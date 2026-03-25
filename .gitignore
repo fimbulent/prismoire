@@ -1,0 +1,51 @@
+# Rust
+server/target/
+
+# Node.js
+node_modules/
+.pnpm-store/
+
+# SvelteKit
+.svelte-kit/
+
+# Build output
+dist/
+build/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# direnv
+.direnv/
+
+# SQLite
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Nix
+result
+result-*
+
+# Local
+justfile
+mockups/
+docs/
+
+# Claude
+CLAUDE.md
+.claude/
