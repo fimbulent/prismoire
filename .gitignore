@@ -44,9 +44,12 @@ result
 result-*
 
 # Local
-justfile
+.justfile.local
 mockups/
 docs/
+
+# Local dev TLS certs
+web/certs/
 
 # Claude
 CLAUDE.md

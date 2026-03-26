@@ -23,25 +23,37 @@ Requires a Rust toolchain and Node.js 22 + pnpm. A [Nix](https://nixos.org/) fla
 nix develop    # or: direnv allow
 
 # Install frontend dependencies:
-pnpm --dir web install
+just web-install
 
-# Build the frontend:
-pnpm --dir web build
+# Run frontend + backend in watch mode:
+just dev
 
-# Run the server (serves API + frontend):
-cd server && cargo run
+# Or build and run separately:
+just web-build
+just serve
 ```
 
 The server creates a SQLite database (`prismoire.db`) in the working directory on first run. Migrations are applied automatically at startup.
 
+A [justfile](https://github.com/casey/just) provides all common development commands. Run `just -l` to see available recipes.
+
+### HTTPS for Local Development
+
+WebAuthn (passkeys) requires a secure context. Generate locally-trusted TLS certs with `mkcert` (included in the Nix devShell):
+
+```sh
+just web-certs   # one-time setup
+just dev         # automatically serves over HTTPS when certs exist
+```
+
 ### Environment Variables
 
-| Variable            | Description                        | Default                                        |
-|---------------------|------------------------------------|------------------------------------------------|
-| `PRISMOIRE_DB`        | Path to the SQLite database file       | `prismoire.db` (relative to working directory) |
-| `PRISMOIRE_WEB_DIR`   | Path to the SvelteKit build output     | `web/build/` (relative to repo root)           |
-| `PRISMOIRE_RP_ID`     | WebAuthn relying party ID (domain)     | `localhost`                                    |
-| `PRISMOIRE_RP_ORIGIN` | WebAuthn relying party origin URL      | `http://localhost:3000`                        |
+| Variable              | Description                          | Default                                        |
+|-----------------------|--------------------------------------|------------------------------------------------|
+| `PRISMOIRE_DB`        | Path to the SQLite database file     | `prismoire.db` (relative to working directory) |
+| `PRISMOIRE_WEB_DIR`   | Path to the SvelteKit build output   | `web/build/` (relative to repo root)           |
+| `PRISMOIRE_RP_ID`     | WebAuthn relying party ID (domain)   | `localhost`                                    |
+| `PRISMOIRE_RP_ORIGIN` | WebAuthn relying party origin URL    | `http://localhost:3000`                        |
 
 ### Offline Query Checking (Nix / CI)
 

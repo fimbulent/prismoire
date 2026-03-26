@@ -102,6 +102,7 @@
             sqlx-cli
             nodejs_22
             nodePackages.pnpm
+            mkcert
           ];
         };
       });
