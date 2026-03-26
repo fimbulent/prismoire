@@ -11,11 +11,16 @@ use tower_http::services::{ServeDir, ServeFile};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api = Router::new().route("/api/health", get(|| async { "ok" }));
 
-    // Resolve web/build relative to the Cargo manifest (server/), so it
-    // works regardless of which directory the binary is launched from.
-    let web_build: PathBuf = [env!("CARGO_MANIFEST_DIR"), "..", "web", "build"]
-        .iter()
-        .collect();
+    // PRISMOIRE_WEB_DIR overrides the default location (set by the Nix
+    // package wrapper). During local development the compile-time
+    // CARGO_MANIFEST_DIR is used as a fallback.
+    let web_build: PathBuf = std::env::var("PRISMOIRE_WEB_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            [env!("CARGO_MANIFEST_DIR"), "..", "web", "build"]
+                .iter()
+                .collect()
+        });
 
     if !web_build.exists() {
         eprintln!(

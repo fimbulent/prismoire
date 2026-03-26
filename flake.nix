@@ -34,14 +34,57 @@
       });
     in
     {
-      packages = forEachSupportedSystem ({ pkgs }: {
-        default = pkgs.rustPlatform.buildRustPackage {
+      packages = forEachSupportedSystem ({ pkgs }: let
+        server = pkgs.rustPlatform.buildRustPackage {
           pname = "prismoire-server";
           version = "0.1.0";
           src = ./server;
           cargoLock.lockFile = ./server/Cargo.lock;
           nativeBuildInputs = with pkgs; [ pkg-config ];
           buildInputs = with pkgs; [ openssl ];
+        };
+
+        web = pkgs.stdenv.mkDerivation (finalAttrs: {
+          pname = "prismoire-web";
+          version = "0.1.0";
+          src = ./web;
+
+          nativeBuildInputs = [
+            pkgs.nodejs_22
+            pkgs.pnpm_10
+            pkgs.pnpmConfigHook
+          ];
+
+          pnpmDeps = pkgs.fetchPnpmDeps {
+            inherit (finalAttrs) pname version src;
+            pnpm = pkgs.pnpm_10;
+            fetcherVersion = 3;
+            hash = "sha256-q3gqnHdYPyiYjRaRJbRcUCp9RdQIX3ostGnnxlmVhB0=";
+          };
+
+          buildPhase = ''
+            runHook preBuild
+            pnpm build
+            runHook postBuild
+          '';
+
+          installPhase = ''
+            runHook preInstall
+            cp -r build $out
+            runHook postInstall
+          '';
+        });
+      in {
+        inherit server web;
+
+        default = pkgs.symlinkJoin {
+          name = "prismoire";
+          paths = [ server ];
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+          postBuild = ''
+            wrapProgram $out/bin/prismoire-server \
+              --set PRISMOIRE_WEB_DIR "${web}"
+          '';
         };
       });
 
