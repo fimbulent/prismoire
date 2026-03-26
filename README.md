@@ -1,5 +1,7 @@
 # Prismoire
 
+> The official home of this repository is [Codeberg](https://codeberg.org/fimbulent/prismoire). Please file issues and pull requests there.
+
 A trust-based community discussion platform. Each user sees a different facet of the same content graph, shaped by their position in the trust network.
 
 > **Status:** Pre-alpha, work in progress. Not yet usable.
