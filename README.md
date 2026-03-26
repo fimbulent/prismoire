@@ -16,13 +16,19 @@ Rust (Axum) backend, SvelteKit frontend, SQLite database, Passkey (WebAuthn) aut
 
 ## Development
 
-Requires a Rust toolchain. A [Nix](https://nixos.org/) flake is provided for a reproducible dev environment.
+Requires a Rust toolchain and Node.js 22 + pnpm. A [Nix](https://nixos.org/) flake is provided for a reproducible dev environment with all dependencies.
 
 ```sh
 # With Nix:
 nix develop    # or: direnv allow
 
-# Run the server:
+# Install frontend dependencies:
+pnpm --dir web install
+
+# Build the frontend:
+pnpm --dir web build
+
+# Run the server (serves API + frontend):
 cd server && cargo run
 ```
 

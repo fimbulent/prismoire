@@ -1,0 +1,49 @@
+@import 'tailwindcss';
+
+@theme {
+	--color-bg: var(--bg);
+	--color-bg-surface: var(--bg-surface);
+	--color-bg-surface-raised: var(--bg-surface-raised);
+	--color-bg-hover: var(--bg-hover);
+	--color-text-primary: var(--text-primary);
+	--color-text-secondary: var(--text-secondary);
+	--color-text-muted: var(--text-muted);
+	--color-border: var(--border);
+	--color-border-subtle: var(--border-subtle);
+	--color-accent: var(--accent);
+	--color-accent-muted: var(--accent-muted);
+	--color-trust-direct: var(--trust-direct);
+	--color-trust-2hop: var(--trust-2hop);
+	--color-trust-3hop: var(--trust-3hop);
+	--color-trust-untrusted: var(--trust-untrusted);
+	--color-link: var(--link);
+	--color-link-hover: var(--link-hover);
+	--color-danger: var(--danger);
+	--color-success: var(--success);
+
+	--font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+	--font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+}
+
+/* Default palette: Rose Pine */
+:root {
+	--bg: #1a1a2e;
+	--bg-surface: #22223a;
+	--bg-surface-raised: #2a2a44;
+	--bg-hover: #32324e;
+	--text-primary: #e0def4;
+	--text-secondary: #908caa;
+	--text-muted: #6e6a86;
+	--border: #393552;
+	--border-subtle: #2e2b45;
+	--accent: #c4a7e7;
+	--accent-muted: #8e7aab;
+	--trust-direct: #9ccfd8;
+	--trust-2hop: #f6c177;
+	--trust-3hop: #ea9a97;
+	--trust-untrusted: #6e6a86;
+	--link: #c4a7e7;
+	--link-hover: #e0def4;
+	--danger: #eb6f92;
+	--success: #9ccfd8;
+}
