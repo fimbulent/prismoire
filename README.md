@@ -38,8 +38,10 @@ The server creates a SQLite database (`prismoire.db`) in the working directory o
 
 | Variable            | Description                        | Default                                        |
 |---------------------|------------------------------------|------------------------------------------------|
-| `PRISMOIRE_DB`      | Path to the SQLite database file   | `prismoire.db` (relative to working directory) |
-| `PRISMOIRE_WEB_DIR` | Path to the SvelteKit build output | `web/build/` (relative to repo root)           |
+| `PRISMOIRE_DB`        | Path to the SQLite database file       | `prismoire.db` (relative to working directory) |
+| `PRISMOIRE_WEB_DIR`   | Path to the SvelteKit build output     | `web/build/` (relative to repo root)           |
+| `PRISMOIRE_RP_ID`     | WebAuthn relying party ID (domain)     | `localhost`                                    |
+| `PRISMOIRE_RP_ORIGIN` | WebAuthn relying party origin URL      | `http://localhost:3000`                        |
 
 ### Offline Query Checking (Nix / CI)
 
