@@ -42,6 +42,7 @@
           cargoLock.lockFile = ./server/Cargo.lock;
           nativeBuildInputs = with pkgs; [ pkg-config ];
           buildInputs = with pkgs; [ openssl ];
+          SQLX_OFFLINE = "true";
         };
 
         web = pkgs.stdenv.mkDerivation (finalAttrs: {
@@ -98,6 +99,7 @@
             pkg-config
             cargo-watch
             rust-analyzer
+            sqlx-cli
             nodejs_22
             nodePackages.pnpm
           ];

@@ -14,6 +14,12 @@ in
       description = "Port the Prismoire server listens on.";
     };
 
+    dataDir = lib.mkOption {
+      type = lib.types.path;
+      default = "/var/lib/prismoire";
+      description = "Directory for Prismoire state (database, etc.).";
+    };
+
     openFirewall = lib.mkOption {
       type = lib.types.bool;
       default = true;
@@ -45,7 +51,10 @@ in
         Restart = "on-failure";
         RestartSec = 5;
         StateDirectory = "prismoire";
-        WorkingDirectory = "/var/lib/prismoire";
+        WorkingDirectory = cfg.dataDir;
+        Environment = [
+          "PRISMOIRE_DB=${cfg.dataDir}/prismoire.db"
+        ];
       };
     };
 

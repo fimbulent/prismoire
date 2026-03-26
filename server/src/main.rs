@@ -1,14 +1,47 @@
 use std::path::PathBuf;
 
 use axum::{Router, routing::get};
+use sqlx::SqlitePool;
+use sqlx::sqlite::SqlitePoolOptions;
 use tower_http::services::{ServeDir, ServeFile};
+
+/// Configure SQLite connection pragmas for performance and correctness.
+async fn configure_pool(pool: &SqlitePool) {
+    sqlx::query("PRAGMA journal_mode = WAL")
+        .execute(pool)
+        .await
+        .expect("failed to set journal_mode");
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(pool)
+        .await
+        .expect("failed to enable foreign_keys");
+    sqlx::query("PRAGMA busy_timeout = 5000")
+        .execute(pool)
+        .await
+        .expect("failed to set busy_timeout");
+}
 
 /// Start the Prismoire API server and listen for connections.
 ///
-/// Serves the SvelteKit static build from `web/build/` (relative to the
-/// project root) as a fallback behind the API routes.
+/// Connects to SQLite, runs migrations, then serves the SvelteKit static
+/// build from `web/build/` as a fallback behind the API routes.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // PRISMOIRE_DB overrides the default database path. During local
+    // development the database lives next to the server binary; in
+    // production the NixOS module sets this to /var/lib/prismoire/prismoire.db.
+    let db_path = std::env::var("PRISMOIRE_DB").unwrap_or_else(|_| "prismoire.db".to_string());
+    let db_url = format!("sqlite:{db_path}?mode=rwc");
+
+    let pool = SqlitePoolOptions::new()
+        .max_connections(5)
+        .connect(&db_url)
+        .await?;
+
+    configure_pool(&pool).await;
+
+    sqlx::migrate!().run(&pool).await?;
+
     let api = Router::new().route("/api/health", get(|| async { "ok" }));
 
     // PRISMOIRE_WEB_DIR overrides the default location (set by the Nix

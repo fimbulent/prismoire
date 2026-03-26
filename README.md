@@ -32,6 +32,19 @@ pnpm --dir web build
 cd server && cargo run
 ```
 
+The server creates a SQLite database (`prismoire.db`) in the working directory on first run. Migrations are applied automatically at startup.
+
+### Environment Variables
+
+| Variable            | Description                        | Default                                        |
+|---------------------|------------------------------------|------------------------------------------------|
+| `PRISMOIRE_DB`      | Path to the SQLite database file   | `prismoire.db` (relative to working directory) |
+| `PRISMOIRE_WEB_DIR` | Path to the SvelteKit build output | `web/build/` (relative to repo root)           |
+
+### Offline Query Checking (Nix / CI)
+
+SQLx verifies queries at compile time. For builds without a live database, run `cargo sqlx prepare` in `server/` after changing any query or migration, then commit the generated `.sqlx/` directory. Set `SQLX_OFFLINE=true` (already configured in the Nix flake).
+
 ## License
 
 [AGPL-3.0](LICENSE.md)

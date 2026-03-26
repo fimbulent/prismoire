@@ -25,6 +25,8 @@ build/
 *.sqlite-wal
 *.sqlite-shm
 *.db
+*.db-wal
+*.db-shm
 
 # OS
 .DS_Store
