@@ -65,6 +65,7 @@ in
         StateDirectory = "prismoire";
         WorkingDirectory = cfg.dataDir;
         Environment = [
+          "PRISMOIRE_PORT=${toString cfg.port}"
           "PRISMOIRE_DB=${cfg.dataDir}/prismoire.db"
           "PRISMOIRE_RP_ID=${cfg.rpId}"
           "PRISMOIRE_RP_ORIGIN=${cfg.rpOrigin}"

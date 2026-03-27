@@ -2,7 +2,7 @@
   description = "Prismoire — trust-based community discussion platform";
 
   inputs = {
-    nixpkgs.url = "https://flakehub.com/f/NixOS/nixpkgs/0.1.*.tar.gz";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -26,6 +26,7 @@
               rust.stable.latest.default.override {
                 extensions = [ "rust-src" "rustfmt" ];
               };
+          rustMinimal = prev.rust-bin.stable.latest.minimal;
         })
       ];
       supportedSystems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
@@ -35,7 +36,12 @@
     in
     {
       packages = forEachSupportedSystem ({ pkgs }: let
-        server = pkgs.rustPlatform.buildRustPackage {
+        rustPlatform = pkgs.makeRustPlatform {
+          cargo = pkgs.rustMinimal;
+          rustc = pkgs.rustMinimal;
+        };
+
+        server = rustPlatform.buildRustPackage {
           pname = "prismoire-server";
           version = "0.1.0";
           src = ./server;
@@ -55,6 +61,8 @@
             pkgs.pnpm_10
             pkgs.pnpmConfigHook
           ];
+
+          CI = "true";
 
           pnpmDeps = pkgs.fetchPnpmDeps {
             inherit (finalAttrs) pname version src;

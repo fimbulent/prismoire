@@ -59,6 +59,52 @@ just dev         # automatically serves over HTTPS when certs exist
 
 SQLx verifies queries at compile time. For builds without a live database, run `cargo sqlx prepare` in `server/` after changing any query or migration, then commit the generated `.sqlx/` directory. Set `SQLX_OFFLINE=true` (already configured in the Nix flake).
 
+## NixOS Installation
+
+A NixOS module is provided via flake. Add prismoire as a flake input and include the module:
+
+```nix
+# flake.nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.11";
+    prismoire.url = "git+https://codeberg.org/fimbulent/prismoire";
+  };
+
+  outputs = { nixpkgs, prismoire, ... }: {
+    nixosConfigurations.my-server = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        ./configuration.nix
+        prismoire.nixosModules.default
+      ];
+    };
+  };
+}
+```
+
+Then enable it in your `configuration.nix` file:
+
+```nix
+services.prismoire = {
+  enable = true;
+  port = 3000;
+  rpId = "example.com";
+  rpOrigin = "https://example.com";
+};
+
+# Use something like Caddy to serve:
+services.caddy = {
+  enable = true;
+  virtualHosts."example.com" = {
+    extraConfig = ''
+      reverse_proxy localhost:3000
+    '';
+  };
+};
+networking.firewall.allowedTCPPorts = [ 80 443 ];
+```
+
 ## License
 
 [AGPL-3.0](LICENSE.md)

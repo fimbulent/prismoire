@@ -43,10 +43,12 @@ fn build_webauthn() -> Arc<webauthn_rs::Webauthn> {
         .unwrap_or_else(|_| "http://localhost:3000".to_string());
     let rp_origin = Url::parse(&rp_origin_str).expect("invalid PRISMOIRE_RP_ORIGIN URL");
 
+    let is_dev = rp_origin.host_str() == Some("localhost");
+
     let builder = WebauthnBuilder::new(&rp_id, &rp_origin)
         .expect("failed to create WebauthnBuilder")
         .rp_name("Prismoire")
-        .allow_any_port(true);
+        .allow_any_port(is_dev);
 
     Arc::new(builder.build().expect("failed to build Webauthn"))
 }
