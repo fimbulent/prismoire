@@ -20,6 +20,18 @@ in
       description = "Directory for Prismoire state (database, etc.).";
     };
 
+    rpId = lib.mkOption {
+      type = lib.types.str;
+      default = "localhost";
+      description = "WebAuthn Relying Party ID (typically the domain name).";
+    };
+
+    rpOrigin = lib.mkOption {
+      type = lib.types.str;
+      default = "http://localhost:3000";
+      description = "WebAuthn Relying Party origin URL.";
+    };
+
     openFirewall = lib.mkOption {
       type = lib.types.bool;
       default = true;
@@ -54,6 +66,8 @@ in
         WorkingDirectory = cfg.dataDir;
         Environment = [
           "PRISMOIRE_DB=${cfg.dataDir}/prismoire.db"
+          "PRISMOIRE_RP_ID=${cfg.rpId}"
+          "PRISMOIRE_RP_ORIGIN=${cfg.rpOrigin}"
         ];
       };
     };
