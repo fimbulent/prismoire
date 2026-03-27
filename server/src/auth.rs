@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use webauthn_rs::prelude::*;
 
+use crate::display_name::{display_name_skeleton, validate_display_name};
 use crate::error::AppError;
 use crate::session::{
     AuthUser, clear_session_cookie, create_session, delete_session, session_cookie,
@@ -61,24 +62,25 @@ pub struct SessionResponse {
 
 /// Begin a WebAuthn registration ceremony for a new user.
 ///
-/// Validates the display name, checks uniqueness, generates a WebAuthn
-/// registration challenge, and stores the challenge state in the database
-/// for retrieval during the completion step.
+/// Validates the display name (Unicode normalization, character rules, mixed-
+/// script detection), checks uniqueness against both the exact name and the
+/// UTS #39 confusable skeleton, generates a WebAuthn registration challenge,
+/// and stores the challenge state in the database for retrieval during the
+/// completion step.
 pub async fn signup_begin(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SignupBeginRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let display_name = req.display_name.trim().to_string();
-    if display_name.is_empty() || display_name.len() > 64 {
-        return Err(AppError::BadRequest(
-            "display_name must be 1-64 characters".into(),
-        ));
-    }
+    let display_name =
+        validate_display_name(&req.display_name).map_err(|msg| AppError::BadRequest(msg.into()))?;
+    let skeleton = display_name_skeleton(&display_name);
 
-    let existing: Option<(String,)> = sqlx::query_as("SELECT id FROM users WHERE display_name = ?")
-        .bind(&display_name)
-        .fetch_optional(&state.db)
-        .await?;
+    let existing: Option<(String,)> =
+        sqlx::query_as("SELECT id FROM users WHERE display_name = ? OR display_name_skeleton = ?")
+            .bind(&display_name)
+            .bind(&skeleton)
+            .fetch_optional(&state.db)
+            .await?;
 
     if existing.is_some() {
         return Err(AppError::Conflict("display name already taken".into()));
@@ -132,8 +134,9 @@ pub async fn signup_begin(
 /// Complete the WebAuthn registration ceremony and create the user account.
 ///
 /// Looks up the stored challenge state, verifies the browser's credential
-/// response, creates the user and credential rows, optionally consumes the
-/// invite code (creating a mutual vouch), and starts a session.
+/// response, creates the user and credential rows (including the confusable
+/// skeleton for future uniqueness checks), optionally consumes the invite
+/// code (creating a mutual vouch), and starts a session.
 pub async fn signup_complete(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SignupCompleteRequest>,
@@ -169,12 +172,18 @@ pub async fn signup_complete(
         "admin"
     };
 
-    sqlx::query("INSERT INTO users (id, display_name, signup_method) VALUES (?, ?, ?)")
-        .bind(&user_id)
-        .bind(&display_name)
-        .bind(signup_method)
-        .execute(&state.db)
-        .await?;
+    let skeleton = display_name_skeleton(&display_name);
+
+    sqlx::query(
+        "INSERT INTO users (id, display_name, display_name_skeleton, signup_method) \
+         VALUES (?, ?, ?, ?)",
+    )
+    .bind(&user_id)
+    .bind(&display_name)
+    .bind(&skeleton)
+    .bind(signup_method)
+    .execute(&state.db)
+    .await?;
 
     let cred_id = Uuid::new_v4().to_string();
     let passkey_bytes = serde_json::to_vec(&passkey)?;

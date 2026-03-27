@@ -10,6 +10,7 @@ use url::Url;
 use webauthn_rs::WebauthnBuilder;
 
 mod auth;
+mod display_name;
 mod error;
 mod session;
 mod state;

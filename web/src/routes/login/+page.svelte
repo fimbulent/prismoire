@@ -47,6 +47,7 @@
 					type="text"
 					bind:value={displayName}
 					required
+					autocomplete="username webauthn"
 					disabled={submitting}
 					class="w-full bg-bg-surface-raised border border-border-subtle rounded-md px-3 py-2 text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent"
 					placeholder="Your display name"
