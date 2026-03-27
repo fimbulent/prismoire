@@ -120,7 +120,20 @@ pub async fn signup_begin(
     .execute(&state.db)
     .await?;
 
-    let options = serde_json::to_value(ccr)?;
+    // FIXME
+    // webauthn-rs hardcodes residentKey: "discouraged" in start_passkey_registration
+    // and doesn't expose a way to override it. Patch the JSON to request discoverable
+    // credentials so conditional UI works on the login page. Can be removed if
+    // webauthn-rs adds a configurable resident key option to start_passkey_registration.
+    let mut options = serde_json::to_value(ccr)?;
+    if let Some(sel) = options
+        .get_mut("publicKey")
+        .and_then(|pk| pk.get_mut("authenticatorSelection"))
+    {
+        sel["residentKey"] = serde_json::json!("preferred");
+        sel["requireResidentKey"] = serde_json::json!(false);
+    }
+
     Ok(Json(AuthBeginResponse {
         challenge_id,
         options,
@@ -363,28 +376,7 @@ pub async fn login_complete(
             .await?;
     let user_id = user.0;
 
-    let cred_rows: Vec<(String, Vec<u8>)> =
-        sqlx::query_as("SELECT id, public_key FROM credentials WHERE user_id = ?")
-            .bind(&user_id)
-            .fetch_all(&state.db)
-            .await?;
-
-    for (cred_db_id, passkey_bytes) in &cred_rows {
-        let mut passkey: Passkey = serde_json::from_slice(passkey_bytes)?;
-        if passkey.update_credential(&auth_result).is_some() {
-            let updated_bytes = serde_json::to_vec(&passkey)?;
-            let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-            sqlx::query(
-                "UPDATE credentials SET public_key = ?, sign_count = ?, last_used = ? WHERE id = ?",
-            )
-            .bind(&updated_bytes)
-            .bind(auth_result.counter() as i64)
-            .bind(&now)
-            .bind(cred_db_id)
-            .execute(&state.db)
-            .await?;
-        }
-    }
+    update_credential_counter(&state.db, &user_id, &auth_result).await?;
 
     let token = create_session(&state.db, &user_id).await?;
     let mut headers = HeaderMap::new();
@@ -397,6 +389,150 @@ pub async fn login_complete(
             display_name,
         }),
     ))
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/auth/discover/begin
+// ---------------------------------------------------------------------------
+
+/// Begin a discoverable (conditional UI) WebAuthn authentication.
+///
+/// Returns a challenge with empty `allowCredentials` so the browser can offer
+/// passkeys from its autofill UI. No display name is needed — the browser
+/// discovers which credential to use.
+pub async fn discover_begin(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, AppError> {
+    let (rcr, disc_state) = state.webauthn.start_discoverable_authentication()?;
+
+    let challenge_id = Uuid::new_v4().to_string();
+    let state_bytes = serde_json::to_vec(&disc_state)?;
+
+    sqlx::query(
+        "INSERT INTO auth_challenges (id, challenge_type, state) \
+         VALUES (?, 'discoverable', ?)",
+    )
+    .bind(&challenge_id)
+    .bind(&state_bytes)
+    .execute(&state.db)
+    .await?;
+
+    let options = serde_json::to_value(rcr)?;
+    Ok(Json(AuthBeginResponse {
+        challenge_id,
+        options,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/auth/discover/complete
+// ---------------------------------------------------------------------------
+
+/// Complete a discoverable (conditional UI) WebAuthn authentication.
+///
+/// The browser response contains the user handle, which lets us identify the
+/// user without them ever typing a display name.
+pub async fn discover_complete(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<LoginCompleteRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let challenge = sqlx::query_as::<_, (Vec<u8>,)>(
+        "SELECT state FROM auth_challenges \
+         WHERE id = ? AND challenge_type = 'discoverable'",
+    )
+    .bind(&req.challenge_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::BadRequest("invalid or expired challenge".into()))?;
+
+    let (state_bytes,) = challenge;
+
+    sqlx::query("DELETE FROM auth_challenges WHERE id = ?")
+        .bind(&req.challenge_id)
+        .execute(&state.db)
+        .await?;
+
+    let disc_state: DiscoverableAuthentication = serde_json::from_slice(&state_bytes)?;
+
+    let (user_uuid, _cred_id) = state
+        .webauthn
+        .identify_discoverable_authentication(&req.credential)?;
+
+    let user = sqlx::query_as::<_, (String, String)>(
+        "SELECT id, display_name FROM users WHERE id = ? AND status = 'active'",
+    )
+    .bind(user_uuid.to_string())
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::NotFound("user not found".into()))?;
+
+    let (user_id, display_name) = user;
+
+    let cred_rows: Vec<(Vec<u8>,)> =
+        sqlx::query_as("SELECT public_key FROM credentials WHERE user_id = ?")
+            .bind(&user_id)
+            .fetch_all(&state.db)
+            .await?;
+
+    let discoverable_keys: Vec<DiscoverableKey> = cred_rows
+        .iter()
+        .map(|(bytes,)| {
+            let passkey: Passkey = serde_json::from_slice(bytes)?;
+            Ok(DiscoverableKey::from(passkey))
+        })
+        .collect::<Result<_, serde_json::Error>>()?;
+
+    let auth_result = state.webauthn.finish_discoverable_authentication(
+        &req.credential,
+        disc_state,
+        &discoverable_keys,
+    )?;
+
+    update_credential_counter(&state.db, &user_id, &auth_result).await?;
+
+    let token = create_session(&state.db, &user_id).await?;
+    let mut headers = HeaderMap::new();
+    headers.insert(SET_COOKIE, session_cookie(&token).parse().unwrap());
+
+    Ok((
+        headers,
+        Json(SessionResponse {
+            user_id,
+            display_name,
+        }),
+    ))
+}
+
+/// Update the credential sign counter after successful authentication.
+async fn update_credential_counter(
+    db: &sqlx::SqlitePool,
+    user_id: &str,
+    auth_result: &AuthenticationResult,
+) -> Result<(), AppError> {
+    let cred_rows: Vec<(String, Vec<u8>)> =
+        sqlx::query_as("SELECT id, public_key FROM credentials WHERE user_id = ?")
+            .bind(user_id)
+            .fetch_all(db)
+            .await?;
+
+    for (cred_db_id, passkey_bytes) in &cred_rows {
+        let mut passkey: Passkey = serde_json::from_slice(passkey_bytes)?;
+        if passkey.update_credential(auth_result).is_some() {
+            let updated_bytes = serde_json::to_vec(&passkey)?;
+            let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+            sqlx::query(
+                "UPDATE credentials SET public_key = ?, sign_count = ?, last_used = ? WHERE id = ?",
+            )
+            .bind(&updated_bytes)
+            .bind(auth_result.counter() as i64)
+            .bind(&now)
+            .bind(cred_db_id)
+            .execute(db)
+            .await?;
+        }
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

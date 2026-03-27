@@ -50,7 +50,8 @@ export async function createPasskey(
 }
 
 export async function getPasskey(
-	options: PublicKeyCredentialRequestOptions & { challenge: string }
+	options: PublicKeyCredentialRequestOptions & { challenge: string },
+	signal?: AbortSignal
 ): Promise<Credential> {
 	const publicKey: PublicKeyCredentialRequestOptions = {
 		...options,
@@ -61,9 +62,36 @@ export async function getPasskey(
 		}))
 	};
 
-	const credential = (await navigator.credentials.get({ publicKey })) as PublicKeyCredential;
+	const credential = (await navigator.credentials.get({
+		publicKey,
+		signal
+	})) as PublicKeyCredential;
 	if (!credential) throw new Error('Passkey authentication cancelled');
 
+	return serializeAssertion(credential);
+}
+
+export async function getPasskeyConditional(
+	options: PublicKeyCredentialRequestOptions & { challenge: string },
+	signal?: AbortSignal
+): Promise<Credential> {
+	const publicKey: PublicKeyCredentialRequestOptions = {
+		...options,
+		challenge: base64urlToBuffer(options.challenge as unknown as string),
+		allowCredentials: []
+	};
+
+	const credential = (await navigator.credentials.get({
+		publicKey,
+		mediation: 'conditional' as CredentialMediationRequirement,
+		signal
+	})) as PublicKeyCredential;
+	if (!credential) throw new Error('Passkey authentication cancelled');
+
+	return serializeAssertion(credential);
+}
+
+function serializeAssertion(credential: PublicKeyCredential): Credential {
 	const response = credential.response as AuthenticatorAssertionResponse;
 	return {
 		id: credential.id,

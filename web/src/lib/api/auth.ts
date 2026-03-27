@@ -49,6 +49,25 @@ export async function loginBegin(displayName: string): Promise<AuthBeginResponse
 	return apiPost('/api/auth/login/begin', { display_name: displayName });
 }
 
+export async function discoverBegin(): Promise<AuthBeginResponse> {
+	const res = await fetch('/api/auth/discover/begin');
+	if (!res.ok) {
+		const err: ApiError = await res.json();
+		throw new Error(err.error);
+	}
+	return res.json();
+}
+
+export async function discoverComplete(
+	challengeId: string,
+	credential: Credential
+): Promise<SessionInfo> {
+	return apiPost('/api/auth/discover/complete', {
+		challenge_id: challengeId,
+		credential
+	});
+}
+
 export async function loginComplete(
 	challengeId: string,
 	credential: Credential

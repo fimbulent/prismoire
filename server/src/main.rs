@@ -82,6 +82,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/auth/signup/complete", post(auth::signup_complete))
         .route("/api/auth/login/begin", post(auth::login_begin))
         .route("/api/auth/login/complete", post(auth::login_complete))
+        .route("/api/auth/discover/begin", get(auth::discover_begin))
+        .route("/api/auth/discover/complete", post(auth::discover_complete))
         .route("/api/auth/session", get(auth::session_info))
         .route("/api/auth/logout", post(auth::logout))
         .with_state(shared_state);

@@ -1,14 +1,52 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import { loginBegin, loginComplete } from '$lib/api/auth';
-	import { getPasskey } from '$lib/api/webauthn';
+	import { slide } from 'svelte/transition';
+	import {
+		discoverBegin,
+		discoverComplete,
+		loginBegin,
+		loginComplete
+	} from '$lib/api/auth';
+	import { getPasskey, getPasskeyConditional } from '$lib/api/webauthn';
 	import { session } from '$lib/stores/session.svelte';
 
 	let displayName = $state('');
 	let error = $state<string | null>(null);
 	let submitting = $state(false);
 
+	let conditionalAbort: AbortController | null = null;
+
+	async function startConditionalUI() {
+		if (
+			!window.PublicKeyCredential ||
+			!(await PublicKeyCredential.isConditionalMediationAvailable?.())
+		) {
+			return;
+		}
+
+		try {
+			conditionalAbort = new AbortController();
+			const { challenge_id, ...options } = await discoverBegin();
+			const credential = await getPasskeyConditional(
+				options.publicKey as never,
+				conditionalAbort.signal
+			);
+
+			const info = await discoverComplete(challenge_id, credential);
+			session.set(info);
+			goto('/');
+		} catch {
+			// Aborted or unsupported — fall back to manual login
+		}
+	}
+
+	$effect(() => {
+		startConditionalUI();
+		return () => conditionalAbort?.abort();
+	});
+
 	async function handleLogin() {
+		conditionalAbort?.abort();
 		error = null;
 		submitting = true;
 
@@ -55,7 +93,7 @@
 			</div>
 
 			{#if error}
-				<p class="text-danger text-sm">{error}</p>
+				<p transition:slide={{ duration: 150 }} class="text-danger text-sm">{error}</p>
 			{/if}
 
 			<button
