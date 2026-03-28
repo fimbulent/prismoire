@@ -110,13 +110,14 @@ pub async fn signup_begin(
     let state_bytes = serde_json::to_vec(&reg_state)?;
 
     sqlx::query(
-        "INSERT INTO auth_challenges (id, challenge_type, state, display_name, invite_code) \
-         VALUES (?, 'registration', ?, ?, ?)",
+        "INSERT INTO auth_challenges (id, challenge_type, state, display_name, invite_code, user_id) \
+         VALUES (?, 'registration', ?, ?, ?, ?)",
     )
     .bind(&challenge_id)
     .bind(&state_bytes)
     .bind(&display_name)
     .bind(&req.invite_code)
+    .bind(user_uuid.to_string())
     .execute(&state.db)
     .await?;
 
@@ -154,8 +155,8 @@ pub async fn signup_complete(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SignupCompleteRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let challenge = sqlx::query_as::<_, (Vec<u8>, Option<String>, Option<String>)>(
-        "SELECT state, display_name, invite_code FROM auth_challenges \
+    let challenge = sqlx::query_as::<_, (Vec<u8>, Option<String>, Option<String>, Option<String>)>(
+        "SELECT state, display_name, invite_code, user_id FROM auth_challenges \
          WHERE id = ? AND challenge_type = 'registration'",
     )
     .bind(&req.challenge_id)
@@ -163,9 +164,11 @@ pub async fn signup_complete(
     .await?
     .ok_or_else(|| AppError::BadRequest("invalid or expired challenge".into()))?;
 
-    let (state_bytes, display_name, invite_code) = challenge;
+    let (state_bytes, display_name, invite_code, user_id) = challenge;
     let display_name = display_name
         .ok_or_else(|| AppError::Internal("missing display_name in challenge".into()))?;
+    let user_id =
+        user_id.ok_or_else(|| AppError::Internal("missing user_id in challenge".into()))?;
 
     sqlx::query("DELETE FROM auth_challenges WHERE id = ?")
         .bind(&req.challenge_id)
@@ -178,7 +181,6 @@ pub async fn signup_complete(
         .webauthn
         .finish_passkey_registration(&req.credential, &reg_state)?;
 
-    let user_id = Uuid::new_v4().to_string();
     let signup_method = if invite_code.is_some() {
         "invite"
     } else {
@@ -187,7 +189,7 @@ pub async fn signup_complete(
 
     let skeleton = display_name_skeleton(&display_name);
 
-    sqlx::query(
+    if let Err(err) = sqlx::query(
         "INSERT INTO users (id, display_name, display_name_skeleton, signup_method) \
          VALUES (?, ?, ?, ?)",
     )
@@ -196,7 +198,11 @@ pub async fn signup_complete(
     .bind(&skeleton)
     .bind(signup_method)
     .execute(&state.db)
-    .await?;
+    .await
+    {
+        eprintln!("user creation constraint failure for display_name={display_name}: {err}");
+        return Err(err.into());
+    }
 
     let cred_id = Uuid::new_v4().to_string();
     let passkey_bytes = serde_json::to_vec(&passkey)?;

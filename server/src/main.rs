@@ -76,6 +76,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let shared_state = Arc::new(AppState { db: pool, webauthn });
 
+    let authed = Router::new()
+        .route("/api/auth/session", get(auth::session_info))
+        .route("/api/auth/logout", post(auth::logout))
+        .layer(axum::middleware::from_fn_with_state(
+            shared_state.clone(),
+            session::session_middleware,
+        ));
+
     let api = Router::new()
         .route("/api/health", get(|| async { "ok" }))
         .route("/api/auth/signup/begin", post(auth::signup_begin))
@@ -84,8 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/auth/login/complete", post(auth::login_complete))
         .route("/api/auth/discover/begin", get(auth::discover_begin))
         .route("/api/auth/discover/complete", post(auth::discover_complete))
-        .route("/api/auth/session", get(auth::session_info))
-        .route("/api/auth/logout", post(auth::logout))
+        .merge(authed)
         .with_state(shared_state);
 
     let web_build: PathBuf = std::env::var("PRISMOIRE_WEB_DIR")

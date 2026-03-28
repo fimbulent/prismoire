@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use axum::extract::FromRequestParts;
-use axum::http::StatusCode;
-use axum::http::header::COOKIE;
+use axum::extract::{FromRequestParts, State};
+use axum::http::header::{COOKIE, SET_COOKIE};
 use axum::http::request::Parts;
+use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::{Duration, Utc};
 use rand::RngCore;
@@ -15,10 +15,43 @@ pub const SESSION_COOKIE_NAME: &str = "prismoire_session";
 const SESSION_DURATION_DAYS: i64 = 30;
 const TOKEN_BYTES: usize = 32;
 
-/// Authenticated user extracted from the session cookie.
+/// Renewal threshold: renew the session when more than half its lifetime has elapsed.
+const RENEWAL_THRESHOLD_DAYS: i64 = SESSION_DURATION_DAYS / 2;
+
+/// Authenticated user info, populated by [`session_middleware`] and read by handlers
+/// via the [`AuthUser`] extractor.
+#[derive(Clone)]
+struct AuthSession {
+    user_id: String,
+    display_name: String,
+}
+
+/// Authenticated user extracted from request extensions.
+///
+/// The [`session_middleware`] validates the session cookie and stores the
+/// authenticated user in request extensions. This extractor reads it back,
+/// returning 401 if no valid session was found.
 pub struct AuthUser {
     pub user_id: String,
     pub display_name: String,
+}
+
+impl FromRequestParts<Arc<AppState>> for AuthUser {
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        _state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let session = parts
+            .extensions
+            .get::<AuthSession>()
+            .ok_or_else(|| StatusCode::UNAUTHORIZED.into_response())?;
+        Ok(AuthUser {
+            user_id: session.user_id.clone(),
+            display_name: session.display_name.clone(),
+        })
+    }
 }
 
 /// Generate a cryptographically random session token.
@@ -68,8 +101,8 @@ pub fn clear_session_cookie() -> String {
 }
 
 /// Extract the session token from the Cookie header.
-fn extract_session_token(parts: &Parts) -> Option<String> {
-    let cookie_header = parts.headers.get(COOKIE)?.to_str().ok()?;
+fn extract_session_token<B>(request: &Request<B>) -> Option<String> {
+    let cookie_header = request.headers().get(COOKIE)?.to_str().ok()?;
     for pair in cookie_header.split(';') {
         let pair = pair.trim();
         if let Some(value) = pair.strip_prefix(&format!("{SESSION_COOKIE_NAME}="))
@@ -81,21 +114,24 @@ fn extract_session_token(parts: &Parts) -> Option<String> {
     None
 }
 
-impl FromRequestParts<Arc<AppState>> for AuthUser {
-    type Rejection = Response;
+/// Session authentication and renewal middleware.
+///
+/// Validates the session cookie against the database, stores the authenticated
+/// user in request extensions for downstream extractors, and handles sliding
+/// session renewal. When a session is past its renewal threshold (half its
+/// lifetime), the database expiry is extended and a fresh `Set-Cookie` header
+/// is added to the response.
+///
+/// Requests without a session cookie pass through unauthenticated — handlers
+/// that require auth use the [`AuthUser`] extractor which returns 401.
+pub async fn session_middleware(
+    State(state): State<Arc<AppState>>,
+    mut request: Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    let mut renewal_cookie: Option<String> = None;
 
-    /// Extract the authenticated user from the session cookie.
-    ///
-    /// Looks up the session token in the database, checks expiry, and returns
-    /// the associated user. Returns 401 if the session is missing, expired, or
-    /// the user account is not active.
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &Arc<AppState>,
-    ) -> Result<Self, Self::Rejection> {
-        let token =
-            extract_session_token(parts).ok_or_else(|| StatusCode::UNAUTHORIZED.into_response())?;
-
+    if let Some(token) = extract_session_token(&request) {
         let row = sqlx::query_as::<_, (String, String, String, String)>(
             "SELECT s.user_id, u.display_name, s.expires_at, u.status \
              FROM sessions s \
@@ -105,24 +141,45 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
         .bind(&token)
         .fetch_optional(&state.db)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?
-        .ok_or_else(|| StatusCode::UNAUTHORIZED.into_response())?;
+        .ok()
+        .flatten();
 
-        let (user_id, display_name, expires_at, status) = row;
+        if let Some((user_id, display_name, expires_at, status)) = row
+            && status == "active"
+            && let Ok(expires) =
+                chrono::NaiveDateTime::parse_from_str(&expires_at, "%Y-%m-%dT%H:%M:%SZ")
+        {
+            let now = Utc::now().naive_utc();
+            if expires >= now {
+                request.extensions_mut().insert(AuthSession {
+                    user_id,
+                    display_name,
+                });
 
-        if status != "active" {
-            return Err(StatusCode::UNAUTHORIZED.into_response());
+                // Sliding session: renew when past the halfway point.
+                let remaining = expires - now;
+                if remaining < Duration::days(RENEWAL_THRESHOLD_DAYS) {
+                    let new_expires = (Utc::now() + Duration::days(SESSION_DURATION_DAYS))
+                        .format("%Y-%m-%dT%H:%M:%SZ")
+                        .to_string();
+                    let _ = sqlx::query("UPDATE sessions SET expires_at = ? WHERE token = ?")
+                        .bind(&new_expires)
+                        .bind(&token)
+                        .execute(&state.db)
+                        .await;
+                    renewal_cookie = Some(session_cookie(&token));
+                }
+            }
         }
-
-        let expires = chrono::NaiveDateTime::parse_from_str(&expires_at, "%Y-%m-%dT%H:%M:%SZ")
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
-        if expires < Utc::now().naive_utc() {
-            return Err(StatusCode::UNAUTHORIZED.into_response());
-        }
-
-        Ok(AuthUser {
-            user_id,
-            display_name,
-        })
     }
+
+    let mut response = next.run(request).await;
+
+    if let Some(cookie) = renewal_cookie
+        && let Ok(val) = cookie.parse()
+    {
+        response.headers_mut().insert(SET_COOKIE, val);
+    }
+
+    response
 }
