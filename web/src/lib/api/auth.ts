@@ -87,3 +87,32 @@ export async function getSession(): Promise<SessionInfo | null> {
 export async function logout(): Promise<void> {
 	await fetch('/api/auth/logout', { method: 'POST' });
 }
+
+export interface SetupStatus {
+	needs_setup: boolean;
+}
+
+export async function getSetupStatus(): Promise<SetupStatus> {
+	const res = await fetch('/api/setup/status');
+	return res.json();
+}
+
+export async function setupBegin(
+	token: string,
+	displayName: string
+): Promise<AuthBeginResponse> {
+	return apiPost('/api/setup/begin', {
+		token,
+		display_name: displayName
+	});
+}
+
+export async function setupComplete(
+	challengeId: string,
+	credential: Credential
+): Promise<SessionInfo> {
+	return apiPost('/api/setup/complete', {
+		challenge_id: challengeId,
+		credential
+	});
+}

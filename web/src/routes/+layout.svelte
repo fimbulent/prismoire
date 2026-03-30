@@ -3,11 +3,18 @@
 	import favicon from '$lib/assets/favicon.svg';
 	import { session } from '$lib/stores/session.svelte';
 	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
 
 	let { children } = $props();
 
 	$effect(() => {
 		session.load();
+	});
+
+	$effect(() => {
+		if (!session.loading && session.needsSetup && page.url.pathname !== '/setup') {
+			goto('/setup');
+		}
 	});
 
 	async function handleLogout() {

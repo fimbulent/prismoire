@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use axum::Router;
 use axum::routing::{get, post};
@@ -13,6 +14,7 @@ mod auth;
 mod display_name;
 mod error;
 mod session;
+mod setup;
 mod state;
 
 use state::AppState;
@@ -54,11 +56,38 @@ fn build_webauthn() -> Arc<webauthn_rs::Webauthn> {
     Arc::new(builder.build().expect("failed to build Webauthn"))
 }
 
+/// Check whether an admin account exists in the database.
+async fn has_admin(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
+    let row: Option<(i64,)> = sqlx::query_as("SELECT 1 FROM users WHERE role = 'admin' LIMIT 1")
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.is_some())
+}
+
+/// Read the setup token from the file path in `PRISMOIRE_SETUP_TOKEN_FILE`.
+///
+/// Returns `None` if the env var is not set. Returns an error if the file
+/// cannot be read or contains an empty token (misconfiguration should fail
+/// loud at startup).
+fn load_setup_token() -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let path = match std::env::var("PRISMOIRE_SETUP_TOKEN_FILE") {
+        Ok(p) => p,
+        Err(_) => return Ok(None),
+    };
+    let contents = std::fs::read_to_string(&path)
+        .map_err(|e| format!("failed to read setup token file {path}: {e}"))?;
+    let token = contents.trim().to_string();
+    if token.is_empty() {
+        return Err(format!("setup token file {path} is empty").into());
+    }
+    Ok(Some(token))
+}
+
 /// Start the Prismoire API server and listen for connections.
 ///
-/// Connects to SQLite, runs migrations, configures WebAuthn, then serves
-/// the SvelteKit static build from `web/build/` as a fallback behind the
-/// API routes.
+/// Connects to SQLite, runs migrations, configures WebAuthn, checks for
+/// admin bootstrap state, then serves the SvelteKit static build from
+/// `web/build/` as a fallback behind the API routes.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_path = std::env::var("PRISMOIRE_DB").unwrap_or_else(|_| "prismoire.db".to_string());
@@ -72,9 +101,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     configure_pool(&pool).await;
     sqlx::migrate!().run(&pool).await?;
 
+    let admin_exists = has_admin(&pool).await?;
+    let setup_token = load_setup_token()?;
+
+    if !admin_exists && setup_token.is_none() {
+        eprintln!(
+            "error: no admin account exists and PRISMOIRE_SETUP_TOKEN_FILE is not configured.\n\
+             Set PRISMOIRE_SETUP_TOKEN_FILE to a file containing a one-time setup token,\n\
+             then visit /setup in the browser to create the initial admin account."
+        );
+        std::process::exit(1);
+    }
+
     let webauthn = build_webauthn();
 
-    let shared_state = Arc::new(AppState { db: pool, webauthn });
+    let shared_state = Arc::new(AppState {
+        db: pool,
+        webauthn,
+        needs_setup: AtomicBool::new(!admin_exists),
+        setup_token: if admin_exists { None } else { setup_token },
+    });
 
     let authed = Router::new()
         .route("/api/auth/session", get(auth::session_info))
@@ -86,6 +132,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let api = Router::new()
         .route("/api/health", get(|| async { "ok" }))
+        .route("/api/setup/status", get(setup::setup_status))
+        .route("/api/setup/begin", post(setup::setup_begin))
+        .route("/api/setup/complete", post(setup::setup_complete))
         .route("/api/auth/signup/begin", post(auth::signup_begin))
         .route("/api/auth/signup/complete", post(auth::signup_complete))
         .route("/api/auth/login/begin", post(auth::login_begin))
@@ -93,6 +142,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/auth/discover/begin", get(auth::discover_begin))
         .route("/api/auth/discover/complete", post(auth::discover_complete))
         .merge(authed)
+        .layer(axum::middleware::from_fn_with_state(
+            shared_state.clone(),
+            setup::setup_guard_middleware,
+        ))
         .with_state(shared_state);
 
     let web_build: PathBuf = std::env::var("PRISMOIRE_WEB_DIR")
@@ -116,8 +169,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = api.fallback_service(spa_fallback);
 
-    let addr = "127.0.0.1:3000";
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let port = std::env::var("PRISMOIRE_PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(3000);
+    let addr = format!("127.0.0.1:{port}");
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
     println!("listening on http://{addr}");
     axum::serve(listener, app).await?;
 

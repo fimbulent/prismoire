@@ -1,7 +1,13 @@
-import { getSession, logout as apiLogout, type SessionInfo } from '$lib/api/auth';
+import {
+	getSession,
+	getSetupStatus,
+	logout as apiLogout,
+	type SessionInfo
+} from '$lib/api/auth';
 
 let user = $state<SessionInfo | null>(null);
 let loading = $state(true);
+let needsSetup = $state(false);
 
 export const session = {
 	get user() {
@@ -13,11 +19,18 @@ export const session = {
 	get isLoggedIn() {
 		return user !== null;
 	},
+	get needsSetup() {
+		return needsSetup;
+	},
 
 	async load() {
 		loading = true;
 		try {
-			user = await getSession();
+			const status = await getSetupStatus();
+			needsSetup = status.needs_setup;
+			if (!needsSetup) {
+				user = await getSession();
+			}
 		} catch {
 			user = null;
 		} finally {
@@ -27,6 +40,7 @@ export const session = {
 
 	set(info: SessionInfo) {
 		user = info;
+		needsSetup = false;
 		loading = false;
 	},
 

@@ -1,0 +1,14 @@
+[package]
+name = "prismoire"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "prismoire"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+tokio = { version = "1", features = ["full"] }
+uuid = "1"

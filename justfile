@@ -8,19 +8,19 @@ dev:
     fi
     pnpm --dir web dev & VITE_PID=$!
     trap 'kill $VITE_PID 2>/dev/null; wait $VITE_PID 2>/dev/null' EXIT
-    cargo watch --workdir server -x run
+    cargo watch -x 'run -p prismoire-server'
 
 # Run the backend server once (no watch)
 serve:
-    cargo run --manifest-path server/Cargo.toml
+    cargo run -p prismoire-server
 
 # Run the backend server with auto-reload on changes
 watch:
-    cargo watch --workdir server -x run
+    cargo watch -x 'run -p prismoire-server'
 
-# Build the backend
+# Build the whole workspace
 build:
-    cargo build --manifest-path server/Cargo.toml
+    cargo build --workspace
 
 # Install frontend dependencies
 web-install:
@@ -65,3 +65,15 @@ db-prepare:
 db-reset:
     rm -f server/prismoire.db server/prismoire.db-wal server/prismoire.db-shm
     cd server && cargo sqlx database create && cargo sqlx migrate run
+
+# Generate a random setup token for initial admin bootstrap
+setup-token:
+    @openssl rand -hex 32
+
+# Grant admin role to a user
+admin-grant user_id:
+    cargo run -p prismoire -- admin grant {{user_id}}
+
+# Revoke admin role from a user
+admin-revoke user_id:
+    cargo run -p prismoire -- admin revoke {{user_id}}

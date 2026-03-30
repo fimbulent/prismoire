@@ -32,6 +32,15 @@ in
       description = "WebAuthn Relying Party origin URL.";
     };
 
+    setupTokenFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = ''
+        Path to a file containing the one-time setup token for creating the
+        initial admin account. Required on first boot; ignored after setup.
+      '';
+    };
+
     openFirewall = lib.mkOption {
       type = lib.types.bool;
       default = true;
@@ -69,6 +78,8 @@ in
           "PRISMOIRE_DB=${cfg.dataDir}/prismoire.db"
           "PRISMOIRE_RP_ID=${cfg.rpId}"
           "PRISMOIRE_RP_ORIGIN=${cfg.rpOrigin}"
+        ] ++ lib.optionals (cfg.setupTokenFile != null) [
+          "PRISMOIRE_SETUP_TOKEN_FILE=${cfg.setupTokenFile}"
         ];
       };
     };

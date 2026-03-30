@@ -11,7 +11,6 @@ pub struct ApiError {
 #[derive(Debug)]
 pub enum AppError {
     BadRequest(String),
-    #[expect(dead_code)]
     Unauthorized(String),
     NotFound(String),
     Conflict(String),
@@ -40,7 +39,8 @@ impl From<sqlx::Error> for AppError {
 
 impl From<webauthn_rs::prelude::WebauthnError> for AppError {
     fn from(err: webauthn_rs::prelude::WebauthnError) -> Self {
-        Self::BadRequest(format!("webauthn error: {err}"))
+        eprintln!("webauthn error: {err}");
+        Self::BadRequest("webauthn ceremony failed".into())
     }
 }
 

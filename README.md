@@ -35,6 +35,8 @@ just serve
 
 The server creates a SQLite database (`prismoire.db`) in the working directory on first run. Migrations are applied automatically at startup.
 
+On first boot, the server requires a setup token to create the initial admin account. See [Admin Bootstrap](#admin-bootstrap) below.
+
 A [justfile](https://github.com/casey/just) provides all common development commands. Run `just -l` to see available recipes.
 
 ### HTTPS for Local Development
@@ -48,12 +50,35 @@ just dev         # automatically serves over HTTPS when certs exist
 
 ### Environment Variables
 
-| Variable              | Description                          | Default                                        |
-|-----------------------|--------------------------------------|------------------------------------------------|
-| `PRISMOIRE_DB`        | Path to the SQLite database file     | `prismoire.db` (relative to working directory) |
-| `PRISMOIRE_WEB_DIR`   | Path to the SvelteKit build output   | `web/build/` (relative to repo root)           |
-| `PRISMOIRE_RP_ID`     | WebAuthn relying party ID (domain)   | `localhost`                                    |
-| `PRISMOIRE_RP_ORIGIN` | WebAuthn relying party origin URL    | `http://localhost:3000`                        |
+| Variable                      | Description                              | Default                                        |
+|-------------------------------|------------------------------------------|------------------------------------------------|
+| `PRISMOIRE_DB`                | Path to the SQLite database file         | `prismoire.db` (relative to working directory) |
+| `PRISMOIRE_WEB_DIR`           | Path to the SvelteKit build output       | `web/build/` (relative to repo root)           |
+| `PRISMOIRE_RP_ID`             | WebAuthn relying party ID (domain)       | `localhost`                                    |
+| `PRISMOIRE_RP_ORIGIN`         | WebAuthn relying party origin URL        | `http://localhost:3000`                        |
+| `PRISMOIRE_PORT`              | Port the server listens on               | `3000`                                         |
+| `PRISMOIRE_SETUP_TOKEN_FILE`  | Path to file containing the setup token  | *(none — required on first boot)*              |
+
+### Admin Bootstrap
+
+On a fresh instance with no admin account, the server requires a one-time setup token to create the first admin:
+
+```sh
+# Generate a setup token
+just setup-token > /path/to/setup-token
+
+# Start the server with the token
+PRISMOIRE_SETUP_TOKEN_FILE=/path/to/setup-token just serve
+```
+
+Visit `/setup` in the browser, paste the token, choose a display name, and register a passkey. The admin account is created and the setup route is permanently disabled.
+
+To grant or revoke admin role on an existing account:
+
+```sh
+just admin-grant <user-id>
+just admin-revoke <user-id>
+```
 
 ### Offline Query Checking (Nix / CI)
 
@@ -91,6 +116,7 @@ services.prismoire = {
   port = 3000;
   rpId = "example.com";
   rpOrigin = "https://example.com";
+  setupTokenFile = "/run/secrets/prismoire-setup-token"; # required on first boot
 };
 
 # Use something like Caddy to serve:

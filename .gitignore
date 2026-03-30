@@ -1,5 +1,5 @@
 # Rust
-server/target/
+target/
 
 # Node.js
 node_modules/
