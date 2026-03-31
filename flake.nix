@@ -70,6 +70,8 @@
           src = workspaceSrc;
           cargoLock.lockFile = ./Cargo.lock;
           cargoBuildFlags = [ "--package" "prismoire" ];
+          nativeBuildInputs = with pkgs; [ pkg-config ];
+          buildInputs = with pkgs; [ openssl ];
         };
 
         web = pkgs.stdenv.mkDerivation (finalAttrs: {
@@ -89,7 +91,7 @@
             inherit (finalAttrs) pname version src;
             pnpm = pkgs.pnpm_10;
             fetcherVersion = 3;
-            hash = "sha256-Vk0ZcyCshNxFhpc3cWWNj5FCbXfdGCivO7jWp/VYyGk=";
+            hash = "sha256-Jqzi535o83rjHUuPcvt2y9wF0FgTqFvHScFNxx1h9tM=";
           };
 
           buildPhase = ''

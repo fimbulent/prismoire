@@ -7,6 +7,8 @@
 
 	let { children } = $props();
 
+	let navHeight = $state(0);
+
 	$effect(() => {
 		session.load();
 	});
@@ -27,7 +29,8 @@
 	<link rel="icon" href={favicon} />
 </svelte:head>
 
-<nav class="bg-bg-surface border-b border-border px-4 py-3 flex items-center justify-between">
+<div class="bg-bg text-text-primary min-h-screen" style:--nav-height="{navHeight}px">
+<nav bind:clientHeight={navHeight} class="bg-bg-surface border-b border-border px-4 py-3 flex items-center justify-between">
 	<a href="/" class="text-accent font-bold tracking-wide text-lg hover:opacity-90">Prismoire</a>
 
 	<div class="flex items-center gap-4 text-sm">
@@ -54,3 +57,4 @@
 </nav>
 
 {@render children()}
+</div>

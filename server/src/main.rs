@@ -16,6 +16,9 @@ mod error;
 mod session;
 mod setup;
 mod state;
+mod topic_name;
+mod topics;
+mod validation;
 
 use state::AppState;
 
@@ -125,6 +128,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let authed = Router::new()
         .route("/api/auth/session", get(auth::session_info))
         .route("/api/auth/logout", post(auth::logout))
+        .route(
+            "/api/topics",
+            get(topics::list_topics).post(topics::create_topic),
+        )
+        .route("/api/topics/{id}", get(topics::get_topic))
         .layer(axum::middleware::from_fn_with_state(
             shared_state.clone(),
             session::session_middleware,

@@ -1,10 +1,15 @@
-use unicode_normalization::UnicodeNormalization;
-use unicode_security::MixedScript;
 use unicode_security::confusable_detection::skeleton;
 
-const MIN_CHARS: usize = 3;
-const MAX_CHARS: usize = 20;
-const MAX_BYTES: usize = 64;
+use crate::validation::{NameRules, validate_name};
+
+const RULES: NameRules = NameRules {
+    label: "display name",
+    min_chars: 3,
+    max_chars: 20,
+    max_bytes: 64,
+    allowed_separators: &['_', '-'],
+    allowed_chars_description: "letters, numbers, hyphens, and underscores",
+};
 
 /// Validate and normalize a display name.
 ///
@@ -21,55 +26,73 @@ const MAX_BYTES: usize = 64;
 ///
 /// Returns the normalized display name on success, or a human-readable error.
 pub fn validate_display_name(raw: &str) -> Result<String, &'static str> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err("display name must not be empty");
-    }
+    validate_name(raw, &RULES).map_err(|_| match () {
+        _ if raw.trim().is_empty() => "display name must not be empty",
+        _ => {
+            let normalized: String = {
+                use unicode_normalization::UnicodeNormalization;
+                raw.trim().nfc().collect()
+            };
+            classify_display_name_error(&normalized)
+        }
+    })
+}
 
-    let normalized: String = trimmed.nfc().collect();
+/// Map a failed display name to the most specific static error message.
+///
+/// This preserves the original static `&str` error messages for backward
+/// compatibility with existing frontend/test expectations.
+fn classify_display_name_error(normalized: &str) -> &'static str {
+    use unicode_normalization::UnicodeNormalization;
+    use unicode_security::MixedScript;
+
+    let nfc: String = normalized.nfc().collect();
 
     let mut has_alpha = false;
-
-    for ch in normalized.chars() {
+    let mut has_bad_char = false;
+    for ch in nfc.chars() {
         if ch.is_alphabetic() {
             has_alpha = true;
         } else if ch.is_ascii_digit() || ch == '_' || ch == '-' {
-            // allowed non-alpha characters
+            // ok
         } else {
-            return Err("display name may only contain letters, numbers, hyphens, and underscores");
+            has_bad_char = true;
         }
     }
 
+    if has_bad_char {
+        return "display name may only contain letters, numbers, hyphens, and underscores";
+    }
     if !has_alpha {
-        return Err("display name must contain at least one letter");
+        return "display name must contain at least one letter";
     }
 
-    let char_count = normalized.chars().count();
-    if char_count < MIN_CHARS {
-        return Err("display name must be at least 3 characters");
+    let char_count = nfc.chars().count();
+    if char_count < 3 {
+        return "display name must be at least 3 characters";
     }
-    if char_count > MAX_CHARS {
-        return Err("display name must be at most 20 characters");
+    if char_count > 20 {
+        return "display name must be at most 20 characters";
     }
-    if normalized.len() > MAX_BYTES {
-        return Err("display name is too long");
+    if nfc.len() > 64 {
+        return "display name is too long";
     }
 
-    let first = normalized.chars().next().unwrap();
-    let last = normalized.chars().next_back().unwrap();
+    let first = nfc.chars().next().unwrap();
+    let last = nfc.chars().next_back().unwrap();
     if matches!(first, '_' | '-') || matches!(last, '_' | '-') {
-        return Err("display name must not start or end with a hyphen or underscore");
+        return "display name must not start or end with a hyphen or underscore";
     }
 
-    if has_consecutive_separators(&normalized) {
-        return Err("display name must not contain consecutive hyphens or underscores");
+    if crate::validation::has_consecutive_separators(&nfc, &['_', '-']) {
+        return "display name must not contain consecutive hyphens or underscores";
     }
 
-    if !normalized.is_ascii() && !normalized.is_single_script() {
-        return Err("display name must not mix characters from different scripts");
+    if !nfc.is_ascii() && !nfc.is_single_script() {
+        return "display name must not mix characters from different scripts";
     }
 
-    Ok(normalized)
+    "invalid display name"
 }
 
 /// Compute the confusable skeleton of a display name for lookalike detection.
@@ -82,20 +105,6 @@ pub fn validate_display_name(raw: &str) -> Result<String, &'static str> {
 pub fn display_name_skeleton(name: &str) -> String {
     let skel: String = skeleton(name).collect();
     skel.to_lowercase().replace('-', "_")
-}
-
-/// Returns true if the string contains consecutive separator characters
-/// (any combination of `-` and `_` back-to-back).
-fn has_consecutive_separators(s: &str) -> bool {
-    let mut prev_sep = false;
-    for ch in s.chars() {
-        let is_sep = ch == '-' || ch == '_';
-        if is_sep && prev_sep {
-            return true;
-        }
-        prev_sep = is_sep;
-    }
-    false
 }
 
 #[cfg(test)]
