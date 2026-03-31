@@ -1,4 +1,4 @@
-/// Shared validation helpers for display names and topic names.
+/// Shared validation helpers for display names and area names.
 ///
 /// Both name types share common rules (NFC normalization, character-class
 /// checks, mixed-script detection, consecutive-separator rejection) but

@@ -124,6 +124,10 @@ services.caddy = {
   enable = true;
   virtualHosts."example.com" = {
     extraConfig = ''
+      @immutable path /_app/immutable/*
+      header @immutable Cache-Control "public, max-age=31536000, immutable"
+      @other not path /_app/immutable/*
+      header @other Cache-Control "no-cache"
       reverse_proxy localhost:3000
     '';
   };

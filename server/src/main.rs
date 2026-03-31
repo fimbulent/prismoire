@@ -10,14 +10,14 @@ use tower_http::services::{ServeDir, ServeFile};
 use url::Url;
 use webauthn_rs::WebauthnBuilder;
 
+mod area_name;
+mod areas;
 mod auth;
 mod display_name;
 mod error;
 mod session;
 mod setup;
 mod state;
-mod topic_name;
-mod topics;
 mod validation;
 
 use state::AppState;
@@ -129,10 +129,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/auth/session", get(auth::session_info))
         .route("/api/auth/logout", post(auth::logout))
         .route(
-            "/api/topics",
-            get(topics::list_topics).post(topics::create_topic),
+            "/api/areas",
+            get(areas::list_areas).post(areas::create_area),
         )
-        .route("/api/topics/{id}", get(topics::get_topic))
+        .route("/api/areas/{id}", get(areas::get_area))
         .layer(axum::middleware::from_fn_with_state(
             shared_state.clone(),
             session::session_middleware,

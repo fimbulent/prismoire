@@ -17,14 +17,14 @@ function isAllowedChar(ch: string): boolean {
 }
 
 /**
- * Validate a topic name against the same rules enforced server-side.
+ * Validate an area name against the same rules enforced server-side.
  *
  * Returns `null` if the name is valid, or a human-readable error message.
  * Does not check for mixed scripts — that is enforced only on the server.
  */
-export function validateTopicName(raw: string): string | null {
+export function validateAreaName(raw: string): string | null {
 	const trimmed = raw.trim();
-	if (trimmed.length === 0) return 'Topic name must not be empty';
+	if (trimmed.length === 0) return 'Area name must not be empty';
 
 	const normalized = trimmed.normalize('NFC');
 
@@ -34,25 +34,25 @@ export function validateTopicName(raw: string): string | null {
 		if (isLetter(ch)) {
 			hasAlpha = true;
 		} else if (!isAllowedChar(ch)) {
-			return 'Topic name may only contain letters, numbers, spaces, and hyphens';
+			return 'Area name may only contain letters, numbers, spaces, and hyphens';
 		}
 	}
 
-	if (!hasAlpha) return 'Topic name must contain at least one letter';
+	if (!hasAlpha) return 'Area name must contain at least one letter';
 
 	const charCount = [...normalized].length;
-	if (charCount < MIN_CHARS) return 'Topic name must be at least 3 characters';
-	if (charCount > MAX_CHARS) return 'Topic name must be at most 30 characters';
-	if (new TextEncoder().encode(normalized).length > MAX_BYTES) return 'Topic name is too long';
+	if (charCount < MIN_CHARS) return 'Area name must be at least 3 characters';
+	if (charCount > MAX_CHARS) return 'Area name must be at most 30 characters';
+	if (new TextEncoder().encode(normalized).length > MAX_BYTES) return 'Area name is too long';
 
 	const first = [...normalized][0];
 	const last = [...normalized].at(-1)!;
 	if (first === ' ' || first === '-' || last === ' ' || last === '-') {
-		return 'Topic name must not start or end with a space or hyphen';
+		return 'Area name must not start or end with a space or hyphen';
 	}
 
 	if (/[ -]{2}/.test(normalized)) {
-		return 'Topic name must not contain consecutive spaces or hyphens';
+		return 'Area name must not contain consecutive spaces or hyphens';
 	}
 
 	return null;

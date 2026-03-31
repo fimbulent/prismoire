@@ -1,6 +1,6 @@
 import type { ApiError } from './auth';
 
-export interface Topic {
+export interface Area {
 	id: string;
 	name: string;
 	slug: string;
@@ -13,27 +13,27 @@ export interface Topic {
 	last_activity: string | null;
 }
 
-export interface TopicListResponse {
-	topics: Topic[];
+export interface AreaListResponse {
+	areas: Area[];
 }
 
-export interface CreateTopicRequest {
+export interface CreateAreaRequest {
 	name: string;
 	description?: string;
 }
 
-export async function listTopics(): Promise<Topic[]> {
-	const res = await fetch('/api/topics');
+export async function listAreas(): Promise<Area[]> {
+	const res = await fetch('/api/areas');
 	if (!res.ok) {
 		const err: ApiError = await res.json();
 		throw new Error(err.error);
 	}
-	const data: TopicListResponse = await res.json();
-	return data.topics;
+	const data: AreaListResponse = await res.json();
+	return data.areas;
 }
 
-export async function getTopic(idOrName: string): Promise<Topic> {
-	const res = await fetch(`/api/topics/${encodeURIComponent(idOrName)}`);
+export async function getArea(idOrName: string): Promise<Area> {
+	const res = await fetch(`/api/areas/${encodeURIComponent(idOrName)}`);
 	if (!res.ok) {
 		const err: ApiError = await res.json();
 		throw new Error(err.error);
@@ -41,8 +41,8 @@ export async function getTopic(idOrName: string): Promise<Topic> {
 	return res.json();
 }
 
-export async function createTopic(req: CreateTopicRequest): Promise<Topic> {
-	const res = await fetch('/api/topics', {
+export async function createArea(req: CreateAreaRequest): Promise<Area> {
+	const res = await fetch('/api/areas', {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify(req)
