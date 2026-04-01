@@ -29,21 +29,7 @@
 	<title>{thread ? `${thread.title} — Prismoire` : 'Thread — Prismoire'}</title>
 </svelte:head>
 
-<div class="max-w-4xl mx-auto px-6 py-4 text-sm text-text-muted">
-	<a href="/areas" class="hover:text-text-secondary">All Areas</a>
-	{#if thread}
-		<span class="mx-1">/</span>
-		<a
-			href="/area/{encodeURIComponent(thread.area_slug)}"
-			class="hover:text-text-secondary"
-		>{thread.area_name}</a
-		>
-		<span class="mx-1">/</span>
-		<span class="text-text-secondary">{thread.title}</span>
-	{/if}
-</div>
-
-<div class="max-w-4xl mx-auto px-6 pb-16">
+<div class="max-w-4xl mx-auto px-6 pt-6 pb-16">
 	{#if loading}
 		<div class="text-center text-text-muted py-12">Loading thread…</div>
 	{:else if error}
