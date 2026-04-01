@@ -1,7 +1,7 @@
 <script lang="ts">
-	import { createArea } from '$lib/api/areas';
+	import { createRoom } from '$lib/api/rooms';
 	import { session } from '$lib/stores/session.svelte';
-	import { validateAreaName } from '$lib/validation/area-name';
+	import { validateRoomName } from '$lib/validation/room-name';
 	import { goto } from '$app/navigation';
 	import { slide } from 'svelte/transition';
 
@@ -10,14 +10,14 @@
 	let name = $state('');
 	let description = $state('');
 	let error = $state<string | null>(null);
-	let nameError = $derived(name.trim() ? validateAreaName(name) : null);
+	let nameError = $derived(name.trim() ? validateRoomName(name) : null);
 	let slug = $derived(name.trim() ? name.trim().toLowerCase().replace(/[ -]/g, '_') : '');
 	let descriptionChars = $derived([...description].length);
 	let submitting = $state(false);
 
 	async function handleSubmit(e: SubmitEvent) {
 		e.preventDefault();
-		const validationError = validateAreaName(name);
+		const validationError = validateRoomName(name);
 		if (validationError) {
 			error = validationError;
 			return;
@@ -30,13 +30,13 @@
 		submitting = true;
 		error = null;
 		try {
-			const area = await createArea({
+			const room = await createRoom({
 				name: name.trim(),
 				description: description.trim() || undefined
 			});
-			goto(`/area/${encodeURIComponent(area.slug)}`);
+			goto(`/room/${encodeURIComponent(room.slug)}`);
 		} catch (e) {
-			error = e instanceof Error ? e.message : 'Failed to create area';
+			error = e instanceof Error ? e.message : 'Failed to create room';
 		} finally {
 			submitting = false;
 		}
@@ -44,15 +44,15 @@
 </script>
 
 <svelte:head>
-	<title>New Area — Prismoire</title>
+	<title>New Room — Prismoire</title>
 </svelte:head>
 
 <div class="max-w-4xl mx-auto px-6 pt-6 pb-16">
-	<h1 class="text-xl font-bold mb-6">New Area</h1>
+	<h1 class="text-xl font-bold mb-6">New Room</h1>
 
 	{#if !session.isLoggedIn && !session.loading}
 		<div class="text-center text-text-muted py-12">
-			<a href="/login" class="text-link hover:text-link-hover">Sign in</a> to create an area.
+			<a href="/login" class="text-link hover:text-link-hover">Sign in</a> to create a room.
 		</div>
 	{:else}
 		<form onsubmit={handleSubmit} class="space-y-4">
@@ -66,11 +66,11 @@
 			{/if}
 
 			<div>
-				<label for="area-name" class="block text-sm font-medium text-text-secondary mb-1"
+				<label for="room-name" class="block text-sm font-medium text-text-secondary mb-1"
 					>Name</label
 				>
 				<input
-					id="area-name"
+					id="room-name"
 					type="text"
 					bind:value={name}
 					maxlength={30}
@@ -86,20 +86,20 @@
 					</p>
 				{:else if slug}
 					<p transition:slide={{ duration: 150 }} class="text-xs text-text-muted mt-1">
-						/area/<span class="text-text-secondary">{slug}</span>
+						/room/<span class="text-text-secondary">{slug}</span>
 					</p>
 				{/if}
 			</div>
 
 			<div>
 				<label
-					for="area-description"
+					for="room-description"
 					class="block text-sm font-medium text-text-secondary mb-1">Description</label
 				>
 				<textarea
-					id="area-description"
+					id="room-description"
 					bind:value={description}
-					placeholder="What is this area about?"
+					placeholder="What is this room about?"
 					rows={3}
 					disabled={submitting}
 					class="w-full bg-bg-surface border border-border rounded-md text-text-primary text-sm px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted resize-y"
@@ -120,7 +120,7 @@
 					disabled={submitting || !name.trim() || !!nameError || descriptionChars > MAX_DESCRIPTION}
 					class="text-sm px-4 py-2 rounded-md cursor-pointer border border-accent bg-accent text-bg font-medium hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
 				>
-					{submitting ? 'Creating…' : 'Create Area'}
+					{submitting ? 'Creating…' : 'Create Room'}
 				</button>
 				<a href="/" class="text-sm text-text-muted hover:text-text-secondary">Cancel</a>
 			</div>

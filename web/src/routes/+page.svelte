@@ -5,9 +5,9 @@
 	$effect(() => {
 		if (session.loading) return;
 		if (session.isLoggedIn) {
-			goto('/area/all', { replaceState: true });
+			goto('/room/all', { replaceState: true });
 		} else {
-			goto('/areas', { replaceState: true });
+			goto('/rooms', { replaceState: true });
 		}
 	});
 </script>

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { getArea, type Area } from '$lib/api/areas';
+	import { getRoom, type Room } from '$lib/api/rooms';
 	import { createThread } from '$lib/api/threads';
 	import { session } from '$lib/stores/session.svelte';
 	import { page } from '$app/state';
@@ -11,7 +11,7 @@
 	const MAX_BODY = 50_000;
 	const BODY_COUNTER_THRESHOLD = 40_000;
 
-	let area = $state<Area | null>(null);
+	let room = $state<Room | null>(null);
 	let title = $state('');
 	let body = $state('');
 	let error = $state<string | null>(null);
@@ -29,15 +29,15 @@
 	});
 
 	$effect(() => {
-		const areaSlug = page.params.area;
-		if (areaSlug) loadArea(areaSlug);
+		const roomSlug = page.params.room;
+		if (roomSlug) loadRoom(roomSlug);
 	});
 
-	async function loadArea(slug: string) {
+	async function loadRoom(slug: string) {
 		try {
-			area = await getArea(slug);
+			room = await getRoom(slug);
 		} catch {
-			error = 'Failed to load area';
+			error = 'Failed to load room';
 		}
 	}
 
@@ -59,12 +59,12 @@
 		submitting = true;
 		error = null;
 		try {
-			const slug = area!.slug;
+			const slug = room!.slug;
 			const thread = await createThread(slug, {
 				title: title.trim(),
 				body: body.trim()
 			});
-			goto(`/area/${encodeURIComponent(slug)}/${thread.id}`);
+			goto(`/room/${encodeURIComponent(slug)}/${thread.id}`);
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to create thread';
 		} finally {
@@ -74,7 +74,7 @@
 </script>
 
 <svelte:head>
-	<title>New Thread{area ? ` — ${area.name}` : ''} — Prismoire</title>
+	<title>New Thread{room ? ` — ${room.name}` : ''} — Prismoire</title>
 </svelte:head>
 
 <div class="max-w-4xl mx-auto px-6 pt-6 pb-16">
@@ -153,7 +153,7 @@
 					{submitting ? 'Creating…' : 'Create Thread'}
 				</button>
 				<a
-					href="/area/{area ? encodeURIComponent(area.slug) : ''}"
+					href="/room/{room ? encodeURIComponent(room.slug) : ''}"
 					class="text-sm text-text-muted hover:text-text-secondary">Cancel</a
 				>
 			</div>

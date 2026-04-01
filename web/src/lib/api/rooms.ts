@@ -1,6 +1,6 @@
 import type { ApiError } from './auth';
 
-export interface Area {
+export interface Room {
 	id: string;
 	name: string;
 	slug: string;
@@ -13,27 +13,27 @@ export interface Area {
 	last_activity: string | null;
 }
 
-export interface AreaListResponse {
-	areas: Area[];
+export interface RoomListResponse {
+	rooms: Room[];
 }
 
-export interface CreateAreaRequest {
+export interface CreateRoomRequest {
 	name: string;
 	description?: string;
 }
 
-export async function listAreas(): Promise<Area[]> {
-	const res = await fetch('/api/areas');
+export async function listRooms(): Promise<Room[]> {
+	const res = await fetch('/api/rooms');
 	if (!res.ok) {
 		const err: ApiError = await res.json();
 		throw new Error(err.error);
 	}
-	const data: AreaListResponse = await res.json();
-	return data.areas;
+	const data: RoomListResponse = await res.json();
+	return data.rooms;
 }
 
-export async function getArea(idOrName: string): Promise<Area> {
-	const res = await fetch(`/api/areas/${encodeURIComponent(idOrName)}`);
+export async function getRoom(idOrName: string): Promise<Room> {
+	const res = await fetch(`/api/rooms/${encodeURIComponent(idOrName)}`);
 	if (!res.ok) {
 		const err: ApiError = await res.json();
 		throw new Error(err.error);
@@ -41,23 +41,23 @@ export async function getArea(idOrName: string): Promise<Area> {
 	return res.json();
 }
 
-export interface AreaSummary {
+export interface RoomSummary {
 	slug: string;
 	name: string;
 }
 
-export async function topAreas(): Promise<AreaSummary[]> {
-	const res = await fetch('/api/areas/top');
+export async function topRooms(): Promise<RoomSummary[]> {
+	const res = await fetch('/api/rooms/top');
 	if (!res.ok) {
 		const err: ApiError = await res.json();
 		throw new Error(err.error);
 	}
-	const data: { areas: AreaSummary[] } = await res.json();
-	return data.areas;
+	const data: { rooms: RoomSummary[] } = await res.json();
+	return data.rooms;
 }
 
-export async function createArea(req: CreateAreaRequest): Promise<Area> {
-	const res = await fetch('/api/areas', {
+export async function createRoom(req: CreateRoomRequest): Promise<Room> {
+	const res = await fetch('/api/rooms', {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify(req)

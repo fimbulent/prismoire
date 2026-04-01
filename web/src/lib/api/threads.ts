@@ -5,9 +5,9 @@ export interface ThreadSummary {
 	title: string;
 	author_id: string;
 	author_name: string;
-	area_id: string;
-	area_name: string;
-	area_slug: string;
+	room_id: string;
+	room_name: string;
+	room_slug: string;
 	created_at: string;
 	pinned: boolean;
 	locked: boolean;
@@ -35,9 +35,9 @@ export interface ThreadDetail {
 	title: string;
 	author_id: string;
 	author_name: string;
-	area_id: string;
-	area_name: string;
-	area_slug: string;
+	room_id: string;
+	room_name: string;
+	room_slug: string;
 	created_at: string;
 	pinned: boolean;
 	locked: boolean;
@@ -51,14 +51,14 @@ export interface CreateThreadRequest {
 }
 
 export async function listThreads(
-	areaIdOrSlug: string,
+	roomIdOrSlug: string,
 	cursor?: string
 ): Promise<ThreadListResponse> {
 	const params = new URLSearchParams();
 	if (cursor) params.set('cursor', cursor);
 	const qs = params.toString();
 	const res = await fetch(
-		`/api/areas/${encodeURIComponent(areaIdOrSlug)}/threads${qs ? `?${qs}` : ''}`
+		`/api/rooms/${encodeURIComponent(roomIdOrSlug)}/threads${qs ? `?${qs}` : ''}`
 	);
 	if (!res.ok) {
 		const err: ApiError = await res.json();
@@ -89,10 +89,10 @@ export async function getThread(id: string): Promise<ThreadDetail> {
 }
 
 export async function createThread(
-	areaIdOrSlug: string,
+	roomIdOrSlug: string,
 	req: CreateThreadRequest
 ): Promise<ThreadDetail> {
-	const res = await fetch(`/api/areas/${encodeURIComponent(areaIdOrSlug)}/threads`, {
+	const res = await fetch(`/api/rooms/${encodeURIComponent(roomIdOrSlug)}/threads`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify(req)

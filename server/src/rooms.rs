@@ -6,15 +6,15 @@ use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::area_name::{area_slug, validate_area_name};
+use crate::room_name::{room_slug, validate_room_name};
 use crate::error::AppError;
 use crate::session::AuthUser;
 use crate::state::AppState;
 
-const MAX_AREA_DESCRIPTION_LEN: usize = 300;
+const MAX_ROOM_DESCRIPTION_LEN: usize = 300;
 
 #[derive(Serialize)]
-pub struct AreaResponse {
+pub struct RoomResponse {
     pub id: String,
     pub name: String,
     pub slug: String,
@@ -28,58 +28,58 @@ pub struct AreaResponse {
 }
 
 #[derive(Serialize)]
-pub struct AreaListResponse {
-    pub areas: Vec<AreaResponse>,
+pub struct RoomListResponse {
+    pub rooms: Vec<RoomResponse>,
 }
 
 #[derive(Deserialize)]
-pub struct CreateAreaRequest {
+pub struct CreateRoomRequest {
     pub name: String,
     pub description: Option<String>,
 }
 
-/// Lightweight area summary for tab bars and navigation.
+/// Lightweight room summary for tab bars and navigation.
 #[derive(Serialize)]
-pub struct AreaSummary {
+pub struct RoomSummary {
     pub slug: String,
     pub name: String,
 }
 
 #[derive(Serialize)]
-pub struct AreaSummaryListResponse {
-    pub areas: Vec<AreaSummary>,
+pub struct RoomSummaryListResponse {
+    pub rooms: Vec<RoomSummary>,
 }
 
-/// GET /api/areas/top — return the most active areas (lightweight, for tab bar).
-pub async fn top_areas(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
+/// GET /api/rooms/top — return the most active rooms (lightweight, for tab bar).
+pub async fn top_rooms(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
     let rows = sqlx::query_as::<_, (String, String)>(
-        "SELECT a.slug, a.name \
-         FROM areas a \
-         WHERE a.merged_into IS NULL \
+        "SELECT r.slug, r.name \
+         FROM rooms r \
+         WHERE r.merged_into IS NULL \
          ORDER BY \
-           (SELECT MAX(p.created_at) FROM posts p JOIN threads t ON p.thread = t.id WHERE t.area = a.id) DESC NULLS LAST, \
-           a.created_at DESC \
+           (SELECT MAX(p.created_at) FROM posts p JOIN threads t ON p.thread = t.id WHERE t.room = r.id) DESC NULLS LAST, \
+           r.created_at DESC \
          LIMIT 6",
     )
     .fetch_all(&state.db)
     .await?;
 
-    let areas = rows
+    let rooms = rows
         .into_iter()
-        .map(|(slug, name)| AreaSummary { slug, name })
+        .map(|(slug, name)| RoomSummary { slug, name })
         .collect();
 
-    Ok(Json(AreaSummaryListResponse { areas }))
+    Ok(Json(RoomSummaryListResponse { rooms }))
 }
 
-/// GET /api/areas — list all non-merged areas with thread/post counts.
-pub async fn list_areas(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
+/// GET /api/rooms — list all non-merged rooms with thread/post counts.
+pub async fn list_rooms(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
     let rows = sqlx::query_as::<_, (String, String, String, String, String, String, String, i64, i64, Option<String>)>(
         "SELECT t.id, t.name, t.slug, t.description, t.created_by, u.display_name, t.created_at, \
-         (SELECT COUNT(*) FROM threads th WHERE th.area = t.id) AS thread_count, \
-         (SELECT COUNT(*) FROM posts p JOIN threads th2 ON p.thread = th2.id WHERE th2.area = t.id) AS post_count, \
-         (SELECT MAX(p2.created_at) FROM posts p2 JOIN threads th3 ON p2.thread = th3.id WHERE th3.area = t.id) AS last_activity \
-         FROM areas t \
+         (SELECT COUNT(*) FROM threads th WHERE th.room = t.id) AS thread_count, \
+         (SELECT COUNT(*) FROM posts p JOIN threads th2 ON p.thread = th2.id WHERE th2.room = t.id) AS post_count, \
+         (SELECT MAX(p2.created_at) FROM posts p2 JOIN threads th3 ON p2.thread = th3.id WHERE th3.room = t.id) AS last_activity \
+         FROM rooms t \
          JOIN users u ON u.id = t.created_by \
          WHERE t.merged_into IS NULL \
          ORDER BY last_activity DESC NULLS LAST, t.created_at DESC",
@@ -87,7 +87,7 @@ pub async fn list_areas(State(state): State<Arc<AppState>>) -> Result<impl IntoR
     .fetch_all(&state.db)
     .await?;
 
-    let areas = rows
+    let rooms = rows
         .into_iter()
         .map(
             |(
@@ -102,7 +102,7 @@ pub async fn list_areas(State(state): State<Arc<AppState>>) -> Result<impl IntoR
                 post_count,
                 last_activity,
             )| {
-                AreaResponse {
+                RoomResponse {
                     id,
                     name,
                     slug,
@@ -118,20 +118,20 @@ pub async fn list_areas(State(state): State<Arc<AppState>>) -> Result<impl IntoR
         )
         .collect();
 
-    Ok(Json(AreaListResponse { areas }))
+    Ok(Json(RoomListResponse { rooms }))
 }
 
-/// GET /api/areas/:id — get area detail by ID or slug.
-pub async fn get_area(
+/// GET /api/rooms/:id — get room detail by ID or slug.
+pub async fn get_room(
     State(state): State<Arc<AppState>>,
     Path(id_or_slug): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     let row = sqlx::query_as::<_, (String, String, String, String, String, String, String, i64, i64, Option<String>)>(
         "SELECT t.id, t.name, t.slug, t.description, t.created_by, u.display_name, t.created_at, \
-         (SELECT COUNT(*) FROM threads th WHERE th.area = t.id) AS thread_count, \
-         (SELECT COUNT(*) FROM posts p JOIN threads th2 ON p.thread = th2.id WHERE th2.area = t.id) AS post_count, \
-         (SELECT MAX(p2.created_at) FROM posts p2 JOIN threads th3 ON p2.thread = th3.id WHERE th3.area = t.id) AS last_activity \
-         FROM areas t \
+         (SELECT COUNT(*) FROM threads th WHERE th.room = t.id) AS thread_count, \
+         (SELECT COUNT(*) FROM posts p JOIN threads th2 ON p.thread = th2.id WHERE th2.room = t.id) AS post_count, \
+         (SELECT MAX(p2.created_at) FROM posts p2 JOIN threads th3 ON p2.thread = th3.id WHERE th3.room = t.id) AS last_activity \
+         FROM rooms t \
          JOIN users u ON u.id = t.created_by \
          WHERE (t.id = ? OR t.slug = ?) AND t.merged_into IS NULL",
     )
@@ -139,7 +139,7 @@ pub async fn get_area(
     .bind(&id_or_slug)
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| AppError::NotFound("area not found".into()))?;
+    .ok_or_else(|| AppError::NotFound("room not found".into()))?;
 
     let (
         id,
@@ -154,7 +154,7 @@ pub async fn get_area(
         last_activity,
     ) = row;
 
-    Ok(Json(AreaResponse {
+    Ok(Json(RoomResponse {
         id,
         name,
         slug,
@@ -168,36 +168,36 @@ pub async fn get_area(
     }))
 }
 
-/// POST /api/areas — create a new area (requires auth).
-pub async fn create_area(
+/// POST /api/rooms — create a new room (requires auth).
+pub async fn create_room(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
-    Json(req): Json<CreateAreaRequest>,
+    Json(req): Json<CreateRoomRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let name = validate_area_name(&req.name).map_err(AppError::BadRequest)?;
-    let slug = area_slug(&name);
+    let name = validate_room_name(&req.name).map_err(AppError::BadRequest)?;
+    let slug = room_slug(&name);
     let description = req.description.as_deref().unwrap_or("").trim().to_string();
 
-    if description.len() > MAX_AREA_DESCRIPTION_LEN {
+    if description.len() > MAX_ROOM_DESCRIPTION_LEN {
         return Err(AppError::BadRequest("description is too long".into()));
     }
 
     let existing: Option<(String,)> =
-        sqlx::query_as("SELECT id FROM areas WHERE slug = ? AND merged_into IS NULL")
+        sqlx::query_as("SELECT id FROM rooms WHERE slug = ? AND merged_into IS NULL")
             .bind(&slug)
             .fetch_optional(&state.db)
             .await?;
 
     if existing.is_some() {
         return Err(AppError::Conflict(
-            "an area with that name already exists".into(),
+            "a room with that name already exists".into(),
         ));
     }
 
     let id = Uuid::new_v4().to_string();
 
     let (created_at,): (String,) = sqlx::query_as(
-        "INSERT INTO areas (id, name, slug, description, created_by) VALUES (?, ?, ?, ?, ?) RETURNING created_at",
+        "INSERT INTO rooms (id, name, slug, description, created_by) VALUES (?, ?, ?, ?, ?) RETURNING created_at",
     )
     .bind(&id)
     .bind(&name)
@@ -209,7 +209,7 @@ pub async fn create_area(
 
     Ok((
         axum::http::StatusCode::CREATED,
-        Json(AreaResponse {
+        Json(RoomResponse {
             id,
             name,
             slug,

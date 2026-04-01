@@ -19,14 +19,14 @@ function isAllowedChar(ch: string): boolean {
 }
 
 /**
- * Validate an area name against the same rules enforced server-side.
+ * Validate a room name against the same rules enforced server-side.
  *
  * Returns `null` if the name is valid, or a human-readable error message.
  * Does not check for mixed scripts — that is enforced only on the server.
  */
-export function validateAreaName(raw: string): string | null {
+export function validateRoomName(raw: string): string | null {
 	const trimmed = raw.trim();
-	if (trimmed.length === 0) return 'Area name must not be empty';
+	if (trimmed.length === 0) return 'Room name must not be empty';
 
 	const normalized = trimmed.normalize('NFC');
 
@@ -36,30 +36,30 @@ export function validateAreaName(raw: string): string | null {
 		if (isLetter(ch)) {
 			hasAlpha = true;
 		} else if (!isAllowedChar(ch)) {
-			return 'Area name may only contain letters, numbers, spaces, and hyphens';
+			return 'Room name may only contain letters, numbers, spaces, and hyphens';
 		}
 	}
 
-	if (!hasAlpha) return 'Area name must contain at least one letter';
+	if (!hasAlpha) return 'Room name must contain at least one letter';
 
 	const charCount = [...normalized].length;
-	if (charCount < MIN_CHARS) return 'Area name must be at least 3 characters';
-	if (charCount > MAX_CHARS) return 'Area name must be at most 30 characters';
-	if (new TextEncoder().encode(normalized).length > MAX_BYTES) return 'Area name is too long';
+	if (charCount < MIN_CHARS) return 'Room name must be at least 3 characters';
+	if (charCount > MAX_CHARS) return 'Room name must be at most 30 characters';
+	if (new TextEncoder().encode(normalized).length > MAX_BYTES) return 'Room name is too long';
 
 	const first = [...normalized][0];
 	const last = [...normalized].at(-1)!;
 	if (first === ' ' || first === '-' || last === ' ' || last === '-') {
-		return 'Area name must not start or end with a space or hyphen';
+		return 'Room name must not start or end with a space or hyphen';
 	}
 
 	if (/[ -]{2}/.test(normalized)) {
-		return 'Area name must not contain consecutive spaces or hyphens';
+		return 'Room name must not contain consecutive spaces or hyphens';
 	}
 
 	const slug = normalized.toLowerCase().replace(/[ -]/g, '_');
 	if (RESERVED_SLUGS.includes(slug)) {
-		return `Area name "${normalized}" is reserved`;
+		return `Room name "${normalized}" is reserved`;
 	}
 
 	return null;

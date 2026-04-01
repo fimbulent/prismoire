@@ -1,13 +1,13 @@
 <script lang="ts">
-	import { getArea, type Area } from '$lib/api/areas';
+	import { getRoom, type Room } from '$lib/api/rooms';
 	import { listThreads, listAllThreads, type ThreadSummary } from '$lib/api/threads';
 	import { relativeTime } from '$lib/format';
 	import { session } from '$lib/stores/session.svelte';
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
 
-	let isAll = $derived(page.params.area === 'all');
-	let area = $state<Area | null>(null);
+	let isAll = $derived(page.params.room === 'all');
+	let room = $state<Room | null>(null);
 	let threads = $state<ThreadSummary[]>([]);
 	let nextCursor = $state<string | null>(null);
 	let loadingMore = $state(false);
@@ -15,7 +15,7 @@
 	let error = $state<string | null>(null);
 
 	$effect(() => {
-		const slug = page.params.area;
+		const slug = page.params.room;
 		if (slug) load(slug);
 	});
 
@@ -26,16 +26,16 @@
 		nextCursor = null;
 		try {
 			if (slug === 'all') {
-				area = null;
+				room = null;
 				const res = await listAllThreads();
 				threads = res.threads;
 				nextCursor = res.next_cursor;
 			} else {
-				const [areaData, threadData] = await Promise.all([
-					getArea(slug),
+				const [roomData, threadData] = await Promise.all([
+					getRoom(slug),
 					listThreads(slug)
 				]);
-				area = areaData;
+				room = roomData;
 				threads = threadData.threads;
 				nextCursor = threadData.next_cursor;
 			}
@@ -50,7 +50,7 @@
 		if (!nextCursor || loadingMore) return;
 		loadingMore = true;
 		try {
-			const slug = page.params.area!;
+			const slug = page.params.room!;
 			const res =
 				slug === 'all' ? await listAllThreads(nextCursor) : await listThreads(slug, nextCursor);
 			threads = [...threads, ...res.threads];
@@ -65,10 +65,10 @@
 	let pinnedThreads = $derived(threads.filter((t) => t.pinned));
 	let unpinnedThreads = $derived(threads.filter((t) => !t.pinned));
 
-	let heading = $derived(isAll ? 'All threads' : area?.name ?? '');
+	let heading = $derived(isAll ? 'All threads' : room?.name ?? '');
 
 	function threadHref(thread: ThreadSummary): string {
-		return `/area/${encodeURIComponent(thread.area_slug)}/${thread.id}`;
+		return `/room/${encodeURIComponent(thread.room_slug)}/${thread.id}`;
 	}
 </script>
 
@@ -84,9 +84,9 @@
 	{:else}
 		<div class="pt-5 pb-3 flex items-center justify-between">
 			<h1 class="text-lg font-bold">{heading}</h1>
-			{#if session.isLoggedIn && !isAll && area}
+			{#if session.isLoggedIn && !isAll && room}
 				<button
-					onclick={() => goto(`/area/${encodeURIComponent(area!.slug)}/new`)}
+					onclick={() => goto(`/room/${encodeURIComponent(room!.slug)}/new`)}
 					class="text-sm px-3 py-1.5 rounded-md cursor-pointer border border-accent bg-accent text-bg font-medium hover:opacity-90 shrink-0"
 				>
 					New Thread
@@ -130,9 +130,9 @@
 								{#if isAll}
 									<span>&middot;</span>
 									<a
-										href="/area/{encodeURIComponent(thread.area_slug)}"
+										href="/room/{encodeURIComponent(thread.room_slug)}"
 										class="text-accent-muted no-underline hover:underline"
-										>{thread.area_name}</a
+										>{thread.room_name}</a
 									>
 								{/if}
 							</div>
@@ -166,9 +166,9 @@
 								{#if isAll}
 									<span>&middot;</span>
 									<a
-										href="/area/{encodeURIComponent(thread.area_slug)}"
+										href="/room/{encodeURIComponent(thread.room_slug)}"
 										class="text-accent-muted no-underline hover:underline"
-										>{thread.area_name}</a
+										>{thread.room_name}</a
 									>
 								{/if}
 							</div>

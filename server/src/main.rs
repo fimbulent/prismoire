@@ -10,11 +10,11 @@ use tower_http::services::{ServeDir, ServeFile};
 use url::Url;
 use webauthn_rs::WebauthnBuilder;
 
-mod area_name;
-mod areas;
 mod auth;
 mod display_name;
 mod error;
+mod room_name;
+mod rooms;
 mod session;
 mod setup;
 mod signing;
@@ -131,13 +131,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/auth/session", get(auth::session_info))
         .route("/api/auth/logout", post(auth::logout))
         .route(
-            "/api/areas",
-            get(areas::list_areas).post(areas::create_area),
+            "/api/rooms",
+            get(rooms::list_rooms).post(rooms::create_room),
         )
-        .route("/api/areas/top", get(areas::top_areas))
-        .route("/api/areas/{id}", get(areas::get_area))
+        .route("/api/rooms/top", get(rooms::top_rooms))
+        .route("/api/rooms/{id}", get(rooms::get_room))
         .route(
-            "/api/areas/{id}/threads",
+            "/api/rooms/{id}/threads",
             get(threads::list_threads).post(threads::create_thread),
         )
         .route("/api/threads", get(threads::list_all_threads))
