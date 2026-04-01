@@ -2,6 +2,8 @@ const MIN_CHARS = 3;
 const MAX_CHARS = 30;
 const MAX_BYTES = 120;
 
+const RESERVED_SLUGS = ['top', 'all', 'favorites'];
+
 const LETTER_RE = /^\p{L}$/u;
 
 function isLetter(ch: string): boolean {
@@ -53,6 +55,11 @@ export function validateAreaName(raw: string): string | null {
 
 	if (/[ -]{2}/.test(normalized)) {
 		return 'Area name must not contain consecutive spaces or hyphens';
+	}
+
+	const slug = normalized.toLowerCase().replace(/[ -]/g, '_');
+	if (RESERVED_SLUGS.includes(slug)) {
+		return `Area name "${normalized}" is reserved`;
 	}
 
 	return null;

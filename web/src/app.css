@@ -3,6 +3,7 @@
 @theme {
 	--color-bg: var(--bg);
 	--color-bg-surface: var(--bg-surface);
+	--color-bg-surface-dim: var(--bg-surface-dim);
 	--color-bg-surface-raised: var(--bg-surface-raised);
 	--color-bg-hover: var(--bg-hover);
 	--color-text-primary: var(--text-primary);
@@ -29,6 +30,7 @@
 :root {
 	--bg: #1a1a2e;
 	--bg-surface: #22223a;
+	--bg-surface-dim: #1e1e34;
 	--bg-surface-raised: #2a2a44;
 	--bg-hover: #32324e;
 	--text-primary: #e0def4;

@@ -17,7 +17,9 @@ mod display_name;
 mod error;
 mod session;
 mod setup;
+mod signing;
 mod state;
+mod threads;
 mod validation;
 
 use state::AppState;
@@ -132,7 +134,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/areas",
             get(areas::list_areas).post(areas::create_area),
         )
+        .route("/api/areas/top", get(areas::top_areas))
         .route("/api/areas/{id}", get(areas::get_area))
+        .route(
+            "/api/areas/{id}/threads",
+            get(threads::list_threads).post(threads::create_thread),
+        )
+        .route("/api/threads", get(threads::list_all_threads))
+        .route("/api/threads/{id}", get(threads::get_thread))
         .layer(axum::middleware::from_fn_with_state(
             shared_state.clone(),
             session::session_middleware,

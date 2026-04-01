@@ -24,11 +24,20 @@ const RULES: NameRules = NameRules {
     allowed_chars_description: "letters, numbers, spaces, and hyphens",
 };
 
+/// Slugs reserved for API routes and future features.
+const RESERVED_SLUGS: &[&str] = &["top", "all", "favorites"];
+
 /// Validate and normalize an area name.
 ///
 /// Returns the NFC-normalized name on success, or a human-readable error.
+/// Rejects names whose slug would collide with reserved API routes.
 pub fn validate_area_name(raw: &str) -> Result<String, String> {
-    validate_name(raw, &RULES)
+    let name = validate_name(raw, &RULES)?;
+    let slug = area_slug(&name);
+    if RESERVED_SLUGS.contains(&slug.as_str()) {
+        return Err(format!("area name \"{name}\" is reserved"));
+    }
+    Ok(name)
 }
 
 /// Compute the URL slug for an area name.
@@ -127,6 +136,16 @@ mod tests {
     #[test]
     fn rejects_mixed_script() {
         assert!(validate_area_name("Tеch News").is_err()); // Cyrillic 'е'
+    }
+
+    #[test]
+    fn rejects_reserved_slugs() {
+        assert!(validate_area_name("top").is_err());
+        assert!(validate_area_name("Top").is_err());
+        assert!(validate_area_name("all").is_err());
+        assert!(validate_area_name("ALL").is_err());
+        assert!(validate_area_name("favorites").is_err());
+        assert!(validate_area_name("Favorites").is_err());
     }
 
     #[test]

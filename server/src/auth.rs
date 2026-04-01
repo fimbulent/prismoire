@@ -14,6 +14,7 @@ use crate::error::AppError;
 use crate::session::{
     AuthUser, clear_session_cookie, create_session, delete_session, session_cookie,
 };
+use crate::signing;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -216,6 +217,8 @@ pub async fn signup_complete(
     .bind(&passkey_bytes)
     .execute(&state.db)
     .await?;
+
+    signing::create_signing_key(&state.db, &user_id).await?;
 
     let inviter_id: Option<(String,)> = sqlx::query_as(
         "SELECT i.created_by FROM invites i WHERE i.code = ? AND i.used_by IS NULL AND i.revoked = 0",

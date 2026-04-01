@@ -41,6 +41,21 @@ export async function getArea(idOrName: string): Promise<Area> {
 	return res.json();
 }
 
+export interface AreaSummary {
+	slug: string;
+	name: string;
+}
+
+export async function topAreas(): Promise<AreaSummary[]> {
+	const res = await fetch('/api/areas/top');
+	if (!res.ok) {
+		const err: ApiError = await res.json();
+		throw new Error(err.error);
+	}
+	const data: { areas: AreaSummary[] } = await res.json();
+	return data.areas;
+}
+
 export async function createArea(req: CreateAreaRequest): Promise<Area> {
 	const res = await fetch('/api/areas', {
 		method: 'POST',

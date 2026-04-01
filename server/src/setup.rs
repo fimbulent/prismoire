@@ -15,6 +15,7 @@ use crate::auth::{AuthBeginResponse, SessionResponse};
 use crate::display_name::{display_name_skeleton, validate_display_name};
 use crate::error::AppError;
 use crate::session::{create_session, session_cookie};
+use crate::signing;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -203,6 +204,8 @@ pub async fn setup_complete(
     .bind(&passkey_bytes)
     .execute(&state.db)
     .await?;
+
+    signing::create_signing_key(&state.db, &user_id).await?;
 
     state.needs_setup.store(false, Ordering::Relaxed);
 

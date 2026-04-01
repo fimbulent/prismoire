@@ -38,10 +38,42 @@ pub struct CreateAreaRequest {
     pub description: Option<String>,
 }
 
+/// Lightweight area summary for tab bars and navigation.
+#[derive(Serialize)]
+pub struct AreaSummary {
+    pub slug: String,
+    pub name: String,
+}
+
+#[derive(Serialize)]
+pub struct AreaSummaryListResponse {
+    pub areas: Vec<AreaSummary>,
+}
+
+/// GET /api/areas/top — return the most active areas (lightweight, for tab bar).
+pub async fn top_areas(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
+    let rows = sqlx::query_as::<_, (String, String)>(
+        "SELECT a.slug, a.name \
+         FROM areas a \
+         WHERE a.merged_into IS NULL \
+         ORDER BY \
+           (SELECT MAX(p.created_at) FROM posts p JOIN threads t ON p.thread = t.id WHERE t.area = a.id) DESC NULLS LAST, \
+           a.created_at DESC \
+         LIMIT 6",
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    let areas = rows
+        .into_iter()
+        .map(|(slug, name)| AreaSummary { slug, name })
+        .collect();
+
+    Ok(Json(AreaSummaryListResponse { areas }))
+}
+
 /// GET /api/areas — list all non-merged areas with thread/post counts.
-pub async fn list_areas(
-    State(state): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, AppError> {
+pub async fn list_areas(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
     let rows = sqlx::query_as::<_, (String, String, String, String, String, String, String, i64, i64, Option<String>)>(
         "SELECT t.id, t.name, t.slug, t.description, t.created_by, u.display_name, t.created_at, \
          (SELECT COUNT(*) FROM threads th WHERE th.area = t.id) AS thread_count, \
