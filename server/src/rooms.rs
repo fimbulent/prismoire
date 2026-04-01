@@ -6,8 +6,8 @@ use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::room_name::{room_slug, validate_room_name};
 use crate::error::AppError;
+use crate::room_name::{room_slug, validate_room_name};
 use crate::session::AuthUser;
 use crate::state::AppState;
 

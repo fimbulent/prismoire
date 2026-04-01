@@ -13,6 +13,7 @@ use webauthn_rs::WebauthnBuilder;
 mod auth;
 mod display_name;
 mod error;
+mod posts;
 mod room_name;
 mod rooms;
 mod session;
@@ -142,6 +143,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/api/threads", get(threads::list_all_threads))
         .route("/api/threads/{id}", get(threads::get_thread))
+        .route(
+            "/api/posts/{id}",
+            axum::routing::patch(posts::edit_post).delete(posts::retract_post),
+        )
+        .route("/api/posts/{id}/revisions", get(posts::list_revisions))
         .layer(axum::middleware::from_fn_with_state(
             shared_state.clone(),
             session::session_middleware,

@@ -26,8 +26,10 @@ export interface PostResponse {
 	author_name: string;
 	body: string;
 	created_at: string;
+	edited_at: string | null;
 	revision: number;
 	is_op: boolean;
+	retracted_at: string | null;
 }
 
 export interface ThreadDetail {
@@ -81,6 +83,52 @@ export async function listAllThreads(cursor?: string): Promise<ThreadListRespons
 
 export async function getThread(id: string): Promise<ThreadDetail> {
 	const res = await fetch(`/api/threads/${encodeURIComponent(id)}`);
+	if (!res.ok) {
+		const err: ApiError = await res.json();
+		throw new Error(err.error);
+	}
+	return res.json();
+}
+
+export async function editPost(postId: string, body: string): Promise<PostResponse> {
+	const res = await fetch(`/api/posts/${encodeURIComponent(postId)}`, {
+		method: 'PATCH',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ body })
+	});
+	if (!res.ok) {
+		const err: ApiError = await res.json();
+		throw new Error(err.error);
+	}
+	return res.json();
+}
+
+export async function retractPost(postId: string): Promise<void> {
+	const res = await fetch(`/api/posts/${encodeURIComponent(postId)}`, {
+		method: 'DELETE'
+	});
+	if (!res.ok) {
+		const err: ApiError = await res.json();
+		throw new Error(err.error);
+	}
+}
+
+export interface RevisionResponse {
+	revision: number;
+	body: string;
+	created_at: string;
+}
+
+export interface RevisionHistoryResponse {
+	post_id: string;
+	author_id: string;
+	author_name: string;
+	retracted_at: string | null;
+	revisions: RevisionResponse[];
+}
+
+export async function getPostRevisions(postId: string): Promise<RevisionHistoryResponse> {
+	const res = await fetch(`/api/posts/${encodeURIComponent(postId)}/revisions`);
 	if (!res.ok) {
 		const err: ApiError = await res.json();
 		throw new Error(err.error);

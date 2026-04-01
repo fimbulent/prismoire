@@ -54,8 +54,10 @@ pub struct PostResponse {
     pub author_name: String,
     pub body: String,
     pub created_at: String,
+    pub edited_at: Option<String>,
     pub revision: i64,
     pub is_op: bool,
+    pub retracted_at: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -99,7 +101,7 @@ fn validate_title(title: &str) -> Result<String, String> {
     Ok(trimmed)
 }
 
-fn validate_body(body: &str) -> Result<String, String> {
+pub fn validate_body(body: &str) -> Result<String, String> {
     let trimmed = body.trim().to_string();
     if trimmed.is_empty() {
         return Err("body cannot be empty".into());
@@ -199,7 +201,9 @@ pub async fn create_thread(
                 body,
                 created_at: post_created_at,
                 revision: 0,
+                edited_at: None,
                 is_op: true,
+                retracted_at: None,
             },
             reply_count: 0,
         }),
@@ -229,6 +233,8 @@ fn make_cursor(thread: &ThreadSummary) -> String {
 // ---------------------------------------------------------------------------
 // GET /api/threads — list threads across all rooms
 // ---------------------------------------------------------------------------
+// TODO: The "hide retracted OP with no replies" condition is duplicated across
+// list_all_threads and list_threads. Deduplicate when migrating to sqlx::query!().
 
 /// List threads across all rooms, ordered by last activity, with cursor pagination.
 pub async fn list_all_threads(
@@ -246,6 +252,8 @@ pub async fn list_all_threads(
              JOIN users u ON u.id = t.author \
              JOIN rooms r ON r.id = t.room \
              WHERE r.merged_into IS NULL \
+               AND NOT (reply_count = 0 \
+                    AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
                AND (COALESCE(last_activity, t.created_at) < ? \
                     OR (COALESCE(last_activity, t.created_at) = ? AND t.id < ?)) \
              ORDER BY last_activity DESC NULLS LAST, t.created_at DESC, t.id DESC \
@@ -267,6 +275,8 @@ pub async fn list_all_threads(
              JOIN users u ON u.id = t.author \
              JOIN rooms r ON r.id = t.room \
              WHERE r.merged_into IS NULL \
+               AND NOT (reply_count = 0 \
+                    AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
              ORDER BY last_activity DESC NULLS LAST, t.created_at DESC, t.id DESC \
              LIMIT ?",
         )
@@ -357,6 +367,8 @@ pub async fn list_threads(
              JOIN users u ON u.id = t.author \
              WHERE t.room = ? \
                AND t.pinned < 1 \
+               AND NOT (reply_count = 0 \
+                    AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
                AND (COALESCE(last_activity, t.created_at) < ? \
                     OR (COALESCE(last_activity, t.created_at) = ? AND t.id < ?)) \
              ORDER BY t.pinned DESC, last_activity DESC NULLS LAST, t.created_at DESC, t.id DESC \
@@ -378,6 +390,8 @@ pub async fn list_threads(
              FROM threads t \
              JOIN users u ON u.id = t.author \
              WHERE t.room = ? \
+               AND NOT (reply_count = 0 \
+                    AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
              ORDER BY t.pinned DESC, last_activity DESC NULLS LAST, t.created_at DESC, t.id DESC \
              LIMIT ?",
         )
@@ -482,8 +496,10 @@ pub async fn get_thread(
         locked,
     ) = thread;
 
-    let op = sqlx::query_as::<_, (String, String, String, String, String, i64)>(
-        "SELECT p.id, p.author, u.display_name, pr.body, pr.created_at, pr.revision \
+    let op = sqlx::query_as::<_, (String, String, String, String, String, i64, Option<String>, String)>(
+        "SELECT p.id, p.author, u.display_name, pr.body, pr.created_at, pr.revision, \
+         p.retracted_at, \
+         (SELECT pr0.created_at FROM post_revisions pr0 WHERE pr0.post_id = p.id AND pr0.revision = 0) AS original_at \
          FROM posts p \
          JOIN users u ON u.id = p.author \
          JOIN post_revisions pr ON pr.post_id = p.id \
@@ -496,7 +512,21 @@ pub async fn get_thread(
     .await?
     .ok_or_else(|| AppError::Internal("thread has no opening post".into()))?;
 
-    let (post_id, post_author_id, post_author_name, body, post_created_at, revision) = op;
+    let (
+        post_id,
+        post_author_id,
+        post_author_name,
+        body,
+        latest_revision_at,
+        revision,
+        op_retracted_at,
+        original_at,
+    ) = op;
+    let edited_at = if revision > 0 {
+        Some(latest_revision_at)
+    } else {
+        None
+    };
 
     let (reply_count,): (i64,) =
         sqlx::query_as("SELECT COUNT(*) FROM posts WHERE thread = ? AND parent IS NOT NULL")
@@ -520,9 +550,11 @@ pub async fn get_thread(
             author_id: post_author_id,
             author_name: post_author_name,
             body,
-            created_at: post_created_at,
+            created_at: original_at,
+            edited_at,
             revision,
             is_op: true,
+            retracted_at: op_retracted_at,
         },
         reply_count,
     }))
