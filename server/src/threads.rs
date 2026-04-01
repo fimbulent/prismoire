@@ -50,6 +50,7 @@ pub struct PaginationParams {
 #[derive(Serialize)]
 pub struct PostResponse {
     pub id: String,
+    pub parent_id: Option<String>,
     pub author_id: String,
     pub author_name: String,
     pub body: String,
@@ -58,6 +59,7 @@ pub struct PostResponse {
     pub revision: i64,
     pub is_op: bool,
     pub retracted_at: Option<String>,
+    pub children: Vec<PostResponse>,
 }
 
 #[derive(Serialize)]
@@ -83,6 +85,12 @@ pub struct ThreadDetailResponse {
 #[derive(Deserialize)]
 pub struct CreateThreadRequest {
     pub title: String,
+    pub body: String,
+}
+
+#[derive(Deserialize)]
+pub struct CreateReplyRequest {
+    pub parent_id: String,
     pub body: String,
 }
 
@@ -196,6 +204,7 @@ pub async fn create_thread(
             locked: false,
             post: PostResponse {
                 id: post_id,
+                parent_id: None,
                 author_id: user.user_id,
                 author_name: user.display_name,
                 body,
@@ -204,6 +213,7 @@ pub async fn create_thread(
                 edited_at: None,
                 is_op: true,
                 retracted_at: None,
+                children: vec![],
             },
             reply_count: 0,
         }),
@@ -448,10 +458,14 @@ pub async fn list_threads(
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/threads/:id — thread detail with OP
+// GET /api/threads/:id — thread detail with nested reply tree
 // ---------------------------------------------------------------------------
 
-/// Get thread detail including the opening post's latest revision.
+/// Get thread detail including all posts as a nested reply tree.
+///
+/// Fetches every post in the thread with its latest revision, then
+/// reconstructs the parent-child tree in memory. The OP (parent IS NULL)
+/// is returned as `post`, with its `children` populated recursively.
 pub async fn get_thread(
     State(state): State<Arc<AppState>>,
     Path(thread_id): Path<String>,
@@ -486,8 +500,8 @@ pub async fn get_thread(
     let (
         id,
         title,
-        author_id,
-        author_name,
+        thread_author_id,
+        thread_author_name,
         created_at,
         room_id,
         room_name,
@@ -496,66 +510,216 @@ pub async fn get_thread(
         locked,
     ) = thread;
 
-    let op = sqlx::query_as::<_, (String, String, String, String, String, i64, Option<String>, String)>(
-        "SELECT p.id, p.author, u.display_name, pr.body, pr.created_at, pr.revision, \
+    let rows = sqlx::query_as::<_, (String, Option<String>, String, String, String, String, i64, Option<String>, String)>(
+        "SELECT p.id, p.parent, p.author, u.display_name, pr.body, pr.created_at, pr.revision, \
          p.retracted_at, \
          (SELECT pr0.created_at FROM post_revisions pr0 WHERE pr0.post_id = p.id AND pr0.revision = 0) AS original_at \
          FROM posts p \
          JOIN users u ON u.id = p.author \
-         JOIN post_revisions pr ON pr.post_id = p.id \
-         WHERE p.thread = ? AND p.parent IS NULL \
-         ORDER BY pr.revision DESC \
-         LIMIT 1",
+         JOIN post_revisions pr ON pr.post_id = p.id AND pr.revision = ( \
+             SELECT MAX(pr2.revision) FROM post_revisions pr2 WHERE pr2.post_id = p.id \
+         ) \
+         WHERE p.thread = ? \
+         ORDER BY p.created_at ASC",
     )
     .bind(&thread_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::Internal("thread has no opening post".into()))?;
+    .fetch_all(&state.db)
+    .await?;
 
-    let (
+    let op_author_id = thread_author_id.clone();
+
+    use std::collections::{HashMap, HashSet};
+    let mut posts: Vec<Option<PostResponse>> = Vec::with_capacity(rows.len());
+    let mut id_to_index: HashMap<String, usize> = HashMap::new();
+    let mut retracted: HashSet<usize> = HashSet::new();
+
+    for (
         post_id,
-        post_author_id,
-        post_author_name,
+        parent_id,
+        author_id,
+        author_name,
         body,
         latest_revision_at,
         revision,
-        op_retracted_at,
+        retracted_at,
         original_at,
-    ) = op;
-    let edited_at = if revision > 0 {
-        Some(latest_revision_at)
-    } else {
-        None
-    };
+    ) in &rows
+    {
+        let edited_at = if *revision > 0 {
+            Some(latest_revision_at.clone())
+        } else {
+            None
+        };
+        let idx = posts.len();
+        id_to_index.insert(post_id.clone(), idx);
+        if retracted_at.is_some() {
+            retracted.insert(idx);
+        }
+        posts.push(Some(PostResponse {
+            id: post_id.clone(),
+            parent_id: parent_id.clone(),
+            author_id: author_id.clone(),
+            author_name: author_name.clone(),
+            body: body.clone(),
+            created_at: original_at.clone(),
+            edited_at,
+            revision: *revision,
+            is_op: author_id == &op_author_id,
+            retracted_at: retracted_at.clone(),
+            children: vec![],
+        }));
+    }
 
-    let (reply_count,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM posts WHERE thread = ? AND parent IS NOT NULL")
-            .bind(&thread_id)
-            .fetch_one(&state.db)
-            .await?;
+    let mut children_map: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut root_idx: Option<usize> = None;
+
+    for (i, post) in posts.iter().enumerate() {
+        let post = post.as_ref().expect("post not yet taken");
+        if let Some(ref pid) = post.parent_id {
+            if let Some(&parent_idx) = id_to_index.get(pid) {
+                children_map.entry(parent_idx).or_default().push(i);
+            }
+        } else {
+            root_idx = Some(i);
+        }
+    }
+
+    fn build_tree(
+        idx: usize,
+        posts: &mut Vec<Option<PostResponse>>,
+        children_map: &HashMap<usize, Vec<usize>>,
+        retracted: &HashSet<usize>,
+    ) -> PostResponse {
+        let child_indices: Vec<usize> = children_map.get(&idx).cloned().unwrap_or_default();
+        let children: Vec<PostResponse> = child_indices
+            .into_iter()
+            .filter_map(|ci| {
+                if retracted.contains(&ci) && !children_map.contains_key(&ci) {
+                    return None;
+                }
+                Some(build_tree(ci, posts, children_map, retracted))
+            })
+            .collect();
+        let mut post = posts[idx].take().expect("post already taken from tree");
+        post.children = children;
+        post
+    }
+
+    let root_idx =
+        root_idx.ok_or_else(|| AppError::Internal("thread has no opening post".into()))?;
+    let reply_count = posts.len() as i64 - 1;
+    let op = build_tree(root_idx, &mut posts, &children_map, &retracted);
 
     Ok(Json(ThreadDetailResponse {
         id,
         title,
-        author_id,
-        author_name,
+        author_id: thread_author_id,
+        author_name: thread_author_name,
         room_id,
         room_name,
         room_slug,
         created_at,
         pinned,
         locked,
-        post: PostResponse {
-            id: post_id,
-            author_id: post_author_id,
-            author_name: post_author_name,
-            body,
-            created_at: original_at,
-            edited_at,
-            revision,
-            is_op: true,
-            retracted_at: op_retracted_at,
-        },
+        post: op,
         reply_count,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/threads/:id/posts — reply to a thread
+// ---------------------------------------------------------------------------
+
+/// Create a reply to a post within a thread.
+///
+/// The `parent_id` is required — every reply must have a parent. The OP
+/// is the only post with parent=NULL, created at thread creation time.
+/// Rejects replies to retracted posts and replies in locked threads.
+///
+/// Returns the new post with `children` always empty — mutation endpoints
+/// return flat posts; only `get_thread` populates the nested tree.
+pub async fn create_reply(
+    State(state): State<Arc<AppState>>,
+    Path(thread_id): Path<String>,
+    user: AuthUser,
+    Json(req): Json<CreateReplyRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let body = validate_body(&req.body).map_err(AppError::BadRequest)?;
+
+    let thread = sqlx::query_as::<_, (String, bool, String)>(
+        "SELECT id, locked, author FROM threads WHERE id = ?",
+    )
+    .bind(&thread_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::NotFound("thread not found".into()))?;
+
+    let (_tid, locked, thread_author) = thread;
+    if locked {
+        return Err(AppError::BadRequest("thread is locked".into()));
+    }
+
+    let parent = sqlx::query_as::<_, (String, String, Option<String>)>(
+        "SELECT id, thread, retracted_at FROM posts WHERE id = ?",
+    )
+    .bind(&req.parent_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::NotFound("parent post not found".into()))?;
+
+    let (parent_id, parent_thread, parent_retracted) = parent;
+    if parent_thread != thread_id {
+        return Err(AppError::BadRequest(
+            "parent post does not belong to this thread".into(),
+        ));
+    }
+    if parent_retracted.is_some() {
+        return Err(AppError::BadRequest(
+            "cannot reply to a retracted post".into(),
+        ));
+    }
+
+    let signature = signing::sign_message(&state.db, &user.user_id, body.as_bytes()).await?;
+
+    let post_id = Uuid::new_v4().to_string();
+
+    sqlx::query("INSERT INTO posts (id, author, thread, parent) VALUES (?, ?, ?, ?)")
+        .bind(&post_id)
+        .bind(&user.user_id)
+        .bind(&thread_id)
+        .bind(&parent_id)
+        .execute(&state.db)
+        .await?;
+
+    sqlx::query(
+        "INSERT INTO post_revisions (post_id, revision, body, signature) VALUES (?, 0, ?, ?)",
+    )
+    .bind(&post_id)
+    .bind(&body)
+    .bind(&signature)
+    .execute(&state.db)
+    .await?;
+
+    let (post_created_at,): (String,) =
+        sqlx::query_as("SELECT created_at FROM post_revisions WHERE post_id = ? AND revision = 0")
+            .bind(&post_id)
+            .fetch_one(&state.db)
+            .await?;
+
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(PostResponse {
+            id: post_id,
+            parent_id: Some(parent_id),
+            author_id: user.user_id.clone(),
+            author_name: user.display_name.clone(),
+            body,
+            created_at: post_created_at,
+            edited_at: None,
+            revision: 0,
+            is_op: user.user_id == thread_author,
+            retracted_at: None,
+            children: vec![],
+        }),
+    ))
 }

@@ -44,7 +44,9 @@ pub struct EditPostRequest {
 /// Edit a post by creating a new revision.
 ///
 /// Only the post author can edit. The new body is signed with the author's
-/// Ed25519 key and stored as the next revision. Returns the updated post.
+/// Ed25519 key and stored as the next revision. Returns the updated post
+/// with `children` always empty — mutation endpoints return flat posts;
+/// only `get_thread` populates the nested tree.
 pub async fn edit_post(
     State(state): State<Arc<AppState>>,
     Path(post_id): Path<String>,
@@ -100,24 +102,27 @@ pub async fn edit_post(
         .execute(&mut *tx)
         .await?;
 
-    let (original_at, edited_at, is_op): (String, String, bool) = sqlx::query_as(
-        "SELECT \
-         (SELECT pr0.created_at FROM post_revisions pr0 WHERE pr0.post_id = ? AND pr0.revision = 0), \
-         (SELECT pr1.created_at FROM post_revisions pr1 WHERE pr1.post_id = ? AND pr1.revision = ?), \
-         (p.parent IS NULL) \
-         FROM posts p WHERE p.id = ?",
-    )
-    .bind(&post_id)
-    .bind(&post_id)
-    .bind(new_revision)
-    .bind(&post_id)
-    .fetch_one(&mut *tx)
-    .await?;
+    let (original_at, edited_at, is_op, parent_id): (String, String, bool, Option<String>) =
+        sqlx::query_as(
+            "SELECT \
+             (SELECT pr0.created_at FROM post_revisions pr0 WHERE pr0.post_id = ? AND pr0.revision = 0), \
+             (SELECT pr1.created_at FROM post_revisions pr1 WHERE pr1.post_id = ? AND pr1.revision = ?), \
+             (p.parent IS NULL), \
+             p.parent \
+             FROM posts p WHERE p.id = ?",
+        )
+        .bind(&post_id)
+        .bind(&post_id)
+        .bind(new_revision)
+        .bind(&post_id)
+        .fetch_one(&mut *tx)
+        .await?;
 
     tx.commit().await?;
 
     Ok(Json(PostResponse {
         id: post_id,
+        parent_id,
         author_id: user.user_id,
         author_name: user.display_name,
         body,
@@ -126,6 +131,7 @@ pub async fn edit_post(
         revision: new_revision,
         is_op,
         retracted_at: None,
+        children: vec![],
     }))
 }
 

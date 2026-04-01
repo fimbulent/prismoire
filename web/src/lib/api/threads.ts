@@ -22,6 +22,7 @@ export interface ThreadListResponse {
 
 export interface PostResponse {
 	id: string;
+	parent_id: string | null;
 	author_id: string;
 	author_name: string;
 	body: string;
@@ -30,6 +31,7 @@ export interface PostResponse {
 	revision: number;
 	is_op: boolean;
 	retracted_at: string | null;
+	children: PostResponse[];
 }
 
 export interface ThreadDetail {
@@ -129,6 +131,23 @@ export interface RevisionHistoryResponse {
 
 export async function getPostRevisions(postId: string): Promise<RevisionHistoryResponse> {
 	const res = await fetch(`/api/posts/${encodeURIComponent(postId)}/revisions`);
+	if (!res.ok) {
+		const err: ApiError = await res.json();
+		throw new Error(err.error);
+	}
+	return res.json();
+}
+
+export async function replyToThread(
+	threadId: string,
+	parentId: string,
+	body: string
+): Promise<PostResponse> {
+	const res = await fetch(`/api/threads/${encodeURIComponent(threadId)}/posts`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ parent_id: parentId, body })
+	});
 	if (!res.ok) {
 		const err: ApiError = await res.json();
 		throw new Error(err.error);

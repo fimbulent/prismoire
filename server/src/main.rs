@@ -143,6 +143,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/api/threads", get(threads::list_all_threads))
         .route("/api/threads/{id}", get(threads::get_thread))
+        .route("/api/threads/{id}/posts", post(threads::create_reply))
         .route(
             "/api/posts/{id}",
             axum::routing::patch(posts::edit_post).delete(posts::retract_post),
