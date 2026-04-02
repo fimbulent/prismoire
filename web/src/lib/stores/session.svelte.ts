@@ -19,6 +19,9 @@ export const session = {
 	get isLoggedIn() {
 		return user !== null;
 	},
+	get isAdmin() {
+		return user?.role === 'admin';
+	},
 	get needsSetup() {
 		return needsSetup;
 	},

@@ -5,12 +5,20 @@
 		type ThreadDetail,
 		type PostResponse
 	} from '$lib/api/threads';
+	import {
+		lockThread, unlockThread, removePost
+	} from '$lib/api/admin';
 	import { page } from '$app/state';
 	import { pushState } from '$app/navigation';
-	import { fade } from 'svelte/transition';
+	import { fade, slide } from 'svelte/transition';
 	import PostCard from '$lib/components/post/PostCard.svelte';
 	import ReplyForm from '$lib/components/post/ReplyForm.svelte';
+	import RemoveForm from '$lib/components/post/RemoveForm.svelte';
 	import ReplyTree from '$lib/components/post/ReplyTree.svelte';
+	import LockIcon from '$lib/components/ui/LockIcon.svelte';
+	import Badge from '$lib/components/ui/Badge.svelte';
+	import { session } from '$lib/stores/session.svelte';
+	import { goto } from '$app/navigation';
 
 	let thread = $state<ThreadDetail | null>(null);
 	let loading = $state(true);
@@ -55,7 +63,15 @@
 		error = null;
 		try {
 			thread = await getThread(id);
+			if (!session.isLoggedIn && !thread.room_public) {
+				goto('/login', { replaceState: true });
+				return;
+			}
 		} catch (e) {
+			if (!session.isLoggedIn) {
+				goto('/login', { replaceState: true });
+				return;
+			}
 			error = e instanceof Error ? e.message : 'Failed to load thread';
 		} finally {
 			loading = false;
@@ -129,6 +145,68 @@
 	function handlePopState() {
 		viewRootStack = page.state.viewRootStack ?? [];
 	}
+
+	let adminError = $state<string | null>(null);
+	let lockReasonInput = $state('');
+	let showLockForm = $state(false);
+	let removeTarget = $state<string | null>(null);
+	let removeError = $state<string | null>(null);
+	let removeSaving = $state(false);
+
+	async function handleLock() {
+		if (!thread) return;
+		adminError = null;
+		try {
+			if (thread.locked) {
+				await unlockThread(thread.id);
+				thread.locked = false;
+			} else {
+				const reason = lockReasonInput.trim();
+				if (!reason) {
+					adminError = 'Reason is required to lock a thread';
+					return;
+				}
+				await lockThread(thread.id, reason);
+				thread.locked = true;
+				showLockForm = false;
+				lockReasonInput = '';
+			}
+		} catch (e) {
+			adminError = e instanceof Error ? e.message : 'Action failed';
+		}
+	}
+
+	async function handleRemovePost(reason: string) {
+		if (!removeTarget) return;
+		removeError = null;
+		removeSaving = true;
+		try {
+			await removePost(removeTarget, reason);
+			function markRemoved(post: PostResponse): boolean {
+				if (post.id === removeTarget) {
+					post.retracted_at = new Date().toISOString();
+					post.body = '[removed by admin]';
+					return true;
+				}
+				for (const child of post.children) {
+					if (markRemoved(child)) return true;
+				}
+				return false;
+			}
+			if (thread) markRemoved(thread.post);
+			thread = thread;
+			removeTarget = null;
+		} catch (e) {
+			removeError = e instanceof Error ? e.message : 'Action failed';
+		} finally {
+			removeSaving = false;
+		}
+	}
+
+	function cancelRemove() {
+		removeTarget = null;
+		removeError = null;
+	}
 </script>
 
 <svelte:window onpopstate={handlePopState} />
@@ -145,11 +223,75 @@
 	{:else if thread}
 		<!-- OP -->
 		<div class="bg-bg-surface border border-border rounded-md p-5 mb-6">
-			<h1 class="text-2xl font-bold leading-tight mb-2">{thread.title}</h1>
-			<PostCard post={thread.post} onreply={startReplying} />
+			<h1 class="text-2xl font-bold leading-tight mb-2 flex items-center gap-2">
+				{thread.title}
+				{#if thread.room_public}
+					<Badge>Public</Badge>
+				{/if}
+				{#if thread.locked}
+					<LockIcon class="w-5 h-5" />
+				{/if}
+			</h1>
+			<PostCard post={thread.post} onreply={thread.locked ? undefined : startReplying} onremove={session.isAdmin ? (postId) => { removeTarget = postId; removeError = null; } : undefined}>
+				{#snippet extraActions()}
+					{#if session.isAdmin && thread}
+						{#if thread.locked}
+							<button
+								onclick={handleLock}
+								class="bg-transparent border-none text-text-muted cursor-pointer text-xs font-sans py-1 hover:text-text-secondary"
+							>Unlock</button>
+						{:else}
+							<button
+								onclick={() => { showLockForm = !showLockForm; }}
+								class="bg-transparent border-none text-text-muted cursor-pointer text-xs font-sans py-1 hover:text-text-secondary"
+							>Lock</button>
+						{/if}
+					{/if}
+				{/snippet}
+			</PostCard>
+
+			{#if session.isAdmin && showLockForm && !thread.locked}
+				<div class="mt-3 bg-bg border border-border rounded-md p-4" transition:slide={{ duration: 150 }}>
+					<input
+						id="lock-reason"
+						type="text"
+						bind:value={lockReasonInput}
+						placeholder="Why is this thread being locked?"
+						class="w-full bg-bg-surface border border-border rounded-md text-text-primary text-sm px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted"
+					/>
+					<p class="text-xs text-text-muted mt-1">Lock reason will be public in the <a href="/log" class="text-link hover:text-link-hover">admin log</a>.</p>
+					<div class="flex gap-2 mt-2">
+						<button
+							onclick={handleLock}
+							disabled={!lockReasonInput.trim()}
+							class="text-xs px-3 py-1.5 rounded-md border border-danger text-danger hover:bg-bg-hover cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+						>Lock thread</button>
+						<button
+							onclick={() => { showLockForm = false; lockReasonInput = ''; }}
+							class="text-xs px-3 py-1.5 rounded-md border border-border text-text-muted hover:text-text-primary hover:bg-bg-hover cursor-pointer transition-colors"
+						>Cancel</button>
+					</div>
+				</div>
+			{/if}
+
+			{#if removeTarget === thread.post.id}
+				<RemoveForm saving={removeSaving} error={removeError} onsubmit={handleRemovePost} oncancel={cancelRemove} />
+			{/if}
+
+			{#if adminError}
+				<div class="mt-3 text-danger text-sm">{adminError}</div>
+			{/if}
 		</div>
 
-		{#if viewRoot}
+		{#if thread.room_public && !thread.locked}
+			<div transition:slide={{ duration: 150 }} class="text-xs text-accent bg-accent/10 border border-accent/20 rounded-md px-4 py-2.5 mb-4">This post is readable to the public, but replies to this post are visible only to trusted users.</div>
+		{/if}
+
+		{#if !session.isLoggedIn}
+			<div class="text-center py-8">
+				<a href="/login" class="text-link hover:text-link-hover">Sign in</a> to see replies and join the discussion.
+			</div>
+		{:else if viewRoot}
 			<!-- Re-rooted view -->
 			<button
 				onclick={popViewRoot}
@@ -157,9 +299,12 @@
 			>&larr; {viewRootStack.length <= 1 ? 'Back to full thread' : 'Previous comments'}</button>
 
 			<div class="py-4 border-b border-border-subtle">
-				<PostCard post={viewRoot} onreply={startReplying} />
+				<PostCard post={viewRoot} onreply={thread.locked ? undefined : startReplying} onremove={session.isAdmin ? (postId) => { removeTarget = postId; removeError = null; } : undefined} />
 				{#if replyingToId === viewRoot.id}
 					<ReplyForm saving={replySaving} error={replyError} onsubmit={submitReply} oncancel={cancelReplying} />
+				{/if}
+				{#if removeTarget === viewRoot.id}
+					<RemoveForm saving={removeSaving} error={removeError} onsubmit={handleRemovePost} oncancel={cancelRemove} />
 				{/if}
 				{#if viewRoot.children.length > 0}
 					<ReplyTree
@@ -169,10 +314,16 @@
 						{replyingToId}
 						{replySaving}
 						{replyError}
-						onreply={startReplying}
+						onreply={thread.locked ? undefined : startReplying}
 						oncancelreply={cancelReplying}
 						onsubmitreply={submitReply}
 						oncontinuethread={(post) => pushViewRoot(post.id)}
+						onremove={session.isAdmin ? (postId) => { removeTarget = postId; removeError = null; } : undefined}
+						removeTargetId={removeTarget}
+						{removeSaving}
+						{removeError}
+						onsubmitremove={handleRemovePost}
+						oncancelremove={cancelRemove}
 					/>
 				{/if}
 			</div>
@@ -189,9 +340,12 @@
 
 				{#each thread.post.children as reply (reply.id)}
 					<div class="py-4 border-b border-border-subtle">
-						<PostCard post={reply} onreply={startReplying} />
+						<PostCard post={reply} onreply={thread.locked ? undefined : startReplying} onremove={session.isAdmin ? (postId) => { removeTarget = postId; removeError = null; } : undefined} />
 						{#if replyingToId === reply.id}
 							<ReplyForm saving={replySaving} error={replyError} onsubmit={submitReply} oncancel={cancelReplying} />
+						{/if}
+						{#if removeTarget === reply.id}
+							<RemoveForm saving={removeSaving} error={removeError} onsubmit={handleRemovePost} oncancel={cancelRemove} />
 						{/if}
 						{#if reply.children.length > 0}
 							<ReplyTree
@@ -201,10 +355,16 @@
 								{replyingToId}
 								{replySaving}
 								{replyError}
-								onreply={startReplying}
+								onreply={thread.locked ? undefined : startReplying}
 								oncancelreply={cancelReplying}
 								onsubmitreply={submitReply}
 								oncontinuethread={(post) => pushViewRoot(post.id)}
+								onremove={session.isAdmin ? (postId) => { removeTarget = postId; removeError = null; } : undefined}
+								removeTargetId={removeTarget}
+								{removeSaving}
+								{removeError}
+								onsubmitremove={handleRemovePost}
+								oncancelremove={cancelRemove}
 							/>
 						{/if}
 					</div>
@@ -215,7 +375,7 @@
 		{/if}
 
 		<!-- Bottom reply form -->
-		{#if !viewRoot}
+		{#if session.isLoggedIn && !viewRoot && !thread.locked}
 		<div class="pt-8">
 			<textarea
 				bind:value={topLevelBody}

@@ -61,6 +61,15 @@ db-migrate:
 db-prepare:
     cd server && cargo sqlx prepare
 
+# Dump the current schema (from migrations) to schema.sql
+db-schema:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tmp="$(mktemp)"
+    trap 'rm -f "$tmp"' EXIT
+    DATABASE_URL="sqlite://$tmp" cargo sqlx migrate run --source server/migrations
+    sqlite3 "$tmp" .schema > schema.sql
+
 # Delete the database and recreate from scratch
 db-reset:
     rm -f server/prismoire.db server/prismoire.db-wal server/prismoire.db-shm

@@ -2,6 +2,7 @@
 	import type { PostResponse } from '$lib/api/threads';
 	import PostCard from './PostCard.svelte';
 	import ReplyForm from './ReplyForm.svelte';
+	import RemoveForm from './RemoveForm.svelte';
 	import ReplyTree from './ReplyTree.svelte';
 	import { slide } from 'svelte/transition';
 
@@ -17,6 +18,12 @@
 		oncancelreply?: () => void;
 		onsubmitreply?: (body: string) => void;
 		oncontinuethread?: (post: PostResponse) => void;
+		onremove?: (postId: string) => void;
+		removeTargetId?: string | null;
+		removeSaving?: boolean;
+		removeError?: string | null;
+		onsubmitremove?: (reason: string) => void;
+		oncancelremove?: () => void;
 	}
 
 	let {
@@ -30,7 +37,13 @@
 		onreply,
 		oncancelreply,
 		onsubmitreply,
-		oncontinuethread
+		oncontinuethread,
+		onremove,
+		removeTargetId = null,
+		removeSaving = false,
+		removeError = null,
+		onsubmitremove,
+		oncancelremove
 	}: Props = $props();
 
 	let collapsedIds = $state(new Set<string>());
@@ -74,9 +87,12 @@
 		<div transition:slide={{ duration: 200 }}>
 			{#each children as reply (reply.id)}
 				<div class="pl-4 py-3">
-					<PostCard post={reply} {onreply} />
+					<PostCard post={reply} {onreply} {onremove} />
 					{#if replyingToId === reply.id && oncancelreply && onsubmitreply}
 						<ReplyForm saving={replySaving} error={replyError} onsubmit={onsubmitreply} oncancel={oncancelreply} />
+					{/if}
+					{#if removeTargetId === reply.id && oncancelremove && onsubmitremove}
+						<RemoveForm saving={removeSaving} error={removeError} onsubmit={onsubmitremove} oncancel={oncancelremove} />
 					{/if}
 					{#if reply.children.length > 0}
 						{#if depth >= maxDepth}
@@ -100,6 +116,12 @@
 								{oncancelreply}
 								{onsubmitreply}
 								{oncontinuethread}
+								{onremove}
+								{removeTargetId}
+								{removeSaving}
+								{removeError}
+								{onsubmitremove}
+								{oncancelremove}
 							/>
 						{/if}
 					{/if}

@@ -9,6 +9,7 @@
 
 	let name = $state('');
 	let description = $state('');
+	let isPublic = $state(false);
 	let error = $state<string | null>(null);
 	let nameError = $derived(name.trim() ? validateRoomName(name) : null);
 	let slug = $derived(name.trim() ? name.trim().toLowerCase().replace(/[ -]/g, '_') : '');
@@ -30,10 +31,12 @@
 		submitting = true;
 		error = null;
 		try {
-			const room = await createRoom({
+				const req: import('$lib/api/rooms').CreateRoomRequest = {
 				name: name.trim(),
 				description: description.trim() || undefined
-			});
+			};
+			if (session.isAdmin && isPublic) req.public = true;
+			const room = await createRoom(req);
 			goto(`/room/${encodeURIComponent(room.slug)}`);
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to create room';
@@ -113,6 +116,20 @@
 					{descriptionChars}/{MAX_DESCRIPTION}
 				</p>
 			</div>
+
+			{#if session.isAdmin}
+				<div class="flex items-center gap-4">
+					<label class="flex items-center gap-1.5 text-xs text-text-secondary cursor-pointer">
+						<input type="checkbox" bind:checked={isPublic} disabled={submitting} class="accent-accent" />
+						Public room
+					</label>
+				</div>
+				{#if isPublic}
+					<p transition:slide={{ duration: 150 }} class="text-xs text-text-muted">
+						Public rooms are visible to unauthenticated users. Only admins can create threads in public rooms. Unauthenticated users can see the top-level posts in public rooms, but replies are only visible to authenticated users.
+					</p>
+				{/if}
+			{/if}
 
 			<div class="flex items-center gap-3">
 				<button

@@ -29,6 +29,11 @@
 	});
 
 	$effect(() => {
+		if (session.loading) return;
+		if (!session.isLoggedIn) {
+			goto('/login', { replaceState: true });
+			return;
+		}
 		const roomSlug = page.params.room;
 		if (roomSlug) loadRoom(roomSlug);
 	});
@@ -60,10 +65,11 @@
 		error = null;
 		try {
 			const slug = room!.slug;
-			const thread = await createThread(slug, {
+			const req: import('$lib/api/threads').CreateThreadRequest = {
 				title: title.trim(),
 				body: body.trim()
-			});
+			};
+			const thread = await createThread(slug, req);
 			goto(`/room/${encodeURIComponent(slug)}/${thread.id}`);
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to create thread';

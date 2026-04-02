@@ -19,6 +19,7 @@ pub struct RoomResponse {
     pub name: String,
     pub slug: String,
     pub description: String,
+    pub public: bool,
     pub created_by: String,
     pub created_by_name: String,
     pub created_at: String,
@@ -36,6 +37,8 @@ pub struct RoomListResponse {
 pub struct CreateRoomRequest {
     pub name: String,
     pub description: Option<String>,
+    #[serde(default)]
+    pub public: Option<bool>,
 }
 
 /// Lightweight room summary for tab bars and navigation.
@@ -43,6 +46,7 @@ pub struct CreateRoomRequest {
 pub struct RoomSummary {
     pub slug: String,
     pub name: String,
+    pub public: bool,
 }
 
 #[derive(Serialize)]
@@ -52,8 +56,8 @@ pub struct RoomSummaryListResponse {
 
 /// GET /api/rooms/top — return the most active rooms (lightweight, for tab bar).
 pub async fn top_rooms(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
-    let rows = sqlx::query_as::<_, (String, String)>(
-        "SELECT r.slug, r.name \
+    let rows = sqlx::query_as::<_, (String, String, bool)>(
+        "SELECT r.slug, r.name, r.public \
          FROM rooms r \
          WHERE r.merged_into IS NULL \
          ORDER BY \
@@ -66,7 +70,7 @@ pub async fn top_rooms(State(state): State<Arc<AppState>>) -> Result<impl IntoRe
 
     let rooms = rows
         .into_iter()
-        .map(|(slug, name)| RoomSummary { slug, name })
+        .map(|(slug, name, public)| RoomSummary { slug, name, public })
         .collect();
 
     Ok(Json(RoomSummaryListResponse { rooms }))
@@ -74,8 +78,8 @@ pub async fn top_rooms(State(state): State<Arc<AppState>>) -> Result<impl IntoRe
 
 /// GET /api/rooms — list all non-merged rooms with thread/post counts.
 pub async fn list_rooms(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
-    let rows = sqlx::query_as::<_, (String, String, String, String, String, String, String, i64, i64, Option<String>)>(
-        "SELECT t.id, t.name, t.slug, t.description, t.created_by, u.display_name, t.created_at, \
+    let rows = sqlx::query_as::<_, (String, String, String, String, bool, String, String, String, i64, i64, Option<String>)>(
+        "SELECT t.id, t.name, t.slug, t.description, t.public, t.created_by, u.display_name, t.created_at, \
          (SELECT COUNT(*) FROM threads th WHERE th.room = t.id) AS thread_count, \
          (SELECT COUNT(*) FROM posts p JOIN threads th2 ON p.thread = th2.id WHERE th2.room = t.id) AS post_count, \
          (SELECT MAX(p2.created_at) FROM posts p2 JOIN threads th3 ON p2.thread = th3.id WHERE th3.room = t.id) AS last_activity \
@@ -95,6 +99,7 @@ pub async fn list_rooms(State(state): State<Arc<AppState>>) -> Result<impl IntoR
                 name,
                 slug,
                 description,
+                public,
                 created_by,
                 created_by_name,
                 created_at,
@@ -107,6 +112,7 @@ pub async fn list_rooms(State(state): State<Arc<AppState>>) -> Result<impl IntoR
                     name,
                     slug,
                     description,
+                    public,
                     created_by,
                     created_by_name,
                     created_at,
@@ -126,8 +132,8 @@ pub async fn get_room(
     State(state): State<Arc<AppState>>,
     Path(id_or_slug): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let row = sqlx::query_as::<_, (String, String, String, String, String, String, String, i64, i64, Option<String>)>(
-        "SELECT t.id, t.name, t.slug, t.description, t.created_by, u.display_name, t.created_at, \
+    let row = sqlx::query_as::<_, (String, String, String, String, bool, String, String, String, i64, i64, Option<String>)>(
+        "SELECT t.id, t.name, t.slug, t.description, t.public, t.created_by, u.display_name, t.created_at, \
          (SELECT COUNT(*) FROM threads th WHERE th.room = t.id) AS thread_count, \
          (SELECT COUNT(*) FROM posts p JOIN threads th2 ON p.thread = th2.id WHERE th2.room = t.id) AS post_count, \
          (SELECT MAX(p2.created_at) FROM posts p2 JOIN threads th3 ON p2.thread = th3.id WHERE th3.room = t.id) AS last_activity \
@@ -146,6 +152,7 @@ pub async fn get_room(
         name,
         slug,
         description,
+        public,
         created_by,
         created_by_name,
         created_at,
@@ -159,6 +166,7 @@ pub async fn get_room(
         name,
         slug,
         description,
+        public,
         created_by,
         created_by_name,
         created_at,
@@ -177,6 +185,7 @@ pub async fn create_room(
     let name = validate_room_name(&req.name).map_err(AppError::BadRequest)?;
     let slug = room_slug(&name);
     let description = req.description.as_deref().unwrap_or("").trim().to_string();
+    let public = req.public.unwrap_or(false) && user.is_admin();
 
     if description.len() > MAX_ROOM_DESCRIPTION_LEN {
         return Err(AppError::BadRequest("description is too long".into()));
@@ -197,12 +206,13 @@ pub async fn create_room(
     let id = Uuid::new_v4().to_string();
 
     let (created_at,): (String,) = sqlx::query_as(
-        "INSERT INTO rooms (id, name, slug, description, created_by) VALUES (?, ?, ?, ?, ?) RETURNING created_at",
+        "INSERT INTO rooms (id, name, slug, description, public, created_by) VALUES (?, ?, ?, ?, ?, ?) RETURNING created_at",
     )
     .bind(&id)
     .bind(&name)
     .bind(&slug)
     .bind(&description)
+    .bind(public)
     .bind(&user.user_id)
     .fetch_one(&state.db)
     .await?;
@@ -214,6 +224,7 @@ pub async fn create_room(
             name,
             slug,
             description,
+            public,
             created_by: user.user_id,
             created_by_name: user.display_name,
             created_at,

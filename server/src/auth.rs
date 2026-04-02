@@ -55,6 +55,7 @@ pub struct AuthBeginResponse {
 pub struct SessionResponse {
     pub user_id: String,
     pub display_name: String,
+    pub role: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -276,6 +277,7 @@ pub async fn signup_complete(
         Json(SessionResponse {
             user_id,
             display_name,
+            role: "user".into(),
         }),
     ))
 }
@@ -375,12 +377,12 @@ pub async fn login_complete(
         .webauthn
         .finish_passkey_authentication(&req.credential, &auth_state)?;
 
-    let user: (String,) =
-        sqlx::query_as("SELECT id FROM users WHERE display_name = ? AND status = 'active'")
+    let user: (String, String) =
+        sqlx::query_as("SELECT id, role FROM users WHERE display_name = ? AND status = 'active'")
             .bind(&display_name)
             .fetch_one(&state.db)
             .await?;
-    let user_id = user.0;
+    let (user_id, role) = user;
 
     update_credential_counter(&state.db, &user_id, &auth_result).await?;
 
@@ -393,6 +395,7 @@ pub async fn login_complete(
         Json(SessionResponse {
             user_id,
             display_name,
+            role,
         }),
     ))
 }
@@ -464,15 +467,15 @@ pub async fn discover_complete(
         .webauthn
         .identify_discoverable_authentication(&req.credential)?;
 
-    let user = sqlx::query_as::<_, (String, String)>(
-        "SELECT id, display_name FROM users WHERE id = ? AND status = 'active'",
+    let user = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT id, display_name, role FROM users WHERE id = ? AND status = 'active'",
     )
     .bind(user_uuid.to_string())
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| AppError::NotFound("user not found".into()))?;
 
-    let (user_id, display_name) = user;
+    let (user_id, display_name, role) = user;
 
     let cred_rows: Vec<(Vec<u8>,)> =
         sqlx::query_as("SELECT public_key FROM credentials WHERE user_id = ?")
@@ -505,6 +508,7 @@ pub async fn discover_complete(
         Json(SessionResponse {
             user_id,
             display_name,
+            role,
         }),
     ))
 }
@@ -550,6 +554,7 @@ pub async fn session_info(user: AuthUser) -> Json<SessionResponse> {
     Json(SessionResponse {
         user_id: user.user_id,
         display_name: user.display_name,
+        role: user.role,
     })
 }
 

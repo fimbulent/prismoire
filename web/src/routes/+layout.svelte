@@ -29,7 +29,7 @@
 	<link rel="icon" href={favicon} />
 </svelte:head>
 
-<div class="bg-bg text-text-primary min-h-screen" style:--nav-height="{navHeight}px">
+<div class="bg-bg text-text-primary min-h-screen flex flex-col" style:--nav-height="{navHeight}px">
 <nav bind:clientHeight={navHeight} class="bg-bg-surface border-b border-border px-4 py-3 flex items-center justify-between">
 	<a href="/" class="text-accent font-bold tracking-wide text-lg hover:opacity-90">Prismoire</a>
 
@@ -56,5 +56,13 @@
 	</div>
 </nav>
 
+<div class="w-full">
 {@render children()}
+</div>
+
+{#if session.isLoggedIn}
+	<footer class="text-center py-6 text-xs text-text-muted mt-auto">
+		<a href="/log" class="hover:text-text-secondary transition-colors">Admin Log</a>
+	</footer>
+{/if}
 </div>

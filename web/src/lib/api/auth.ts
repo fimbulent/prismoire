@@ -1,6 +1,7 @@
 export interface SessionInfo {
 	user_id: string;
 	display_name: string;
+	role: string;
 }
 
 export interface AuthBeginResponse {

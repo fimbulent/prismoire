@@ -5,6 +5,7 @@ export interface Room {
 	name: string;
 	slug: string;
 	description: string;
+	public: boolean;
 	created_by: string;
 	created_by_name: string;
 	created_at: string;
@@ -20,6 +21,7 @@ export interface RoomListResponse {
 export interface CreateRoomRequest {
 	name: string;
 	description?: string;
+	public?: boolean;
 }
 
 export async function listRooms(): Promise<Room[]> {
@@ -44,6 +46,7 @@ export async function getRoom(idOrName: string): Promise<Room> {
 export interface RoomSummary {
 	slug: string;
 	name: string;
+	public: boolean;
 }
 
 export async function topRooms(): Promise<RoomSummary[]> {

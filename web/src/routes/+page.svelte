@@ -7,7 +7,7 @@
 		if (session.isLoggedIn) {
 			goto('/room/all', { replaceState: true });
 		} else {
-			goto('/rooms', { replaceState: true });
+			goto('/public', { replaceState: true });
 		}
 	});
 </script>

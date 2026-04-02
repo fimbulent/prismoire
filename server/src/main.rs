@@ -3,13 +3,14 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqlitePoolOptions;
 use tower_http::services::{ServeDir, ServeFile};
 use url::Url;
 use webauthn_rs::WebauthnBuilder;
 
+mod admin;
 mod auth;
 mod display_name;
 mod error;
@@ -149,6 +150,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             axum::routing::patch(posts::edit_post).delete(posts::retract_post),
         )
         .route("/api/posts/{id}/revisions", get(posts::list_revisions))
+        .route("/api/admin/log", get(admin::get_admin_log))
+        .route(
+            "/api/admin/threads/{id}/lock",
+            post(admin::lock_thread).delete(admin::unlock_thread),
+        )
+        .route("/api/admin/posts/{id}", delete(admin::remove_post))
         .layer(axum::middleware::from_fn_with_state(
             shared_state.clone(),
             session::session_middleware,
@@ -156,6 +163,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let api = Router::new()
         .route("/api/health", get(|| async { "ok" }))
+        .route("/api/threads/public", get(threads::list_public_threads))
         .route("/api/setup/status", get(setup::setup_status))
         .route("/api/setup/begin", post(setup::setup_begin))
         .route("/api/setup/complete", post(setup::setup_complete))

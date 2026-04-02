@@ -30,8 +30,8 @@ pub struct ThreadSummary {
     pub room_name: String,
     pub room_slug: String,
     pub created_at: String,
-    pub pinned: bool,
     pub locked: bool,
+    pub room_public: bool,
     pub reply_count: i64,
     pub last_activity: Option<String>,
 }
@@ -72,8 +72,8 @@ pub struct ThreadDetailResponse {
     pub room_name: String,
     pub room_slug: String,
     pub created_at: String,
-    pub pinned: bool,
     pub locked: bool,
+    pub room_public: bool,
     pub post: PostResponse,
     pub reply_count: i64,
 }
@@ -138,14 +138,21 @@ pub async fn create_thread(
     let title = validate_title(&req.title).map_err(AppError::BadRequest)?;
     let body = validate_body(&req.body).map_err(AppError::BadRequest)?;
 
-    let room: Option<(String,)> =
-        sqlx::query_as("SELECT id FROM rooms WHERE (id = ? OR slug = ?) AND merged_into IS NULL")
-            .bind(&room_id_or_slug)
-            .bind(&room_id_or_slug)
-            .fetch_optional(&state.db)
-            .await?;
+    let room: Option<(String, bool)> = sqlx::query_as(
+        "SELECT id, public FROM rooms WHERE (id = ? OR slug = ?) AND merged_into IS NULL",
+    )
+    .bind(&room_id_or_slug)
+    .bind(&room_id_or_slug)
+    .fetch_optional(&state.db)
+    .await?;
 
-    let (room_id,) = room.ok_or_else(|| AppError::NotFound("room not found".into()))?;
+    let (room_id, room_public) = room.ok_or_else(|| AppError::NotFound("room not found".into()))?;
+
+    if room_public && !user.is_admin() {
+        return Err(AppError::Unauthorized(
+            "only admins can post in public rooms".into(),
+        ));
+    }
 
     let signature = signing::sign_message(&state.db, &user.user_id, body.as_bytes()).await?;
 
@@ -200,8 +207,8 @@ pub async fn create_thread(
             room_name: fetched_room_name,
             room_slug: room_id_or_slug,
             created_at,
-            pinned: false,
             locked: false,
+            room_public,
             post: PostResponse {
                 id: post_id,
                 parent_id: None,
@@ -223,11 +230,17 @@ pub async fn create_thread(
 /// Parse a cursor string into (timestamp, id).
 ///
 /// Cursors encode the last-seen sort key so the next page starts after it.
-/// Format: `<ISO timestamp>|<thread id>`.
-fn parse_cursor(cursor: &str) -> Result<(String, String), AppError> {
+/// Format: `<ISO timestamp>|<UUID>`.
+pub fn parse_cursor(cursor: &str) -> Result<(String, String), AppError> {
     let (ts, id) = cursor
         .split_once('|')
         .ok_or_else(|| AppError::BadRequest("invalid cursor".into()))?;
+    let _: chrono::NaiveDateTime = ts
+        .parse()
+        .map_err(|_| AppError::BadRequest("invalid cursor".into()))?;
+    let _: uuid::Uuid = id
+        .parse()
+        .map_err(|_| AppError::BadRequest("invalid cursor".into()))?;
     Ok((ts.to_string(), id.to_string()))
 }
 
@@ -241,10 +254,116 @@ fn make_cursor(thread: &ThreadSummary) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// GET /api/threads/public — list threads in public rooms (no auth required)
+// ---------------------------------------------------------------------------
+
+/// List threads from public rooms only, ordered by last activity, with cursor pagination.
+/// This endpoint does not require authentication and is used for the logged-out landing page.
+pub async fn list_public_threads(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<PaginationParams>,
+) -> Result<impl IntoResponse, AppError> {
+    let rows = if let Some(ref cursor) = params.cursor {
+        let (cursor_ts, cursor_id) = parse_cursor(cursor)?;
+        sqlx::query_as::<_, (String, String, String, String, String, String, String, String, bool, bool, i64, Option<String>)>(
+            "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
+             r.id, r.name, r.slug, t.locked, r.public, \
+             (SELECT COUNT(*) FROM posts p WHERE p.thread = t.id AND p.parent IS NOT NULL) AS reply_count, \
+             (SELECT MAX(p2.created_at) FROM posts p2 WHERE p2.thread = t.id) AS last_activity \
+             FROM threads t \
+             JOIN users u ON u.id = t.author \
+             JOIN rooms r ON r.id = t.room \
+             WHERE r.merged_into IS NULL \
+               AND r.public = 1 \
+               AND NOT (reply_count = 0 \
+                    AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
+               AND (COALESCE(last_activity, t.created_at) < ? \
+                    OR (COALESCE(last_activity, t.created_at) = ? AND t.id < ?)) \
+             ORDER BY last_activity DESC NULLS LAST, t.created_at DESC, t.id DESC \
+             LIMIT ?",
+        )
+        .bind(&cursor_ts)
+        .bind(&cursor_ts)
+        .bind(&cursor_id)
+        .bind(PAGE_SIZE as i64 + 1)
+        .fetch_all(&state.db)
+        .await?
+    } else {
+        sqlx::query_as::<_, (String, String, String, String, String, String, String, String, bool, bool, i64, Option<String>)>(
+            "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
+             r.id, r.name, r.slug, t.locked, r.public, \
+             (SELECT COUNT(*) FROM posts p WHERE p.thread = t.id AND p.parent IS NOT NULL) AS reply_count, \
+             (SELECT MAX(p2.created_at) FROM posts p2 WHERE p2.thread = t.id) AS last_activity \
+             FROM threads t \
+             JOIN users u ON u.id = t.author \
+             JOIN rooms r ON r.id = t.room \
+             WHERE r.merged_into IS NULL \
+               AND r.public = 1 \
+               AND NOT (reply_count = 0 \
+                    AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
+             ORDER BY last_activity DESC NULLS LAST, t.created_at DESC, t.id DESC \
+             LIMIT ?",
+        )
+        .bind(PAGE_SIZE as i64 + 1)
+        .fetch_all(&state.db)
+        .await?
+    };
+
+    let has_more = rows.len() > PAGE_SIZE;
+    let threads: Vec<ThreadSummary> = rows
+        .into_iter()
+        .take(PAGE_SIZE)
+        .map(
+            |(
+                id,
+                title,
+                author_id,
+                author_name,
+                created_at,
+                room_id,
+                room_name,
+                room_slug,
+                locked,
+                room_public,
+                reply_count,
+                last_activity,
+            )| {
+                ThreadSummary {
+                    id,
+                    title,
+                    author_id,
+                    author_name,
+                    room_id,
+                    room_name,
+                    room_slug,
+                    created_at,
+                    locked,
+                    room_public,
+                    reply_count,
+                    last_activity,
+                }
+            },
+        )
+        .collect();
+
+    let next_cursor = if has_more {
+        threads.last().map(make_cursor)
+    } else {
+        None
+    };
+
+    Ok(Json(ThreadListResponse {
+        threads,
+        next_cursor,
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // GET /api/threads — list threads across all rooms
 // ---------------------------------------------------------------------------
 // TODO: The "hide retracted OP with no replies" condition is duplicated across
-// list_all_threads and list_threads. Deduplicate when migrating to sqlx::query!().
+// list_all_threads, list_threads, and list_public_threads. Deduplicate when
+// migrating to sqlx::query!().
 
 /// List threads across all rooms, ordered by last activity, with cursor pagination.
 pub async fn list_all_threads(
@@ -255,7 +374,7 @@ pub async fn list_all_threads(
         let (cursor_ts, cursor_id) = parse_cursor(cursor)?;
         sqlx::query_as::<_, (String, String, String, String, String, String, String, String, bool, bool, i64, Option<String>)>(
             "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
-             r.id, r.name, r.slug, t.pinned, t.locked, \
+             r.id, r.name, r.slug, t.locked, r.public, \
              (SELECT COUNT(*) FROM posts p WHERE p.thread = t.id AND p.parent IS NOT NULL) AS reply_count, \
              (SELECT MAX(p2.created_at) FROM posts p2 WHERE p2.thread = t.id) AS last_activity \
              FROM threads t \
@@ -278,7 +397,7 @@ pub async fn list_all_threads(
     } else {
         sqlx::query_as::<_, (String, String, String, String, String, String, String, String, bool, bool, i64, Option<String>)>(
             "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
-             r.id, r.name, r.slug, t.pinned, t.locked, \
+             r.id, r.name, r.slug, t.locked, r.public, \
              (SELECT COUNT(*) FROM posts p WHERE p.thread = t.id AND p.parent IS NOT NULL) AS reply_count, \
              (SELECT MAX(p2.created_at) FROM posts p2 WHERE p2.thread = t.id) AS last_activity \
              FROM threads t \
@@ -309,8 +428,8 @@ pub async fn list_all_threads(
                 room_id,
                 room_name,
                 room_slug,
-                pinned,
                 locked,
+                room_public,
                 reply_count,
                 last_activity,
             )| {
@@ -323,8 +442,8 @@ pub async fn list_all_threads(
                     room_name,
                     room_slug,
                     created_at,
-                    pinned,
                     locked,
+                    room_public,
                     reply_count,
                     last_activity,
                 }
@@ -348,40 +467,38 @@ pub async fn list_all_threads(
 // GET /api/rooms/:id/threads — list threads in a room
 // ---------------------------------------------------------------------------
 
-/// List threads in a room, ordered by pinned first, then last activity,
-/// with cursor pagination.
+/// List threads in a room, ordered by last activity, with cursor pagination.
 pub async fn list_threads(
     State(state): State<Arc<AppState>>,
     Path(room_id_or_slug): Path<String>,
     Query(params): Query<PaginationParams>,
 ) -> Result<impl IntoResponse, AppError> {
-    let room: Option<(String, String, String)> = sqlx::query_as(
-        "SELECT id, name, slug FROM rooms WHERE (id = ? OR slug = ?) AND merged_into IS NULL",
+    let room: Option<(String, String, String, bool)> = sqlx::query_as(
+        "SELECT id, name, slug, public FROM rooms WHERE (id = ? OR slug = ?) AND merged_into IS NULL",
     )
     .bind(&room_id_or_slug)
     .bind(&room_id_or_slug)
     .fetch_optional(&state.db)
     .await?;
 
-    let (room_id, room_name, room_slug) =
+    let (room_id, room_name, room_slug, room_public) =
         room.ok_or_else(|| AppError::NotFound("room not found".into()))?;
 
     let rows = if let Some(ref cursor) = params.cursor {
         let (cursor_ts, cursor_id) = parse_cursor(cursor)?;
-        sqlx::query_as::<_, (String, String, String, String, String, bool, bool, i64, Option<String>)>(
+        sqlx::query_as::<_, (String, String, String, String, String, bool, i64, Option<String>)>(
             "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
-             t.pinned, t.locked, \
+             t.locked, \
              (SELECT COUNT(*) FROM posts p WHERE p.thread = t.id AND p.parent IS NOT NULL) AS reply_count, \
              (SELECT MAX(p2.created_at) FROM posts p2 WHERE p2.thread = t.id) AS last_activity \
              FROM threads t \
              JOIN users u ON u.id = t.author \
              WHERE t.room = ? \
-               AND t.pinned < 1 \
                AND NOT (reply_count = 0 \
                     AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
                AND (COALESCE(last_activity, t.created_at) < ? \
                     OR (COALESCE(last_activity, t.created_at) = ? AND t.id < ?)) \
-             ORDER BY t.pinned DESC, last_activity DESC NULLS LAST, t.created_at DESC, t.id DESC \
+             ORDER BY last_activity DESC NULLS LAST, t.created_at DESC, t.id DESC \
              LIMIT ?",
         )
         .bind(&room_id)
@@ -392,9 +509,9 @@ pub async fn list_threads(
         .fetch_all(&state.db)
         .await?
     } else {
-        sqlx::query_as::<_, (String, String, String, String, String, bool, bool, i64, Option<String>)>(
+        sqlx::query_as::<_, (String, String, String, String, String, bool, i64, Option<String>)>(
             "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
-             t.pinned, t.locked, \
+             t.locked, \
              (SELECT COUNT(*) FROM posts p WHERE p.thread = t.id AND p.parent IS NOT NULL) AS reply_count, \
              (SELECT MAX(p2.created_at) FROM posts p2 WHERE p2.thread = t.id) AS last_activity \
              FROM threads t \
@@ -402,7 +519,7 @@ pub async fn list_threads(
              WHERE t.room = ? \
                AND NOT (reply_count = 0 \
                     AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
-             ORDER BY t.pinned DESC, last_activity DESC NULLS LAST, t.created_at DESC, t.id DESC \
+             ORDER BY last_activity DESC NULLS LAST, t.created_at DESC, t.id DESC \
              LIMIT ?",
         )
         .bind(&room_id)
@@ -422,7 +539,6 @@ pub async fn list_threads(
                 author_id,
                 author_name,
                 created_at,
-                pinned,
                 locked,
                 reply_count,
                 last_activity,
@@ -436,8 +552,8 @@ pub async fn list_threads(
                     room_name: room_name.clone(),
                     room_slug: room_slug.clone(),
                     created_at,
-                    pinned,
                     locked,
+                    room_public,
                     reply_count,
                     last_activity,
                 }
@@ -486,7 +602,7 @@ pub async fn get_thread(
         ),
     >(
         "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
-         r.id, r.name, r.slug, t.pinned, t.locked \
+         r.id, r.name, r.slug, t.locked, r.public \
          FROM threads t \
          JOIN users u ON u.id = t.author \
          JOIN rooms r ON r.id = t.room \
@@ -506,8 +622,8 @@ pub async fn get_thread(
         room_id,
         room_name,
         room_slug,
-        pinned,
         locked,
+        room_public,
     ) = thread;
 
     let rows = sqlx::query_as::<_, (String, Option<String>, String, String, String, String, i64, Option<String>, String)>(
@@ -619,8 +735,8 @@ pub async fn get_thread(
         room_name,
         room_slug,
         created_at,
-        pinned,
         locked,
+        room_public,
         post: op,
         reply_count,
     }))

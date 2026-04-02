@@ -218,6 +218,7 @@ pub async fn setup_complete(
         Json(SessionResponse {
             user_id,
             display_name,
+            role: "admin".into(),
         }),
     ))
 }

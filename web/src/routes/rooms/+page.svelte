@@ -3,6 +3,7 @@
 	import { session } from '$lib/stores/session.svelte';
 	import { relativeTime } from '$lib/format';
 	import { goto } from '$app/navigation';
+	import Badge from '$lib/components/ui/Badge.svelte';
 
 	let rooms = $state<Room[]>([]);
 	let loading = $state(true);
@@ -10,6 +11,11 @@
 	let searchQuery = $state('');
 
 	$effect(() => {
+		if (session.loading) return;
+		if (!session.isLoggedIn) {
+			goto('/login', { replaceState: true });
+			return;
+		}
 		loadRooms();
 	});
 
@@ -81,8 +87,11 @@
 					href="/room/{encodeURIComponent(room.slug)}"
 					class="block border border-border rounded-md p-5 bg-bg-surface no-underline transition-[background,border-color] duration-150 hover:bg-bg-hover hover:border-accent-muted"
 				>
-					<div class="mb-1.5">
+					<div class="mb-1.5 flex items-center gap-2">
 						<h3 class="text-base font-bold text-text-primary">{room.name}</h3>
+						{#if room.public}
+							<Badge>Public</Badge>
+						{/if}
 					</div>
 					{#if room.description}
 						<p class="text-sm text-text-secondary mb-3">{room.description}</p>

@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { topRooms, type RoomSummary } from '$lib/api/rooms';
 	import { page } from '$app/state';
+	import { session } from '$lib/stores/session.svelte';
 
 	let { children } = $props();
 
@@ -13,6 +14,7 @@
 	let currentSlug = $derived(page.params.room);
 </script>
 
+{#if session.isLoggedIn}
 <div class="bg-bg-surface-dim border-b border-border-subtle">
 	<div class="max-w-4xl mx-auto px-6 flex items-center gap-0 overflow-x-auto">
 		<a
@@ -43,5 +45,6 @@
 		</a>
 	</div>
 </div>
+{/if}
 
 {@render children()}

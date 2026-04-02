@@ -1,15 +1,11 @@
 <script lang="ts">
-	import { getRoom, type Room } from '$lib/api/rooms';
-	import { listThreads, listAllThreads, type ThreadSummary } from '$lib/api/threads';
+	import { listPublicThreads, type ThreadSummary } from '$lib/api/threads';
 	import { relativeTime } from '$lib/format';
 	import { session } from '$lib/stores/session.svelte';
-	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
-	import LockIcon from '$lib/components/ui/LockIcon.svelte';
 	import Badge from '$lib/components/ui/Badge.svelte';
+	import LockIcon from '$lib/components/ui/LockIcon.svelte';
 
-	let isAll = $derived(page.params.room === 'all');
-	let room = $state<Room | null>(null);
 	let threads = $state<ThreadSummary[]>([]);
 	let nextCursor = $state<string | null>(null);
 	let loadingMore = $state(false);
@@ -18,34 +14,20 @@
 
 	$effect(() => {
 		if (session.loading) return;
-		if (!session.isLoggedIn) {
-			goto('/login', { replaceState: true });
+		if (session.isLoggedIn) {
+			goto('/room/all', { replaceState: true });
 			return;
 		}
-		const slug = page.params.room;
-		if (slug) load(slug);
+		load();
 	});
 
-	async function load(slug: string) {
+	async function load() {
 		loading = true;
 		error = null;
-		threads = [];
-		nextCursor = null;
 		try {
-			if (slug === 'all') {
-				room = null;
-				const res = await listAllThreads();
-				threads = res.threads;
-				nextCursor = res.next_cursor;
-			} else {
-				const [roomData, threadData] = await Promise.all([
-					getRoom(slug),
-					listThreads(slug)
-				]);
-				room = roomData;
-				threads = threadData.threads;
-				nextCursor = threadData.next_cursor;
-			}
+			const res = await listPublicThreads();
+			threads = res.threads;
+			nextCursor = res.next_cursor;
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to load';
 		} finally {
@@ -57,9 +39,7 @@
 		if (!nextCursor || loadingMore) return;
 		loadingMore = true;
 		try {
-			const slug = page.params.room!;
-			const res =
-				slug === 'all' ? await listAllThreads(nextCursor) : await listThreads(slug, nextCursor);
+			const res = await listPublicThreads(nextCursor);
 			threads = [...threads, ...res.threads];
 			nextCursor = res.next_cursor;
 		} catch (e) {
@@ -69,15 +49,13 @@
 		}
 	}
 
-	let heading = $derived(isAll ? 'All threads' : room?.name ?? '');
-
 	function threadHref(thread: ThreadSummary): string {
 		return `/room/${encodeURIComponent(thread.room_slug)}/${thread.id}`;
 	}
 </script>
 
 <svelte:head>
-	<title>{heading ? `${heading} — Prismoire` : 'Prismoire'}</title>
+	<title>Prismoire</title>
 </svelte:head>
 
 <div class="max-w-4xl mx-auto px-6 pb-16">
@@ -86,23 +64,13 @@
 	{:else if error}
 		<div class="text-center text-danger py-12">{error}</div>
 	{:else}
-		<div class="pt-5 pb-3 flex items-center justify-between">
-			<h1 class="text-lg font-bold">{heading}</h1>
-			{#if session.isLoggedIn && !isAll && room && (!room.public || session.isAdmin)}
-				<button
-					onclick={() => goto(`/room/${encodeURIComponent(room!.slug)}/new`)}
-					class="text-sm px-3 py-1.5 rounded-md cursor-pointer border border-accent bg-accent text-bg font-medium hover:opacity-90 shrink-0"
-				>
-					New Thread
-				</button>
-			{/if}
+		<div class="pt-5 pb-3">
+			<h1 class="text-lg font-bold">Public Threads</h1>
 		</div>
 
 		{#if threads.length === 0}
-			<div
-				class="text-center text-text-muted py-12 border border-border-subtle rounded-md bg-bg-surface"
-			>
-				No threads yet.{#if !isAll} Be the first to start a discussion!{/if}
+			<div class="text-center text-text-muted py-12 border border-border-subtle rounded-md bg-bg-surface">
+				No public threads yet.
 			</div>
 		{:else}
 			{#each threads as thread, i (thread.id)}
@@ -112,9 +80,7 @@
 					<div class="flex items-start gap-3">
 						<div class="flex-1 min-w-0">
 							<div class="mb-1 flex items-center gap-2">
-								{#if thread.room_public}
-									<Badge>Public</Badge>
-								{/if}
+								<Badge>Public</Badge>
 								{#if thread.locked}
 									<LockIcon />
 								{/if}
@@ -129,18 +95,7 @@
 								<span>&middot;</span>
 								<span>{relativeTime(thread.last_activity ?? thread.created_at)}</span>
 								<span>&middot;</span>
-								<span
-									>{thread.reply_count}
-									{thread.reply_count === 1 ? 'reply' : 'replies'}</span
-								>
-								{#if isAll}
-									<span>&middot;</span>
-									<a
-										href="/room/{encodeURIComponent(thread.room_slug)}"
-										class="text-accent-muted no-underline hover:underline"
-										>{thread.room_name}</a
-									>
-								{/if}
+								<span>{thread.reply_count} {thread.reply_count === 1 ? 'reply' : 'replies'}</span>
 							</div>
 						</div>
 					</div>

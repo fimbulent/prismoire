@@ -9,8 +9,8 @@ export interface ThreadSummary {
 	room_name: string;
 	room_slug: string;
 	created_at: string;
-	pinned: boolean;
 	locked: boolean;
+	room_public: boolean;
 	reply_count: number;
 	last_activity: string | null;
 }
@@ -43,8 +43,8 @@ export interface ThreadDetail {
 	room_name: string;
 	room_slug: string;
 	created_at: string;
-	pinned: boolean;
 	locked: boolean;
+	room_public: boolean;
 	post: PostResponse;
 	reply_count: number;
 }
@@ -76,6 +76,18 @@ export async function listAllThreads(cursor?: string): Promise<ThreadListRespons
 	if (cursor) params.set('cursor', cursor);
 	const qs = params.toString();
 	const res = await fetch(`/api/threads${qs ? `?${qs}` : ''}`);
+	if (!res.ok) {
+		const err: ApiError = await res.json();
+		throw new Error(err.error);
+	}
+	return res.json();
+}
+
+export async function listPublicThreads(cursor?: string): Promise<ThreadListResponse> {
+	const params = new URLSearchParams();
+	if (cursor) params.set('cursor', cursor);
+	const qs = params.toString();
+	const res = await fetch(`/api/threads/public${qs ? `?${qs}` : ''}`);
 	if (!res.ok) {
 		const err: ApiError = await res.json();
 		throw new Error(err.error);

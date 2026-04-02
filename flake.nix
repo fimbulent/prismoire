@@ -130,6 +130,7 @@
             pkg-config
             cargo-watch
             rust-analyzer
+            sqlite
             sqlx-cli
             nodejs_22
             nodePackages.pnpm

@@ -24,6 +24,7 @@ const RENEWAL_THRESHOLD_DAYS: i64 = SESSION_DURATION_DAYS / 2;
 struct AuthSession {
     user_id: String,
     display_name: String,
+    role: String,
 }
 
 /// Authenticated user extracted from request extensions.
@@ -34,6 +35,13 @@ struct AuthSession {
 pub struct AuthUser {
     pub user_id: String,
     pub display_name: String,
+    pub role: String,
+}
+
+impl AuthUser {
+    pub fn is_admin(&self) -> bool {
+        self.role == "admin"
+    }
 }
 
 impl FromRequestParts<Arc<AppState>> for AuthUser {
@@ -50,6 +58,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
         Ok(AuthUser {
             user_id: session.user_id.clone(),
             display_name: session.display_name.clone(),
+            role: session.role.clone(),
         })
     }
 }
@@ -132,8 +141,8 @@ pub async fn session_middleware(
     let mut renewal_cookie: Option<String> = None;
 
     if let Some(token) = extract_session_token(&request) {
-        let row = sqlx::query_as::<_, (String, String, String, String)>(
-            "SELECT s.user_id, u.display_name, s.expires_at, u.status \
+        let row = sqlx::query_as::<_, (String, String, String, String, String)>(
+            "SELECT s.user_id, u.display_name, s.expires_at, u.status, u.role \
              FROM sessions s \
              JOIN users u ON u.id = s.user_id \
              WHERE s.token = ?",
@@ -144,7 +153,7 @@ pub async fn session_middleware(
         .ok()
         .flatten();
 
-        if let Some((user_id, display_name, expires_at, status)) = row
+        if let Some((user_id, display_name, expires_at, status, role)) = row
             && status == "active"
             && let Ok(expires) =
                 chrono::NaiveDateTime::parse_from_str(&expires_at, "%Y-%m-%dT%H:%M:%SZ")
@@ -154,6 +163,7 @@ pub async fn session_middleware(
                 request.extensions_mut().insert(AuthSession {
                     user_id,
                     display_name,
+                    role,
                 });
 
                 // Sliding session: renew when past the halfway point.

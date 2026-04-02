@@ -9,12 +9,16 @@
 	import { relativeTime } from '$lib/format';
 	import { session } from '$lib/stores/session.svelte';
 
+	import type { Snippet } from 'svelte';
+
 	interface Props {
 		post: PostResponse;
 		onreply?: (postId: string) => void;
+		onremove?: (postId: string) => void;
+		extraActions?: Snippet;
 	}
 
-	let { post, onreply }: Props = $props();
+	let { post, onreply, onremove, extraActions }: Props = $props();
 
 	let editingPostId = $state<string | null>(null);
 	let editBody = $state('');
@@ -153,8 +157,10 @@
 		<span class="font-semibold text-text-primary">{post.author_name}</span>
 	{/if}
 	<span class="text-text-muted text-xs">{relativeTime(post.created_at)}</span>
-	{#if post.retracted_at}
+	{#if post.retracted_at && post.body !== '[removed by admin]'}
 		<span class="text-text-muted text-xs italic">retracted {relativeTime(post.retracted_at)}</span>
+	{:else if post.retracted_at}
+		<span class="text-text-muted text-xs italic">removed {relativeTime(post.retracted_at)}</span>
 	{:else if post.edited_at}
 		<span class="relative history-dropdown">
 			<button
@@ -190,7 +196,9 @@
 </div>
 
 <!-- Body -->
-{#if post.retracted_at}
+{#if post.retracted_at && post.body === '[removed by admin]'}
+	<div class="text-text-muted italic">[removed by admin]</div>
+{:else if post.retracted_at}
 	<div class="text-text-muted italic">[retracted]</div>
 {:else if editingPostId === post.id}
 	<div class="space-y-3">
@@ -261,6 +269,15 @@
 				class="bg-transparent border-none text-text-muted cursor-pointer text-xs font-sans py-1 hover:text-text-secondary"
 			>Retract</button>
 		{/if}
+	{/if}
+	{#if !post.retracted_at && onremove}
+		<button
+			onclick={() => onremove(post.id)}
+			class="bg-transparent border-none text-text-muted cursor-pointer text-xs font-sans py-1 hover:text-danger"
+		>Remove</button>
+	{/if}
+	{#if extraActions}
+		{@render extraActions()}
 	{/if}
 </div>
 {#if retractError && retractConfirmId === post.id}
