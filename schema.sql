@@ -12,10 +12,9 @@ CREATE TABLE users (
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     signup_method TEXT NOT NULL CHECK (signup_method IN ('steam_key', 'invite', 'admin')),
     steam_verified INTEGER NOT NULL DEFAULT 0,
-    invited_by TEXT REFERENCES users(id),
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended', 'banned')),
     bio TEXT
-, display_name_skeleton TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'admin')));
+, display_name_skeleton TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'admin')), invite_id TEXT REFERENCES invites(id));
 CREATE TABLE credentials (
     id TEXT PRIMARY KEY NOT NULL,
     user_id TEXT NOT NULL REFERENCES users(id),
@@ -53,10 +52,10 @@ CREATE TABLE invites (
     id TEXT PRIMARY KEY NOT NULL,
     code TEXT NOT NULL UNIQUE,
     created_by TEXT NOT NULL REFERENCES users(id),
-    used_by TEXT REFERENCES users(id),
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    used_at TEXT,
-    revoked INTEGER NOT NULL DEFAULT 0
+    revoked_at TEXT,
+    max_uses INTEGER,
+    expires_at TEXT
 );
 CREATE INDEX idx_invites_code ON invites(code);
 CREATE TABLE IF NOT EXISTS "rooms" (
@@ -145,3 +144,4 @@ CREATE TABLE IF NOT EXISTS "admin_log" (
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 CREATE INDEX idx_admin_log_created_at ON admin_log(created_at);
+CREATE INDEX idx_users_invite_id ON users(invite_id);

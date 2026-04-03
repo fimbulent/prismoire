@@ -11,6 +11,7 @@ use webauthn_rs::prelude::*;
 
 use crate::display_name::{display_name_skeleton, validate_display_name};
 use crate::error::AppError;
+use crate::invites;
 use crate::session::{
     AuthUser, clear_session_cookie, create_session, delete_session, session_cookie,
 };
@@ -94,15 +95,7 @@ pub async fn signup_begin(
         .filter(|c| !c.is_empty())
         .ok_or_else(|| AppError::BadRequest("invite code required".into()))?;
 
-    let invite: Option<(String,)> =
-        sqlx::query_as("SELECT id FROM invites WHERE code = ? AND used_by IS NULL AND revoked = 0")
-            .bind(invite_code)
-            .fetch_optional(&state.db)
-            .await?;
-
-    if invite.is_none() {
-        return Err(AppError::BadRequest("invalid or used invite code".into()));
-    }
+    invites::validate_invite_for_signup(&state.db, invite_code).await?;
 
     let user_uuid = Uuid::new_v4();
 
@@ -189,6 +182,9 @@ pub async fn signup_complete(
     let invite_code =
         invite_code.ok_or_else(|| AppError::Internal("missing invite_code in challenge".into()))?;
 
+    let (invite_id, inviter_id) =
+        invites::validate_invite_for_signup(&state.db, &invite_code).await?;
+
     let skeleton = display_name_skeleton(&display_name);
 
     if let Err(err) = sqlx::query(
@@ -221,52 +217,34 @@ pub async fn signup_complete(
 
     signing::create_signing_key(&state.db, &user_id).await?;
 
-    let inviter_id: Option<(String,)> = sqlx::query_as(
-        "SELECT i.created_by FROM invites i WHERE i.code = ? AND i.used_by IS NULL AND i.revoked = 0",
+    sqlx::query("UPDATE users SET invite_id = ? WHERE id = ?")
+        .bind(&invite_id)
+        .bind(&user_id)
+        .execute(&state.db)
+        .await?;
+
+    let vouch1_id = Uuid::new_v4().to_string();
+    let vouch2_id = Uuid::new_v4().to_string();
+
+    sqlx::query(
+        "INSERT INTO trust_edges (id, source_user, target_user, trust_type, weight) \
+         VALUES (?, ?, ?, 'vouch', 1.0)",
     )
-    .bind(&invite_code)
-    .fetch_optional(&state.db)
+    .bind(&vouch1_id)
+    .bind(&inviter_id)
+    .bind(&user_id)
+    .execute(&state.db)
     .await?;
 
-    if let Some((inviter_id,)) = inviter_id {
-        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-
-        sqlx::query("UPDATE invites SET used_by = ?, used_at = ? WHERE code = ?")
-            .bind(&user_id)
-            .bind(&now)
-            .bind(&invite_code)
-            .execute(&state.db)
-            .await?;
-
-        sqlx::query("UPDATE users SET invited_by = ? WHERE id = ?")
-            .bind(&inviter_id)
-            .bind(&user_id)
-            .execute(&state.db)
-            .await?;
-
-        let vouch1_id = Uuid::new_v4().to_string();
-        let vouch2_id = Uuid::new_v4().to_string();
-
-        sqlx::query(
-            "INSERT INTO trust_edges (id, source_user, target_user, trust_type, weight) \
-             VALUES (?, ?, ?, 'vouch', 1.0)",
-        )
-        .bind(&vouch1_id)
-        .bind(&inviter_id)
-        .bind(&user_id)
-        .execute(&state.db)
-        .await?;
-
-        sqlx::query(
-            "INSERT INTO trust_edges (id, source_user, target_user, trust_type, weight) \
-             VALUES (?, ?, ?, 'vouch', 1.0)",
-        )
-        .bind(&vouch2_id)
-        .bind(&user_id)
-        .bind(&inviter_id)
-        .execute(&state.db)
-        .await?;
-    }
+    sqlx::query(
+        "INSERT INTO trust_edges (id, source_user, target_user, trust_type, weight) \
+         VALUES (?, ?, ?, 'vouch', 1.0)",
+    )
+    .bind(&vouch2_id)
+    .bind(&user_id)
+    .bind(&inviter_id)
+    .execute(&state.db)
+    .await?;
 
     let token = create_session(&state.db, &user_id).await?;
     let mut headers = HeaderMap::new();

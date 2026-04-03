@@ -14,6 +14,7 @@ mod admin;
 mod auth;
 mod display_name;
 mod error;
+mod invites;
 mod posts;
 mod room_name;
 mod rooms;
@@ -150,6 +151,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             axum::routing::patch(posts::edit_post).delete(posts::retract_post),
         )
         .route("/api/posts/{id}/revisions", get(posts::list_revisions))
+        .route(
+            "/api/invites",
+            get(invites::list_invites).post(invites::create_invite),
+        )
+        .route("/api/invites/users", get(invites::list_invited_users))
+        .route("/api/invites/{id}", delete(invites::revoke_invite))
         .route("/api/admin/log", get(admin::get_admin_log))
         .route(
             "/api/admin/threads/{id}/lock",
@@ -173,6 +180,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/auth/login/complete", post(auth::login_complete))
         .route("/api/auth/discover/begin", get(auth::discover_begin))
         .route("/api/auth/discover/complete", post(auth::discover_complete))
+        .route(
+            "/api/invites/{code}/validate",
+            get(invites::validate_invite),
+        )
         .merge(authed)
         .layer(axum::middleware::from_fn_with_state(
             shared_state.clone(),

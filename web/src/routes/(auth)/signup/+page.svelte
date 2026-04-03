@@ -1,13 +1,14 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
 	import { slide } from 'svelte/transition';
 	import { signupBegin, signupComplete } from '$lib/api/auth';
 	import { createPasskey } from '$lib/api/webauthn';
 	import { session } from '$lib/stores/session.svelte';
 	import { validateDisplayName } from '$lib/validation/display-name';
 
+	const inviteCode = $derived(page.url.searchParams.get('invite') ?? '');
 	let displayName = $state('');
-	let inviteCode = $state('');
 	let error = $state<string | null>(null);
 	let nameError = $derived(displayName.trim() ? validateDisplayName(displayName) : null);
 	let submitting = $state(false);
@@ -71,20 +72,6 @@
 					{nameError}
 				</p>
 			{/if}
-		</div>
-
-		<div>
-			<label for="invite-code" class="block text-text-secondary text-sm mb-1"
-				>Invite Code <span class="text-text-muted">(optional)</span></label
-			>
-			<input
-				id="invite-code"
-				type="text"
-				bind:value={inviteCode}
-				disabled={submitting}
-				class="w-full bg-bg-surface-raised border border-border-subtle rounded-md px-3 py-2 text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent"
-				placeholder="Enter invite code"
-			/>
 		</div>
 
 		{#if error}
