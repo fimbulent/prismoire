@@ -158,17 +158,14 @@
 
 <!-- Header -->
 <div class="flex items-center gap-2 mb-2 text-sm">
-	{#if post.is_op}
+	{#if session.user?.user_id === post.author_id}
 		<span class="font-semibold text-text-primary bg-bg-surface-raised px-2 py-0.5 rounded border border-border">{post.author_name}</span>
-		{#if session.user?.user_id !== post.author_id}
-			<TrustBadge distance={post.trust_distance} />
-		{/if}
-		<span class="text-xs font-bold px-1.5 py-0.5 rounded border border-accent-muted text-accent uppercase tracking-wider">op</span>
 	{:else}
 		<span class="font-semibold text-text-primary">{post.author_name}</span>
-		{#if session.user?.user_id !== post.author_id}
-			<TrustBadge distance={post.trust_distance} />
-		{/if}
+		<TrustBadge distance={post.trust_distance} />
+	{/if}
+	{#if post.is_op}
+		<span class="text-xs font-bold px-1.5 py-0.5 rounded border border-accent-muted text-accent uppercase tracking-wider">op</span>
 	{/if}
 	<span class="text-text-muted text-xs">{relativeTime(post.created_at)}</span>
 	{#if post.retracted_at && post.body !== '[removed by admin]'}

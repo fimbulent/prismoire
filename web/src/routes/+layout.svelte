@@ -70,12 +70,9 @@
 					onclick={() => (dropdownOpen = !dropdownOpen)}
 					aria-haspopup="true"
 					aria-expanded={dropdownOpen}
-					class="text-text-secondary hover:text-text-primary transition-colors cursor-pointer flex items-center gap-1"
+					class="font-semibold text-text-primary bg-bg-surface-raised px-2 py-0.5 rounded border border-border cursor-pointer text-sm"
 				>
 					{session.user?.display_name}
-					<svg class="w-3.5 h-3.5 transition-transform" class:rotate-180={dropdownOpen} viewBox="0 0 20 20" fill="currentColor">
-						<path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd" />
-					</svg>
 				</button>
 				{#if dropdownOpen}
 					<div class="absolute right-0 top-full mt-1 w-44 bg-bg-surface border border-border rounded-md shadow-lg py-1 z-50">

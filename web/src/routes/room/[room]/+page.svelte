@@ -126,8 +126,10 @@
 								>
 							</div>
 							<div class="flex items-center gap-2 text-xs text-text-muted">
-								<span class="text-text-secondary font-medium">{thread.author_name}</span>
-								{#if session.user?.user_id !== thread.author_id}
+								{#if session.user?.user_id === thread.author_id}
+									<span class="text-text-primary font-medium bg-bg-surface-raised px-1.5 py-0.5 rounded border border-border">{thread.author_name}</span>
+								{:else}
+									<span class="text-text-secondary font-medium">{thread.author_name}</span>
 									<TrustBadge distance={thread.trust_distance} compact />
 								{/if}
 								<span>&middot;</span>
