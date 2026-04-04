@@ -1,0 +1,12 @@
+[package]
+name = "prismoire-bench"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "trust-bench"
+path = "src/main.rs"
+
+[dependencies]
+rand = "0.8"
+rand_chacha = "0.3"

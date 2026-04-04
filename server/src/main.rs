@@ -23,6 +23,7 @@ mod setup;
 mod signing;
 mod state;
 mod threads;
+mod trust;
 mod validation;
 
 use state::AppState;
@@ -128,7 +129,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         webauthn,
         needs_setup: AtomicBool::new(!admin_exists),
         setup_token: if admin_exists { None } else { setup_token },
+        trust_graph_dirty: AtomicBool::new(true),
+        trust_graph: std::sync::RwLock::new(Arc::new(trust::TrustGraph::empty())),
     });
+
+    // Spawn the hourly trust graph rebuild background task.
+    // Runs immediately on first tick (dirty flag starts true), then every hour
+    // if trust edges have been mutated since the last rebuild. Builds a new
+    // dual CSR graph and swaps it into the shared Arc atomically.
+    {
+        let state = shared_state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                interval.tick().await;
+                if !state
+                    .trust_graph_dirty
+                    .swap(false, std::sync::atomic::Ordering::AcqRel)
+                {
+                    continue;
+                }
+                let result = trust::rebuild_trust_graph(&state.db, &state.trust_graph).await;
+                match result {
+                    Ok(()) => {}
+                    Err(e) => {
+                        eprintln!("trust graph rebuild failed: {e}");
+                        state
+                            .trust_graph_dirty
+                            .store(true, std::sync::atomic::Ordering::Release);
+                    }
+                }
+            }
+        });
+    }
 
     let authed = Router::new()
         .route("/api/auth/session", get(auth::session_info))

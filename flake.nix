@@ -49,7 +49,7 @@
           filter = path: type:
             let baseName = builtins.baseNameOf path; in
             # Keep only the Cargo workspace directory structure and Rust/SQL sources
-            (type == "directory" && builtins.elem baseName [ "server" "cli" "src" "migrations" ]) ||
+            (type == "directory" && builtins.elem baseName [ "server" "cli" "bench" "src" "migrations" ]) ||
             builtins.match ".*\\.(rs|toml|lock|sql)$" path != null;
         };
 
@@ -106,8 +106,16 @@
             runHook postInstall
           '';
         });
+        bench = rustPlatform.buildRustPackage {
+          pname = "prismoire-bench";
+          version = "0.1.0";
+          src = workspaceSrc;
+          cargoLock.lockFile = ./Cargo.lock;
+          cargoBuildFlags = [ "--package" "prismoire-bench" ];
+          doCheck = false;
+        };
       in {
-        inherit server cli web;
+        inherit server cli web bench;
 
         default = pkgs.symlinkJoin {
           name = "prismoire";

@@ -7,6 +7,7 @@
 	import { goto } from '$app/navigation';
 	import LockIcon from '$lib/components/ui/LockIcon.svelte';
 	import Badge from '$lib/components/ui/Badge.svelte';
+	import TrustBadge from '$lib/components/trust/TrustBadge.svelte';
 
 	let isAll = $derived(page.params.room === 'all');
 	let room = $state<Room | null>(null);
@@ -126,6 +127,9 @@
 							</div>
 							<div class="flex items-center gap-2 text-xs text-text-muted">
 								<span class="text-text-secondary font-medium">{thread.author_name}</span>
+								{#if session.user?.user_id !== thread.author_id}
+									<TrustBadge distance={thread.trust_distance} compact />
+								{/if}
 								<span>&middot;</span>
 								<span>{relativeTime(thread.last_activity ?? thread.created_at)}</span>
 								<span>&middot;</span>

@@ -63,6 +63,31 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
     }
 }
 
+/// Optional authenticated user — succeeds with `None` if no valid session.
+///
+/// Use this for endpoints that behave differently for logged-in vs. anonymous
+/// users (e.g. public thread view with optional trust badges).
+pub struct OptionalAuthUser(pub Option<AuthUser>);
+
+impl FromRequestParts<Arc<AppState>> for OptionalAuthUser {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        _state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let user = parts
+            .extensions
+            .get::<AuthSession>()
+            .map(|session| AuthUser {
+                user_id: session.user_id.clone(),
+                display_name: session.display_name.clone(),
+                role: session.role.clone(),
+            });
+        Ok(OptionalAuthUser(user))
+    }
+}
+
 /// Generate a cryptographically random session token.
 pub fn generate_token() -> String {
     let mut bytes = vec![0u8; TOKEN_BYTES];

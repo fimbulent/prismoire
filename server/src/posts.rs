@@ -132,6 +132,7 @@ pub async fn edit_post(
         is_op,
         retracted_at: None,
         children: vec![],
+        trust_distance: None,
     }))
 }
 

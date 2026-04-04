@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::Json;
@@ -7,9 +8,23 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::AppError;
-use crate::session::AuthUser;
+use crate::session::{AuthUser, OptionalAuthUser};
 use crate::signing;
 use crate::state::AppState;
+use crate::trust::TrustScore;
+
+/// Build a lookup map from user UUID to trust distance for the given reader.
+// TODO: Use HashMap<Uuid, f64> once we migrate to typed sqlx::query!() macros
+// so author IDs are already Uuid instead of String.
+fn trust_distance_map(state: &AppState, reader_id: &str) -> HashMap<String, f64> {
+    let reader_uuid = Uuid::parse_str(reader_id).unwrap_or(Uuid::nil());
+    let graph = state.trust_graph.read().unwrap();
+    let scores: Vec<TrustScore> = graph.forward_scores(reader_uuid);
+    scores
+        .into_iter()
+        .map(|s| (s.target_user.to_string(), s.distance))
+        .collect()
+}
 
 const MIN_TITLE_LEN: usize = 5;
 const MAX_TITLE_LEN: usize = 150;
@@ -34,6 +49,7 @@ pub struct ThreadSummary {
     pub room_public: bool,
     pub reply_count: i64,
     pub last_activity: Option<String>,
+    pub trust_distance: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -60,6 +76,7 @@ pub struct PostResponse {
     pub is_op: bool,
     pub retracted_at: Option<String>,
     pub children: Vec<PostResponse>,
+    pub trust_distance: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -221,6 +238,7 @@ pub async fn create_thread(
                 is_op: true,
                 retracted_at: None,
                 children: vec![],
+                trust_distance: None,
             },
             reply_count: 0,
         }),
@@ -341,6 +359,7 @@ pub async fn list_public_threads(
                     room_public,
                     reply_count,
                     last_activity,
+                    trust_distance: None,
                 }
             },
         )
@@ -368,8 +387,10 @@ pub async fn list_public_threads(
 /// List threads across all rooms, ordered by last activity, with cursor pagination.
 pub async fn list_all_threads(
     State(state): State<Arc<AppState>>,
+    user: AuthUser,
     Query(params): Query<PaginationParams>,
 ) -> Result<impl IntoResponse, AppError> {
+    let trust_map = trust_distance_map(&state, &user.user_id);
     let rows = if let Some(ref cursor) = params.cursor {
         let (cursor_ts, cursor_id) = parse_cursor(cursor)?;
         sqlx::query_as::<_, (String, String, String, String, String, String, String, String, bool, bool, i64, Option<String>)>(
@@ -434,6 +455,7 @@ pub async fn list_all_threads(
                 last_activity,
             )| {
                 ThreadSummary {
+                    trust_distance: trust_map.get(&author_id).copied(),
                     id,
                     title,
                     author_id,
@@ -471,8 +493,10 @@ pub async fn list_all_threads(
 pub async fn list_threads(
     State(state): State<Arc<AppState>>,
     Path(room_id_or_slug): Path<String>,
+    user: AuthUser,
     Query(params): Query<PaginationParams>,
 ) -> Result<impl IntoResponse, AppError> {
+    let trust_map = trust_distance_map(&state, &user.user_id);
     let room: Option<(String, String, String, bool)> = sqlx::query_as(
         "SELECT id, name, slug, public FROM rooms WHERE (id = ? OR slug = ?) AND merged_into IS NULL",
     )
@@ -544,6 +568,7 @@ pub async fn list_threads(
                 last_activity,
             )| {
                 ThreadSummary {
+                    trust_distance: trust_map.get(&author_id).copied(),
                     id,
                     title,
                     author_id,
@@ -585,7 +610,12 @@ pub async fn list_threads(
 pub async fn get_thread(
     State(state): State<Arc<AppState>>,
     Path(thread_id): Path<String>,
+    OptionalAuthUser(user): OptionalAuthUser,
 ) -> Result<impl IntoResponse, AppError> {
+    let trust_map = user
+        .as_ref()
+        .map(|u| trust_distance_map(&state, &u.user_id))
+        .unwrap_or_default();
     let thread = sqlx::query_as::<
         _,
         (
@@ -644,7 +674,7 @@ pub async fn get_thread(
 
     let op_author_id = thread_author_id.clone();
 
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
     let mut posts: Vec<Option<PostResponse>> = Vec::with_capacity(rows.len());
     let mut id_to_index: HashMap<String, usize> = HashMap::new();
     let mut retracted: HashSet<usize> = HashSet::new();
@@ -672,6 +702,7 @@ pub async fn get_thread(
             retracted.insert(idx);
         }
         posts.push(Some(PostResponse {
+            trust_distance: trust_map.get(author_id.as_str()).copied(),
             id: post_id.clone(),
             parent_id: parent_id.clone(),
             author_id: author_id.clone(),
@@ -836,6 +867,7 @@ pub async fn create_reply(
             is_op: user.user_id == thread_author,
             retracted_at: None,
             children: vec![],
+            trust_distance: None,
         }),
     ))
 }

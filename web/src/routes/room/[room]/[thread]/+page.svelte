@@ -50,11 +50,24 @@
 		history.back();
 	}
 
+	// Guard: wait for the session store to finish loading before fetching the
+	// thread. Without this, a hard refresh races — the fetch fires before the
+	// session cookie is available, the catch block sees !session.isLoggedIn
+	// (still loading), and incorrectly redirects to /login.
+	//
+	// We also track lastLoadedThreadId so the effect doesn't re-fire (and
+	// reset viewRootStack) when session.loading transitions from true→false
+	// for the *same* thread. Only a change in the route param triggers a
+	// fresh load.
+	let lastLoadedThreadId = $state<string | null>(null);
+
 	$effect(() => {
+		if (session.loading) return;
 		const threadId = page.params.thread;
-		if (threadId) {
-			loadThread(threadId);
+		if (threadId && threadId !== lastLoadedThreadId) {
+			lastLoadedThreadId = threadId;
 			viewRootStack = [];
+			loadThread(threadId);
 		}
 	});
 

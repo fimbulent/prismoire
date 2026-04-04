@@ -246,6 +246,10 @@ pub async fn signup_complete(
     .execute(&state.db)
     .await?;
 
+    state
+        .trust_graph_dirty
+        .store(true, std::sync::atomic::Ordering::Release);
+
     let token = create_session(&state.db, &user_id).await?;
     let mut headers = HeaderMap::new();
     headers.insert(SET_COOKIE, session_cookie(&token).parse().unwrap());

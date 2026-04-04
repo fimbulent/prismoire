@@ -145,3 +145,11 @@ CREATE TABLE IF NOT EXISTS "admin_log" (
 );
 CREATE INDEX idx_admin_log_created_at ON admin_log(created_at);
 CREATE INDEX idx_users_invite_id ON users(invite_id);
+CREATE TABLE trust_scores (
+    source_user TEXT NOT NULL REFERENCES users(id),
+    target_user TEXT NOT NULL REFERENCES users(id),
+    score REAL NOT NULL,
+    distance REAL NOT NULL,
+    PRIMARY KEY (source_user, target_user)
+);
+CREATE INDEX idx_trust_scores_target ON trust_scores(target_user);
