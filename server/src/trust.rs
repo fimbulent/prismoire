@@ -458,6 +458,16 @@ impl TrustGraph {
         scores
     }
 
+    /// Build a lookup map from user UUID string to trust distance for the given reader.
+    // TODO: Use HashMap<Uuid, f64> once we migrate to typed sqlx::query!() macros
+    // so author IDs are already Uuid instead of String.
+    pub fn distance_map(&self, reader: Uuid) -> HashMap<String, f64> {
+        self.forward_scores(reader)
+            .into_iter()
+            .map(|s| (s.target_user.to_string(), s.distance))
+            .collect()
+    }
+
     /// Compute reverse trust scores: all users who trust `reader` within
     /// MAX_DEPTH hops (visibility check).
     ///

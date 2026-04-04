@@ -11,20 +11,6 @@ use crate::error::AppError;
 use crate::session::{AuthUser, OptionalAuthUser};
 use crate::signing;
 use crate::state::AppState;
-use crate::trust::TrustScore;
-
-/// Build a lookup map from user UUID to trust distance for the given reader.
-// TODO: Use HashMap<Uuid, f64> once we migrate to typed sqlx::query!() macros
-// so author IDs are already Uuid instead of String.
-fn trust_distance_map(state: &AppState, reader_id: &str) -> HashMap<String, f64> {
-    let reader_uuid = Uuid::parse_str(reader_id).unwrap_or(Uuid::nil());
-    let graph = state.trust_graph.read().unwrap();
-    let scores: Vec<TrustScore> = graph.forward_scores(reader_uuid);
-    scores
-        .into_iter()
-        .map(|s| (s.target_user.to_string(), s.distance))
-        .collect()
-}
 
 const MIN_TITLE_LEN: usize = 5;
 const MAX_TITLE_LEN: usize = 150;
@@ -390,7 +376,8 @@ pub async fn list_all_threads(
     user: AuthUser,
     Query(params): Query<PaginationParams>,
 ) -> Result<impl IntoResponse, AppError> {
-    let trust_map = trust_distance_map(&state, &user.user_id);
+    let reader_uuid = Uuid::parse_str(&user.user_id).unwrap_or(Uuid::nil());
+    let trust_map = state.get_trust_graph()?.distance_map(reader_uuid);
     let rows = if let Some(ref cursor) = params.cursor {
         let (cursor_ts, cursor_id) = parse_cursor(cursor)?;
         sqlx::query_as::<_, (String, String, String, String, String, String, String, String, bool, bool, i64, Option<String>)>(
@@ -496,7 +483,8 @@ pub async fn list_threads(
     user: AuthUser,
     Query(params): Query<PaginationParams>,
 ) -> Result<impl IntoResponse, AppError> {
-    let trust_map = trust_distance_map(&state, &user.user_id);
+    let reader_uuid = Uuid::parse_str(&user.user_id).unwrap_or(Uuid::nil());
+    let trust_map = state.get_trust_graph()?.distance_map(reader_uuid);
     let room: Option<(String, String, String, bool)> = sqlx::query_as(
         "SELECT id, name, slug, public FROM rooms WHERE (id = ? OR slug = ?) AND merged_into IS NULL",
     )
@@ -612,10 +600,13 @@ pub async fn get_thread(
     Path(thread_id): Path<String>,
     OptionalAuthUser(user): OptionalAuthUser,
 ) -> Result<impl IntoResponse, AppError> {
-    let trust_map = user
-        .as_ref()
-        .map(|u| trust_distance_map(&state, &u.user_id))
-        .unwrap_or_default();
+    let trust_map = match user.as_ref() {
+        Some(u) => {
+            let reader_uuid = Uuid::parse_str(&u.user_id).unwrap_or(Uuid::nil());
+            state.get_trust_graph()?.distance_map(reader_uuid)
+        }
+        None => HashMap::new(),
+    };
     let thread = sqlx::query_as::<
         _,
         (

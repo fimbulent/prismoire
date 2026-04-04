@@ -4,6 +4,7 @@ use std::sync::atomic::AtomicBool;
 use sqlx::SqlitePool;
 use webauthn_rs::Webauthn;
 
+use crate::error::AppError;
 use crate::trust::TrustGraph;
 
 /// Shared application state available to all request handlers.
@@ -26,4 +27,20 @@ pub struct AppState {
     /// Rebuilt periodically when `trust_graph_dirty` is set. Readers clone
     /// the inner `Arc<TrustGraph>` for zero-contention concurrent access.
     pub trust_graph: std::sync::RwLock<Arc<TrustGraph>>,
+}
+
+impl AppState {
+    /// Acquire a read handle to the trust graph.
+    ///
+    /// Returns a cloned `Arc` so the lock is released immediately. Logs and
+    /// returns a 500 error if the lock is poisoned.
+    pub fn get_trust_graph(&self) -> Result<Arc<TrustGraph>, AppError> {
+        self.trust_graph
+            .read()
+            .map(|guard| Arc::clone(&guard))
+            .map_err(|_| {
+                eprintln!("trust graph lock poisoned");
+                AppError::Internal("internal server error".into())
+            })
+    }
 }
