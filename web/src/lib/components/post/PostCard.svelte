@@ -9,6 +9,7 @@
 	import { relativeTime } from '$lib/format';
 	import { session } from '$lib/stores/session.svelte';
 	import TrustBadge from '$lib/components/trust/TrustBadge.svelte';
+	import Markdown from '$lib/components/ui/Markdown.svelte';
 	import { slide } from 'svelte/transition';
 
 	import type { Snippet } from 'svelte';
@@ -252,7 +253,7 @@
 			>back to latest</button>
 		</div>
 	{/if}
-	<div class="text-base leading-7 whitespace-pre-wrap">{getDisplayBody()}</div>
+	<Markdown source={getDisplayBody()} profile={post.parent_id === null ? 'full' : 'reply'} />
 {/if}
 
 <!-- Actions -->
