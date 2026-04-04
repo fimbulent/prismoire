@@ -32,6 +32,12 @@
 	let topLevelError = $state<string | null>(null);
 	let topLevelSaving = $state(false);
 
+	const MAX_REPLY_BODY = 10_000;
+	const REPLY_COUNTER_THRESHOLD = 8_000;
+	let topLevelBodyLen = $derived(topLevelBody.trim().length);
+	let showTopLevelCounter = $derived(topLevelBodyLen >= REPLY_COUNTER_THRESHOLD);
+	let topLevelRemaining = $derived(MAX_REPLY_BODY - topLevelBodyLen);
+
 	const MAX_DEPTH = 4;
 	let viewRootStack = $state<string[]>([]);
 
@@ -400,6 +406,14 @@
 			{/if}
 			<div class="mt-2 flex justify-end gap-3 items-center">
 				<span class="text-xs text-text-muted mr-auto">Markdown supported</span>
+				{#if showTopLevelCounter}
+					<span
+						transition:slide={{ duration: 150, axis: 'x' }}
+						class="text-xs tabular-nums {topLevelRemaining < 0 ? 'text-danger font-medium' : topLevelRemaining < 2000 ? 'text-text-secondary' : 'text-text-muted'}"
+					>
+						{topLevelRemaining.toLocaleString()} characters remaining
+					</span>
+				{/if}
 				{#if topLevelBody.trim() !== ''}
 					<button
 						transition:fade={{ duration: 150 }}
@@ -410,7 +424,7 @@
 				{/if}
 				<button
 					onclick={submitTopLevelReply}
-					disabled={topLevelSaving || topLevelBody.trim() === ''}
+					disabled={topLevelSaving || topLevelBody.trim() === '' || topLevelBodyLen > MAX_REPLY_BODY}
 					class="font-sans text-sm px-4 py-2 rounded-md cursor-pointer border border-accent bg-accent text-bg font-medium hover:opacity-90 disabled:opacity-50 transition-opacity duration-150"
 				>{topLevelSaving ? 'Posting…' : 'Post reply'}</button>
 			</div>

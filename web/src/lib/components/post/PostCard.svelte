@@ -9,6 +9,7 @@
 	import { relativeTime } from '$lib/format';
 	import { session } from '$lib/stores/session.svelte';
 	import TrustBadge from '$lib/components/trust/TrustBadge.svelte';
+	import { slide } from 'svelte/transition';
 
 	import type { Snippet } from 'svelte';
 
@@ -25,6 +26,12 @@
 	let editBody = $state('');
 	let editError = $state<string | null>(null);
 	let editSaving = $state(false);
+
+	let editMaxBody = $derived(post.parent_id === null ? 50_000 : 10_000);
+	let editCounterThreshold = $derived(post.parent_id === null ? 40_000 : 8_000);
+	let editBodyLen = $derived(editBody.trim().length);
+	let showEditCounter = $derived(editingPostId !== null && editBodyLen >= editCounterThreshold);
+	let editRemaining = $derived(editMaxBody - editBodyLen);
 
 	let retractConfirmId = $state<string | null>(null);
 	let retractError = $state<string | null>(null);
@@ -216,10 +223,18 @@
 		{#if editError}
 			<div class="text-danger text-sm">{editError}</div>
 		{/if}
+		{#if showEditCounter}
+			<p
+				transition:slide={{ duration: 150, axis: 'x' }}
+				class="text-xs tabular-nums {editRemaining < 0 ? 'text-danger font-medium' : editRemaining < 2000 ? 'text-text-secondary' : 'text-text-muted'}"
+			>
+				{editRemaining.toLocaleString()} characters remaining
+			</p>
+		{/if}
 		<div class="flex gap-2">
 			<button
 				onclick={saveEdit}
-				disabled={editSaving || editBody.trim() === ''}
+				disabled={editSaving || editBody.trim() === '' || editBodyLen > editMaxBody}
 				class="px-3 py-1.5 text-sm font-medium rounded-md bg-accent text-bg hover:opacity-90 disabled:opacity-50"
 			>{editSaving ? 'Saving…' : 'Save'}</button>
 			<button

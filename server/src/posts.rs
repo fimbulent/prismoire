@@ -53,17 +53,18 @@ pub async fn edit_post(
     user: AuthUser,
     Json(req): Json<EditPostRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let body = validate_body(&req.body).map_err(AppError::BadRequest)?;
-
-    let post = sqlx::query_as::<_, (String, Option<String>)>(
-        "SELECT author, retracted_at FROM posts WHERE id = ?",
+    let post = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+        "SELECT author, retracted_at, parent FROM posts WHERE id = ?",
     )
     .bind(&post_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| AppError::NotFound("post not found".into()))?;
 
-    let (author, retracted_at) = post;
+    let (author, retracted_at, parent) = post;
+
+    let max_len = if parent.is_some() { 10_000 } else { 50_000 };
+    let body = validate_body(&req.body, max_len).map_err(AppError::BadRequest)?;
 
     if author != user.user_id {
         return Err(AppError::Unauthorized(

@@ -1,6 +1,9 @@
 <script lang="ts">
 	import { slide } from 'svelte/transition';
 
+	const MAX_BODY = 10_000;
+	const BODY_COUNTER_THRESHOLD = 8_000;
+
 	interface Props {
 		saving?: boolean;
 		error?: string | null;
@@ -11,6 +14,9 @@
 	let { saving = false, error = null, onsubmit, oncancel }: Props = $props();
 
 	let body = $state('');
+	let bodyLen = $derived(body.trim().length);
+	let showBodyCounter = $derived(bodyLen >= BODY_COUNTER_THRESHOLD);
+	let bodyRemaining = $derived(MAX_BODY - bodyLen);
 
 	function handleSubmit() {
 		const text = body;
@@ -30,6 +36,14 @@
 	{/if}
 	<div class="mt-2 flex justify-end gap-3 items-center">
 		<span class="text-xs text-text-muted mr-auto">Markdown supported</span>
+		{#if showBodyCounter}
+			<span
+				transition:slide={{ duration: 150, axis: 'x' }}
+				class="text-xs tabular-nums {bodyRemaining < 0 ? 'text-danger font-medium' : bodyRemaining < 2000 ? 'text-text-secondary' : 'text-text-muted'}"
+			>
+				{bodyRemaining.toLocaleString()} characters remaining
+			</span>
+		{/if}
 		<button
 			onclick={oncancel}
 			disabled={saving}
@@ -37,7 +51,7 @@
 		>Cancel</button>
 		<button
 			onclick={handleSubmit}
-			disabled={saving || body.trim() === ''}
+			disabled={saving || body.trim() === '' || bodyLen > MAX_BODY}
 			class="font-sans text-sm px-4 py-2 rounded-md cursor-pointer border border-accent bg-accent text-bg font-medium hover:opacity-90 disabled:opacity-50 transition-opacity duration-150"
 		>{saving ? 'Posting…' : 'Post reply'}</button>
 	</div>

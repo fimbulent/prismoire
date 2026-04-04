@@ -15,6 +15,7 @@ use crate::state::AppState;
 const MIN_TITLE_LEN: usize = 5;
 const MAX_TITLE_LEN: usize = 150;
 const MAX_BODY_LEN: usize = 50_000;
+const MAX_REPLY_BODY_LEN: usize = 10_000;
 const PAGE_SIZE: usize = 20;
 
 // ---------------------------------------------------------------------------
@@ -112,13 +113,13 @@ fn validate_title(title: &str) -> Result<String, String> {
     Ok(trimmed)
 }
 
-pub fn validate_body(body: &str) -> Result<String, String> {
+pub fn validate_body(body: &str, max_len: usize) -> Result<String, String> {
     let trimmed = body.trim().to_string();
     if trimmed.is_empty() {
         return Err("body cannot be empty".into());
     }
-    if trimmed.len() > MAX_BODY_LEN {
-        return Err(format!("body must be at most {MAX_BODY_LEN} characters"));
+    if trimmed.len() > max_len {
+        return Err(format!("body must be at most {max_len} characters"));
     }
     Ok(trimmed)
 }
@@ -139,7 +140,7 @@ pub async fn create_thread(
     Json(req): Json<CreateThreadRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let title = validate_title(&req.title).map_err(AppError::BadRequest)?;
-    let body = validate_body(&req.body).map_err(AppError::BadRequest)?;
+    let body = validate_body(&req.body, MAX_BODY_LEN).map_err(AppError::BadRequest)?;
 
     let room: Option<(String, bool)> = sqlx::query_as(
         "SELECT id, public FROM rooms WHERE (id = ? OR slug = ?) AND merged_into IS NULL",
@@ -782,7 +783,7 @@ pub async fn create_reply(
     user: AuthUser,
     Json(req): Json<CreateReplyRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let body = validate_body(&req.body).map_err(AppError::BadRequest)?;
+    let body = validate_body(&req.body, MAX_REPLY_BODY_LEN).map_err(AppError::BadRequest)?;
 
     let thread = sqlx::query_as::<_, (String, bool, String)>(
         "SELECT id, locked, author FROM threads WHERE id = ?",
