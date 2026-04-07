@@ -5,6 +5,7 @@
 	import RemoveForm from './RemoveForm.svelte';
 	import ReplyTree from './ReplyTree.svelte';
 	import { slide } from 'svelte/transition';
+	import MoreButton from '../ui/MoreButton.svelte';
 
 	interface Props {
 		parentId: string;
@@ -98,10 +99,7 @@
 						{#if depth >= maxDepth}
 							{@const descendants = countDescendants(reply)}
 							<div class="py-2">
-								<button
-									onclick={() => oncontinuethread?.(reply)}
-									class="font-sans text-xs text-accent bg-bg-surface border border-dashed border-border rounded-md px-3.5 py-1.5 cursor-pointer hover:bg-bg-surface-raised hover:border-accent-muted transition-colors"
-								>{descendants} more {descendants === 1 ? 'reply' : 'replies'}</button>
+								<MoreButton onclick={() => oncontinuethread?.(reply)}>{descendants} more {descendants === 1 ? 'reply' : 'replies'}</MoreButton>
 							</div>
 						{:else}
 							<ReplyTree

@@ -50,6 +50,12 @@ export interface TrustDetailResponse {
 	trusted_by_total: number;
 }
 
+export interface TrustEdgesResponse {
+	users: TrustEdgeUser[];
+	total: number;
+	capped: boolean;
+}
+
 export interface ActivityItem {
 	type: string;
 	thread_id: string;
@@ -92,6 +98,21 @@ export async function getActivity(
 	if (cursor) params.set('cursor', cursor);
 	const res = await fetch(
 		`/api/users/${encodeURIComponent(username)}/activity?${params.toString()}`
+	);
+	if (!res.ok) {
+		const err: ApiError = await res.json();
+		throw new Error(err.error);
+	}
+	return res.json();
+}
+
+export async function getTrustEdges(
+	username: string,
+	direction: 'trusts' | 'trusted_by'
+): Promise<TrustEdgesResponse> {
+	const params = new URLSearchParams({ direction });
+	const res = await fetch(
+		`/api/users/${encodeURIComponent(username)}/trust/edges?${params.toString()}`
 	);
 	if (!res.ok) {
 		const err: ApiError = await res.json();

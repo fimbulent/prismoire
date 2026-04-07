@@ -16,6 +16,8 @@ use crate::trust::TrustPath;
 const MAX_BIO_LEN: usize = 500;
 const ACTIVITY_PAGE_SIZE: i64 = 10;
 const TRUST_LIST_PREVIEW: i64 = 5;
+const TRUST_LIST_FETCH: i64 = 50;
+const TRUST_LIST_MAX: i64 = 500;
 
 /// Minimum trust score for a user to count toward reach stats.
 const REACH_THRESHOLD: f64 = 0.45;
@@ -82,6 +84,13 @@ pub struct TrustEdgeUser {
 }
 
 #[derive(Serialize)]
+pub struct TrustEdgesResponse {
+    pub users: Vec<TrustEdgeUser>,
+    pub total: i64,
+    pub capped: bool,
+}
+
+#[derive(Serialize)]
 pub struct ActivityItem {
     #[serde(rename = "type")]
     pub activity_type: String,
@@ -107,6 +116,11 @@ pub struct ActivityResponse {
 pub struct ActivityQuery {
     pub filter: Option<String>,
     pub cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct TrustEdgesQuery {
+    pub direction: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -302,7 +316,10 @@ pub async fn get_trust_detail(
         .collect();
 
     let name_map = resolve_display_names(&state.db, &intermediary_uuids).await?;
-    let distance_map = graph.distance_map(viewer_uuid);
+    let mut distance_map = graph.distance_map(viewer_uuid);
+    // The viewer isn't included in their own distance map; pin them at 0 so
+    // they sort first rather than falling through to f64::MAX (untrusted).
+    distance_map.insert(user.user_id.clone(), 0.0);
 
     let paths: Vec<TrustPathResponse> = raw_paths
         .into_iter()
@@ -378,53 +395,67 @@ pub async fn get_trust_detail(
         edges
     };
 
-    let trusts_all = sqlx::query_as::<_, (String, String)>(
+    let trusts_batch = sqlx::query_as::<_, (String, String)>(
         "SELECT u.display_name, u.id FROM trust_edges te \
          JOIN users u ON u.id = te.target_user \
-         WHERE te.source_user = ? AND te.trust_type = 'trust'",
+         WHERE te.source_user = ? AND te.trust_type = 'trust' \
+         ORDER BY te.created_at DESC LIMIT ?",
     )
     .bind(&target_id)
+    .bind(TRUST_LIST_FETCH)
     .fetch_all(&state.db)
     .await?;
 
-    let trusts_total = trusts_all.len() as i64;
-    let trusts_sorted = sort_trust_edges(
-        trusts_all
+    let (trusts_total,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM trust_edges WHERE source_user = ? AND trust_type = 'trust'",
+    )
+    .bind(&target_id)
+    .fetch_one(&state.db)
+    .await?;
+
+    let trusts: Vec<TrustEdgeUser> = sort_trust_edges(
+        trusts_batch
             .into_iter()
             .map(|(name, uid)| TrustEdgeUser {
                 trust_distance: distance_map.get(&uid).copied(),
                 display_name: name,
             })
             .collect(),
-    );
-    let trusts: Vec<TrustEdgeUser> = trusts_sorted
-        .into_iter()
-        .take(TRUST_LIST_PREVIEW as usize)
-        .collect();
+    )
+    .into_iter()
+    .take(TRUST_LIST_PREVIEW as usize)
+    .collect();
 
-    let trusted_by_all = sqlx::query_as::<_, (String, String)>(
+    let trusted_by_batch = sqlx::query_as::<_, (String, String)>(
         "SELECT u.display_name, u.id FROM trust_edges te \
          JOIN users u ON u.id = te.source_user \
-         WHERE te.target_user = ? AND te.trust_type = 'trust'",
+         WHERE te.target_user = ? AND te.trust_type = 'trust' \
+         ORDER BY te.created_at DESC LIMIT ?",
     )
     .bind(&target_id)
+    .bind(TRUST_LIST_FETCH)
     .fetch_all(&state.db)
     .await?;
 
-    let trusted_by_total = trusted_by_all.len() as i64;
-    let trusted_by_sorted = sort_trust_edges(
-        trusted_by_all
+    let (trusted_by_total,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM trust_edges WHERE target_user = ? AND trust_type = 'trust'",
+    )
+    .bind(&target_id)
+    .fetch_one(&state.db)
+    .await?;
+
+    let trusted_by: Vec<TrustEdgeUser> = sort_trust_edges(
+        trusted_by_batch
             .into_iter()
             .map(|(name, uid)| TrustEdgeUser {
                 trust_distance: distance_map.get(&uid).copied(),
                 display_name: name,
             })
             .collect(),
-    );
-    let trusted_by: Vec<TrustEdgeUser> = trusted_by_sorted
-        .into_iter()
-        .take(TRUST_LIST_PREVIEW as usize)
-        .collect();
+    )
+    .into_iter()
+    .take(TRUST_LIST_PREVIEW as usize)
+    .collect();
 
     let reads = graph.reads_count(target_uuid, REACH_THRESHOLD);
     let readers = graph.readers_count(target_uuid, REACH_THRESHOLD);
@@ -530,6 +561,86 @@ pub async fn get_activity(
     };
 
     Ok(Json(ActivityResponse { items, next_cursor }))
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/users/:username/trust/edges — Full trust edge list
+// ---------------------------------------------------------------------------
+
+/// Returns the full list of trust edges for a user (capped at 500),
+/// sorted by viewer's trust distance (closest first), then alphabetically.
+pub async fn get_trust_edges(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(username): Path<String>,
+    Query(query): Query<TrustEdgesQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let (target_id, ..) = resolve_user(&state.db, &username).await?;
+
+    let graph = state.get_trust_graph()?;
+    let viewer_uuid =
+        Uuid::parse_str(&user.user_id).map_err(|_| AppError::Internal("invalid user id".into()))?;
+    let mut distance_map = graph.distance_map(viewer_uuid);
+    // The viewer isn't included in their own distance map; pin them at 0 so
+    // they sort first rather than falling through to f64::MAX (untrusted).
+    distance_map.insert(user.user_id.clone(), 0.0);
+
+    let (rows, total) = match query.direction.as_str() {
+        "trusts" => {
+            let rows = sqlx::query_as::<_, (String, String)>(
+                "SELECT u.display_name, u.id FROM trust_edges te \
+                 JOIN users u ON u.id = te.target_user \
+                 WHERE te.source_user = ? AND te.trust_type = 'trust'",
+            )
+            .bind(&target_id)
+            .fetch_all(&state.db)
+            .await?;
+            let total = rows.len() as i64;
+            (rows, total)
+        }
+        "trusted_by" => {
+            let rows = sqlx::query_as::<_, (String, String)>(
+                "SELECT u.display_name, u.id FROM trust_edges te \
+                 JOIN users u ON u.id = te.source_user \
+                 WHERE te.target_user = ? AND te.trust_type = 'trust'",
+            )
+            .bind(&target_id)
+            .fetch_all(&state.db)
+            .await?;
+            let total = rows.len() as i64;
+            (rows, total)
+        }
+        _ => {
+            return Err(AppError::BadRequest(
+                "direction must be 'trusts' or 'trusted_by'".into(),
+            ));
+        }
+    };
+
+    let mut users: Vec<TrustEdgeUser> = rows
+        .into_iter()
+        .map(|(name, uid)| TrustEdgeUser {
+            trust_distance: distance_map.get(&uid).copied(),
+            display_name: name,
+        })
+        .collect();
+
+    users.sort_by(|a, b| {
+        let da = a.trust_distance.unwrap_or(f64::MAX);
+        let db = b.trust_distance.unwrap_or(f64::MAX);
+        da.partial_cmp(&db)
+            .unwrap()
+            .then_with(|| a.display_name.cmp(&b.display_name))
+    });
+
+    let capped = total > TRUST_LIST_MAX;
+    users.truncate(TRUST_LIST_MAX as usize);
+
+    Ok(Json(TrustEdgesResponse {
+        users,
+        total,
+        capped,
+    }))
 }
 
 // ---------------------------------------------------------------------------

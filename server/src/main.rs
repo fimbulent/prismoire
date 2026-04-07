@@ -198,6 +198,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/users/{username}/trust", get(users::get_trust_detail))
         .route("/api/users/{username}/activity", get(users::get_activity))
         .route(
+            "/api/users/{username}/trust/edges",
+            get(users::get_trust_edges),
+        )
+        .route(
             "/api/users/{username}/trust",
             post(users::create_trust).delete(users::revoke_trust),
         )

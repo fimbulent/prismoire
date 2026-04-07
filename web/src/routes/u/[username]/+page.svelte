@@ -21,6 +21,7 @@
 	import UserName from '$lib/components/trust/UserName.svelte';
 	import Markdown from '$lib/components/ui/Markdown.svelte';
 	import Tooltip from '$lib/components/ui/Tooltip.svelte';
+	import MoreButton from '$lib/components/ui/MoreButton.svelte';
 
 	let username = $derived(page.params.username ?? '');
 
@@ -432,7 +433,7 @@
 									</div>
 								{/each}
 								{#if trustDetail.trusts_total > trustDetail.trusts.length}
-									<button class="text-xs text-accent hover:underline cursor-pointer bg-transparent border-none mt-1">Show all {trustDetail.trusts_total}</button>
+									<MoreButton href="/u/{username}/trust-edges/trusts">Show all {trustDetail.trusts_total}</MoreButton>
 								{/if}
 							</div>
 						</div>
@@ -446,7 +447,7 @@
 									</div>
 								{/each}
 								{#if trustDetail.trusted_by_total > trustDetail.trusted_by.length}
-									<button class="text-xs text-accent hover:underline cursor-pointer bg-transparent border-none mt-1">Show all {trustDetail.trusted_by_total}</button>
+									<MoreButton href="/u/{username}/trust-edges/trusted-by">Show all {trustDetail.trusted_by_total}</MoreButton>
 								{/if}
 							</div>
 						</div>
@@ -499,11 +500,7 @@
 
 				{#if activityCursor}
 					<div class="text-center">
-						<button
-							onclick={() => loadActivity(false)}
-							disabled={activityLoading}
-							class="text-xs text-accent bg-bg-surface border border-dashed border-border rounded-md px-3.5 py-1.5 cursor-pointer hover:bg-bg-surface-raised hover:border-accent-muted transition-colors disabled:opacity-50"
-						>{activityLoading ? 'Loading…' : 'Load more activity'}</button>
+						<MoreButton onclick={() => loadActivity(false)} loading={activityLoading}>Load more activity</MoreButton>
 					</div>
 				{/if}
 			</div>

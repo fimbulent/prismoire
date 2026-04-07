@@ -3,6 +3,7 @@
 	import { relativeTime } from '$lib/format';
 	import { session } from '$lib/stores/session.svelte';
 	import { goto } from '$app/navigation';
+	import MoreButton from '$lib/components/ui/MoreButton.svelte';
 
 	let entries = $state<AdminLogEntry[]>([]);
 	let nextCursor = $state<string | null>(null);
@@ -107,13 +108,7 @@
 
 		{#if nextCursor}
 			<div class="text-center py-6">
-				<button
-					onclick={loadMore}
-					disabled={loadingMore}
-					class="text-sm px-4 py-2 rounded-md border border-border text-text-secondary hover:text-text-primary hover:bg-bg-hover cursor-pointer disabled:opacity-50 disabled:cursor-default transition-colors"
-				>
-					{loadingMore ? 'Loading…' : 'Load more'}
-				</button>
+				<MoreButton onclick={loadMore} loading={loadingMore}>Load more</MoreButton>
 			</div>
 		{/if}
 	{/if}
