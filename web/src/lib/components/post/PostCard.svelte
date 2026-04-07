@@ -159,7 +159,7 @@
 
 <!-- Header -->
 <div class="flex items-center gap-2 mb-2 text-sm">
-	<UserName name={post.author_name} distance={post.trust_distance} linked={session.isLoggedIn} />
+	<UserName name={post.author_name} trust={post.trust} linked={session.isLoggedIn} />
 	{#if post.is_op}
 		<span class="text-xs font-bold px-1.5 py-0.5 rounded border border-accent-muted text-accent uppercase tracking-wider">op</span>
 	{/if}

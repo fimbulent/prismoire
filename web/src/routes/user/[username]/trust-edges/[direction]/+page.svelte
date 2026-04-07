@@ -55,7 +55,7 @@
 
 <div class="max-w-4xl mx-auto px-6 py-8">
 	<div class="mb-4">
-		<a href="/u/{username}" class="text-xs text-accent hover:underline">← Back to profile</a>
+		<a href="/user/{username}" class="text-xs text-accent hover:underline">← Back to profile</a>
 	</div>
 
 	<h1 class="text-xl font-bold mb-1">{title}</h1>
@@ -80,7 +80,7 @@
 		<div class="bg-bg-surface border border-border rounded-md divide-y divide-border-subtle">
 			{#each users as user}
 				<div class="px-4 py-2.5 flex items-center gap-2 min-w-0">
-					<UserName name={user.display_name} distance={user.trust_distance} compact />
+					<UserName name={user.display_name} trust={user.trust} compact />
 				</div>
 			{/each}
 		</div>

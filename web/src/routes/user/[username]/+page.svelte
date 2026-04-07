@@ -224,13 +224,6 @@
 		return '';
 	}
 
-	function trustTierLabel(distance: number | null): string {
-		if (distance == null) return 'Untrusted';
-		if (distance <= 1.0) return 'Direct trust';
-		if (distance <= 2.0) return '2-hop trust';
-		if (distance <= 3.0) return '3-hop trust';
-		return 'Untrusted';
-	}
 </script>
 
 <svelte:head>
@@ -255,7 +248,7 @@
 						<div class="flex items-center gap-2">
 							<h1 class="text-2xl font-bold leading-tight">{profile.display_name}</h1>
 							{#if !profile.is_self}
-								<TrustBadge distance={profile.trust_distance} />
+								<TrustBadge trust={profile.trust} />
 							{/if}
 							{#if profile.role === 'admin'}
 								<span class="text-xs px-1.5 py-0.5 rounded font-semibold bg-accent text-bg">Admin</span>
@@ -296,6 +289,18 @@
 					</div>
 				{/if}
 			</div>
+
+			<!-- Blocked banner -->
+			{#if !profile.is_self && profile.you_block}
+				<div class="flex items-center justify-between gap-3 px-4 py-3 rounded-md blocked-badge border border-danger/20 mb-4">
+					<span class="text-sm text-danger">You have blocked this user.</span>
+					<button
+						onclick={handleBlock}
+						disabled={actionLoading}
+						class="text-xs px-3 py-1.5 rounded-md cursor-pointer font-medium border border-danger/30 text-danger hover:bg-danger/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+					>Unblock</button>
+				</div>
+			{/if}
 
 			<!-- Bio -->
 			{#if profile.is_self && editingBio}
@@ -373,48 +378,37 @@
 						<div class="border-t border-border-subtle mt-4 pt-4">
 							<h2 class="text-sm font-semibold uppercase tracking-wider text-text-muted mb-3">Your trust</h2>
 							<div class="flex items-center gap-3 mb-3">
-								<TrustBadge distance={trustDetail.trust_distance} />
-								<span class="text-sm text-text-secondary">{trustTierLabel(trustDetail.trust_distance)}</span>
-								{#if trustDetail.trust_score != null}
-									<Tooltip text="Computed from trust and block relationships. Raw score: {trustDetail.trust_score.toFixed(2)}">
-										<span class="trust-score-hint">?</span>
-									</Tooltip>
-								{/if}
+								<TrustBadge trust={trustDetail.trust} />
+								<Tooltip text={trustDetail.trust_score != null ? `Computed from trust and block relationships. Raw score: ${trustDetail.trust_score.toFixed(2)}` : 'No trust path exists to this user'}>
+									<span class="trust-score-hint">?</span>
+								</Tooltip>
 							</div>
 
-							<!-- Trust paths (hide when only path is direct) -->
-							{#if trustDetail.paths.length > 0 && !(trustDetail.paths.length === 1 && trustDetail.paths[0].type === 'direct')}
-								<div class="text-sm text-text-secondary leading-relaxed">
+							{#if trustDetail.paths.length > 0 || trustDetail.score_reductions.length > 0}
+								<div class="text-sm text-text-secondary leading-relaxed space-y-1">
 									{#each trustDetail.paths as path}
-										<div class="flex items-center gap-2 mb-1 flex-wrap">
+										<div class="flex items-center gap-2 flex-wrap">
+											<span class="text-text-muted text-xs">▲</span>
 											{#if path.type === 'direct'}
 												<span class="text-text-muted">Direct trust</span>
 											{:else if path.type === '2hop' && path.via}
 												<span class="text-text-muted">via</span>
-												<UserName name={path.via.display_name} distance={path.via.trust_distance} compact />
+												<UserName name={path.via.display_name} trust={path.via.trust} compact />
 												<span class="text-text-muted">→ {profile.display_name}</span>
 											{:else if path.type === '3hop' && path.via && path.via2}
 												<span class="text-text-muted">via</span>
-												<UserName name={path.via.display_name} distance={path.via.trust_distance} compact />
+												<UserName name={path.via.display_name} trust={path.via.trust} compact />
 												<span class="text-text-muted">→</span>
-												<UserName name={path.via2.display_name} distance={path.via2.trust_distance} compact />
+												<UserName name={path.via2.display_name} trust={path.via2.trust} compact />
 												<span class="text-text-muted">→ {profile.display_name}</span>
 											{/if}
 										</div>
 									{/each}
-								</div>
-							{/if}
-
-							<!-- Score reductions -->
-							{#if trustDetail.score_reductions.length > 0}
-								<div class="mt-3 text-xs text-text-muted">
-									<div class="mb-1.5">Score reduced:</div>
 									{#each trustDetail.score_reductions as reduction}
-										<div class="flex items-center gap-2 mb-1">
-											<span class="text-text-muted">·</span>
-											<span>Trusts</span>
-											<span class="font-semibold text-text-primary opacity-50">{reduction.display_name}</span>
-											<span class="text-xs text-danger px-1.5 py-0.5 rounded font-medium blocked-badge">{reduction.reason}</span>
+										<div class="flex items-center gap-2 flex-wrap">
+											<span class="text-text-muted text-xs">▼</span>
+											<span class="text-text-muted">Trusts</span>
+											<UserName name={reduction.display_name} trust={{ distance: null, blocked: true }} compact />
 										</div>
 									{/each}
 								</div>
@@ -429,11 +423,11 @@
 							<div class="space-y-2">
 								{#each trustDetail.trusts as user}
 									<div class="flex items-center gap-2 min-w-0">
-										<UserName name={user.display_name} distance={user.trust_distance} compact />
+										<UserName name={user.display_name} trust={user.trust} compact />
 									</div>
 								{/each}
 								{#if trustDetail.trusts_total > trustDetail.trusts.length}
-									<MoreButton href="/u/{username}/trust-edges/trusts">Show all {trustDetail.trusts_total}</MoreButton>
+									<MoreButton href="/user/{username}/trust-edges/trusts">Show all {trustDetail.trusts_total}</MoreButton>
 								{/if}
 							</div>
 						</div>
@@ -443,11 +437,11 @@
 							<div class="space-y-2">
 								{#each trustDetail.trusted_by as user}
 									<div class="flex items-center gap-2 min-w-0">
-										<UserName name={user.display_name} distance={user.trust_distance} compact />
+										<UserName name={user.display_name} trust={user.trust} compact />
 									</div>
 								{/each}
 								{#if trustDetail.trusted_by_total > trustDetail.trusted_by.length}
-									<MoreButton href="/u/{username}/trust-edges/trusted-by">Show all {trustDetail.trusted_by_total}</MoreButton>
+									<MoreButton href="/user/{username}/trust-edges/trusted-by">Show all {trustDetail.trusted_by_total}</MoreButton>
 								{/if}
 							</div>
 						</div>

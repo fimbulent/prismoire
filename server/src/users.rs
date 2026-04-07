@@ -12,16 +12,13 @@ use uuid::Uuid;
 use crate::error::AppError;
 use crate::session::AuthUser;
 use crate::state::AppState;
-use crate::trust::TrustPath;
+use crate::trust::{MINIMUM_TRUST_THRESHOLD, TrustInfo, TrustPath, load_block_set};
 
 const MAX_BIO_LEN: usize = 500;
 const ACTIVITY_PAGE_SIZE: i64 = 10;
 const TRUST_LIST_PREVIEW: i64 = 5;
 const TRUST_LIST_FETCH: i64 = 50;
 const TRUST_LIST_MAX: i64 = 500;
-
-/// Minimum trust score for a user to count toward reach stats.
-const REACH_THRESHOLD: f64 = 0.45;
 
 // ---------------------------------------------------------------------------
 // Response types
@@ -37,7 +34,7 @@ pub struct UserProfileResponse {
     pub is_self: bool,
     pub you_trust: bool,
     pub you_block: bool,
-    pub trust_distance: Option<f64>,
+    pub trust: TrustInfo,
     pub trust_score: Option<f64>,
 }
 
@@ -52,7 +49,7 @@ pub struct TrustPathResponse {
 #[derive(Serialize)]
 pub struct TrustUserRef {
     pub display_name: String,
-    pub trust_distance: Option<f64>,
+    pub trust: TrustInfo,
 }
 
 #[derive(Serialize)]
@@ -69,7 +66,7 @@ pub struct TrustDetailResponse {
     pub reads: u32,
     pub readers: u32,
     pub trust_score: Option<f64>,
-    pub trust_distance: Option<f64>,
+    pub trust: TrustInfo,
     pub paths: Vec<TrustPathResponse>,
     pub score_reductions: Vec<ScoreReduction>,
     pub trusts: Vec<TrustEdgeUser>,
@@ -81,7 +78,7 @@ pub struct TrustDetailResponse {
 #[derive(Serialize)]
 pub struct TrustEdgeUser {
     pub display_name: String,
-    pub trust_distance: Option<f64>,
+    pub trust: TrustInfo,
 }
 
 #[derive(Serialize)]
@@ -223,13 +220,25 @@ pub async fn get_profile(
     let target_uuid =
         Uuid::parse_str(&target_id).map_err(|_| AppError::Internal("invalid user id".into()))?;
 
-    let (trust_score, trust_distance) = if is_self {
-        (None, None)
+    let (trust_score, trust) = if is_self {
+        (None, TrustInfo::self_trust())
     } else {
-        graph
-            .trust_between(viewer_uuid, target_uuid)
-            .map(|(score, dist)| (Some(score), Some(dist)))
-            .unwrap_or((None, None))
+        match graph.trust_between(viewer_uuid, target_uuid) {
+            Some((score, distance)) => (
+                Some(score),
+                TrustInfo {
+                    distance,
+                    blocked: you_block,
+                },
+            ),
+            None => (
+                None,
+                TrustInfo {
+                    distance: None,
+                    blocked: you_block,
+                },
+            ),
+        }
     };
 
     Ok(Json(UserProfileResponse {
@@ -241,7 +250,7 @@ pub async fn get_profile(
         is_self,
         you_trust,
         you_block,
-        trust_distance,
+        trust,
         trust_score,
     }))
 }
@@ -291,33 +300,6 @@ pub async fn get_trust_detail(
     // Single forward BFS from viewer — used for trust_between, distance_map, and path enrichment.
     let viewer_scores = graph.forward_scores(viewer_uuid);
 
-    let (trust_score, trust_distance) = if is_self {
-        (None, None)
-    } else {
-        viewer_scores
-            .iter()
-            .find(|s| s.target_user == target_uuid)
-            .map(|s| (Some(s.score), Some(s.distance)))
-            .unwrap_or((None, None))
-    };
-
-    // Trust paths
-    let raw_paths = if is_self {
-        Vec::new()
-    } else {
-        graph.paths_to(viewer_uuid, target_uuid)
-    };
-
-    let intermediary_uuids: Vec<Uuid> = raw_paths
-        .iter()
-        .flat_map(|p| match p {
-            TrustPath::Direct => vec![],
-            TrustPath::TwoHop { via } => vec![*via],
-            TrustPath::ThreeHop { via1, via2 } => vec![*via1, *via2],
-        })
-        .collect();
-
-    let name_map = resolve_display_names(&state.db, &intermediary_uuids).await?;
     let mut distance_map: HashMap<String, f64> = viewer_scores
         .into_iter()
         .map(|s| (s.target_user.to_string(), s.distance))
@@ -326,50 +308,87 @@ pub async fn get_trust_detail(
     // they sort first rather than falling through to f64::MAX (untrusted).
     distance_map.insert(user.user_id.clone(), 0.0);
 
-    let paths: Vec<TrustPathResponse> = raw_paths
-        .into_iter()
-        .map(|p| match p {
-            TrustPath::Direct => TrustPathResponse {
-                path_type: "direct".into(),
-                via: None,
-                via2: None,
-            },
-            TrustPath::TwoHop { via } => TrustPathResponse {
-                path_type: "2hop".into(),
-                via: Some(TrustUserRef {
-                    display_name: name_map
-                        .get(&via)
-                        .cloned()
-                        .unwrap_or_else(|| "unknown".into()),
-                    trust_distance: distance_map.get(&via.to_string()).copied(),
-                }),
-                via2: None,
-            },
-            TrustPath::ThreeHop { via1, via2 } => TrustPathResponse {
-                path_type: "3hop".into(),
-                via: Some(TrustUserRef {
-                    display_name: name_map
-                        .get(&via1)
-                        .cloned()
-                        .unwrap_or_else(|| "unknown".into()),
-                    trust_distance: distance_map.get(&via1.to_string()).copied(),
-                }),
-                via2: Some(TrustUserRef {
-                    display_name: name_map
-                        .get(&via2)
-                        .cloned()
-                        .unwrap_or_else(|| "unknown".into()),
-                    trust_distance: distance_map.get(&via2.to_string()).copied(),
-                }),
-            },
-        })
-        .collect();
+    let block_set = load_block_set(&state.db, &user.user_id).await?;
+    let you_block = !is_self && block_set.contains(&target_id);
 
-    // Score reductions: target's trust targets that the viewer has blocked
-    let score_reductions = if is_self {
-        Vec::new()
+    // When the viewer has blocked the target, trust is fixed at 0 — skip
+    // paths and score reductions since they have no effect.
+    let (trust_score, trust, paths, score_reductions) = if is_self || you_block {
+        let trust = if is_self {
+            TrustInfo::self_trust()
+        } else {
+            TrustInfo {
+                distance: None,
+                blocked: true,
+            }
+        };
+        (None, trust, Vec::new(), Vec::new())
     } else {
-        sqlx::query_as::<_, (String,)>(
+        let (score, distance) = graph
+            .trust_between(viewer_uuid, target_uuid)
+            .map(|(s, d)| (Some(s), d))
+            .unwrap_or((None, None));
+
+        let raw_paths = graph.paths_to(viewer_uuid, target_uuid);
+
+        let intermediary_uuids: Vec<Uuid> = raw_paths
+            .iter()
+            .flat_map(|p| match p {
+                TrustPath::Direct => vec![],
+                TrustPath::TwoHop { via } => vec![*via],
+                TrustPath::ThreeHop { via1, via2 } => vec![*via1, *via2],
+            })
+            .collect();
+
+        let name_map = resolve_display_names(&state.db, &intermediary_uuids).await?;
+
+        let built_paths: Vec<TrustPathResponse> = raw_paths
+            .into_iter()
+            .map(|p| match p {
+                TrustPath::Direct => TrustPathResponse {
+                    path_type: "direct".into(),
+                    via: None,
+                    via2: None,
+                },
+                TrustPath::TwoHop { via } => {
+                    let id = via.to_string();
+                    TrustPathResponse {
+                        path_type: "2hop".into(),
+                        via: Some(TrustUserRef {
+                            display_name: name_map
+                                .get(&via)
+                                .cloned()
+                                .unwrap_or_else(|| "unknown".into()),
+                            trust: TrustInfo::build(&id, &distance_map, &block_set),
+                        }),
+                        via2: None,
+                    }
+                }
+                TrustPath::ThreeHop { via1, via2 } => {
+                    let id1 = via1.to_string();
+                    let id2 = via2.to_string();
+                    TrustPathResponse {
+                        path_type: "3hop".into(),
+                        via: Some(TrustUserRef {
+                            display_name: name_map
+                                .get(&via1)
+                                .cloned()
+                                .unwrap_or_else(|| "unknown".into()),
+                            trust: TrustInfo::build(&id1, &distance_map, &block_set),
+                        }),
+                        via2: Some(TrustUserRef {
+                            display_name: name_map
+                                .get(&via2)
+                                .cloned()
+                                .unwrap_or_else(|| "unknown".into()),
+                            trust: TrustInfo::build(&id2, &distance_map, &block_set),
+                        }),
+                    }
+                }
+            })
+            .collect();
+
+        let reductions = sqlx::query_as::<_, (String,)>(
             "SELECT u.display_name FROM trust_edges te \
              JOIN users u ON u.id = te.target_user \
              WHERE te.source_user = ? AND te.trust_type = 'trust' \
@@ -384,15 +403,25 @@ pub async fn get_trust_detail(
             display_name: name,
             reason: "blocked by you".into(),
         })
-        .collect()
+        .collect();
+
+        (
+            score,
+            TrustInfo {
+                distance,
+                blocked: false,
+            },
+            built_paths,
+            reductions,
+        )
     };
 
     // Trust edge lists: who this user trusts / trusted by
     // Fetch all edges, sort by viewer's trust distance (closest first), then alphabetically.
     let sort_trust_edges = |mut edges: Vec<TrustEdgeUser>| -> Vec<TrustEdgeUser> {
         edges.sort_by(|a, b| {
-            let da = a.trust_distance.unwrap_or(f64::MAX);
-            let db = b.trust_distance.unwrap_or(f64::MAX);
+            let da = a.trust.distance.unwrap_or(f64::MAX);
+            let db = b.trust.distance.unwrap_or(f64::MAX);
             da.partial_cmp(&db)
                 .unwrap()
                 .then_with(|| a.display_name.cmp(&b.display_name))
@@ -422,7 +451,7 @@ pub async fn get_trust_detail(
         trusts_batch
             .into_iter()
             .map(|(name, uid)| TrustEdgeUser {
-                trust_distance: distance_map.get(&uid).copied(),
+                trust: TrustInfo::build(&uid, &distance_map, &block_set),
                 display_name: name,
             })
             .collect(),
@@ -453,7 +482,7 @@ pub async fn get_trust_detail(
         trusted_by_batch
             .into_iter()
             .map(|(name, uid)| TrustEdgeUser {
-                trust_distance: distance_map.get(&uid).copied(),
+                trust: TrustInfo::build(&uid, &distance_map, &block_set),
                 display_name: name,
             })
             .collect(),
@@ -462,8 +491,8 @@ pub async fn get_trust_detail(
     .take(TRUST_LIST_PREVIEW as usize)
     .collect();
 
-    let reads = graph.reads_count(target_uuid, REACH_THRESHOLD);
-    let readers = graph.readers_count(target_uuid, REACH_THRESHOLD);
+    let reads = graph.reads_count(target_uuid, MINIMUM_TRUST_THRESHOLD);
+    let readers = graph.readers_count(target_uuid, MINIMUM_TRUST_THRESHOLD);
 
     Ok(Json(TrustDetailResponse {
         trusts_given,
@@ -472,7 +501,7 @@ pub async fn get_trust_detail(
         reads,
         readers,
         trust_score,
-        trust_distance,
+        trust,
         paths,
         score_reductions,
         trusts,
@@ -622,17 +651,22 @@ pub async fn get_trust_edges(
         }
     };
 
+    let block_set = load_block_set(&state.db, &user.user_id).await?;
+
     let mut users: Vec<TrustEdgeUser> = rows
         .into_iter()
-        .map(|(name, uid)| TrustEdgeUser {
-            trust_distance: distance_map.get(&uid).copied(),
-            display_name: name,
+        .map(|(name, uid)| {
+            let trust = TrustInfo::build(&uid, &distance_map, &block_set);
+            TrustEdgeUser {
+                display_name: name,
+                trust,
+            }
         })
         .collect();
 
     users.sort_by(|a, b| {
-        let da = a.trust_distance.unwrap_or(f64::MAX);
-        let db = b.trust_distance.unwrap_or(f64::MAX);
+        let da = a.trust.distance.unwrap_or(f64::MAX);
+        let db = b.trust.distance.unwrap_or(f64::MAX);
         da.partial_cmp(&db)
             .unwrap()
             .then_with(|| a.display_name.cmp(&b.display_name))

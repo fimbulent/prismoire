@@ -127,7 +127,7 @@
 								>
 							</div>
 							<div class="flex items-center gap-2 text-xs text-text-muted">
-								<UserName name={thread.author_name} distance={thread.trust_distance} compact linked={session.isLoggedIn} />
+								<UserName name={thread.author_name} trust={thread.trust} compact linked={session.isLoggedIn} />
 								<span>&middot;</span>
 								<span>{relativeTime(thread.last_activity ?? thread.created_at)}</span>
 								<span>&middot;</span>

@@ -10,6 +10,7 @@ use crate::session::AuthUser;
 use crate::signing;
 use crate::state::AppState;
 use crate::threads::{PostResponse, validate_body};
+use crate::trust::TrustInfo;
 
 // ---------------------------------------------------------------------------
 // Response types
@@ -133,7 +134,7 @@ pub async fn edit_post(
         is_op,
         retracted_at: None,
         children: vec![],
-        trust_distance: None,
+        trust: TrustInfo::self_trust(),
     }))
 }
 

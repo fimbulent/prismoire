@@ -1,4 +1,5 @@
 import type { ApiError } from './auth';
+import type { TrustInfo } from './users';
 
 export interface ThreadSummary {
 	id: string;
@@ -13,7 +14,7 @@ export interface ThreadSummary {
 	room_public: boolean;
 	reply_count: number;
 	last_activity: string | null;
-	trust_distance: number | null;
+	trust: TrustInfo;
 }
 
 export interface ThreadListResponse {
@@ -33,7 +34,7 @@ export interface PostResponse {
 	is_op: boolean;
 	retracted_at: string | null;
 	children: PostResponse[];
-	trust_distance: number | null;
+	trust: TrustInfo;
 }
 
 export interface ThreadDetail {

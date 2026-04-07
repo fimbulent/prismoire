@@ -1,5 +1,10 @@
 import type { ApiError } from './auth';
 
+export interface TrustInfo {
+	distance: number | null;
+	blocked: boolean;
+}
+
 export interface UserProfile {
 	display_name: string;
 	created_at: string;
@@ -9,13 +14,13 @@ export interface UserProfile {
 	is_self: boolean;
 	you_trust: boolean;
 	you_block: boolean;
-	trust_distance: number | null;
+	trust: TrustInfo;
 	trust_score: number | null;
 }
 
 export interface TrustUserRef {
 	display_name: string;
-	trust_distance: number | null;
+	trust: TrustInfo;
 }
 
 export interface TrustPathResponse {
@@ -31,7 +36,7 @@ export interface ScoreReduction {
 
 export interface TrustEdgeUser {
 	display_name: string;
-	trust_distance: number | null;
+	trust: TrustInfo;
 }
 
 export interface TrustDetailResponse {
@@ -41,7 +46,7 @@ export interface TrustDetailResponse {
 	reads: number;
 	readers: number;
 	trust_score: number | null;
-	trust_distance: number | null;
+	trust: TrustInfo;
 	paths: TrustPathResponse[];
 	score_reductions: ScoreReduction[];
 	trusts: TrustEdgeUser[];

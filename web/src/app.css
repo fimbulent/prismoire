@@ -14,7 +14,9 @@
 	--color-accent: var(--accent);
 	--color-accent-muted: var(--accent-muted);
 	--color-trust-direct: var(--trust-direct);
+	--color-trust-1_5hop: var(--trust-1_5hop);
 	--color-trust-2hop: var(--trust-2hop);
+	--color-trust-2_5hop: var(--trust-2_5hop);
 	--color-trust-3hop: var(--trust-3hop);
 	--color-trust-untrusted: var(--trust-untrusted);
 	--color-link: var(--link);
@@ -40,9 +42,11 @@
 	--border-subtle: #2e2b45;
 	--accent: #c4a7e7;
 	--accent-muted: #8e7aab;
-	--trust-direct: #9ccfd8;
-	--trust-2hop: #f6c177;
-	--trust-3hop: #ea9a97;
+	--trust-direct: oklch(0.78 0.08 185);
+	--trust-1_5hop: oklch(0.78 0.08 146.3);
+	--trust-2hop: oklch(0.78 0.08 107.5);
+	--trust-2_5hop: oklch(0.78 0.08 68.8);
+	--trust-3hop: oklch(0.78 0.08 30);
 	--trust-untrusted: #6e6a86;
 	--link: #c4a7e7;
 	--link-hover: #e0def4;

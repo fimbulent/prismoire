@@ -11,6 +11,7 @@ use crate::error::AppError;
 use crate::session::{AuthUser, OptionalAuthUser};
 use crate::signing;
 use crate::state::AppState;
+use crate::trust::{TrustInfo, load_block_set};
 
 const MIN_TITLE_LEN: usize = 5;
 const MAX_TITLE_LEN: usize = 150;
@@ -36,7 +37,7 @@ pub struct ThreadSummary {
     pub room_public: bool,
     pub reply_count: i64,
     pub last_activity: Option<String>,
-    pub trust_distance: Option<f64>,
+    pub trust: TrustInfo,
 }
 
 #[derive(Serialize)]
@@ -63,7 +64,7 @@ pub struct PostResponse {
     pub is_op: bool,
     pub retracted_at: Option<String>,
     pub children: Vec<PostResponse>,
-    pub trust_distance: Option<f64>,
+    pub trust: TrustInfo,
 }
 
 #[derive(Serialize)]
@@ -225,7 +226,7 @@ pub async fn create_thread(
                 is_op: true,
                 retracted_at: None,
                 children: vec![],
-                trust_distance: None,
+                trust: TrustInfo::self_trust(),
             },
             reply_count: 0,
         }),
@@ -346,7 +347,7 @@ pub async fn list_public_threads(
                     room_public,
                     reply_count,
                     last_activity,
-                    trust_distance: None,
+                    trust: TrustInfo::unknown(),
                 }
             },
         )
@@ -379,6 +380,7 @@ pub async fn list_all_threads(
 ) -> Result<impl IntoResponse, AppError> {
     let reader_uuid = Uuid::parse_str(&user.user_id).unwrap_or(Uuid::nil());
     let trust_map = state.get_trust_graph()?.distance_map(reader_uuid);
+    let block_set = load_block_set(&state.db, &user.user_id).await?;
     let rows = if let Some(ref cursor) = params.cursor {
         let (cursor_ts, cursor_id) = parse_cursor(cursor)?;
         sqlx::query_as::<_, (String, String, String, String, String, String, String, String, bool, bool, i64, Option<String>)>(
@@ -442,8 +444,9 @@ pub async fn list_all_threads(
                 reply_count,
                 last_activity,
             )| {
+                let trust = TrustInfo::build(&author_id, &trust_map, &block_set);
                 ThreadSummary {
-                    trust_distance: trust_map.get(&author_id).copied(),
+                    trust,
                     id,
                     title,
                     author_id,
@@ -486,6 +489,7 @@ pub async fn list_threads(
 ) -> Result<impl IntoResponse, AppError> {
     let reader_uuid = Uuid::parse_str(&user.user_id).unwrap_or(Uuid::nil());
     let trust_map = state.get_trust_graph()?.distance_map(reader_uuid);
+    let block_set = load_block_set(&state.db, &user.user_id).await?;
     let room: Option<(String, String, String, bool)> = sqlx::query_as(
         "SELECT id, name, slug, public FROM rooms WHERE (id = ? OR slug = ?) AND merged_into IS NULL",
     )
@@ -556,8 +560,9 @@ pub async fn list_threads(
                 reply_count,
                 last_activity,
             )| {
+                let trust = TrustInfo::build(&author_id, &trust_map, &block_set);
                 ThreadSummary {
-                    trust_distance: trust_map.get(&author_id).copied(),
+                    trust,
                     id,
                     title,
                     author_id,
@@ -601,12 +606,14 @@ pub async fn get_thread(
     Path(thread_id): Path<String>,
     OptionalAuthUser(user): OptionalAuthUser,
 ) -> Result<impl IntoResponse, AppError> {
-    let trust_map = match user.as_ref() {
+    let (trust_map, block_set) = match user.as_ref() {
         Some(u) => {
             let reader_uuid = Uuid::parse_str(&u.user_id).unwrap_or(Uuid::nil());
-            state.get_trust_graph()?.distance_map(reader_uuid)
+            let dm = state.get_trust_graph()?.distance_map(reader_uuid);
+            let bs = load_block_set(&state.db, &u.user_id).await?;
+            (dm, bs)
         }
-        None => HashMap::new(),
+        None => (HashMap::new(), std::collections::HashSet::new()),
     };
     let thread = sqlx::query_as::<
         _,
@@ -694,7 +701,7 @@ pub async fn get_thread(
             retracted.insert(idx);
         }
         posts.push(Some(PostResponse {
-            trust_distance: trust_map.get(author_id.as_str()).copied(),
+            trust: TrustInfo::build(author_id, &trust_map, &block_set),
             id: post_id.clone(),
             parent_id: parent_id.clone(),
             author_id: author_id.clone(),
@@ -859,7 +866,7 @@ pub async fn create_reply(
             is_op: user.user_id == thread_author,
             retracted_at: None,
             children: vec![],
-            trust_distance: None,
+            trust: TrustInfo::self_trust(),
         }),
     ))
 }

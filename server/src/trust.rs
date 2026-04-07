@@ -9,6 +9,10 @@ const DECAY: f64 = 0.7;
 /// Maximum BFS depth for trust traversal.
 const MAX_DEPTH: u32 = 3;
 
+/// Minimum trust score to be considered trusted. Scores below this are
+/// treated as untrusted (no trust relationship).
+pub const MINIMUM_TRUST_THRESHOLD: f64 = 0.45;
+
 /// Per-blocked-target penalty for reliability computation.
 const BLOCK_PENALTY: f64 = 0.25;
 
@@ -379,6 +383,65 @@ fn reverse_bfs(reader: u32, reverse_graph: &CsrGraph) -> Vec<(u32, f64)> {
 }
 
 // ---------------------------------------------------------------------------
+// TrustInfo: shared trust metadata for API responses
+// ---------------------------------------------------------------------------
+
+/// Trust metadata attached to any user reference in API responses.
+///
+/// Built from a distance map (forward BFS results) and block set (viewer's
+/// block targets) via `TrustInfo::build`. Serializes as a nested `"trust"`
+/// object, e.g. `{ "trust": { "distance": 1.5, "blocked": false } }`.
+#[derive(Clone, serde::Serialize)]
+pub struct TrustInfo {
+    pub distance: Option<f64>,
+    pub blocked: bool,
+}
+
+impl TrustInfo {
+    /// Build TrustInfo for a user from the viewer's distance map and block set.
+    pub fn build(
+        user_id: &str,
+        distance_map: &HashMap<String, f64>,
+        block_set: &HashSet<String>,
+    ) -> Self {
+        Self {
+            distance: distance_map.get(user_id).copied(),
+            blocked: block_set.contains(user_id),
+        }
+    }
+
+    /// TrustInfo for the viewer themselves (distance 0, not blocked).
+    pub fn self_trust() -> Self {
+        Self {
+            distance: None,
+            blocked: false,
+        }
+    }
+
+    /// Unknown/absent trust (no viewer context available).
+    pub fn unknown() -> Self {
+        Self {
+            distance: None,
+            blocked: false,
+        }
+    }
+}
+
+/// Load the set of user IDs that the viewer has blocked.
+pub async fn load_block_set(
+    db: &sqlx::SqlitePool,
+    viewer_id: &str,
+) -> Result<HashSet<String>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, (String,)>(
+        "SELECT target_user FROM trust_edges WHERE source_user = ? AND trust_type = 'block'",
+    )
+    .bind(viewer_id)
+    .fetch_all(db)
+    .await?;
+    Ok(rows.into_iter().map(|(id,)| id).collect())
+}
+
+// ---------------------------------------------------------------------------
 // Score-to-distance conversion
 // ---------------------------------------------------------------------------
 
@@ -527,6 +590,7 @@ impl TrustGraph {
 
         let mut scores: Vec<TrustScore> = forward_bfs(source_id, &self.forward, &self.block_sets)
             .into_iter()
+            .filter(|&(_, score)| score >= MINIMUM_TRUST_THRESHOLD)
             .map(|(target_id, score)| {
                 let distance = score_to_distance(score);
                 TrustScore {
@@ -589,6 +653,9 @@ impl TrustGraph {
             return Vec::new();
         }
 
+        let empty_blocks = HashSet::new();
+        let blocked = self.block_sets.get(&source_id).unwrap_or(&empty_blocks);
+
         let mut paths = Vec::new();
 
         let source_neighbors = self.forward.neighbors(source_id);
@@ -598,7 +665,7 @@ impl TrustGraph {
         }
 
         for &mid in source_neighbors {
-            if mid == source_id || mid == target_id {
+            if mid == source_id || mid == target_id || blocked.contains(&mid) {
                 continue;
             }
             if self.forward.neighbors(mid).contains(&target_id) {
@@ -609,11 +676,12 @@ impl TrustGraph {
         }
 
         for &mid1 in source_neighbors {
-            if mid1 == source_id || mid1 == target_id {
+            if mid1 == source_id || mid1 == target_id || blocked.contains(&mid1) {
                 continue;
             }
             for &mid2 in self.forward.neighbors(mid1) {
-                if mid2 == source_id || mid2 == target_id || mid2 == mid1 {
+                if mid2 == source_id || mid2 == target_id || mid2 == mid1 || blocked.contains(&mid2)
+                {
                     continue;
                 }
                 if self.forward.neighbors(mid2).contains(&target_id) {
@@ -654,13 +722,20 @@ impl TrustGraph {
     /// Look up the forward trust score from `source` to `target`.
     ///
     /// Returns `None` if the target is unreachable from the source.
-    pub fn trust_between(&self, source: Uuid, target: Uuid) -> Option<(f64, f64)> {
+    /// When reachable, returns `(score, Some(distance))` if above threshold,
+    /// or `(score, None)` if below threshold (untrusted but reachable).
+    pub fn trust_between(&self, source: Uuid, target: Uuid) -> Option<(f64, Option<f64>)> {
         let source_id = self.index.get_id(&source)?;
         let target_id = self.index.get_id(&target)?;
 
         for (node, score) in forward_bfs(source_id, &self.forward, &self.block_sets) {
             if node == target_id {
-                return Some((score, score_to_distance(score)));
+                let distance = if score >= MINIMUM_TRUST_THRESHOLD {
+                    Some(score_to_distance(score))
+                } else {
+                    None
+                };
+                return Some((score, distance));
             }
         }
 
@@ -947,7 +1022,7 @@ mod tests {
         let g = graph_from_edges(&[(A, B)]);
         let (score, distance) = g.trust_between(A, B).unwrap();
         assert!((score - 1.0).abs() < 0.001);
-        assert!((distance - 1.0).abs() < 0.01);
+        assert!((distance.unwrap() - 1.0).abs() < 0.01);
     }
 
     #[test]
@@ -1046,8 +1121,8 @@ mod tests {
         assert!((map[&B] - 0.75).abs() < 0.001);
         // C = 0.75 * DECAY * 1.0 = 0.525
         assert!((map[&C] - 0.525).abs() < 0.001);
-        // E is directly blocked → 0.0
-        assert!((map[&E] - 0.0).abs() < 0.001);
+        // E is directly blocked → 0.0, filtered out by threshold
+        assert!(!map.contains_key(&E));
     }
 
     #[test]
@@ -1059,6 +1134,9 @@ mod tests {
 
         // B trusts 2 blocked → reliability = 0.75^2 = 0.5625
         assert!((map[&B] - 0.5625).abs() < 0.001);
+        // C and D are directly blocked → filtered out by threshold
+        assert!(!map.contains_key(&C));
+        assert!(!map.contains_key(&D));
     }
 
     #[test]
@@ -1096,10 +1174,13 @@ mod tests {
 
         // B: reliability = 0.75 → 0.75
         assert!((map[&B] - 0.75).abs() < 0.001);
-        // C: 0.75 * DECAY * reliability(C) = 0.75 * 0.7 * 0.75 = 0.39375
-        assert!((map[&C] - 0.39375).abs() < 0.001);
-        // D: 0.39375 * DECAY * 1.0 ≈ 0.2756
-        assert!((map[&D] - 0.39375 * DECAY).abs() < 0.01);
+        // C: 0.75 * 0.7 * 0.75 = 0.39375 — below threshold, filtered
+        assert!(!map.contains_key(&C));
+        // D: 0.39375 * 0.7 ≈ 0.2756 — below threshold, filtered
+        assert!(!map.contains_key(&D));
+        // E, F blocked → filtered
+        assert!(!map.contains_key(&E));
+        assert!(!map.contains_key(&F));
     }
 
     #[test]
