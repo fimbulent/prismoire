@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -250,9 +251,6 @@ pub async fn get_profile(
 // ---------------------------------------------------------------------------
 
 /// Returns trust stats, paths, score reductions, and trust edge lists.
-// TODO consider the performance of this method - 3-4 different BFS per page load
-//   may need to drop "reads" and "readers", or limit that stat only to current user, or use values
-//   like >100 etc.
 pub async fn get_trust_detail(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -290,12 +288,16 @@ pub async fn get_trust_detail(
     let target_uuid =
         Uuid::parse_str(&target_id).map_err(|_| AppError::Internal("invalid user id".into()))?;
 
+    // Single forward BFS from viewer — used for trust_between, distance_map, and path enrichment.
+    let viewer_scores = graph.forward_scores(viewer_uuid);
+
     let (trust_score, trust_distance) = if is_self {
         (None, None)
     } else {
-        graph
-            .trust_between(viewer_uuid, target_uuid)
-            .map(|(score, dist)| (Some(score), Some(dist)))
+        viewer_scores
+            .iter()
+            .find(|s| s.target_user == target_uuid)
+            .map(|s| (Some(s.score), Some(s.distance)))
             .unwrap_or((None, None))
     };
 
@@ -316,7 +318,10 @@ pub async fn get_trust_detail(
         .collect();
 
     let name_map = resolve_display_names(&state.db, &intermediary_uuids).await?;
-    let mut distance_map = graph.distance_map(viewer_uuid);
+    let mut distance_map: HashMap<String, f64> = viewer_scores
+        .into_iter()
+        .map(|s| (s.target_user.to_string(), s.distance))
+        .collect();
     // The viewer isn't included in their own distance map; pin them at 0 so
     // they sort first rather than falling through to f64::MAX (untrusted).
     distance_map.insert(user.user_id.clone(), 0.0);

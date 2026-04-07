@@ -377,6 +377,10 @@ pub enum TrustPath {
 /// Built from trust_edges at startup and rebuilt periodically when the dirty
 /// flag is set. Stored behind an `Arc` in `AppState`; readers clone the Arc
 /// for zero-contention concurrent access.
+// TODO: If more call sites need multiple BFS operations from the same source,
+//  consider a per-request `TrustQuery` context that lazily computes and caches
+//  forward/reverse BFS results internally. Currently only get_trust_detail
+//  benefits, and it consolidates manually via forward_scores().
 pub struct TrustGraph {
     forward: CsrGraph,
     reverse: CsrGraph,
