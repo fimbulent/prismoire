@@ -24,6 +24,7 @@ mod signing;
 mod state;
 mod threads;
 mod trust;
+mod users;
 mod validation;
 
 use state::AppState;
@@ -190,6 +191,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/api/invites/users", get(invites::list_invited_users))
         .route("/api/invites/{id}", delete(invites::revoke_invite))
+        .route(
+            "/api/users/{username}",
+            get(users::get_profile).patch(users::update_bio),
+        )
+        .route("/api/users/{username}/trust", get(users::get_trust_detail))
+        .route("/api/users/{username}/activity", get(users::get_activity))
+        .route(
+            "/api/users/{username}/trust",
+            post(users::create_trust).delete(users::revoke_trust),
+        )
+        .route(
+            "/api/users/{username}/block",
+            post(users::create_block).delete(users::revoke_block),
+        )
         .route("/api/admin/log", get(admin::get_admin_log))
         .route(
             "/api/admin/threads/{id}/lock",

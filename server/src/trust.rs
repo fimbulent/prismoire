@@ -356,11 +356,19 @@ fn score_to_distance(score: f64) -> f64 {
 // ---------------------------------------------------------------------------
 
 /// A trust score with effective distance for a single (source, target) pair.
-#[cfg_attr(not(test), expect(dead_code))]
 pub struct TrustScore {
     pub target_user: Uuid,
+    #[allow(dead_code)]
     pub score: f64,
     pub distance: f64,
+}
+
+/// A concrete trust path from source to target through the graph.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TrustPath {
+    Direct,
+    TwoHop { via: Uuid },
+    ThreeHop { via1: Uuid, via2: Uuid },
 }
 
 /// In-memory trust graph using dual CSR (forward + reverse) for on-demand
@@ -378,11 +386,11 @@ pub struct TrustGraph {
 impl TrustGraph {
     /// Build the trust graph from the database.
     ///
-    /// Loads all vouch edges from `trust_edges`, builds the UUID↔u32 index,
+    /// Loads all trust edges from `trust_edges`, builds the UUID↔u32 index,
     /// and constructs forward and reverse CSR graphs.
     pub async fn build(db: &SqlitePool) -> Result<Self, sqlx::Error> {
         let rows = sqlx::query_as::<_, (String, String)>(
-            "SELECT source_user, target_user FROM trust_edges WHERE trust_type = 'vouch'",
+            "SELECT source_user, target_user FROM trust_edges WHERE trust_type = 'trust'",
         )
         .fetch_all(db)
         .await?;
@@ -487,10 +495,86 @@ impl TrustGraph {
             .collect()
     }
 
+    /// Enumerate all concrete paths from `source` to `target` up to 3 hops.
+    ///
+    /// Returns paths as Direct / TwoHop / ThreeHop variants. Bounded by
+    /// O(d²) where d is the average out-degree — fast on typical graphs.
+    pub fn paths_to(&self, source: Uuid, target: Uuid) -> Vec<TrustPath> {
+        let Some(source_id) = self.index.get_id(&source) else {
+            return Vec::new();
+        };
+        let Some(target_id) = self.index.get_id(&target) else {
+            return Vec::new();
+        };
+        if source_id == target_id {
+            return Vec::new();
+        }
+
+        let mut paths = Vec::new();
+
+        let source_neighbors = self.forward.neighbors(source_id);
+
+        if source_neighbors.contains(&target_id) {
+            paths.push(TrustPath::Direct);
+        }
+
+        for &mid in source_neighbors {
+            if mid == source_id || mid == target_id {
+                continue;
+            }
+            if self.forward.neighbors(mid).contains(&target_id) {
+                paths.push(TrustPath::TwoHop {
+                    via: self.index.get_uuid(mid),
+                });
+            }
+        }
+
+        for &mid1 in source_neighbors {
+            if mid1 == source_id || mid1 == target_id {
+                continue;
+            }
+            for &mid2 in self.forward.neighbors(mid1) {
+                if mid2 == source_id || mid2 == target_id || mid2 == mid1 {
+                    continue;
+                }
+                if self.forward.neighbors(mid2).contains(&target_id) {
+                    paths.push(TrustPath::ThreeHop {
+                        via1: self.index.get_uuid(mid1),
+                        via2: self.index.get_uuid(mid2),
+                    });
+                }
+            }
+        }
+
+        paths
+    }
+
+    /// Count how many users `user` can read (forward trust score ≥ threshold).
+    pub fn reads_count(&self, user: Uuid, threshold: f64) -> u32 {
+        let Some(source_id) = self.index.get_id(&user) else {
+            return 0;
+        };
+        forward_bfs(source_id, &self.forward)
+            .into_iter()
+            .filter(|&(_, score)| score >= threshold)
+            .count() as u32
+    }
+
+    /// Count how many users trust `user` enough to read their content
+    /// (reverse trust score ≥ threshold).
+    pub fn readers_count(&self, user: Uuid, threshold: f64) -> u32 {
+        let Some(reader_id) = self.index.get_id(&user) else {
+            return 0;
+        };
+        reverse_bfs(reader_id, &self.reverse)
+            .into_iter()
+            .filter(|&(_, score)| score >= threshold)
+            .count() as u32
+    }
+
     /// Look up the forward trust score from `source` to `target`.
     ///
     /// Returns `None` if the target is unreachable from the source.
-    #[cfg_attr(not(test), expect(dead_code))]
     pub fn trust_between(&self, source: Uuid, target: Uuid) -> Option<(f64, f64)> {
         let source_id = self.index.get_id(&source)?;
         let target_id = self.index.get_id(&target)?;
@@ -787,5 +871,66 @@ mod tests {
         // C is not in the graph
         assert!(g.forward_scores(C).is_empty());
         assert!(g.reverse_scores(C).is_empty());
+    }
+
+    // -- paths_to tests --
+
+    #[test]
+    fn test_paths_to_direct() {
+        let g = graph_from_edges(&[(A, B)]);
+        let paths = g.paths_to(A, B);
+        assert_eq!(paths, vec![TrustPath::Direct]);
+    }
+
+    #[test]
+    fn test_paths_to_two_hop() {
+        let g = graph_from_edges(&[(A, B), (B, C)]);
+        let paths = g.paths_to(A, C);
+        assert_eq!(paths, vec![TrustPath::TwoHop { via: B }]);
+    }
+
+    #[test]
+    fn test_paths_to_three_hop() {
+        let g = graph_from_edges(&[(A, B), (B, C), (C, D)]);
+        let paths = g.paths_to(A, D);
+        assert_eq!(paths, vec![TrustPath::ThreeHop { via1: B, via2: C }]);
+    }
+
+    #[test]
+    fn test_paths_to_multiple() {
+        // A → B → D and A → C → D
+        let g = graph_from_edges(&[(A, B), (A, C), (B, D), (C, D)]);
+        let paths = g.paths_to(A, D);
+        assert_eq!(paths.len(), 2);
+        assert!(paths.contains(&TrustPath::TwoHop { via: B }));
+        assert!(paths.contains(&TrustPath::TwoHop { via: C }));
+    }
+
+    #[test]
+    fn test_paths_to_unreachable() {
+        let g = graph_from_edges(&[(A, B)]);
+        assert!(g.paths_to(B, A).is_empty());
+    }
+
+    #[test]
+    fn test_paths_to_beyond_depth() {
+        // A → B → C → D → E (4 hops to E, no paths)
+        let g = graph_from_edges(&[(A, B), (B, C), (C, D), (D, E)]);
+        assert!(g.paths_to(A, E).is_empty());
+    }
+
+    #[test]
+    fn test_paths_to_self() {
+        let g = graph_from_edges(&[(A, B), (B, A)]);
+        assert!(g.paths_to(A, A).is_empty());
+    }
+
+    #[test]
+    fn test_paths_to_mixed_depths() {
+        // A → B (direct to B), A → B → C (2-hop to C), plus A → C directly
+        let g = graph_from_edges(&[(A, B), (A, C), (B, C)]);
+        let paths = g.paths_to(A, C);
+        assert!(paths.contains(&TrustPath::Direct));
+        assert!(paths.contains(&TrustPath::TwoHop { via: B }));
     }
 }

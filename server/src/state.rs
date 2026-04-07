@@ -19,7 +19,7 @@ pub struct AppState {
     /// One-time setup token read from `PRISMOIRE_SETUP_TOKEN_FILE` at startup.
     /// `None` after setup completes (or if the instance already has an admin).
     pub setup_token: Option<String>,
-    /// Set to `true` when trust edges are mutated (vouch, block, invite signup).
+    /// Set to `true` when trust edges are mutated (trust, block, invite signup).
     /// The background trust recomputation task checks and clears this flag
     /// each tick.
     pub trust_graph_dirty: AtomicBool,

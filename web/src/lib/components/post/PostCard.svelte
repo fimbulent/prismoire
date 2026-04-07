@@ -8,7 +8,7 @@
 	} from '$lib/api/threads';
 	import { relativeTime } from '$lib/format';
 	import { session } from '$lib/stores/session.svelte';
-	import TrustBadge from '$lib/components/trust/TrustBadge.svelte';
+	import UserName from '$lib/components/trust/UserName.svelte';
 	import Markdown from '$lib/components/ui/Markdown.svelte';
 	import { slide } from 'svelte/transition';
 
@@ -159,12 +159,7 @@
 
 <!-- Header -->
 <div class="flex items-center gap-2 mb-2 text-sm">
-	{#if session.user?.user_id === post.author_id}
-		<span class="font-semibold text-text-primary bg-bg-surface-raised px-2 py-0.5 rounded border border-border">{post.author_name}</span>
-	{:else}
-		<span class="font-semibold text-text-primary">{post.author_name}</span>
-		<TrustBadge distance={post.trust_distance} />
-	{/if}
+	<UserName name={post.author_name} distance={post.trust_distance} linked={session.isLoggedIn} />
 	{#if post.is_op}
 		<span class="text-xs font-bold px-1.5 py-0.5 rounded border border-accent-muted text-accent uppercase tracking-wider">op</span>
 	{/if}

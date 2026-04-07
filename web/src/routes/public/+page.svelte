@@ -5,6 +5,7 @@
 	import { goto } from '$app/navigation';
 	import Badge from '$lib/components/ui/Badge.svelte';
 	import LockIcon from '$lib/components/ui/LockIcon.svelte';
+	import UserName from '$lib/components/trust/UserName.svelte';
 
 	let threads = $state<ThreadSummary[]>([]);
 	let nextCursor = $state<string | null>(null);
@@ -91,7 +92,7 @@
 								>
 							</div>
 							<div class="flex items-center gap-2 text-xs text-text-muted">
-								<span class="text-text-secondary font-medium">{thread.author_name}</span>
+								<UserName name={thread.author_name} linked={false} />
 								<span>&middot;</span>
 								<span>{relativeTime(thread.last_activity ?? thread.created_at)}</span>
 								<span>&middot;</span>

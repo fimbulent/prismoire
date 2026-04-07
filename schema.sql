@@ -35,19 +35,6 @@ CREATE TABLE sessions (
 );
 CREATE INDEX idx_sessions_user_id ON sessions(user_id);
 CREATE INDEX idx_sessions_expires_at ON sessions(expires_at);
-CREATE TABLE trust_edges (
-    id TEXT PRIMARY KEY NOT NULL,
-    source_user TEXT NOT NULL REFERENCES users(id),
-    target_user TEXT NOT NULL REFERENCES users(id),
-    trust_type TEXT NOT NULL CHECK (trust_type IN ('vouch', 'block')),
-    weight REAL NOT NULL DEFAULT 1.0 CHECK (weight >= 0.0 AND weight <= 1.0),
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    expires_at TEXT,
-    reason TEXT,
-    UNIQUE(source_user, target_user)
-);
-CREATE INDEX idx_trust_edges_source ON trust_edges(source_user);
-CREATE INDEX idx_trust_edges_target ON trust_edges(target_user);
 CREATE TABLE invites (
     id TEXT PRIMARY KEY NOT NULL,
     code TEXT NOT NULL UNIQUE,
@@ -145,11 +132,16 @@ CREATE TABLE IF NOT EXISTS "admin_log" (
 );
 CREATE INDEX idx_admin_log_created_at ON admin_log(created_at);
 CREATE INDEX idx_users_invite_id ON users(invite_id);
-CREATE TABLE trust_scores (
+CREATE TABLE IF NOT EXISTS "trust_edges" (
+    id TEXT PRIMARY KEY NOT NULL,
     source_user TEXT NOT NULL REFERENCES users(id),
     target_user TEXT NOT NULL REFERENCES users(id),
-    score REAL NOT NULL,
-    distance REAL NOT NULL,
-    PRIMARY KEY (source_user, target_user)
+    trust_type TEXT NOT NULL CHECK (trust_type IN ('trust', 'block')),
+    weight REAL NOT NULL DEFAULT 1.0 CHECK (weight >= 0.0 AND weight <= 1.0),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    expires_at TEXT,
+    reason TEXT,
+    UNIQUE(source_user, target_user)
 );
-CREATE INDEX idx_trust_scores_target ON trust_scores(target_user);
+CREATE INDEX idx_trust_edges_source ON trust_edges(source_user);
+CREATE INDEX idx_trust_edges_target ON trust_edges(target_user);

@@ -148,7 +148,7 @@ pub async fn signup_begin(
 /// Looks up the stored challenge state, verifies the browser's credential
 /// response, creates the user and credential rows (including the confusable
 /// skeleton for future uniqueness checks), optionally consumes the invite
-/// code (creating a mutual vouch), and starts a session.
+/// code (creating a mutual trust), and starts a session.
 pub async fn signup_complete(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SignupCompleteRequest>,
@@ -223,14 +223,14 @@ pub async fn signup_complete(
         .execute(&state.db)
         .await?;
 
-    let vouch1_id = Uuid::new_v4().to_string();
-    let vouch2_id = Uuid::new_v4().to_string();
+    let trust1_id = Uuid::new_v4().to_string();
+    let trust2_id = Uuid::new_v4().to_string();
 
     sqlx::query(
         "INSERT INTO trust_edges (id, source_user, target_user, trust_type, weight) \
-         VALUES (?, ?, ?, 'vouch', 1.0)",
+         VALUES (?, ?, ?, 'trust', 1.0)",
     )
-    .bind(&vouch1_id)
+    .bind(&trust1_id)
     .bind(&inviter_id)
     .bind(&user_id)
     .execute(&state.db)
@@ -238,9 +238,9 @@ pub async fn signup_complete(
 
     sqlx::query(
         "INSERT INTO trust_edges (id, source_user, target_user, trust_type, weight) \
-         VALUES (?, ?, ?, 'vouch', 1.0)",
+         VALUES (?, ?, ?, 'trust', 1.0)",
     )
-    .bind(&vouch2_id)
+    .bind(&trust2_id)
     .bind(&user_id)
     .bind(&inviter_id)
     .execute(&state.db)

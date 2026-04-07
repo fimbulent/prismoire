@@ -1,7 +1,7 @@
 import { Marked, type Tokens } from 'marked';
 import DOMPurify from 'dompurify';
 
-export type MarkdownProfile = 'full' | 'reply';
+export type MarkdownProfile = 'full' | 'reply' | 'bio';
 
 function isSafeUrl(url: string): boolean {
 	try {
@@ -52,7 +52,7 @@ function createMarked(profile: MarkdownProfile): Marked {
 		breaks: true
 	});
 
-	if (profile === 'reply') {
+	if (profile === 'reply' || profile === 'bio') {
 		marked.use({
 			tokenizer: {
 				heading(_src: string): Tokens.Heading | undefined {
@@ -62,6 +62,25 @@ function createMarked(profile: MarkdownProfile): Marked {
 					return undefined;
 				},
 				lheading(_src: string): Tokens.Heading | undefined {
+					return undefined;
+				}
+			}
+		});
+	}
+
+	if (profile === 'bio') {
+		marked.use({
+			tokenizer: {
+				blockquote(_src: string): Tokens.Blockquote | undefined {
+					return undefined;
+				},
+				table(_src: string): Tokens.Table | undefined {
+					return undefined;
+				},
+				fences(_src: string): Tokens.Code | undefined {
+					return undefined;
+				},
+				list(_src: string): Tokens.List | undefined {
 					return undefined;
 				}
 			}
@@ -96,9 +115,19 @@ function createMarked(profile: MarkdownProfile): Marked {
 
 const fullMarked = createMarked('full');
 const replyMarked = createMarked('reply');
+const bioMarked = createMarked('bio');
+
+const BIO_SANITIZE_CONFIG = {
+	ALLOWED_TAGS: ['p', 'br', 'strong', 'em', 'del', 'code', 'a'],
+	ALLOWED_ATTR: ['href', 'title'],
+	ALLOW_DATA_ATTR: false,
+	ADD_ATTR: ['target'],
+	FORBID_TAGS: ['img', 'iframe', 'style', 'script', 'object', 'embed', 'form']
+};
 
 export function renderMarkdown(source: string, profile: MarkdownProfile = 'full'): string {
-	const marked = profile === 'full' ? fullMarked : replyMarked;
+	const marked = profile === 'full' ? fullMarked : profile === 'bio' ? bioMarked : replyMarked;
 	const raw = marked.parse(source) as string;
-	return DOMPurify.sanitize(raw, SANITIZE_CONFIG);
+	const config = profile === 'bio' ? BIO_SANITIZE_CONFIG : SANITIZE_CONFIG;
+	return DOMPurify.sanitize(raw, config);
 }
