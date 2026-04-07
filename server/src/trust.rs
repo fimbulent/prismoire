@@ -9,6 +9,12 @@ const DECAY: f64 = 0.7;
 /// Maximum BFS depth for trust traversal.
 const MAX_DEPTH: u32 = 3;
 
+/// Per-blocked-target penalty for reliability computation.
+const BLOCK_PENALTY: f64 = 0.25;
+
+/// Maps blocker's dense node ID → set of blocked dense node IDs.
+type BlockSets = HashMap<u32, HashSet<u32>>;
+
 // ---------------------------------------------------------------------------
 // CSR graph representation
 // ---------------------------------------------------------------------------
@@ -177,16 +183,39 @@ impl PathGroups {
 }
 
 // ---------------------------------------------------------------------------
+// Block reliability
+// ---------------------------------------------------------------------------
+
+/// Compute the reliability factor for a node given its outgoing neighbors and
+/// the viewer's block set. Each neighbor that appears in `viewer_blocks`
+/// contributes an independent multiplicative penalty.
+#[inline]
+fn reliability(neighbors: &[u32], viewer_blocks: &HashSet<u32>) -> f64 {
+    let count = neighbors
+        .iter()
+        .filter(|n| viewer_blocks.contains(n))
+        .count() as i32;
+    (1.0 - BLOCK_PENALTY).powi(count)
+}
+
+// ---------------------------------------------------------------------------
 // Forward BFS: reader → authors (relevance)
 // ---------------------------------------------------------------------------
 
 /// Compute trust scores from a single source using bottleneck-grouped BFS
-/// on the forward CSR graph.
+/// on the forward CSR graph with block propagation.
 ///
 /// Paths are grouped by the source's direct (first-hop) neighbor. Within each
 /// group, only the max path score is kept. Across groups, scores combine via
 /// probabilistic independence.
-fn forward_bfs(source: u32, graph: &CsrGraph) -> Vec<(u32, f64)> {
+///
+/// Block propagation: each visited node's score is multiplied by a reliability
+/// factor based on how many of its trust targets the viewer has blocked.
+/// After BFS, directly blocked users are overridden to score 0.0.
+fn forward_bfs(source: u32, graph: &CsrGraph, block_sets: &BlockSets) -> Vec<(u32, f64)> {
+    let empty = HashSet::new();
+    let viewer_blocks = block_sets.get(&source).unwrap_or(&empty);
+
     // BFS state: (current_node, depth, first_hop, path_score)
     let mut queue: VecDeque<(u32, u32, u32, f64)> = VecDeque::new();
     let mut target_groups: HashMap<u32, PathGroups> = HashMap::new();
@@ -200,11 +229,12 @@ fn forward_bfs(source: u32, graph: &CsrGraph) -> Vec<(u32, f64)> {
         if neighbor == source {
             continue;
         }
-        queue.push_back((neighbor, 1, neighbor, 1.0));
+        let penalized = reliability(graph.neighbors(neighbor), viewer_blocks);
+        queue.push_back((neighbor, 1, neighbor, penalized));
         target_groups
             .entry(neighbor)
             .or_insert_with(PathGroups::new)
-            .add(neighbor, 1.0);
+            .add(neighbor, penalized);
         visited_per_group
             .entry(neighbor)
             .or_default()
@@ -227,7 +257,8 @@ fn forward_bfs(source: u32, graph: &CsrGraph) -> Vec<(u32, f64)> {
             }
             visited.insert(next);
 
-            let next_score = path_score * DECAY;
+            let r = reliability(graph.neighbors(next), viewer_blocks);
+            let next_score = path_score * DECAY * r;
 
             target_groups
                 .entry(next)
@@ -238,10 +269,21 @@ fn forward_bfs(source: u32, graph: &CsrGraph) -> Vec<(u32, f64)> {
         }
     }
 
-    target_groups
+    let mut results: Vec<(u32, f64)> = target_groups
         .into_iter()
         .map(|(target, groups)| (target, groups.combined_score()))
-        .collect()
+        .collect();
+
+    // Direct block override: blocked users get effective trust 0.0.
+    if !viewer_blocks.is_empty() {
+        for entry in &mut results {
+            if viewer_blocks.contains(&entry.0) {
+                entry.1 = 0.0;
+            }
+        }
+    }
+
+    results
 }
 
 // ---------------------------------------------------------------------------
@@ -266,6 +308,12 @@ fn forward_bfs(source: u32, graph: &CsrGraph) -> Vec<(u32, f64)> {
 ///   predecessors at greater depths) without re-expanding the node. This is
 ///   safe because re-expansion would only produce lower scores downstream
 ///   (deeper paths have strictly lower path_score due to multiplicative decay).
+///
+/// NOTE: This function does NOT apply block propagation. Block penalties are
+/// viewer-specific (each source A has its own block set), so they cannot be
+/// folded into the shared path_score of a single reverse pass. The scores
+/// returned here are an approximation that ignores blocks. For exact
+/// block-penalized trust(A, reader), use forward_bfs from A directly.
 fn reverse_bfs(reader: u32, reverse_graph: &CsrGraph) -> Vec<(u32, f64)> {
     // BFS state: (current_node, depth, path_score)
     // No first_hop tag — the group key is determined by expansion context.
@@ -385,6 +433,7 @@ pub struct TrustGraph {
     forward: CsrGraph,
     reverse: CsrGraph,
     index: NodeIndex,
+    block_sets: BlockSets,
 }
 
 impl TrustGraph {
@@ -420,16 +469,37 @@ impl TrustGraph {
         let forward = CsrGraph::from_edges(index.num_nodes(), &dense_edges);
         let reverse = forward.transpose();
 
+        // Load block edges into per-user block sets (not into the CSR graph).
+        let block_rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT source_user, target_user FROM trust_edges WHERE trust_type = 'block'",
+        )
+        .fetch_all(db)
+        .await?;
+
+        let mut block_sets: BlockSets = HashMap::new();
+        for (src_str, tgt_str) in &block_rows {
+            let src_uuid =
+                Uuid::parse_str(src_str).expect("invalid UUID in trust_edges.source_user");
+            let tgt_uuid =
+                Uuid::parse_str(tgt_str).expect("invalid UUID in trust_edges.target_user");
+            if let (Some(src_id), Some(tgt_id)) = (index.get_id(&src_uuid), index.get_id(&tgt_uuid))
+            {
+                block_sets.entry(src_id).or_default().insert(tgt_id);
+            }
+        }
+
         eprintln!(
-            "trust graph built: {} nodes, {} edges",
+            "trust graph built: {} nodes, {} trust edges, {} block edges",
             index.num_nodes(),
-            dense_edges.len()
+            dense_edges.len(),
+            block_rows.len()
         );
 
         Ok(Self {
             forward,
             reverse,
             index,
+            block_sets,
         })
     }
 
@@ -442,6 +512,7 @@ impl TrustGraph {
                 uuid_to_id: HashMap::new(),
                 id_to_uuid: Vec::new(),
             },
+            block_sets: HashMap::new(),
         }
     }
 
@@ -454,7 +525,7 @@ impl TrustGraph {
             return Vec::new();
         };
 
-        let mut scores: Vec<TrustScore> = forward_bfs(source_id, &self.forward)
+        let mut scores: Vec<TrustScore> = forward_bfs(source_id, &self.forward, &self.block_sets)
             .into_iter()
             .map(|(target_id, score)| {
                 let distance = score_to_distance(score);
@@ -487,6 +558,10 @@ impl TrustGraph {
     /// to check whether a given author's content should be visible to the
     /// reader: if the author is in this map and their score meets their read
     /// threshold, the content is visible.
+    ///
+    /// NOTE: These scores do NOT include block propagation — they are an
+    /// approximation. For exact block-penalized trust(author, reader), use
+    /// `trust_between(author, reader)` which runs forward BFS from the author.
     #[cfg_attr(not(test), expect(dead_code))]
     pub fn reverse_scores(&self, reader: Uuid) -> HashMap<Uuid, f64> {
         let Some(reader_id) = self.index.get_id(&reader) else {
@@ -558,7 +633,7 @@ impl TrustGraph {
         let Some(source_id) = self.index.get_id(&user) else {
             return 0;
         };
-        forward_bfs(source_id, &self.forward)
+        forward_bfs(source_id, &self.forward, &self.block_sets)
             .into_iter()
             .filter(|&(_, score)| score >= threshold)
             .count() as u32
@@ -583,7 +658,7 @@ impl TrustGraph {
         let source_id = self.index.get_id(&source)?;
         let target_id = self.index.get_id(&target)?;
 
-        for (node, score) in forward_bfs(source_id, &self.forward) {
+        for (node, score) in forward_bfs(source_id, &self.forward, &self.block_sets) {
             if node == target_id {
                 return Some((score, score_to_distance(score)));
             }
@@ -625,6 +700,7 @@ mod tests {
     const C: Uuid = Uuid::from_u128(0xc);
     const D: Uuid = Uuid::from_u128(0xd);
     const E: Uuid = Uuid::from_u128(0xe);
+    const F: Uuid = Uuid::from_u128(0xf);
     const H: Uuid = Uuid::from_u128(0x10);
     const M: Uuid = Uuid::from_u128(0x11);
     const S1: Uuid = Uuid::from_u128(0x12);
@@ -632,6 +708,14 @@ mod tests {
 
     /// Build a TrustGraph directly from UUID edges (no database).
     fn graph_from_edges(edges: &[(Uuid, Uuid)]) -> TrustGraph {
+        graph_from_edges_with_blocks(edges, &[])
+    }
+
+    /// Build a TrustGraph with both trust and block edges (no database).
+    fn graph_from_edges_with_blocks(
+        edges: &[(Uuid, Uuid)],
+        block_edges: &[(Uuid, Uuid)],
+    ) -> TrustGraph {
         let index = NodeIndex::from_edges(edges);
         let dense: Vec<(u32, u32)> = edges
             .iter()
@@ -639,10 +723,21 @@ mod tests {
             .collect();
         let forward = CsrGraph::from_edges(index.num_nodes(), &dense);
         let reverse = forward.transpose();
+
+        let mut block_sets: BlockSets = HashMap::new();
+        for &(blocker, blocked) in block_edges {
+            if let (Some(blocker_id), Some(blocked_id)) =
+                (index.get_id(&blocker), index.get_id(&blocked))
+            {
+                block_sets.entry(blocker_id).or_default().insert(blocked_id);
+            }
+        }
+
         TrustGraph {
             forward,
             reverse,
             index,
+            block_sets,
         }
     }
 
@@ -936,5 +1031,89 @@ mod tests {
         let paths = g.paths_to(A, C);
         assert!(paths.contains(&TrustPath::Direct));
         assert!(paths.contains(&TrustPath::TwoHop { via: B }));
+    }
+
+    // -- Block propagation tests --
+
+    #[test]
+    fn test_block_single_target_penalizes_intermediary() {
+        // A→B→C, B trusts E (blocked by A)
+        let g = graph_from_edges_with_blocks(&[(A, B), (B, C), (B, E)], &[(A, E)]);
+        let scores = g.forward_scores(A);
+        let map: HashMap<Uuid, f64> = scores.iter().map(|s| (s.target_user, s.score)).collect();
+
+        // B trusts E (blocked) → reliability = 0.75
+        assert!((map[&B] - 0.75).abs() < 0.001);
+        // C = 0.75 * DECAY * 1.0 = 0.525
+        assert!((map[&C] - 0.525).abs() < 0.001);
+        // E is directly blocked → 0.0
+        assert!((map[&E] - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_block_multiple_targets_compound() {
+        // A→B, B trusts C and D (both blocked by A)
+        let g = graph_from_edges_with_blocks(&[(A, B), (B, C), (B, D)], &[(A, C), (A, D)]);
+        let scores = g.forward_scores(A);
+        let map: HashMap<Uuid, f64> = scores.iter().map(|s| (s.target_user, s.score)).collect();
+
+        // B trusts 2 blocked → reliability = 0.75^2 = 0.5625
+        assert!((map[&B] - 0.5625).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_block_no_penalty_clean_node() {
+        // A→B→C, A→E. A blocks E. B doesn't trust E → no penalty.
+        let g = graph_from_edges_with_blocks(&[(A, B), (B, C), (A, E)], &[(A, E)]);
+        let scores = g.forward_scores(A);
+        let map: HashMap<Uuid, f64> = scores.iter().map(|s| (s.target_user, s.score)).collect();
+
+        assert!((map[&B] - 1.0).abs() < 0.001);
+        assert!((map[&C] - 0.7).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_block_multipath_recovery() {
+        // A→B→D, A→C→D. B trusts E (blocked by A), C is clean.
+        let g = graph_from_edges_with_blocks(&[(A, B), (A, C), (B, D), (C, D), (B, E)], &[(A, E)]);
+        let scores = g.forward_scores(A);
+        let map: HashMap<Uuid, f64> = scores.iter().map(|s| (s.target_user, s.score)).collect();
+
+        // Group B: 0.75 * 0.7 = 0.525, Group C: 1.0 * 0.7 = 0.7
+        // Combined: 1 - (1-0.525)(1-0.7) = 0.8575
+        assert!((map[&D] - 0.8575).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_block_compounds_along_path() {
+        // A→B→C→D, B trusts E (blocked), C trusts F (blocked)
+        let g = graph_from_edges_with_blocks(
+            &[(A, B), (B, C), (C, D), (B, E), (C, F)],
+            &[(A, E), (A, F)],
+        );
+        let scores = g.forward_scores(A);
+        let map: HashMap<Uuid, f64> = scores.iter().map(|s| (s.target_user, s.score)).collect();
+
+        // B: reliability = 0.75 → 0.75
+        assert!((map[&B] - 0.75).abs() < 0.001);
+        // C: 0.75 * DECAY * reliability(C) = 0.75 * 0.7 * 0.75 = 0.39375
+        assert!((map[&C] - 0.39375).abs() < 0.001);
+        // D: 0.39375 * DECAY * 1.0 ≈ 0.2756
+        assert!((map[&D] - 0.39375 * DECAY).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_block_sybil_resistance() {
+        // A→H, H→M, H→S1→M, H→S2→M, H→E. A blocks E.
+        let g = graph_from_edges_with_blocks(
+            &[(A, H), (H, M), (H, S1), (H, S2), (S1, M), (S2, M), (H, E)],
+            &[(A, E)],
+        );
+        let scores = g.forward_scores(A);
+        let map: HashMap<Uuid, f64> = scores.iter().map(|s| (s.target_user, s.score)).collect();
+
+        // All via first-hop H. H reliability = 0.75 (trusts E).
+        // Best in group: H→M = 0.75 * 0.7 = 0.525
+        assert!((map[&M] - 0.525).abs() < 0.001);
     }
 }

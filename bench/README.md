@@ -65,32 +65,35 @@ This is a **pessimistic scenario for performance**: a 10K-user instance connecte
 These results are from a test run on a Raspberry Pi 4. Even on modest hardware, forward and backwards trust computations for 100 users (simulated page load) in the "federation" scenario takes only 1ms:
 
 ```
+Prismoire Trust Graph Benchmark
+===============================
 Algorithm: Bottleneck-Grouped Probabilistic (DECAY=0.7, MAX_DEPTH=3)
 
 ============================================================
   Benchmark: Single Instance (10K users)
 ============================================================
 
-Graph generation:  18.3ms
+Graph generation:  19.9ms
   nodes: 10000  edges: 100000
   local users: 10000
 
-CSR build:         7.2ms
+CSR build:         6.8ms
   forward:  offsets=10001 targets=100000
   reverse:  offsets=10001 targets=100000
   memory:   859 KB (forward + reverse CSR, no index)
-  RSS delta: 1.6 MB → 3.5 MB (+1.9 MB)
+  RSS delta: 1.8 MB → 3.6 MB (+1.8 MB)
+  block edges: 1532  blockers: 1000
 
 Forward BFS (relevance) — 100 samples:
-  min: 0.464ms  p50: 0.482ms  p99: 0.678ms  max: 0.678ms  mean: 0.506ms
+  min: 0.474ms  p50: 0.488ms  p99: 1.124ms  max: 1.124ms  mean: 0.546ms
   avg reachable targets: 1046
 
 Reverse BFS (visibility) — 100 samples:
-  min: 0.103ms  p50: 0.421ms  p99: 0.952ms  max: 0.952ms  mean: 0.420ms
+  min: 0.101ms  p50: 0.416ms  p99: 0.911ms  max: 0.911ms  mean: 0.414ms
   avg reachable sources: 1082
 
 Dual BFS (simulated page load) — 100 samples:
-  p50: 0.924ms  p99: 1.414ms  mean: 0.915ms
+  p50: 0.930ms  p99: 1.451ms  mean: 0.946ms
 
 Peak RSS: 4.2 MB
 
@@ -98,26 +101,27 @@ Peak RSS: 4.2 MB
   Benchmark: Federation (10K instances)
 ============================================================
 
-Graph generation:  29.5ms
+Graph generation:  30.1ms
   nodes: 1120000  edges: 1210000
   local users: 10000
 
-CSR build:         96.9ms
+CSR build:         97.8ms
   forward:  offsets=1120001 targets=1210000
   reverse:  offsets=1120001 targets=1210000
   memory:   17.8 MB (forward + reverse CSR, no index)
-  RSS delta: 2.4 MB → 37.7 MB (+35.3 MB)
+  RSS delta: 2.6 MB → 37.8 MB (+35.2 MB)
+  block edges: 1532  blockers: 1000
 
 Forward BFS (relevance) — 100 samples:
-  min: 0.610ms  p50: 0.629ms  p99: 0.760ms  max: 0.760ms  mean: 0.635ms
+  min: 0.634ms  p50: 0.654ms  p99: 1.133ms  max: 1.133ms  mean: 0.702ms
   avg reachable targets: 1367
 
 Reverse BFS (visibility) — 100 samples:
-  min: 0.100ms  p50: 0.426ms  p99: 0.842ms  max: 0.842ms  mean: 0.417ms
+  min: 0.099ms  p50: 0.417ms  p99: 0.819ms  max: 0.819ms  mean: 0.406ms
   avg reachable sources: 1082
 
 Dual BFS (simulated page load) — 100 samples:
-  p50: 1.074ms  p99: 1.510ms  mean: 1.062ms
+  p50: 1.106ms  p99: 1.754ms  mean: 1.126ms
 
-Peak RSS: 46.9 MB
+Peak RSS: 47.0 MB
 ```
