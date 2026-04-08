@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -614,9 +613,12 @@ pub async fn get_trust_edges(
     let graph = state.get_trust_graph()?;
     let viewer_uuid =
         Uuid::parse_str(&user.user_id).map_err(|_| AppError::Internal("invalid user id".into()))?;
-    let mut distance_map = graph.distance_map(viewer_uuid);
+    let cached_dm = graph.distance_map(viewer_uuid);
     // The viewer isn't included in their own distance map; pin them at 0 so
     // they sort first rather than falling through to f64::MAX (untrusted).
+    // TODO: Avoid cloning the entire cached map just to insert one entry.
+    //  Check for the viewer's own ID inline at lookup sites instead.
+    let mut distance_map = HashMap::clone(&cached_dm);
     distance_map.insert(user.user_id.clone(), 0.0);
 
     let (rows, total) = match query.direction.as_str() {
@@ -752,7 +754,7 @@ pub async fn create_trust(
     .execute(&state.db)
     .await?;
 
-    state.trust_graph_dirty.store(true, Ordering::Release);
+    state.trust_graph_notify.notify_one();
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -780,7 +782,7 @@ pub async fn revoke_trust(
         return Err(AppError::NotFound("no trust to revoke".into()));
     }
 
-    state.trust_graph_dirty.store(true, Ordering::Release);
+    state.trust_graph_notify.notify_one();
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -818,7 +820,7 @@ pub async fn create_block(
     .execute(&state.db)
     .await?;
 
-    state.trust_graph_dirty.store(true, Ordering::Release);
+    state.trust_graph_notify.notify_one();
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -846,7 +848,7 @@ pub async fn revoke_block(
         return Err(AppError::NotFound("no block to revoke".into()));
     }
 
-    state.trust_graph_dirty.store(true, Ordering::Release);
+    state.trust_graph_notify.notify_one();
 
     Ok(StatusCode::NO_CONTENT)
 }

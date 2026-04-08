@@ -64,7 +64,12 @@ pub async fn get_thread(
             let bs = load_block_set(&state.db, &u.user_id).await?;
             (dm, rm, bs, Some(u.user_id.clone()))
         }
-        None => (HashMap::new(), HashMap::new(), HashSet::new(), None),
+        None => (
+            Arc::new(HashMap::new()),
+            Arc::new(HashMap::new()),
+            HashSet::new(),
+            None,
+        ),
     };
     let thread = sqlx::query_as::<
         _,

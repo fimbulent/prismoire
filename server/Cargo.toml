@@ -8,6 +8,7 @@ axum = { version = "0.8", features = ["json"] }
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+quick_cache = "0.6"
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 subtle = "2"

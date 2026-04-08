@@ -246,9 +246,7 @@ pub async fn signup_complete(
     .execute(&state.db)
     .await?;
 
-    state
-        .trust_graph_dirty
-        .store(true, std::sync::atomic::Ordering::Release);
+    state.trust_graph_notify.notify_one();
 
     let token = create_session(&state.db, &user_id).await?;
     let mut headers = HeaderMap::new();

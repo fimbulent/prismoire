@@ -1,6 +1,11 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
+use std::time::Duration;
 
+use quick_cache::Weighter;
+use quick_cache::sync::Cache;
 use sqlx::SqlitePool;
+use tokio::sync::Notify;
 use uuid::Uuid;
 
 /// Per-hop decay constant for trust propagation.
@@ -12,6 +17,30 @@ const MAX_DEPTH: u32 = 3;
 /// Minimum trust score to be considered trusted. Scores below this are
 /// treated as untrusted (no trust relationship).
 pub const MINIMUM_TRUST_THRESHOLD: f64 = 0.45;
+
+/// Default total BFS cache budget (in bytes), split evenly between the
+/// forward and reverse caches.
+const DEFAULT_BFS_CACHE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Approximate bytes per entry in a `HashMap<String, f64>` BFS result map.
+/// Accounts for: 36-byte UUID string + 24-byte String overhead + 8-byte f64
+/// value + ~16 bytes HashMap per-bucket overhead.
+const BYTES_PER_MAP_ENTRY: u64 = 84;
+
+/// Base overhead per cached BFS result (Arc + HashMap allocation).
+const MAP_BASE_OVERHEAD: u64 = 48;
+
+/// Weighter that estimates the heap size of a cached BFS result map.
+#[derive(Clone)]
+struct BfsWeighter;
+
+impl Weighter<Uuid, Arc<HashMap<String, f64>>> for BfsWeighter {
+    fn weight(&self, _key: &Uuid, val: &Arc<HashMap<String, f64>>) -> u64 {
+        MAP_BASE_OVERHEAD + (val.len() as u64 * BYTES_PER_MAP_ENTRY)
+    }
+}
+
+type BfsCache = Cache<Uuid, Arc<HashMap<String, f64>>, BfsWeighter>;
 
 /// Per-blocked-target penalty for reliability computation.
 const BLOCK_PENALTY: f64 = 0.25;
@@ -485,26 +514,29 @@ pub enum TrustPath {
 /// In-memory trust graph using dual CSR (forward + reverse) for on-demand
 /// bottleneck-grouped probabilistic BFS.
 ///
-/// Built from trust_edges at startup and rebuilt periodically when the dirty
-/// flag is set. Stored behind an `Arc` in `AppState`; readers clone the Arc
-/// for zero-contention concurrent access.
-// TODO: If more call sites need multiple BFS operations from the same source,
-//  consider a per-request `TrustQuery` context that lazily computes and caches
-//  forward/reverse BFS results internally. Currently only get_trust_detail
-//  benefits, and it consolidates manually via forward_scores().
+/// Built from trust_edges at startup and rebuilt by the background task when
+/// trust edges are mutated. Stored behind an `Arc` in `AppState`; readers
+/// clone the Arc for zero-contention concurrent access. Per-user BFS results
+/// are cached internally with byte-budgeted eviction.
 pub struct TrustGraph {
     forward: CsrGraph,
     reverse: CsrGraph,
     index: NodeIndex,
     block_sets: BlockSets,
+    /// Per-user cache of forward BFS distance maps (reader → {target_uuid_str → distance}).
+    forward_cache: BfsCache,
+    /// Per-user cache of reverse BFS score maps (reader → {author_uuid_str → score}).
+    reverse_cache: BfsCache,
 }
 
 impl TrustGraph {
     /// Build the trust graph from the database.
     ///
     /// Loads all trust edges from `trust_edges`, builds the UUID↔u32 index,
-    /// and constructs forward and reverse CSR graphs.
-    pub async fn build(db: &SqlitePool) -> Result<Self, sqlx::Error> {
+    /// and constructs forward and reverse CSR graphs. `bfs_cache_bytes`
+    /// is the total memory budget (in bytes) for cached BFS results,
+    /// split evenly between the forward and reverse caches.
+    pub async fn build(db: &SqlitePool, bfs_cache_bytes: u64) -> Result<Self, sqlx::Error> {
         let rows = sqlx::query_as::<_, (String, String)>(
             "SELECT source_user, target_user FROM trust_edges WHERE trust_type = 'trust'",
         )
@@ -563,6 +595,8 @@ impl TrustGraph {
             reverse,
             index,
             block_sets,
+            forward_cache: Self::make_bfs_cache(bfs_cache_bytes / 2),
+            reverse_cache: Self::make_bfs_cache(bfs_cache_bytes / 2),
         })
     }
 
@@ -576,7 +610,20 @@ impl TrustGraph {
                 id_to_uuid: Vec::new(),
             },
             block_sets: HashMap::new(),
+            forward_cache: Self::make_bfs_cache(0),
+            reverse_cache: Self::make_bfs_cache(0),
         }
+    }
+
+    /// Create a byte-weighted BFS cache with the given budget.
+    fn make_bfs_cache(budget_bytes: u64) -> BfsCache {
+        let estimated_items = if budget_bytes == 0 {
+            0
+        } else {
+            // Rough estimate assuming ~200 reachable users per BFS result.
+            (budget_bytes / (MAP_BASE_OVERHEAD + 200 * BYTES_PER_MAP_ENTRY)) as usize
+        };
+        Cache::with_weighter(estimated_items, budget_bytes, BfsWeighter)
     }
 
     /// Compute forward trust scores from `reader` to all reachable users
@@ -606,41 +653,61 @@ impl TrustGraph {
     }
 
     /// Build a lookup map from user UUID string to trust distance for the given reader.
+    ///
+    /// Results are cached per reader for the lifetime of this `TrustGraph`
+    /// instance. Returns a shared `Arc` — callers should clone if they need
+    /// to mutate (e.g., inserting the reader's own entry).
     // TODO: Use HashMap<Uuid, f64> once we migrate to typed sqlx::query!() macros
-    // so author IDs are already Uuid instead of String.
-    pub fn distance_map(&self, reader: Uuid) -> HashMap<String, f64> {
-        self.forward_scores(reader)
-            .into_iter()
-            .map(|s| (s.target_user.to_string(), s.distance))
-            .collect()
+    //  so author IDs are already Uuid instead of String. When we do this, we need to update
+    //  BfsWeighter impl (BYTES_PER_MAP_ENTRY would drop from 84 to ~32 bytes)
+    pub fn distance_map(&self, reader: Uuid) -> Arc<HashMap<String, f64>> {
+        self.forward_cache
+            .get_or_insert_with(&reader, || {
+                let map = self
+                    .forward_scores(reader)
+                    .into_iter()
+                    .map(|s| (s.target_user.to_string(), s.distance))
+                    .collect();
+                Ok::<_, ()>(Arc::new(map))
+            })
+            .unwrap()
     }
 
     /// Build a lookup map from author UUID string to their trust-in-reader score.
     ///
     /// Used for visibility filtering: a post is visible if the author's score
     /// for the reader meets the author's threshold (default 0.45).
-    pub fn reverse_score_map(&self, reader: Uuid) -> HashMap<String, f64> {
-        let Some(reader_id) = self.index.get_id(&reader) else {
-            return HashMap::new();
-        };
-
-        self.reverse_scores(reader)
-            .into_iter()
-            .map(|(uuid, score)| {
-                // Direct block override: if this author has blocked the
-                // reader, their trust-in-reader is 0.0 regardless of
-                // graph paths.
-                let effective = if let Some(author_id) = self.index.get_id(&uuid)
-                    && let Some(blocked) = self.block_sets.get(&author_id)
-                    && blocked.contains(&reader_id)
-                {
-                    0.0
-                } else {
-                    score
+    ///
+    /// Results are cached per reader for the lifetime of this `TrustGraph`
+    /// instance. Returns a shared `Arc`.
+    pub fn reverse_score_map(&self, reader: Uuid) -> Arc<HashMap<String, f64>> {
+        self.reverse_cache
+            .get_or_insert_with(&reader, || {
+                let Some(reader_id) = self.index.get_id(&reader) else {
+                    return Ok::<_, ()>(Arc::new(HashMap::new()));
                 };
-                (uuid.to_string(), effective)
+
+                let map = self
+                    .reverse_scores(reader)
+                    .into_iter()
+                    .map(|(uuid, score)| {
+                        // Direct block override: if this author has blocked the
+                        // reader, their trust-in-reader is 0.0 regardless of
+                        // graph paths.
+                        let effective = if let Some(author_id) = self.index.get_id(&uuid)
+                            && let Some(blocked) = self.block_sets.get(&author_id)
+                            && blocked.contains(&reader_id)
+                        {
+                            0.0
+                        } else {
+                            score
+                        };
+                        (uuid.to_string(), effective)
+                    })
+                    .collect();
+                Ok(Arc::new(map))
             })
-            .collect()
+            .unwrap()
     }
 
     /// Compute reverse trust scores: all users who trust `reader` within
@@ -771,22 +838,115 @@ impl TrustGraph {
 }
 
 // ---------------------------------------------------------------------------
-// Periodic rebuild task
+// Debounced rebuild task
 // ---------------------------------------------------------------------------
+
+/// Timing parameters for the trust graph rebuild scheduler.
+///
+/// Three parameters control when a rebuild fires after a mutation:
+/// - `debounce`: wait this long after the *last* mutation before rebuilding,
+///   coalescing rapid changes (e.g., federation sync bursts).
+/// - `min_interval`: minimum time between consecutive rebuilds, preventing
+///   thrashing under sustained mutation load.
+/// - `max_interval`: maximum staleness — if dirty, rebuild after this long
+///   even if mutations are still arriving.
+pub struct RebuildSchedule {
+    pub debounce: Duration,
+    pub min_interval: Duration,
+    pub max_interval: Duration,
+    /// Total memory budget (in bytes) for cached BFS results, split evenly
+    /// between the forward and reverse caches. Entries are evicted when
+    /// either half exceeds its share.
+    pub bfs_cache_bytes: u64,
+}
+
+impl Default for RebuildSchedule {
+    fn default() -> Self {
+        Self {
+            debounce: Duration::from_secs(5),
+            min_interval: Duration::from_secs(30),
+            max_interval: Duration::from_secs(300),
+            bfs_cache_bytes: DEFAULT_BFS_CACHE_BYTES,
+        }
+    }
+}
 
 /// Rebuild the trust graph from the database and swap it into the shared Arc.
 ///
-/// Called by the background task when the dirty flag is set. The new graph
-/// replaces the old one atomically; in-flight queries using the old Arc
-/// continue unaffected until they drop their reference.
+/// Builds a new dual CSR graph and replaces the old one atomically; in-flight
+/// queries using the old Arc continue unaffected until they drop their
+/// reference.
 pub async fn rebuild_trust_graph(
     db: &SqlitePool,
-    graph: &std::sync::RwLock<std::sync::Arc<TrustGraph>>,
+    graph: &std::sync::RwLock<Arc<TrustGraph>>,
+    bfs_cache_bytes: u64,
 ) -> Result<(), sqlx::Error> {
-    let new_graph = TrustGraph::build(db).await?;
-    let new_arc = std::sync::Arc::new(new_graph);
+    let new_graph = TrustGraph::build(db, bfs_cache_bytes).await?;
+    let new_arc = Arc::new(new_graph);
     *graph.write().unwrap() = new_arc;
     Ok(())
+}
+
+/// Run the debounced trust graph rebuild loop.
+///
+/// Waits for notifications from mutation sites, then rebuilds the graph
+/// subject to the timing constraints in `schedule`. The loop ensures:
+/// - At least `min_interval` between rebuilds (prevents thrashing).
+/// - At least `debounce` of quiet time after the last mutation (coalesces bursts).
+/// - At most `max_interval` of staleness when mutations are continuous.
+/// - No rebuild if the graph hasn't changed (dirty flag is false).
+// TODO: Accept a CancellationToken for graceful shutdown.
+pub async fn rebuild_loop(
+    db: SqlitePool,
+    graph: Arc<std::sync::RwLock<Arc<TrustGraph>>>,
+    notify: Arc<Notify>,
+    schedule: RebuildSchedule,
+) {
+    use tokio::time::{Instant, sleep_until};
+
+    // Run an initial build immediately (graph starts empty).
+    // TODO: Retry with backoff if the initial build fails, rather than
+    //  silently continuing with an empty graph.
+    if let Err(e) = rebuild_trust_graph(&db, &graph, schedule.bfs_cache_bytes).await {
+        eprintln!("trust graph initial build failed: {e}");
+    }
+
+    let mut last_rebuild = Instant::now();
+
+    loop {
+        // Wait for the first mutation notification.
+        notify.notified().await;
+
+        // Mutation received — enter the scheduling window.
+        let mut last_mutation = Instant::now();
+        let earliest_rebuild = last_rebuild + schedule.min_interval;
+        let deadline = last_mutation + schedule.max_interval;
+
+        loop {
+            let debounce_at = last_mutation + schedule.debounce;
+            // Next rebuild attempt: respect both debounce and min_interval,
+            // but never exceed the max_interval deadline.
+            let target = debounce_at.max(earliest_rebuild).min(deadline);
+
+            // Wait until target, but wake early if a new mutation arrives
+            // (to reset the debounce timer).
+            tokio::select! {
+                _ = sleep_until(target) => break,
+                _ = notify.notified() => {
+                    last_mutation = Instant::now();
+                    continue;
+                }
+            }
+        }
+
+        match rebuild_trust_graph(&db, &graph, schedule.bfs_cache_bytes).await {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("trust graph rebuild failed: {e}");
+            }
+        }
+        last_rebuild = Instant::now();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -840,6 +1000,8 @@ mod tests {
             reverse,
             index,
             block_sets,
+            forward_cache: TrustGraph::make_bfs_cache(1024 * 1024),
+            reverse_cache: TrustGraph::make_bfs_cache(1024 * 1024),
         }
     }
 
