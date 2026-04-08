@@ -28,6 +28,18 @@
 	--font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
 }
 
+/* Trust color interpolation: themes only need --trust-direct and --trust-3hop.
+   Intermediate levels are derived via oklch blending.
+   Themes can override any intermediate with --trust-{level}-override. */
+:root {
+	--trust-2hop: var(--trust-2hop-override,
+		color-mix(in oklch shorter hue, var(--trust-direct) 50%, var(--trust-3hop)));
+	--trust-1_5hop: var(--trust-1_5hop-override,
+		color-mix(in oklch shorter hue, var(--trust-direct) 50%, var(--trust-2hop)));
+	--trust-2_5hop: var(--trust-2_5hop-override,
+		color-mix(in oklch shorter hue, var(--trust-2hop) 50%, var(--trust-3hop)));
+}
+
 /* Default palette: Rose Pine */
 :root {
 	--bg: #1a1a2e;
@@ -42,11 +54,9 @@
 	--border-subtle: #2e2b45;
 	--accent: #c4a7e7;
 	--accent-muted: #8e7aab;
-	--trust-direct: oklch(0.78 0.08 185);
-	--trust-1_5hop: oklch(0.78 0.08 146.3);
-	--trust-2hop: oklch(0.78 0.08 107.5);
-	--trust-2_5hop: oklch(0.78 0.08 68.8);
-	--trust-3hop: oklch(0.78 0.08 30);
+    --trust-direct: #9ccfd8;
+    --trust-2hop: #f6c177;
+    --trust-3hop: #ea9a97;
 	--trust-untrusted: #6e6a86;
 	--link: #c4a7e7;
 	--link-hover: #e0def4;
