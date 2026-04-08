@@ -615,6 +615,34 @@ impl TrustGraph {
             .collect()
     }
 
+    /// Build a lookup map from author UUID string to their trust-in-reader score.
+    ///
+    /// Used for visibility filtering: a post is visible if the author's score
+    /// for the reader meets the author's threshold (default 0.45).
+    pub fn reverse_score_map(&self, reader: Uuid) -> HashMap<String, f64> {
+        let Some(reader_id) = self.index.get_id(&reader) else {
+            return HashMap::new();
+        };
+
+        self.reverse_scores(reader)
+            .into_iter()
+            .map(|(uuid, score)| {
+                // Direct block override: if this author has blocked the
+                // reader, their trust-in-reader is 0.0 regardless of
+                // graph paths.
+                let effective = if let Some(author_id) = self.index.get_id(&uuid)
+                    && let Some(blocked) = self.block_sets.get(&author_id)
+                    && blocked.contains(&reader_id)
+                {
+                    0.0
+                } else {
+                    score
+                };
+                (uuid.to_string(), effective)
+            })
+            .collect()
+    }
+
     /// Compute reverse trust scores: all users who trust `reader` within
     /// MAX_DEPTH hops (visibility check).
     ///
@@ -626,7 +654,6 @@ impl TrustGraph {
     /// NOTE: These scores do NOT include block propagation — they are an
     /// approximation. For exact block-penalized trust(author, reader), use
     /// `trust_between(author, reader)` which runs forward BFS from the author.
-    #[cfg_attr(not(test), expect(dead_code))]
     pub fn reverse_scores(&self, reader: Uuid) -> HashMap<Uuid, f64> {
         let Some(reader_id) = self.index.get_id(&reader) else {
             return HashMap::new();

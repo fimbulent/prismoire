@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { getRoom, type Room } from '$lib/api/rooms';
-	import { listThreads, listAllThreads, type ThreadSummary } from '$lib/api/threads';
+	import { listThreads, listAllThreads, type ThreadSummary, type ThreadSort } from '$lib/api/threads';
 	import { relativeTime } from '$lib/format';
 	import { session } from '$lib/stores/session.svelte';
 	import { page } from '$app/state';
@@ -17,6 +17,7 @@
 	let loadingMore = $state(false);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
+	let sortMode = $state<ThreadSort>('trust_7d');
 
 	$effect(() => {
 		if (session.loading) return;
@@ -25,10 +26,10 @@
 			return;
 		}
 		const slug = page.params.room;
-		if (slug) load(slug);
+		if (slug) load(slug, sortMode);
 	});
 
-	async function load(slug: string) {
+	async function load(slug: string, sort?: ThreadSort) {
 		loading = true;
 		error = null;
 		threads = [];
@@ -36,13 +37,13 @@
 		try {
 			if (slug === 'all') {
 				room = null;
-				const res = await listAllThreads();
+				const res = await listAllThreads(undefined, sort);
 				threads = res.threads;
 				nextCursor = res.next_cursor;
 			} else {
 				const [roomData, threadData] = await Promise.all([
 					getRoom(slug),
-					listThreads(slug)
+					listThreads(slug, undefined, sort)
 				]);
 				room = roomData;
 				threads = threadData.threads;
@@ -61,7 +62,7 @@
 		try {
 			const slug = page.params.room!;
 			const res =
-				slug === 'all' ? await listAllThreads(nextCursor) : await listThreads(slug, nextCursor);
+				slug === 'all' ? await listAllThreads(nextCursor, sortMode) : await listThreads(slug, nextCursor, sortMode);
 			threads = [...threads, ...res.threads];
 			nextCursor = res.next_cursor;
 		} catch (e) {
@@ -89,7 +90,21 @@
 		<div class="text-center text-danger py-12">{error}</div>
 	{:else}
 		<div class="pt-5 pb-3 flex items-center justify-between">
-			<h1 class="text-lg font-bold">{heading}</h1>
+			<div class="flex items-center gap-3">
+				<h1 class="text-lg font-bold">{heading}</h1>
+				<select
+					bind:value={sortMode}
+					onchange={() => { const slug = page.params.room; if (slug) load(slug, sortMode); }}
+					class="font-sans text-xs bg-bg-surface text-text-secondary border border-border rounded-md px-2 py-1 cursor-pointer hover:border-accent-muted focus:outline-none focus:border-accent-muted"
+				>
+					<option value="trust_24h">Trust (24h)</option>
+					<option value="trust_7d">Trust (7d)</option>
+					<option value="trust_30d">Trust (30d)</option>
+					<option value="trust_1y">Trust (1y)</option>
+					<option value="trust_all">Trust (all)</option>
+					<option value="new">New</option>
+				</select>
+			</div>
 			{#if session.isLoggedIn && !isAll && room && (!room.public || session.isAdmin)}
 				<button
 					onclick={() => goto(`/room/${encodeURIComponent(room!.slug)}/new`)}

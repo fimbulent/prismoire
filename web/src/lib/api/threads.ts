@@ -59,10 +59,12 @@ export interface CreateThreadRequest {
 
 export async function listThreads(
 	roomIdOrSlug: string,
-	cursor?: string
+	cursor?: string,
+	sort?: ThreadSort
 ): Promise<ThreadListResponse> {
 	const params = new URLSearchParams();
 	if (cursor) params.set('cursor', cursor);
+	if (sort) params.set('sort', sort);
 	const qs = params.toString();
 	const res = await fetch(
 		`/api/rooms/${encodeURIComponent(roomIdOrSlug)}/threads${qs ? `?${qs}` : ''}`
@@ -74,9 +76,10 @@ export async function listThreads(
 	return res.json();
 }
 
-export async function listAllThreads(cursor?: string): Promise<ThreadListResponse> {
+export async function listAllThreads(cursor?: string, sort?: ThreadSort): Promise<ThreadListResponse> {
 	const params = new URLSearchParams();
 	if (cursor) params.set('cursor', cursor);
+	if (sort) params.set('sort', sort);
 	const qs = params.toString();
 	const res = await fetch(`/api/threads${qs ? `?${qs}` : ''}`);
 	if (!res.ok) {
@@ -98,8 +101,12 @@ export async function listPublicThreads(cursor?: string): Promise<ThreadListResp
 	return res.json();
 }
 
-export async function getThread(id: string): Promise<ThreadDetail> {
-	const res = await fetch(`/api/threads/${encodeURIComponent(id)}`);
+export type ThreadSort = 'new' | 'trust_24h' | 'trust_7d' | 'trust_30d' | 'trust_1y' | 'trust_all';
+export type ThreadDetailSort = 'trust' | 'new';
+
+export async function getThread(id: string, sort?: ThreadDetailSort): Promise<ThreadDetail> {
+	const params = sort && sort !== 'trust' ? `?sort=${sort}` : '';
+	const res = await fetch(`/api/threads/${encodeURIComponent(id)}${params}`);
 	if (!res.ok) {
 		const err: ApiError = await res.json();
 		throw new Error(err.error);

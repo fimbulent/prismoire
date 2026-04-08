@@ -3,7 +3,8 @@
 		getThread,
 		replyToThread,
 		type ThreadDetail,
-		type PostResponse
+		type PostResponse,
+		type ThreadDetailSort
 	} from '$lib/api/threads';
 	import {
 		lockThread, unlockThread, removePost
@@ -23,6 +24,8 @@
 	let thread = $state<ThreadDetail | null>(null);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
+
+	let sortMode = $state<ThreadDetailSort>('trust');
 
 	let replyingToId = $state<string | null>(null);
 	let replyError = $state<string | null>(null);
@@ -77,11 +80,11 @@
 		}
 	});
 
-	async function loadThread(id: string) {
+	async function loadThread(id: string, sort?: ThreadDetailSort) {
 		loading = true;
 		error = null;
 		try {
-			thread = await getThread(id);
+			thread = await getThread(id, sort);
 			if (!session.isLoggedIn && !thread.room_public) {
 				goto('/login', { replaceState: true });
 				return;
@@ -351,9 +354,13 @@
 			{#if thread.post.children.length > 0}
 				<div class="text-xs mb-2 flex items-center gap-1.5 text-text-muted">
 					<span>Sort by:</span>
-					<select class="font-sans text-xs bg-bg-surface text-text-secondary border border-border rounded-md px-2 py-1 cursor-pointer hover:border-accent-muted focus:outline-none focus:border-accent-muted">
-						<option>Trust</option>
-						<option>Chronological</option>
+					<select
+						bind:value={sortMode}
+						onchange={async () => { if (thread) { const t = await getThread(thread.id, sortMode); thread.post.children = t.post.children; thread.reply_count = t.reply_count; } }}
+						class="font-sans text-xs bg-bg-surface text-text-secondary border border-border rounded-md px-2 py-1 cursor-pointer hover:border-accent-muted focus:outline-none focus:border-accent-muted"
+					>
+						<option value="trust">Trust</option>
+						<option value="new">New</option>
 					</select>
 				</div>
 
