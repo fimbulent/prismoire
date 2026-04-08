@@ -101,7 +101,16 @@ export async function listPublicThreads(cursor?: string): Promise<ThreadListResp
 	return res.json();
 }
 
-export type ThreadSort = 'new' | 'trust_24h' | 'trust_7d' | 'trust_30d' | 'trust_1y' | 'trust_all';
+export type ThreadSort =
+	| 'warm'
+	| 'new'
+	| 'active'
+	| 'trusted'
+	| 'trust_24h'
+	| 'trust_7d'
+	| 'trust_30d'
+	| 'trust_1y'
+	| 'trust_all';
 export type ThreadDetailSort = 'trust' | 'new';
 
 export async function getThread(id: string, sort?: ThreadDetailSort): Promise<ThreadDetail> {

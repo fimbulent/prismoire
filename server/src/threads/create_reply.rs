@@ -10,7 +10,9 @@ use crate::signing;
 use crate::state::AppState;
 use crate::trust::TrustInfo;
 
-use super::common::{CreateReplyRequest, MAX_REPLY_BODY_LEN, PostResponse, validate_body};
+use super::common::{
+    CreateReplyRequest, MAX_REPLY_BODY_LEN, PostResponse, RECENT_REPLIERS_BUFFER, validate_body,
+};
 
 /// Create a reply to a post within a thread.
 ///
@@ -87,6 +89,38 @@ pub async fn create_reply(
             .bind(&post_id)
             .fetch_one(&state.db)
             .await?;
+
+    sqlx::query("UPDATE threads SET reply_count = reply_count + 1, last_activity = ? WHERE id = ?")
+        .bind(&post_created_at)
+        .bind(&thread_id)
+        .execute(&state.db)
+        .await?;
+
+    // These three statements (bump ranks, insert rank 0, trim overflow) are
+    // not wrapped in an explicit transaction, but SQLite serializes all writers
+    // via its WAL write lock, so concurrent replies cannot interleave.
+    sqlx::query(
+        "UPDATE thread_recent_repliers SET reply_rank = reply_rank + 1 WHERE thread_id = ?",
+    )
+    .bind(&thread_id)
+    .execute(&state.db)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO thread_recent_repliers (thread_id, reply_rank, replier_id, replied_at) \
+         VALUES (?, 0, ?, ?)",
+    )
+    .bind(&thread_id)
+    .bind(&user.user_id)
+    .bind(&post_created_at)
+    .execute(&state.db)
+    .await?;
+
+    sqlx::query("DELETE FROM thread_recent_repliers WHERE thread_id = ? AND reply_rank >= ?")
+        .bind(&thread_id)
+        .bind(RECENT_REPLIERS_BUFFER)
+        .execute(&state.db)
+        .await?;
 
     Ok((
         axum::http::StatusCode::CREATED,

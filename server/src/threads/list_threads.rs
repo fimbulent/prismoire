@@ -12,14 +12,30 @@ use crate::state::AppState;
 use crate::trust::{TrustInfo, load_block_set};
 
 use super::common::{
-    PAGE_SIZE, PaginationParams, ThreadListResponse, ThreadSort, ThreadSummary, is_thread_visible,
-    make_cursor, parse_cursor, ranked_authors, sort_threads_by_trust, sql_placeholders,
-    window_cutoff,
+    PAGE_SIZE, PaginationParams, RecentReplier, ThreadListResponse, ThreadSort, ThreadSummary,
+    is_thread_visible, make_cursor, make_cursor_created_at, parse_cursor, ranked_authors,
+    score_trusted_recent, score_warm, sort_threads_by_trust, sql_placeholders, window_cutoff,
 };
 
 /// Number of trusted authors to include per batch when iteratively fetching
 /// threads for trust-sorted listings.
 const TRUST_BATCH_SIZE: usize = 50;
+
+/// Maximum number of candidate threads to fetch for warm sort scoring.
+///
+/// The design doc suggests 2000 as an upper bound, but 500 is sufficient in
+/// practice: visibility filtering reduces the pool further, and rank decay
+/// makes threads beyond ~position 50 negligible. Keeps the replier data
+/// load (500 × 50 = 25K rows) fast.
+const WARM_CANDIDATE_LIMIT: i64 = 500;
+
+// ---------------------------------------------------------------------------
+// Shared SQL fragments
+// ---------------------------------------------------------------------------
+
+/// WHERE clause that hides retracted OPs with no replies.
+const RETRACTED_OP_FILTER: &str = "NOT (t.reply_count = 0 \
+     AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL)";
 
 // ---------------------------------------------------------------------------
 // Row types for query results
@@ -120,6 +136,105 @@ fn room_threads_to_summary(
 }
 
 // ---------------------------------------------------------------------------
+// Shared helpers: fetch recent repliers for warm sort
+// ---------------------------------------------------------------------------
+
+/// Fetch recent repliers for a set of candidate thread IDs from the
+/// denormalized `thread_recent_repliers` table.
+async fn fetch_repliers(
+    db: &sqlx::SqlitePool,
+    thread_ids: &[String],
+) -> Result<Vec<RecentReplier>, AppError> {
+    if thread_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let placeholders = sql_placeholders(thread_ids.len());
+    let sql = format!(
+        "SELECT thread_id, replier_id, replied_at \
+         FROM thread_recent_repliers \
+         WHERE thread_id IN {placeholders} \
+         ORDER BY thread_id, reply_rank ASC"
+    );
+
+    let mut query = sqlx::query_as::<_, (String, String, String)>(&sql);
+    for id in thread_ids {
+        query = query.bind(id);
+    }
+
+    let rows = query.fetch_all(db).await?;
+    Ok(rows
+        .into_iter()
+        .map(|(thread_id, replier_id, replied_at)| RecentReplier {
+            thread_id,
+            replier_id,
+            replied_at,
+        })
+        .collect())
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers: viewer-specific reply counts
+// ---------------------------------------------------------------------------
+
+/// Replace global `reply_count` on each thread with a viewer-specific count
+/// that only includes replies visible to the reader.
+///
+/// Visibility rules match `get_thread`:
+/// 1. The reader authored the reply.
+/// 2. The reply author's reverse trust meets `MINIMUM_TRUST_THRESHOLD`.
+/// 3. Reply visibility grant: the reader authored the reply's direct parent.
+///
+/// Batch-fetches `(thread, author, parent_author)` for the given threads,
+/// then filters in Rust using `reverse_map` point lookups.
+async fn apply_visible_reply_counts(
+    db: &sqlx::SqlitePool,
+    threads: &mut [ThreadSummary],
+    reverse_map: &HashMap<String, f64>,
+    reader_id: &str,
+) -> Result<(), AppError> {
+    if threads.is_empty() {
+        return Ok(());
+    }
+
+    let thread_ids: Vec<&str> = threads.iter().map(|t| t.id.as_str()).collect();
+    let placeholders = sql_placeholders(thread_ids.len());
+    let sql = format!(
+        "SELECT p.thread, p.author, COALESCE(parent_post.author, '') \
+         FROM posts p \
+         LEFT JOIN posts parent_post ON parent_post.id = p.parent \
+         WHERE p.thread IN {placeholders} \
+           AND p.parent IS NOT NULL"
+    );
+
+    let mut query = sqlx::query_as::<_, (String, String, String)>(&sql);
+    for id in &thread_ids {
+        query = query.bind(*id);
+    }
+
+    let rows = query.fetch_all(db).await?;
+
+    use crate::trust::MINIMUM_TRUST_THRESHOLD;
+    let mut counts: HashMap<&str, i64> = HashMap::new();
+    for (thread_id, author_id, parent_author_id) in &rows {
+        let visible = author_id == reader_id
+            || reverse_map
+                .get(author_id)
+                .is_some_and(|&s| s >= MINIMUM_TRUST_THRESHOLD)
+            || parent_author_id == reader_id;
+        if visible {
+            *counts.entry(thread_id.as_str()).or_default() += 1;
+        }
+    }
+
+    for thread in threads.iter_mut() {
+        thread.reply_count = counts.get(thread.id.as_str()).copied().unwrap_or(0);
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Shared iterative top-K trust-sorted fetch
 // ---------------------------------------------------------------------------
 
@@ -153,33 +268,29 @@ async fn fetch_trust_sorted_all_threads(
             format!(
                 "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
                  r.id, r.name, r.slug, t.locked, r.public, \
-                 (SELECT COUNT(*) FROM posts p WHERE p.thread = t.id AND p.parent IS NOT NULL) AS reply_count, \
-                 (SELECT MAX(p2.created_at) FROM posts p2 WHERE p2.thread = t.id) AS last_activity \
+                 t.reply_count, t.last_activity \
                  FROM threads t \
                  JOIN users u ON u.id = t.author \
                  JOIN rooms r ON r.id = t.room \
                  WHERE r.merged_into IS NULL \
                    AND t.author IN {placeholders} \
-                   AND NOT (reply_count = 0 \
-                        AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
-                   AND COALESCE(last_activity, t.created_at) >= ? \
-                 ORDER BY last_activity DESC NULLS LAST, t.created_at DESC \
+                   AND {RETRACTED_OP_FILTER} \
+                   AND COALESCE(t.last_activity, t.created_at) >= ? \
+                 ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC \
                  LIMIT ?"
             )
         } else {
             format!(
                 "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
                  r.id, r.name, r.slug, t.locked, r.public, \
-                 (SELECT COUNT(*) FROM posts p WHERE p.thread = t.id AND p.parent IS NOT NULL) AS reply_count, \
-                 (SELECT MAX(p2.created_at) FROM posts p2 WHERE p2.thread = t.id) AS last_activity \
+                 t.reply_count, t.last_activity \
                  FROM threads t \
                  JOIN users u ON u.id = t.author \
                  JOIN rooms r ON r.id = t.room \
                  WHERE r.merged_into IS NULL \
                    AND t.author IN {placeholders} \
-                   AND NOT (reply_count = 0 \
-                        AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
-                 ORDER BY last_activity DESC NULLS LAST, t.created_at DESC \
+                   AND {RETRACTED_OP_FILTER} \
+                 ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC \
                  LIMIT ?"
             )
         };
@@ -209,33 +320,29 @@ async fn fetch_trust_sorted_all_threads(
             format!(
                 "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
                  r.id, r.name, r.slug, t.locked, r.public, \
-                 (SELECT COUNT(*) FROM posts p WHERE p.thread = t.id AND p.parent IS NOT NULL) AS reply_count, \
-                 (SELECT MAX(p2.created_at) FROM posts p2 WHERE p2.thread = t.id) AS last_activity \
+                 t.reply_count, t.last_activity \
                  FROM threads t \
                  JOIN users u ON u.id = t.author \
                  JOIN rooms r ON r.id = t.room \
                  WHERE r.merged_into IS NULL \
                    AND t.id NOT IN {exclude} \
-                   AND NOT (reply_count = 0 \
-                        AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
-                   AND COALESCE(last_activity, t.created_at) >= ? \
-                 ORDER BY last_activity DESC NULLS LAST, t.created_at DESC \
+                   AND {RETRACTED_OP_FILTER} \
+                   AND COALESCE(t.last_activity, t.created_at) >= ? \
+                 ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC \
                  LIMIT ?"
             )
         } else {
             format!(
                 "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
                  r.id, r.name, r.slug, t.locked, r.public, \
-                 (SELECT COUNT(*) FROM posts p WHERE p.thread = t.id AND p.parent IS NOT NULL) AS reply_count, \
-                 (SELECT MAX(p2.created_at) FROM posts p2 WHERE p2.thread = t.id) AS last_activity \
+                 t.reply_count, t.last_activity \
                  FROM threads t \
                  JOIN users u ON u.id = t.author \
                  JOIN rooms r ON r.id = t.room \
                  WHERE r.merged_into IS NULL \
                    AND t.id NOT IN {exclude} \
-                   AND NOT (reply_count = 0 \
-                        AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
-                 ORDER BY last_activity DESC NULLS LAST, t.created_at DESC \
+                   AND {RETRACTED_OP_FILTER} \
+                 ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC \
                  LIMIT ?"
             )
         };
@@ -296,32 +403,26 @@ async fn fetch_trust_sorted_room_threads(
         let sql = if cutoff.is_some() {
             format!(
                 "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
-                 t.locked, \
-                 (SELECT COUNT(*) FROM posts p WHERE p.thread = t.id AND p.parent IS NOT NULL) AS reply_count, \
-                 (SELECT MAX(p2.created_at) FROM posts p2 WHERE p2.thread = t.id) AS last_activity \
+                 t.locked, t.reply_count, t.last_activity \
                  FROM threads t \
                  JOIN users u ON u.id = t.author \
                  WHERE t.room = ? \
                    AND t.author IN {placeholders} \
-                   AND NOT (reply_count = 0 \
-                        AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
-                   AND COALESCE(last_activity, t.created_at) >= ? \
-                 ORDER BY last_activity DESC NULLS LAST, t.created_at DESC \
+                   AND {RETRACTED_OP_FILTER} \
+                   AND COALESCE(t.last_activity, t.created_at) >= ? \
+                 ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC \
                  LIMIT ?"
             )
         } else {
             format!(
                 "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
-                 t.locked, \
-                 (SELECT COUNT(*) FROM posts p WHERE p.thread = t.id AND p.parent IS NOT NULL) AS reply_count, \
-                 (SELECT MAX(p2.created_at) FROM posts p2 WHERE p2.thread = t.id) AS last_activity \
+                 t.locked, t.reply_count, t.last_activity \
                  FROM threads t \
                  JOIN users u ON u.id = t.author \
                  WHERE t.room = ? \
                    AND t.author IN {placeholders} \
-                   AND NOT (reply_count = 0 \
-                        AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
-                 ORDER BY last_activity DESC NULLS LAST, t.created_at DESC \
+                   AND {RETRACTED_OP_FILTER} \
+                 ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC \
                  LIMIT ?"
             )
         };
@@ -359,32 +460,26 @@ async fn fetch_trust_sorted_room_threads(
         let sql = if cutoff.is_some() {
             format!(
                 "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
-                 t.locked, \
-                 (SELECT COUNT(*) FROM posts p WHERE p.thread = t.id AND p.parent IS NOT NULL) AS reply_count, \
-                 (SELECT MAX(p2.created_at) FROM posts p2 WHERE p2.thread = t.id) AS last_activity \
+                 t.locked, t.reply_count, t.last_activity \
                  FROM threads t \
                  JOIN users u ON u.id = t.author \
                  WHERE t.room = ? \
                    AND t.id NOT IN {exclude} \
-                   AND NOT (reply_count = 0 \
-                        AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
-                   AND COALESCE(last_activity, t.created_at) >= ? \
-                 ORDER BY last_activity DESC NULLS LAST, t.created_at DESC \
+                   AND {RETRACTED_OP_FILTER} \
+                   AND COALESCE(t.last_activity, t.created_at) >= ? \
+                 ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC \
                  LIMIT ?"
             )
         } else {
             format!(
                 "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
-                 t.locked, \
-                 (SELECT COUNT(*) FROM posts p WHERE p.thread = t.id AND p.parent IS NOT NULL) AS reply_count, \
-                 (SELECT MAX(p2.created_at) FROM posts p2 WHERE p2.thread = t.id) AS last_activity \
+                 t.locked, t.reply_count, t.last_activity \
                  FROM threads t \
                  JOIN users u ON u.id = t.author \
                  WHERE t.room = ? \
                    AND t.id NOT IN {exclude} \
-                   AND NOT (reply_count = 0 \
-                        AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
-                 ORDER BY last_activity DESC NULLS LAST, t.created_at DESC \
+                   AND {RETRACTED_OP_FILTER} \
+                 ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC \
                  LIMIT ?"
             )
         };
@@ -437,21 +532,20 @@ pub async fn list_public_threads(
 ) -> Result<impl IntoResponse, AppError> {
     let rows = if let Some(ref cursor) = params.cursor {
         let (cursor_ts, cursor_id) = parse_cursor(cursor)?;
-        sqlx::query_as::<_, (String, String, String, String, String, String, String, String, bool, bool, i64, Option<String>)>(
+        sqlx::query_as::<_, AllThreadsRow>(
             "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
              r.id, r.name, r.slug, t.locked, r.public, \
-             (SELECT COUNT(*) FROM posts p WHERE p.thread = t.id AND p.parent IS NOT NULL) AS reply_count, \
-             (SELECT MAX(p2.created_at) FROM posts p2 WHERE p2.thread = t.id) AS last_activity \
+             t.reply_count, t.last_activity \
              FROM threads t \
              JOIN users u ON u.id = t.author \
              JOIN rooms r ON r.id = t.room \
              WHERE r.merged_into IS NULL \
                AND r.public = 1 \
-               AND NOT (reply_count = 0 \
+               AND NOT (t.reply_count = 0 \
                     AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
-               AND (COALESCE(last_activity, t.created_at) < ? \
-                    OR (COALESCE(last_activity, t.created_at) = ? AND t.id < ?)) \
-             ORDER BY last_activity DESC NULLS LAST, t.created_at DESC, t.id DESC \
+               AND (COALESCE(t.last_activity, t.created_at) < ? \
+                    OR (COALESCE(t.last_activity, t.created_at) = ? AND t.id < ?)) \
+             ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC, t.id DESC \
              LIMIT ?",
         )
         .bind(&cursor_ts)
@@ -461,19 +555,18 @@ pub async fn list_public_threads(
         .fetch_all(&state.db)
         .await?
     } else {
-        sqlx::query_as::<_, (String, String, String, String, String, String, String, String, bool, bool, i64, Option<String>)>(
+        sqlx::query_as::<_, AllThreadsRow>(
             "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
              r.id, r.name, r.slug, t.locked, r.public, \
-             (SELECT COUNT(*) FROM posts p WHERE p.thread = t.id AND p.parent IS NOT NULL) AS reply_count, \
-             (SELECT MAX(p2.created_at) FROM posts p2 WHERE p2.thread = t.id) AS last_activity \
+             t.reply_count, t.last_activity \
              FROM threads t \
              JOIN users u ON u.id = t.author \
              JOIN rooms r ON r.id = t.room \
              WHERE r.merged_into IS NULL \
                AND r.public = 1 \
-               AND NOT (reply_count = 0 \
+               AND NOT (t.reply_count = 0 \
                     AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
-             ORDER BY last_activity DESC NULLS LAST, t.created_at DESC, t.id DESC \
+             ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC, t.id DESC \
              LIMIT ?",
         )
         .bind(PAGE_SIZE as i64 + 1)
@@ -485,8 +578,8 @@ pub async fn list_public_threads(
     let threads: Vec<ThreadSummary> = rows
         .into_iter()
         .take(PAGE_SIZE)
-        .map(
-            |(
+        .map(|row| {
+            let (
                 id,
                 title,
                 author_id,
@@ -499,24 +592,23 @@ pub async fn list_public_threads(
                 room_public,
                 reply_count,
                 last_activity,
-            )| {
-                ThreadSummary {
-                    id,
-                    title,
-                    author_id,
-                    author_name,
-                    room_id,
-                    room_name,
-                    room_slug,
-                    created_at,
-                    locked,
-                    room_public,
-                    reply_count,
-                    last_activity,
-                    trust: TrustInfo::unknown(),
-                }
-            },
-        )
+            ) = row;
+            ThreadSummary {
+                id,
+                title,
+                author_id,
+                author_name,
+                room_id,
+                room_name,
+                room_slug,
+                created_at,
+                locked,
+                room_public,
+                reply_count,
+                last_activity,
+                trust: TrustInfo::unknown(),
+            }
+        })
         .collect();
 
     let next_cursor = if has_more {
@@ -534,19 +626,17 @@ pub async fn list_public_threads(
 // ---------------------------------------------------------------------------
 // GET /api/threads — list threads across all rooms
 // ---------------------------------------------------------------------------
-// TODO: The "hide retracted OP with no replies" condition is duplicated across
-// list_all_threads, list_threads, and list_public_threads. Deduplicate when
-// migrating to sqlx::query!().
-// TODO: The windowed/non-windowed SQL branches in fetch_trust_sorted_all_threads
-// and fetch_trust_sorted_room_threads are near-identical (only the cutoff clause
-// differs). Deduplicate when migrating to sqlx::query!().
 
 /// List threads across all rooms, with sort mode and cursor pagination.
 ///
-/// - `sort=new`: chronological (most recently active first), cursor-paginated.
-/// - `sort=trust_*`: iterative top-K fetch — threads from the reader's most-
-///   trusted authors first, with a backfill for untrusted content. No cursor
-///   pagination (trust ordering is per-reader and not SQL-indexable).
+/// - `sort=warm` (default): rank-based decay × trust signal from visible
+///   repliers. No cursor pagination.
+/// - `sort=trusted`: rank-based decay × OP trust (no replier signal),
+///   with self-trust = 1.0. No cursor pagination.
+/// - `sort=trust_*`: flat OP trust sort with optional time window
+///   (iterative top-K fetch). No cursor pagination.
+/// - `sort=new`: thread creation time descending. Cursor-paginated.
+/// - `sort=active`: last reply time descending. Cursor-paginated.
 pub async fn list_all_threads(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -558,8 +648,50 @@ pub async fn list_all_threads(
     let reverse_map = graph.reverse_score_map(reader_uuid);
     let block_set = load_block_set(&state.db, &user.user_id).await?;
 
-    if params.sort.is_trust() {
-        let threads = fetch_trust_sorted_all_threads(
+    if params.sort == ThreadSort::Warm {
+        let mut threads = fetch_warm_candidates_all(
+            &state.db,
+            &trust_map,
+            &block_set,
+            &reverse_map,
+            &user.user_id,
+        )
+        .await?;
+        let thread_ids: Vec<String> = threads.iter().map(|t| t.id.clone()).collect();
+        let repliers = fetch_repliers(&state.db, &thread_ids).await?;
+        score_warm(
+            &mut threads,
+            &repliers,
+            &trust_map,
+            &reverse_map,
+            &user.user_id,
+        );
+        apply_visible_reply_counts(&state.db, &mut threads, &reverse_map, &user.user_id).await?;
+        return Ok(Json(ThreadListResponse {
+            threads,
+            next_cursor: None,
+        }));
+    }
+
+    if params.sort == ThreadSort::Trusted {
+        let mut threads = fetch_warm_candidates_all(
+            &state.db,
+            &trust_map,
+            &block_set,
+            &reverse_map,
+            &user.user_id,
+        )
+        .await?;
+        score_trusted_recent(&mut threads, &trust_map, &user.user_id);
+        apply_visible_reply_counts(&state.db, &mut threads, &reverse_map, &user.user_id).await?;
+        return Ok(Json(ThreadListResponse {
+            threads,
+            next_cursor: None,
+        }));
+    }
+
+    if params.sort.is_top_trusted() {
+        let mut threads = fetch_trust_sorted_all_threads(
             &state.db,
             &trust_map,
             &block_set,
@@ -568,67 +700,79 @@ pub async fn list_all_threads(
             params.sort,
         )
         .await?;
+        apply_visible_reply_counts(&state.db, &mut threads, &reverse_map, &user.user_id).await?;
         return Ok(Json(ThreadListResponse {
             threads,
             next_cursor: None,
         }));
     }
 
-    // sort=new: chronological with cursor pagination
+    // sort=new (creation time) or sort=active (last reply time)
+    let use_created_at = params.sort == ThreadSort::New;
+    let (order_col, order_col_coalesce) = if use_created_at {
+        ("t.created_at", "t.created_at")
+    } else {
+        ("t.last_activity", "COALESCE(t.last_activity, t.created_at)")
+    };
+
     let rows = if let Some(ref cursor) = params.cursor {
         let (cursor_ts, cursor_id) = parse_cursor(cursor)?;
-        sqlx::query_as::<_, AllThreadsRow>(
+        let sql = format!(
             "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
              r.id, r.name, r.slug, t.locked, r.public, \
-             (SELECT COUNT(*) FROM posts p WHERE p.thread = t.id AND p.parent IS NOT NULL) AS reply_count, \
-             (SELECT MAX(p2.created_at) FROM posts p2 WHERE p2.thread = t.id) AS last_activity \
+             t.reply_count, t.last_activity \
              FROM threads t \
              JOIN users u ON u.id = t.author \
              JOIN rooms r ON r.id = t.room \
              WHERE r.merged_into IS NULL \
-               AND NOT (reply_count = 0 \
-                    AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
-               AND (COALESCE(last_activity, t.created_at) < ? \
-                    OR (COALESCE(last_activity, t.created_at) = ? AND t.id < ?)) \
-             ORDER BY last_activity DESC NULLS LAST, t.created_at DESC, t.id DESC \
-             LIMIT ?",
-        )
-        .bind(&cursor_ts)
-        .bind(&cursor_ts)
-        .bind(&cursor_id)
-        .bind(PAGE_SIZE as i64 + 1)
-        .fetch_all(&state.db)
-        .await?
+               AND {RETRACTED_OP_FILTER} \
+               AND ({order_col_coalesce} < ? \
+                    OR ({order_col_coalesce} = ? AND t.id < ?)) \
+             ORDER BY {order_col} DESC NULLS LAST, t.created_at DESC, t.id DESC \
+             LIMIT ?"
+        );
+        sqlx::query_as::<_, AllThreadsRow>(&sql)
+            .bind(&cursor_ts)
+            .bind(&cursor_ts)
+            .bind(&cursor_id)
+            .bind(PAGE_SIZE as i64 + 1)
+            .fetch_all(&state.db)
+            .await?
     } else {
-        sqlx::query_as::<_, AllThreadsRow>(
+        let sql = format!(
             "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
              r.id, r.name, r.slug, t.locked, r.public, \
-             (SELECT COUNT(*) FROM posts p WHERE p.thread = t.id AND p.parent IS NOT NULL) AS reply_count, \
-             (SELECT MAX(p2.created_at) FROM posts p2 WHERE p2.thread = t.id) AS last_activity \
+             t.reply_count, t.last_activity \
              FROM threads t \
              JOIN users u ON u.id = t.author \
              JOIN rooms r ON r.id = t.room \
              WHERE r.merged_into IS NULL \
-               AND NOT (reply_count = 0 \
-                    AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
-             ORDER BY last_activity DESC NULLS LAST, t.created_at DESC, t.id DESC \
-             LIMIT ?",
-        )
-        .bind(PAGE_SIZE as i64 + 1)
-        .fetch_all(&state.db)
-        .await?
+               AND {RETRACTED_OP_FILTER} \
+             ORDER BY {order_col} DESC NULLS LAST, t.created_at DESC, t.id DESC \
+             LIMIT ?"
+        );
+        sqlx::query_as::<_, AllThreadsRow>(&sql)
+            .bind(PAGE_SIZE as i64 + 1)
+            .fetch_all(&state.db)
+            .await?
     };
 
     let has_more = rows.len() > PAGE_SIZE;
-    let threads: Vec<ThreadSummary> = rows
+    let mut threads: Vec<ThreadSummary> = rows
         .into_iter()
         .take(PAGE_SIZE)
         .filter(|row| is_thread_visible(&row.2, row.9, &user.user_id, &reverse_map))
         .map(|row| all_threads_to_summary(row, &trust_map, &block_set))
         .collect();
 
+    apply_visible_reply_counts(&state.db, &mut threads, &reverse_map, &user.user_id).await?;
+
     let next_cursor = if has_more {
-        threads.last().map(make_cursor)
+        threads.last().map(if use_created_at {
+            make_cursor_created_at
+        } else {
+            make_cursor
+        })
     } else {
         None
     };
@@ -666,8 +810,58 @@ pub async fn list_threads(
     let (room_id, room_name, room_slug, room_public) =
         room.ok_or_else(|| AppError::NotFound("room not found".into()))?;
 
-    if params.sort.is_trust() {
-        let threads = fetch_trust_sorted_room_threads(
+    if params.sort == ThreadSort::Warm {
+        let mut threads = fetch_warm_candidates_room(
+            &state.db,
+            &trust_map,
+            &block_set,
+            &reverse_map,
+            &user.user_id,
+            &room_id,
+            &room_name,
+            &room_slug,
+            room_public,
+        )
+        .await?;
+        let thread_ids: Vec<String> = threads.iter().map(|t| t.id.clone()).collect();
+        let repliers = fetch_repliers(&state.db, &thread_ids).await?;
+        score_warm(
+            &mut threads,
+            &repliers,
+            &trust_map,
+            &reverse_map,
+            &user.user_id,
+        );
+        apply_visible_reply_counts(&state.db, &mut threads, &reverse_map, &user.user_id).await?;
+        return Ok(Json(ThreadListResponse {
+            threads,
+            next_cursor: None,
+        }));
+    }
+
+    if params.sort == ThreadSort::Trusted {
+        let mut threads = fetch_warm_candidates_room(
+            &state.db,
+            &trust_map,
+            &block_set,
+            &reverse_map,
+            &user.user_id,
+            &room_id,
+            &room_name,
+            &room_slug,
+            room_public,
+        )
+        .await?;
+        score_trusted_recent(&mut threads, &trust_map, &user.user_id);
+        apply_visible_reply_counts(&state.db, &mut threads, &reverse_map, &user.user_id).await?;
+        return Ok(Json(ThreadListResponse {
+            threads,
+            next_cursor: None,
+        }));
+    }
+
+    if params.sort.is_top_trusted() {
+        let mut threads = fetch_trust_sorted_room_threads(
             &state.db,
             &trust_map,
             &block_set,
@@ -680,59 +874,63 @@ pub async fn list_threads(
             room_public,
         )
         .await?;
+        apply_visible_reply_counts(&state.db, &mut threads, &reverse_map, &user.user_id).await?;
         return Ok(Json(ThreadListResponse {
             threads,
             next_cursor: None,
         }));
     }
 
-    // sort=new: chronological with cursor pagination
+    // sort=new (creation time) or sort=active (last reply time)
+    let use_created_at = params.sort == ThreadSort::New;
+    let (order_col, order_col_coalesce) = if use_created_at {
+        ("t.created_at", "t.created_at")
+    } else {
+        ("t.last_activity", "COALESCE(t.last_activity, t.created_at)")
+    };
+
     let rows = if let Some(ref cursor) = params.cursor {
         let (cursor_ts, cursor_id) = parse_cursor(cursor)?;
-        sqlx::query_as::<_, RoomThreadsRow>(
+        let sql = format!(
             "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
-             t.locked, \
-             (SELECT COUNT(*) FROM posts p WHERE p.thread = t.id AND p.parent IS NOT NULL) AS reply_count, \
-             (SELECT MAX(p2.created_at) FROM posts p2 WHERE p2.thread = t.id) AS last_activity \
+             t.locked, t.reply_count, t.last_activity \
              FROM threads t \
              JOIN users u ON u.id = t.author \
              WHERE t.room = ? \
-               AND NOT (reply_count = 0 \
-                    AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
-               AND (COALESCE(last_activity, t.created_at) < ? \
-                    OR (COALESCE(last_activity, t.created_at) = ? AND t.id < ?)) \
-             ORDER BY last_activity DESC NULLS LAST, t.created_at DESC, t.id DESC \
-             LIMIT ?",
-        )
-        .bind(&room_id)
-        .bind(&cursor_ts)
-        .bind(&cursor_ts)
-        .bind(&cursor_id)
-        .bind(PAGE_SIZE as i64 + 1)
-        .fetch_all(&state.db)
-        .await?
+               AND {RETRACTED_OP_FILTER} \
+               AND ({order_col_coalesce} < ? \
+                    OR ({order_col_coalesce} = ? AND t.id < ?)) \
+             ORDER BY {order_col} DESC NULLS LAST, t.created_at DESC, t.id DESC \
+             LIMIT ?"
+        );
+        sqlx::query_as::<_, RoomThreadsRow>(&sql)
+            .bind(&room_id)
+            .bind(&cursor_ts)
+            .bind(&cursor_ts)
+            .bind(&cursor_id)
+            .bind(PAGE_SIZE as i64 + 1)
+            .fetch_all(&state.db)
+            .await?
     } else {
-        sqlx::query_as::<_, RoomThreadsRow>(
+        let sql = format!(
             "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
-             t.locked, \
-             (SELECT COUNT(*) FROM posts p WHERE p.thread = t.id AND p.parent IS NOT NULL) AS reply_count, \
-             (SELECT MAX(p2.created_at) FROM posts p2 WHERE p2.thread = t.id) AS last_activity \
+             t.locked, t.reply_count, t.last_activity \
              FROM threads t \
              JOIN users u ON u.id = t.author \
              WHERE t.room = ? \
-               AND NOT (reply_count = 0 \
-                    AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
-             ORDER BY last_activity DESC NULLS LAST, t.created_at DESC, t.id DESC \
-             LIMIT ?",
-        )
-        .bind(&room_id)
-        .bind(PAGE_SIZE as i64 + 1)
-        .fetch_all(&state.db)
-        .await?
+               AND {RETRACTED_OP_FILTER} \
+             ORDER BY {order_col} DESC NULLS LAST, t.created_at DESC, t.id DESC \
+             LIMIT ?"
+        );
+        sqlx::query_as::<_, RoomThreadsRow>(&sql)
+            .bind(&room_id)
+            .bind(PAGE_SIZE as i64 + 1)
+            .fetch_all(&state.db)
+            .await?
     };
 
     let has_more = rows.len() > PAGE_SIZE;
-    let threads: Vec<ThreadSummary> = rows
+    let mut threads: Vec<ThreadSummary> = rows
         .into_iter()
         .take(PAGE_SIZE)
         .filter(|row| is_thread_visible(&row.2, room_public, &user.user_id, &reverse_map))
@@ -749,8 +947,14 @@ pub async fn list_threads(
         })
         .collect();
 
+    apply_visible_reply_counts(&state.db, &mut threads, &reverse_map, &user.user_id).await?;
+
     let next_cursor = if has_more {
-        threads.last().map(make_cursor)
+        threads.last().map(if use_created_at {
+            make_cursor_created_at
+        } else {
+            make_cursor
+        })
     } else {
         None
     };
@@ -759,4 +963,89 @@ pub async fn list_threads(
         threads,
         next_cursor,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Warm sort candidate fetchers
+// ---------------------------------------------------------------------------
+
+/// Fetch visible candidate threads across all rooms for warm sort scoring.
+///
+/// Uses global `last_activity` for candidate ordering (safe proxy — not used
+/// for ranking). Filters to threads visible to the reader.
+async fn fetch_warm_candidates_all(
+    db: &sqlx::SqlitePool,
+    trust_map: &HashMap<String, f64>,
+    block_set: &HashSet<String>,
+    reverse_map: &HashMap<String, f64>,
+    reader_id: &str,
+) -> Result<Vec<ThreadSummary>, AppError> {
+    let rows = sqlx::query_as::<_, AllThreadsRow>(
+        "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
+         r.id, r.name, r.slug, t.locked, r.public, \
+         t.reply_count, t.last_activity \
+         FROM threads t \
+         JOIN users u ON u.id = t.author \
+         JOIN rooms r ON r.id = t.room \
+         WHERE r.merged_into IS NULL \
+           AND NOT (t.reply_count = 0 \
+                AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
+         ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC \
+         LIMIT ?",
+    )
+    .bind(WARM_CANDIDATE_LIMIT)
+    .fetch_all(db)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .filter(|row| is_thread_visible(&row.2, row.9, reader_id, reverse_map))
+        .map(|row| all_threads_to_summary(row, trust_map, block_set))
+        .collect())
+}
+
+/// Fetch visible candidate threads in a single room for warm sort scoring.
+#[allow(clippy::too_many_arguments)]
+async fn fetch_warm_candidates_room(
+    db: &sqlx::SqlitePool,
+    trust_map: &HashMap<String, f64>,
+    block_set: &HashSet<String>,
+    reverse_map: &HashMap<String, f64>,
+    reader_id: &str,
+    room_id: &str,
+    room_name: &str,
+    room_slug: &str,
+    room_public: bool,
+) -> Result<Vec<ThreadSummary>, AppError> {
+    let rows = sqlx::query_as::<_, RoomThreadsRow>(
+        "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
+         t.locked, t.reply_count, t.last_activity \
+         FROM threads t \
+         JOIN users u ON u.id = t.author \
+         WHERE t.room = ? \
+           AND NOT (t.reply_count = 0 \
+                AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
+         ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC \
+         LIMIT ?",
+    )
+    .bind(room_id)
+    .bind(WARM_CANDIDATE_LIMIT)
+    .fetch_all(db)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .filter(|row| is_thread_visible(&row.2, room_public, reader_id, reverse_map))
+        .map(|row| {
+            room_threads_to_summary(
+                row,
+                room_id,
+                room_name,
+                room_slug,
+                room_public,
+                trust_map,
+                block_set,
+            )
+        })
+        .collect())
 }

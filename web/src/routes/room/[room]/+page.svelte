@@ -17,7 +17,11 @@
 	let loadingMore = $state(false);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
-	let sortMode = $state<ThreadSort>('trust_7d');
+	type SortCategory = 'warm' | 'new' | 'active' | 'trusted' | 'top_trusted';
+	type TopTrustedWindow = 'trust_24h' | 'trust_7d' | 'trust_30d' | 'trust_1y' | 'trust_all';
+	let sortCategory = $state<SortCategory>('warm');
+	let topTrustedWindow = $state<TopTrustedWindow>('trust_30d');
+	let sortMode = $derived<ThreadSort>(sortCategory === 'top_trusted' ? topTrustedWindow : sortCategory);
 
 	$effect(() => {
 		if (session.loading) return;
@@ -93,17 +97,27 @@
 			<div class="flex items-center gap-3">
 				<h1 class="text-lg font-bold">{heading}</h1>
 				<select
-					bind:value={sortMode}
-					onchange={() => { const slug = page.params.room; if (slug) load(slug, sortMode); }}
+					bind:value={sortCategory}
 					class="font-sans text-xs bg-bg-surface text-text-secondary border border-border rounded-md px-2 py-1 cursor-pointer hover:border-accent-muted focus:outline-none focus:border-accent-muted"
 				>
-					<option value="trust_24h">Trust (24h)</option>
-					<option value="trust_7d">Trust (7d)</option>
-					<option value="trust_30d">Trust (30d)</option>
-					<option value="trust_1y">Trust (1y)</option>
-					<option value="trust_all">Trust (all)</option>
-					<option value="new">New</option>
+					<option value="warm">Warm</option>
+					<option value="new">Newest</option>
+					<option value="active">Recently Active</option>
+					<option value="trusted">Trusted + Recent</option>
+					<option value="top_trusted">Top Trusted</option>
 				</select>
+				{#if sortCategory === 'top_trusted'}
+					<select
+						bind:value={topTrustedWindow}
+						class="font-sans text-xs bg-bg-surface text-text-secondary border border-border rounded-md px-2 py-1 cursor-pointer hover:border-accent-muted focus:outline-none focus:border-accent-muted"
+					>
+						<option value="trust_24h">24h</option>
+						<option value="trust_7d">7d</option>
+						<option value="trust_30d">30d</option>
+						<option value="trust_1y">1y</option>
+						<option value="trust_all">All time</option>
+					</select>
+				{/if}
 			</div>
 			{#if session.isLoggedIn && !isAll && room && (!room.public || session.isAdmin)}
 				<button

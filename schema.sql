@@ -60,7 +60,7 @@ CREATE TABLE threads (
     room TEXT NOT NULL REFERENCES "rooms"(id),
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     locked INTEGER NOT NULL DEFAULT 0
-);
+, last_activity TEXT, reply_count INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX idx_threads_author ON threads(author);
 CREATE TABLE IF NOT EXISTS "room_admin_log" (
     id TEXT PRIMARY KEY NOT NULL,
@@ -145,3 +145,12 @@ CREATE TABLE IF NOT EXISTS "trust_edges" (
 );
 CREATE INDEX idx_trust_edges_source ON trust_edges(source_user);
 CREATE INDEX idx_trust_edges_target ON trust_edges(target_user);
+CREATE INDEX idx_threads_last_activity ON threads(last_activity);
+CREATE INDEX idx_threads_created_at ON threads(created_at);
+CREATE TABLE thread_recent_repliers (
+    thread_id TEXT NOT NULL REFERENCES threads(id),
+    reply_rank INTEGER NOT NULL,
+    replier_id TEXT NOT NULL REFERENCES users(id),
+    replied_at TEXT NOT NULL,
+    PRIMARY KEY (thread_id, reply_rank)
+);

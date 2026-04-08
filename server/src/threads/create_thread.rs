@@ -50,13 +50,16 @@ pub async fn create_thread(
     let thread_id = uuid::Uuid::new_v4().to_string();
     let post_id = uuid::Uuid::new_v4().to_string();
 
-    sqlx::query("INSERT INTO threads (id, title, author, room) VALUES (?, ?, ?, ?)")
-        .bind(&thread_id)
-        .bind(&title)
-        .bind(&user.user_id)
-        .bind(&room_id)
-        .execute(&state.db)
-        .await?;
+    sqlx::query(
+        "INSERT INTO threads (id, title, author, room, last_activity) \
+         VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))",
+    )
+    .bind(&thread_id)
+    .bind(&title)
+    .bind(&user.user_id)
+    .bind(&room_id)
+    .execute(&state.db)
+    .await?;
 
     sqlx::query("INSERT INTO posts (id, author, thread) VALUES (?, ?, ?)")
         .bind(&post_id)
