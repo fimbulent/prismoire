@@ -13,13 +13,9 @@ use crate::trust::{TrustInfo, load_block_set};
 
 use super::common::{
     PAGE_SIZE, PaginationParams, RecentReplier, ThreadListResponse, ThreadSort, ThreadSummary,
-    is_thread_visible, make_cursor, make_cursor_created_at, parse_cursor, ranked_authors,
-    score_trusted_recent, score_warm, sort_threads_by_trust, sql_placeholders, window_cutoff,
+    is_thread_visible, make_cursor, make_cursor_created_at, parse_cursor, score_trusted_recent,
+    score_warm, sql_placeholders,
 };
-
-/// Number of trusted authors to include per batch when iteratively fetching
-/// threads for trust-sorted listings.
-const TRUST_BATCH_SIZE: usize = 50;
 
 /// Maximum number of candidate threads to fetch for warm sort scoring.
 ///
@@ -235,292 +231,6 @@ async fn apply_visible_reply_counts(
 }
 
 // ---------------------------------------------------------------------------
-// Shared iterative top-K trust-sorted fetch
-// ---------------------------------------------------------------------------
-
-/// Iterative top-K trust-sorted fetch for the all-rooms thread listing.
-///
-/// Fetches threads authored by the reader's most-trusted users in batches,
-/// closest trust first. If trusted-author batches don't fill a page, a
-/// backfill query fetches recent threads from any remaining author.
-/// Threads whose OP author hasn't granted the reader visibility are excluded.
-#[allow(clippy::too_many_arguments)]
-async fn fetch_trust_sorted_all_threads(
-    db: &sqlx::SqlitePool,
-    trust_map: &HashMap<String, f64>,
-    block_set: &HashSet<String>,
-    reverse_map: &HashMap<String, f64>,
-    reader_id: &str,
-    sort: ThreadSort,
-) -> Result<Vec<ThreadSummary>, AppError> {
-    let cutoff = window_cutoff(sort);
-    let authors = ranked_authors(trust_map);
-    let mut threads: Vec<ThreadSummary> = Vec::with_capacity(PAGE_SIZE);
-    let mut seen_ids: HashSet<String> = HashSet::new();
-
-    for batch in authors.chunks(TRUST_BATCH_SIZE) {
-        if threads.len() >= PAGE_SIZE {
-            break;
-        }
-
-        let placeholders = sql_placeholders(batch.len());
-        let sql = if cutoff.is_some() {
-            format!(
-                "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
-                 r.id, r.name, r.slug, t.locked, r.public, \
-                 t.reply_count, t.last_activity \
-                 FROM threads t \
-                 JOIN users u ON u.id = t.author \
-                 JOIN rooms r ON r.id = t.room \
-                 WHERE r.merged_into IS NULL \
-                   AND t.author IN {placeholders} \
-                   AND {RETRACTED_OP_FILTER} \
-                   AND COALESCE(t.last_activity, t.created_at) >= ? \
-                 ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC \
-                 LIMIT ?"
-            )
-        } else {
-            format!(
-                "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
-                 r.id, r.name, r.slug, t.locked, r.public, \
-                 t.reply_count, t.last_activity \
-                 FROM threads t \
-                 JOIN users u ON u.id = t.author \
-                 JOIN rooms r ON r.id = t.room \
-                 WHERE r.merged_into IS NULL \
-                   AND t.author IN {placeholders} \
-                   AND {RETRACTED_OP_FILTER} \
-                 ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC \
-                 LIMIT ?"
-            )
-        };
-
-        let mut query = sqlx::query_as::<_, AllThreadsRow>(&sql);
-        for &(author_id, _) in batch {
-            query = query.bind(author_id);
-        }
-        if let Some(ref cutoff_ts) = cutoff {
-            query = query.bind(cutoff_ts);
-        }
-        query = query.bind(PAGE_SIZE as i64);
-
-        let rows = query.fetch_all(db).await?;
-        for row in rows {
-            if seen_ids.insert(row.0.clone())
-                && is_thread_visible(&row.2, row.9, reader_id, reverse_map)
-            {
-                threads.push(all_threads_to_summary(row, trust_map, block_set));
-            }
-        }
-    }
-
-    if threads.len() < PAGE_SIZE {
-        let exclude = sql_placeholders(seen_ids.len().max(1));
-        let sql = if cutoff.is_some() {
-            format!(
-                "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
-                 r.id, r.name, r.slug, t.locked, r.public, \
-                 t.reply_count, t.last_activity \
-                 FROM threads t \
-                 JOIN users u ON u.id = t.author \
-                 JOIN rooms r ON r.id = t.room \
-                 WHERE r.merged_into IS NULL \
-                   AND t.id NOT IN {exclude} \
-                   AND {RETRACTED_OP_FILTER} \
-                   AND COALESCE(t.last_activity, t.created_at) >= ? \
-                 ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC \
-                 LIMIT ?"
-            )
-        } else {
-            format!(
-                "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
-                 r.id, r.name, r.slug, t.locked, r.public, \
-                 t.reply_count, t.last_activity \
-                 FROM threads t \
-                 JOIN users u ON u.id = t.author \
-                 JOIN rooms r ON r.id = t.room \
-                 WHERE r.merged_into IS NULL \
-                   AND t.id NOT IN {exclude} \
-                   AND {RETRACTED_OP_FILTER} \
-                 ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC \
-                 LIMIT ?"
-            )
-        };
-
-        let mut query = sqlx::query_as::<_, AllThreadsRow>(&sql);
-        if seen_ids.is_empty() {
-            query = query.bind("");
-        } else {
-            for id in &seen_ids {
-                query = query.bind(id.as_str());
-            }
-        }
-        if let Some(ref cutoff_ts) = cutoff {
-            query = query.bind(cutoff_ts);
-        }
-        let remaining = (PAGE_SIZE - threads.len()) as i64;
-        query = query.bind(remaining);
-
-        let rows = query.fetch_all(db).await?;
-        for row in rows {
-            if is_thread_visible(&row.2, row.9, reader_id, reverse_map) {
-                threads.push(all_threads_to_summary(row, trust_map, block_set));
-            }
-        }
-    }
-
-    sort_threads_by_trust(&mut threads, trust_map);
-    threads.truncate(PAGE_SIZE);
-    Ok(threads)
-}
-
-/// Iterative top-K trust-sorted fetch for a single room's thread listing.
-/// Threads whose OP author hasn't granted the reader visibility are excluded.
-#[allow(clippy::too_many_arguments)]
-async fn fetch_trust_sorted_room_threads(
-    db: &sqlx::SqlitePool,
-    trust_map: &HashMap<String, f64>,
-    block_set: &HashSet<String>,
-    reverse_map: &HashMap<String, f64>,
-    reader_id: &str,
-    sort: ThreadSort,
-    room_id: &str,
-    room_name: &str,
-    room_slug: &str,
-    room_public: bool,
-) -> Result<Vec<ThreadSummary>, AppError> {
-    let cutoff = window_cutoff(sort);
-    let authors = ranked_authors(trust_map);
-    let mut threads: Vec<ThreadSummary> = Vec::with_capacity(PAGE_SIZE);
-    let mut seen_ids: HashSet<String> = HashSet::new();
-
-    for batch in authors.chunks(TRUST_BATCH_SIZE) {
-        if threads.len() >= PAGE_SIZE {
-            break;
-        }
-
-        let placeholders = sql_placeholders(batch.len());
-        let sql = if cutoff.is_some() {
-            format!(
-                "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
-                 t.locked, t.reply_count, t.last_activity \
-                 FROM threads t \
-                 JOIN users u ON u.id = t.author \
-                 WHERE t.room = ? \
-                   AND t.author IN {placeholders} \
-                   AND {RETRACTED_OP_FILTER} \
-                   AND COALESCE(t.last_activity, t.created_at) >= ? \
-                 ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC \
-                 LIMIT ?"
-            )
-        } else {
-            format!(
-                "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
-                 t.locked, t.reply_count, t.last_activity \
-                 FROM threads t \
-                 JOIN users u ON u.id = t.author \
-                 WHERE t.room = ? \
-                   AND t.author IN {placeholders} \
-                   AND {RETRACTED_OP_FILTER} \
-                 ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC \
-                 LIMIT ?"
-            )
-        };
-
-        let mut query = sqlx::query_as::<_, RoomThreadsRow>(&sql);
-        query = query.bind(room_id);
-        for &(author_id, _) in batch {
-            query = query.bind(author_id);
-        }
-        if let Some(ref cutoff_ts) = cutoff {
-            query = query.bind(cutoff_ts);
-        }
-        query = query.bind(PAGE_SIZE as i64);
-
-        let rows = query.fetch_all(db).await?;
-        for row in rows {
-            if seen_ids.insert(row.0.clone())
-                && is_thread_visible(&row.2, room_public, reader_id, reverse_map)
-            {
-                threads.push(room_threads_to_summary(
-                    row,
-                    room_id,
-                    room_name,
-                    room_slug,
-                    room_public,
-                    trust_map,
-                    block_set,
-                ));
-            }
-        }
-    }
-
-    if threads.len() < PAGE_SIZE {
-        let exclude = sql_placeholders(seen_ids.len().max(1));
-        let sql = if cutoff.is_some() {
-            format!(
-                "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
-                 t.locked, t.reply_count, t.last_activity \
-                 FROM threads t \
-                 JOIN users u ON u.id = t.author \
-                 WHERE t.room = ? \
-                   AND t.id NOT IN {exclude} \
-                   AND {RETRACTED_OP_FILTER} \
-                   AND COALESCE(t.last_activity, t.created_at) >= ? \
-                 ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC \
-                 LIMIT ?"
-            )
-        } else {
-            format!(
-                "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
-                 t.locked, t.reply_count, t.last_activity \
-                 FROM threads t \
-                 JOIN users u ON u.id = t.author \
-                 WHERE t.room = ? \
-                   AND t.id NOT IN {exclude} \
-                   AND {RETRACTED_OP_FILTER} \
-                 ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC \
-                 LIMIT ?"
-            )
-        };
-
-        let mut query = sqlx::query_as::<_, RoomThreadsRow>(&sql);
-        query = query.bind(room_id);
-        if seen_ids.is_empty() {
-            query = query.bind("");
-        } else {
-            for id in &seen_ids {
-                query = query.bind(id.as_str());
-            }
-        }
-        if let Some(ref cutoff_ts) = cutoff {
-            query = query.bind(cutoff_ts);
-        }
-        let remaining = (PAGE_SIZE - threads.len()) as i64;
-        query = query.bind(remaining);
-
-        let rows = query.fetch_all(db).await?;
-        for row in rows {
-            if is_thread_visible(&row.2, room_public, reader_id, reverse_map) {
-                threads.push(room_threads_to_summary(
-                    row,
-                    room_id,
-                    room_name,
-                    room_slug,
-                    room_public,
-                    trust_map,
-                    block_set,
-                ));
-            }
-        }
-    }
-
-    sort_threads_by_trust(&mut threads, trust_map);
-    threads.truncate(PAGE_SIZE);
-    Ok(threads)
-}
-
-// ---------------------------------------------------------------------------
 // GET /api/threads/public — list threads in public rooms (no auth required)
 // ---------------------------------------------------------------------------
 
@@ -633,8 +343,6 @@ pub async fn list_public_threads(
 ///   repliers. No cursor pagination.
 /// - `sort=trusted`: rank-based decay × OP trust (no replier signal),
 ///   with self-trust = 1.0. No cursor pagination.
-/// - `sort=trust_*`: flat OP trust sort with optional time window
-///   (iterative top-K fetch). No cursor pagination.
 /// - `sort=new`: thread creation time descending. Cursor-paginated.
 /// - `sort=active`: last reply time descending. Cursor-paginated.
 pub async fn list_all_threads(
@@ -683,23 +391,6 @@ pub async fn list_all_threads(
         )
         .await?;
         score_trusted_recent(&mut threads, &trust_map, &user.user_id);
-        apply_visible_reply_counts(&state.db, &mut threads, &reverse_map, &user.user_id).await?;
-        return Ok(Json(ThreadListResponse {
-            threads,
-            next_cursor: None,
-        }));
-    }
-
-    if params.sort.is_top_trusted() {
-        let mut threads = fetch_trust_sorted_all_threads(
-            &state.db,
-            &trust_map,
-            &block_set,
-            &reverse_map,
-            &user.user_id,
-            params.sort,
-        )
-        .await?;
         apply_visible_reply_counts(&state.db, &mut threads, &reverse_map, &user.user_id).await?;
         return Ok(Json(ThreadListResponse {
             threads,
@@ -853,27 +544,6 @@ pub async fn list_threads(
         )
         .await?;
         score_trusted_recent(&mut threads, &trust_map, &user.user_id);
-        apply_visible_reply_counts(&state.db, &mut threads, &reverse_map, &user.user_id).await?;
-        return Ok(Json(ThreadListResponse {
-            threads,
-            next_cursor: None,
-        }));
-    }
-
-    if params.sort.is_top_trusted() {
-        let mut threads = fetch_trust_sorted_room_threads(
-            &state.db,
-            &trust_map,
-            &block_set,
-            &reverse_map,
-            &user.user_id,
-            params.sort,
-            &room_id,
-            &room_name,
-            &room_slug,
-            room_public,
-        )
-        .await?;
         apply_visible_reply_counts(&state.db, &mut threads, &reverse_map, &user.user_id).await?;
         return Ok(Json(ThreadListResponse {
             threads,

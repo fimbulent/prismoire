@@ -30,6 +30,11 @@ pub struct ThreadDetailQuery {
     sort: PostSort,
 }
 
+// TODO: Two-pass query to reduce memory. Pass 1: fetch post metadata
+// without bodies (id, parent, author, created_at, retracted_at), build
+// tree, apply visibility/sort, truncate to M top-level × depth D.
+// Pass 2: fetch bodies only for surviving posts via PK lookup.
+// Current approach loads all bodies upfront (~100MB for 10K-post thread).
 /// Get thread detail including all posts as a nested reply tree.
 ///
 /// Fetches every post in the thread with its latest revision, then

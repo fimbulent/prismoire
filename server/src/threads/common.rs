@@ -48,7 +48,7 @@ pub struct ThreadListResponse {
 /// - `Active`: last reply time descending. Cursor-paginable.
 ///   TODO: Currently uses global last_activity (all replies). Consider
 ///   viewer-specific activity, but that would break cursor pagination.
-/// - `Trusted`: OP trust with rank-based decay (legacy trust_* variants).
+/// - `Trusted`: OP trust with rank-based decay.
 #[derive(Deserialize, Default, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadSort {
     #[default]
@@ -60,38 +60,6 @@ pub enum ThreadSort {
     Active,
     #[serde(rename = "trusted")]
     Trusted,
-    #[serde(rename = "trust_24h")]
-    Trust24h,
-    #[serde(rename = "trust_7d")]
-    Trust7d,
-    #[serde(rename = "trust_30d")]
-    Trust30d,
-    #[serde(rename = "trust_1y")]
-    Trust1y,
-    #[serde(rename = "trust_all")]
-    TrustAll,
-}
-
-impl ThreadSort {
-    /// Returns the activity window as a chrono::Duration, or None for
-    /// non-windowed modes.
-    pub fn window(self) -> Option<chrono::Duration> {
-        match self {
-            Self::Trust24h => Some(chrono::Duration::hours(24)),
-            Self::Trust7d => Some(chrono::Duration::days(7)),
-            Self::Trust30d => Some(chrono::Duration::days(30)),
-            Self::Trust1y => Some(chrono::Duration::days(365)),
-            _ => None,
-        }
-    }
-
-    /// Top Trusted modes: flat OP trust sort with optional time window.
-    pub fn is_top_trusted(self) -> bool {
-        matches!(
-            self,
-            Self::Trust24h | Self::Trust7d | Self::Trust30d | Self::Trust1y | Self::TrustAll
-        )
-    }
 }
 
 #[derive(Deserialize)]
@@ -250,37 +218,6 @@ pub fn sql_placeholders(n: usize) -> String {
     }
     s.push(')');
     s
-}
-
-/// Sort a thread list in-place by the reader's forward trust distance to
-/// the OP author (closest first), with last_activity descending as tiebreaker.
-pub fn sort_threads_by_trust(threads: &mut [ThreadSummary], trust_map: &HashMap<String, f64>) {
-    threads.sort_by(|a, b| {
-        let da = trust_map.get(&a.author_id).copied().unwrap_or(f64::MAX);
-        let db = trust_map.get(&b.author_id).copied().unwrap_or(f64::MAX);
-        da.partial_cmp(&db)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| {
-                let ta = a.last_activity.as_deref().unwrap_or(&a.created_at);
-                let tb = b.last_activity.as_deref().unwrap_or(&b.created_at);
-                tb.cmp(ta)
-            })
-    });
-}
-
-/// Compute the cutoff timestamp string for a trust-window sort mode.
-pub fn window_cutoff(sort: ThreadSort) -> Option<String> {
-    sort.window().map(|dur| {
-        let cutoff = chrono::Utc::now().naive_utc() - dur;
-        cutoff.format("%Y-%m-%d %H:%M:%S").to_string()
-    })
-}
-
-/// Sorted list of (author_id, distance) from the trust map, closest first.
-pub fn ranked_authors(trust_map: &HashMap<String, f64>) -> Vec<(&str, f64)> {
-    let mut authors: Vec<(&str, f64)> = trust_map.iter().map(|(id, &d)| (id.as_str(), d)).collect();
-    authors.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-    authors
 }
 
 // ---------------------------------------------------------------------------
