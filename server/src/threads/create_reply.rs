@@ -1,0 +1,108 @@
+use std::sync::Arc;
+
+use axum::Json;
+use axum::extract::{Path, State};
+use axum::response::IntoResponse;
+
+use crate::error::AppError;
+use crate::session::AuthUser;
+use crate::signing;
+use crate::state::AppState;
+use crate::trust::TrustInfo;
+
+use super::common::{CreateReplyRequest, MAX_REPLY_BODY_LEN, PostResponse, validate_body};
+
+/// Create a reply to a post within a thread.
+///
+/// The `parent_id` is required — every reply must have a parent. The OP
+/// is the only post with parent=NULL, created at thread creation time.
+/// Rejects replies to retracted posts and replies in locked threads.
+///
+/// Returns the new post with `children` always empty — mutation endpoints
+/// return flat posts; only `get_thread` populates the nested tree.
+pub async fn create_reply(
+    State(state): State<Arc<AppState>>,
+    Path(thread_id): Path<String>,
+    user: AuthUser,
+    Json(req): Json<CreateReplyRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let body = validate_body(&req.body, MAX_REPLY_BODY_LEN).map_err(AppError::BadRequest)?;
+
+    let thread = sqlx::query_as::<_, (String, bool, String)>(
+        "SELECT id, locked, author FROM threads WHERE id = ?",
+    )
+    .bind(&thread_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::NotFound("thread not found".into()))?;
+
+    let (_tid, locked, thread_author) = thread;
+    if locked {
+        return Err(AppError::BadRequest("thread is locked".into()));
+    }
+
+    let parent = sqlx::query_as::<_, (String, String, Option<String>)>(
+        "SELECT id, thread, retracted_at FROM posts WHERE id = ?",
+    )
+    .bind(&req.parent_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::NotFound("parent post not found".into()))?;
+
+    let (parent_id, parent_thread, parent_retracted) = parent;
+    if parent_thread != thread_id {
+        return Err(AppError::BadRequest(
+            "parent post does not belong to this thread".into(),
+        ));
+    }
+    if parent_retracted.is_some() {
+        return Err(AppError::BadRequest(
+            "cannot reply to a retracted post".into(),
+        ));
+    }
+
+    let signature = signing::sign_message(&state.db, &user.user_id, body.as_bytes()).await?;
+
+    let post_id = uuid::Uuid::new_v4().to_string();
+
+    sqlx::query("INSERT INTO posts (id, author, thread, parent) VALUES (?, ?, ?, ?)")
+        .bind(&post_id)
+        .bind(&user.user_id)
+        .bind(&thread_id)
+        .bind(&parent_id)
+        .execute(&state.db)
+        .await?;
+
+    sqlx::query(
+        "INSERT INTO post_revisions (post_id, revision, body, signature) VALUES (?, 0, ?, ?)",
+    )
+    .bind(&post_id)
+    .bind(&body)
+    .bind(&signature)
+    .execute(&state.db)
+    .await?;
+
+    let (post_created_at,): (String,) =
+        sqlx::query_as("SELECT created_at FROM post_revisions WHERE post_id = ? AND revision = 0")
+            .bind(&post_id)
+            .fetch_one(&state.db)
+            .await?;
+
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(PostResponse {
+            id: post_id,
+            parent_id: Some(parent_id),
+            author_id: user.user_id.clone(),
+            author_name: user.display_name.clone(),
+            body,
+            created_at: post_created_at,
+            edited_at: None,
+            revision: 0,
+            is_op: user.user_id == thread_author,
+            retracted_at: None,
+            children: vec![],
+            trust: TrustInfo::self_trust(),
+        }),
+    ))
+}
