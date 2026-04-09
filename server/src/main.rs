@@ -164,6 +164,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(threads::list_threads).post(threads::create_thread),
         )
         .route("/api/threads", get(threads::list_all_threads))
+        .route("/api/threads/more", post(threads::load_more_all_threads))
+        .route(
+            "/api/rooms/{id}/threads/more",
+            post(threads::load_more_room_threads),
+        )
         .route("/api/threads/{id}", get(threads::get_thread))
         .route("/api/threads/{id}/posts", post(threads::create_reply))
         .route(

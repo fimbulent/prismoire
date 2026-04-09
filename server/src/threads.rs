@@ -8,4 +8,7 @@ pub use common::{PostResponse, parse_cursor, validate_body};
 pub use create_reply::create_reply;
 pub use create_thread::create_thread;
 pub use get_thread::{get_thread, get_thread_replies, get_thread_subtree};
-pub use list_threads::{list_all_threads, list_public_threads, list_threads};
+pub use list_threads::{
+    list_all_threads, list_public_threads, list_threads, load_more_all_threads,
+    load_more_room_threads,
+};

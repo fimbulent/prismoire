@@ -115,6 +115,46 @@ export async function listPublicThreads(cursor?: string): Promise<ThreadListResp
 }
 
 export type ThreadSort = 'warm' | 'new' | 'active' | 'trusted';
+
+export interface WarmPaginationRequest {
+	cursor: string;
+	seen_ids: string[];
+}
+
+/** Load more threads using warm/trusted pagination (POST). */
+export async function loadMoreThreads(
+	cursor: string,
+	seenIds: string[]
+): Promise<ThreadListResponse> {
+	const res = await fetch('/api/threads/more', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ cursor, seen_ids: seenIds })
+	});
+	if (!res.ok) {
+		const err: ApiError = await res.json();
+		throw new Error(err.error);
+	}
+	return res.json();
+}
+
+/** Load more threads in a room using warm/trusted pagination (POST). */
+export async function loadMoreRoomThreads(
+	roomIdOrSlug: string,
+	cursor: string,
+	seenIds: string[]
+): Promise<ThreadListResponse> {
+	const res = await fetch(`/api/rooms/${encodeURIComponent(roomIdOrSlug)}/threads/more`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ cursor, seen_ids: seenIds })
+	});
+	if (!res.ok) {
+		const err: ApiError = await res.json();
+		throw new Error(err.error);
+	}
+	return res.json();
+}
 export type ThreadDetailSort = 'trust' | 'new';
 
 export async function getThread(

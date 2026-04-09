@@ -1,6 +1,13 @@
 <script lang="ts">
 	import { getRoom, type Room } from '$lib/api/rooms';
-	import { listThreads, listAllThreads, type ThreadSummary, type ThreadSort } from '$lib/api/threads';
+	import {
+		listThreads,
+		listAllThreads,
+		loadMoreThreads,
+		loadMoreRoomThreads,
+		type ThreadSummary,
+		type ThreadSort
+	} from '$lib/api/threads';
 	import { relativeTime } from '$lib/format';
 	import { session } from '$lib/stores/session.svelte';
 	import { page } from '$app/state';
@@ -19,6 +26,12 @@
 	let error = $state<string | null>(null);
 	let sortMode = $state<ThreadSort>('warm');
 
+	// Track rendered thread IDs for warm/trusted deduplication.
+	// Maintained as an array (insertion order) so we can send the most
+	// recent 200 as seen_ids to the server.
+	const MAX_SEEN_IDS = 200;
+	let renderedThreadIds = $state<string[]>([]);
+
 	$effect(() => {
 		if (session.loading) return;
 		if (!session.isLoggedIn) {
@@ -35,6 +48,7 @@
 		error = null;
 		threads = [];
 		nextCursor = null;
+		renderedThreadIds = [];
 		try {
 			if (slug === 'all') {
 				room = null;
@@ -50,6 +64,7 @@
 				threads = threadData.threads;
 				nextCursor = threadData.next_cursor;
 			}
+			renderedThreadIds = threads.map((t) => t.id);
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to load';
 		} finally {
@@ -57,14 +72,38 @@
 		}
 	}
 
+	function isWarmCursor(cursor: string): boolean {
+		return cursor.startsWith('warm:') || cursor.startsWith('trusted:');
+	}
+
 	async function loadMore() {
 		if (!nextCursor || loadingMore) return;
 		loadingMore = true;
 		try {
 			const slug = page.params.room!;
-			const res =
-				slug === 'all' ? await listAllThreads(nextCursor, sortMode) : await listThreads(slug, nextCursor, sortMode);
-			threads = [...threads, ...res.threads];
+			let res;
+
+			if (isWarmCursor(nextCursor)) {
+				// Warm/trusted pagination: POST with seen_ids (tail 200).
+				const seenIds = renderedThreadIds.slice(-MAX_SEEN_IDS);
+				res =
+					slug === 'all'
+						? await loadMoreThreads(nextCursor, seenIds)
+						: await loadMoreRoomThreads(slug, nextCursor, seenIds);
+			} else {
+				// Simple cursor pagination (new/active sorts): GET.
+				res =
+					slug === 'all'
+						? await listAllThreads(nextCursor, sortMode)
+						: await listThreads(slug, nextCursor, sortMode);
+			}
+
+			// Client-side dedup safety net: filter out any threads already rendered.
+			const existingIds = new Set(renderedThreadIds);
+			const newThreads = res.threads.filter((t) => !existingIds.has(t.id));
+
+			threads = [...threads, ...newThreads];
+			renderedThreadIds = [...renderedThreadIds, ...newThreads.map((t) => t.id)];
 			nextCursor = res.next_cursor;
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to load more';

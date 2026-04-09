@@ -14,6 +14,10 @@ pub const PAGE_SIZE: usize = 20;
 /// Maximum number of recent repliers stored per thread for warm sort scoring.
 pub const RECENT_REPLIERS_BUFFER: i64 = 50;
 
+/// Maximum number of seen IDs the client may send for warm/trusted pagination.
+/// Requests exceeding this are rejected with 400.
+pub const MAX_SEEN_IDS: usize = 200;
+
 // ---------------------------------------------------------------------------
 // Response types
 // ---------------------------------------------------------------------------
@@ -67,6 +71,26 @@ pub struct PaginationParams {
     pub cursor: Option<String>,
     #[serde(default)]
     pub sort: ThreadSort,
+}
+
+/// Request body for warm/trusted paginated "load more" (POST endpoints).
+#[derive(Deserialize)]
+pub struct WarmPaginationRequest {
+    pub cursor: String,
+    #[serde(default)]
+    pub seen_ids: Vec<String>,
+}
+
+/// Parsed warm/trusted cursor with pagination state.
+///
+/// Format: `<sort>:<last_activity>|<thread_id>:<visibility_rate>:<rank_offset>`
+/// Example: `warm:2024-01-15T10:30:00|a1b2c3d4-e5f6-7890-abcd-ef1234567890:0.05:20`
+pub struct WarmCursor {
+    pub sort: ThreadSort,
+    pub last_activity: String,
+    pub thread_id: String,
+    pub visibility_rate: f64,
+    pub rank_offset: usize,
 }
 
 #[derive(Serialize)]
@@ -167,21 +191,83 @@ pub fn validate_body(body: &str, max_len: usize) -> Result<String, String> {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-/// Parse a cursor string into (timestamp, id).
+/// Parse a simple cursor string into (timestamp, id).
 ///
-/// Cursors encode the last-seen sort key so the next page starts after it.
-/// Format: `<ISO timestamp>|<UUID>`.
+/// Used by `new` and `active` sorts. Format: `<ISO timestamp>|<UUID>`.
 pub fn parse_cursor(cursor: &str) -> Result<(String, String), AppError> {
     let (ts, id) = cursor
         .split_once('|')
         .ok_or_else(|| AppError::BadRequest("invalid cursor".into()))?;
-    let _: chrono::NaiveDateTime = ts
+    // Strip trailing 'Z' (UTC indicator) for NaiveDateTime validation;
+    // the original timestamp string is preserved for SQL comparisons.
+    let ts_clean = ts.strip_suffix('Z').unwrap_or(ts);
+    let _: chrono::NaiveDateTime = ts_clean
         .parse()
         .map_err(|_| AppError::BadRequest("invalid cursor".into()))?;
     let _: uuid::Uuid = id
         .parse()
         .map_err(|_| AppError::BadRequest("invalid cursor".into()))?;
     Ok((ts.to_string(), id.to_string()))
+}
+
+/// Parse a warm/trusted pagination cursor.
+///
+/// Format: `<sort>:<last_activity>|<thread_id>:<visibility_rate>:<rank_offset>`
+pub fn parse_warm_cursor(cursor: &str) -> Result<WarmCursor, AppError> {
+    let bad = || AppError::BadRequest("invalid cursor".into());
+
+    // Split on first ':' to get sort prefix
+    let (sort_str, rest) = cursor.split_once(':').ok_or_else(bad)?;
+    let sort = match sort_str {
+        "warm" => ThreadSort::Warm,
+        "trusted" => ThreadSort::Trusted,
+        _ => return Err(bad()),
+    };
+
+    // Remaining format: <timestamp>|<uuid>:<visibility_rate>:<rank_offset>
+    // The timestamp may contain colons (ISO 8601), so split from the right
+    // to extract rank_offset and visibility_rate first.
+    let (rest, rank_offset_str) = rest.rsplit_once(':').ok_or_else(bad)?;
+    let (rest, rate_str) = rest.rsplit_once(':').ok_or_else(bad)?;
+
+    // Now `rest` is `<timestamp>|<uuid>`
+    let (ts, thread_id) = rest.rsplit_once('|').ok_or_else(bad)?;
+
+    // Timestamps may have a trailing 'Z' (UTC indicator) which NaiveDateTime
+    // doesn't accept — strip it before validation.
+    let ts_clean = ts.strip_suffix('Z').unwrap_or(ts);
+    let _: chrono::NaiveDateTime = ts_clean.parse().map_err(|_| bad())?;
+    let _: uuid::Uuid = thread_id.parse().map_err(|_| bad())?;
+    let visibility_rate: f64 = rate_str.parse().map_err(|_| bad())?;
+    let rank_offset: usize = rank_offset_str.parse().map_err(|_| bad())?;
+
+    if !(0.0..=1.0).contains(&visibility_rate) {
+        return Err(bad());
+    }
+
+    Ok(WarmCursor {
+        sort,
+        last_activity: ts.to_string(),
+        thread_id: thread_id.to_string(),
+        visibility_rate,
+        rank_offset,
+    })
+}
+
+/// Build a warm/trusted pagination cursor string.
+pub fn make_warm_cursor(
+    sort: ThreadSort,
+    last_activity: &str,
+    thread_id: &str,
+    visibility_rate: f64,
+    rank_offset: usize,
+) -> String {
+    let prefix = match sort {
+        ThreadSort::Warm => "warm",
+        ThreadSort::Trusted => "trusted",
+        _ => "warm",
+    };
+    format!("{prefix}:{last_activity}|{thread_id}:{visibility_rate}:{rank_offset}")
 }
 
 /// Build a cursor string from a thread summary using last_activity.
@@ -275,12 +361,16 @@ pub struct RecentReplier {
 /// Returns threads sorted by warm score descending, truncated to `PAGE_SIZE`.
 /// The `trust_map` is the viewer's forward trust (viewer → authors).
 /// The `reverse_map` is reverse trust (authors → viewer), used for visibility.
+///
+/// `rank_offset` shifts the starting rank for `thread_decay`, ensuring smooth
+/// decay continuity across pages (page 1 uses 0, page 2 uses PAGE_SIZE, etc.).
 pub fn score_warm(
     threads: &mut Vec<ThreadSummary>,
     repliers: &[RecentReplier],
     trust_map: &HashMap<String, f64>,
     reverse_map: &HashMap<String, f64>,
     reader_id: &str,
+    rank_offset: usize,
 ) {
     use crate::trust::MINIMUM_TRUST_THRESHOLD;
     use std::collections::HashMap as Map;
@@ -356,7 +446,8 @@ pub fn score_warm(
     });
 
     let mut warm_scores: Vec<(usize, f64)> = Vec::with_capacity(threads.len());
-    for (rank, thread) in threads.iter().enumerate() {
+    for (i, thread) in threads.iter().enumerate() {
+        let rank = rank_offset + i;
         let s = scored.get(thread.id.as_str());
         let trust_signal = s.map(|s| s.trust_signal).unwrap_or(0.0);
         // Self-trust: your own threads are treated as max OP trust.
@@ -366,7 +457,7 @@ pub fn score_warm(
             trust_map.get(&thread.author_id).copied().unwrap_or(0.0)
         };
         let score = thread_decay(rank) * (WARM_BETA * trust_op + (1.0 - WARM_BETA) * trust_signal);
-        warm_scores.push((rank, score));
+        warm_scores.push((i, score));
     }
 
     warm_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -392,11 +483,15 @@ pub fn score_warm(
 /// as `thread_decay(rank) × trust_op`. Self-trust: the viewer's own
 /// threads are treated as trust 1.0.
 ///
+/// `rank_offset` shifts the starting rank for `thread_decay`, ensuring smooth
+/// decay continuity across pages (page 1 uses 0, page 2 uses PAGE_SIZE, etc.).
+///
 /// Returns threads sorted by score descending, truncated to `PAGE_SIZE`.
 pub fn score_trusted_recent(
     threads: &mut Vec<ThreadSummary>,
     trust_map: &HashMap<String, f64>,
     reader_id: &str,
+    rank_offset: usize,
 ) {
     threads.sort_by(|a, b| {
         let ta = a.last_activity.as_deref().unwrap_or(&a.created_at);
@@ -405,14 +500,15 @@ pub fn score_trusted_recent(
     });
 
     let mut scores: Vec<(usize, f64)> = Vec::with_capacity(threads.len());
-    for (rank, thread) in threads.iter().enumerate() {
+    for (i, thread) in threads.iter().enumerate() {
+        let rank = rank_offset + i;
         // Self-trust: your own threads are treated as max OP trust.
         let trust_op = if thread.author_id == reader_id {
             1.0
         } else {
             trust_map.get(&thread.author_id).copied().unwrap_or(0.0)
         };
-        scores.push((rank, thread_decay(rank) * trust_op));
+        scores.push((i, thread_decay(rank) * trust_op));
     }
 
     scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
