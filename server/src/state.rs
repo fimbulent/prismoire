@@ -17,7 +17,7 @@ pub struct AppState {
     /// once the `/api/setup/complete` flow succeeds. Checked by the
     /// setup-mode middleware to gate non-setup routes.
     pub needs_setup: AtomicBool,
-    /// One-time setup token read from `PRISMOIRE_SETUP_TOKEN_FILE` at startup.
+    /// One-time setup token read from the `server.setup_token_file` config path at startup.
     /// `None` after setup completes (or if the instance already has an admin).
     pub setup_token: Option<String>,
     /// Notified when trust edges are mutated (trust, block, invite signup).

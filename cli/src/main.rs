@@ -6,6 +6,10 @@ use uuid::Uuid;
 #[derive(Parser)]
 #[command(name = "prismoire", about = "Prismoire instance management CLI")]
 struct Cli {
+    /// Path to the TOML config file
+    #[arg(long)]
+    config: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -33,10 +37,11 @@ enum AdminAction {
     },
 }
 
-/// Open the SQLite database at `PRISMOIRE_DB` (or `prismoire.db` by default).
-async fn connect_db() -> Result<SqlitePool, Box<dyn std::error::Error>> {
-    let db_path = std::env::var("PRISMOIRE_DB").unwrap_or_else(|_| "prismoire.db".to_string());
-    let db_url = format!("sqlite:{db_path}?mode=rw");
+/// Open the SQLite database using the path from config.
+async fn connect_db(
+    config: &prismoire_config::Config,
+) -> Result<SqlitePool, Box<dyn std::error::Error>> {
+    let db_url = format!("sqlite:{}?mode=rw", config.server.database);
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect(&db_url)
@@ -47,13 +52,14 @@ async fn connect_db() -> Result<SqlitePool, Box<dyn std::error::Error>> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    let config = prismoire_config::load_config(cli.config.as_deref())?;
 
     match cli.command {
         Commands::Admin { action } => match action {
             AdminAction::Grant { user_id } => {
                 let _ =
                     Uuid::parse_str(&user_id).map_err(|_| format!("invalid UUID: {user_id}"))?;
-                let pool = connect_db().await?;
+                let pool = connect_db(&config).await?;
                 let result = sqlx::query(
                     "UPDATE users SET role = 'admin' WHERE id = ? AND status = 'active'",
                 )
@@ -70,7 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             AdminAction::Revoke { user_id } => {
                 let _ =
                     Uuid::parse_str(&user_id).map_err(|_| format!("invalid UUID: {user_id}"))?;
-                let pool = connect_db().await?;
+                let pool = connect_db(&config).await?;
                 let result =
                     sqlx::query("UPDATE users SET role = 'user' WHERE id = ? AND role = 'admin'")
                         .bind(&user_id)

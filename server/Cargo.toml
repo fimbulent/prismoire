@@ -8,18 +8,19 @@ axum = { version = "0.8", features = ["json"] }
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+prismoire-config = { workspace = true }
 quick_cache = "0.6"
-rand = "0.8"
-serde = { version = "1", features = ["derive"] }
+rand = { workspace = true }
+serde = { workspace = true }
 subtle = "2"
 serde_json = "1"
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
-tokio = { version = "1", features = ["full"] }
+sqlx = { workspace = true, features = ["migrate"] }
+tokio = { workspace = true }
 unicode-normalization = "0.1"
 unicode-security = "0.1"
 tower-http = { version = "0.6", features = ["fs"] }
 url = "2"
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { workspace = true, features = ["v4", "serde"] }
 # conditional-ui: enables discoverable credentials for passkey autofill
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation", "conditional-ui"] }
 webauthn-rs-proto = "0.5"

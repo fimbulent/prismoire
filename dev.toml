@@ -1,0 +1,2 @@
+[webauthn]
+rp_origin = "https://localhost:5173"

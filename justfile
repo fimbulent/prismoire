@@ -1,11 +1,9 @@
 import? '.justfile.local'
 
-# Run frontend + backend in watch mode (HTTPS if certs exist)
+# Run frontend + backend in watch mode
 dev:
     #!/usr/bin/env bash
-    if [ -f web/certs/cert.pem ] && [ -f web/certs/key.pem ]; then
-        export PRISMOIRE_RP_ORIGIN=https://localhost:5173
-    fi
+    export PRISMOIRE_CONFIG=dev.toml
     pnpm --dir web dev & VITE_PID=$!
     trap 'kill $VITE_PID 2>/dev/null; wait $VITE_PID 2>/dev/null' EXIT
     cargo watch -x 'run -p prismoire-server'

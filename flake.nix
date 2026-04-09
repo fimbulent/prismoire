@@ -49,7 +49,7 @@
           filter = path: type:
             let baseName = builtins.baseNameOf path; in
             # Keep only the Cargo workspace directory structure and Rust/SQL sources
-            (type == "directory" && builtins.elem baseName [ "server" "cli" "bench" "src" "migrations" ]) ||
+            (type == "directory" && builtins.elem baseName [ "server" "cli" "config" "bench" "src" "migrations" ]) ||
             builtins.match ".*\\.(rs|toml|lock|sql)$" path != null;
         };
 
@@ -114,6 +114,9 @@
           cargoBuildFlags = [ "--package" "prismoire-bench" ];
           doCheck = false;
         };
+        defaultConfig = (pkgs.formats.toml {}).generate "prismoire.toml" {
+          server.web_dir = "${web}";
+        };
       in {
         inherit server cli web bench;
 
@@ -123,7 +126,7 @@
           nativeBuildInputs = [ pkgs.makeWrapper ];
           postBuild = ''
             wrapProgram $out/bin/prismoire-server \
-              --set PRISMOIRE_WEB_DIR "${web}"
+              --set PRISMOIRE_CONFIG "${defaultConfig}"
           '';
         };
       });

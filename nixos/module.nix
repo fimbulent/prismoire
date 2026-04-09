@@ -3,6 +3,23 @@ flake:
 
 let
   cfg = config.services.prismoire;
+
+  configFormat = pkgs.formats.toml {};
+
+  configAttrs = {
+    server = {
+      port = cfg.port;
+      database = "${cfg.dataDir}/prismoire.db";
+    } // lib.optionalAttrs (cfg.setupTokenFile != null) {
+      setup_token_file = cfg.setupTokenFile;
+    };
+    webauthn = {
+      rp_id = cfg.rpId;
+      rp_origin = cfg.rpOrigin;
+    };
+  };
+
+  configFile = configFormat.generate "prismoire.toml" configAttrs;
 in
 {
   options.services.prismoire = {
@@ -66,21 +83,13 @@ in
       wantedBy = [ "multi-user.target" ];
       after = [ "network.target" ];
       serviceConfig = {
-        ExecStart = "${cfg.package}/bin/prismoire-server";
+        ExecStart = "${cfg.package}/bin/prismoire-server --config ${configFile}";
         User = "prismoire";
         Group = "prismoire";
         Restart = "on-failure";
         RestartSec = 5;
         StateDirectory = "prismoire";
         WorkingDirectory = cfg.dataDir;
-        Environment = [
-          "PRISMOIRE_PORT=${toString cfg.port}"
-          "PRISMOIRE_DB=${cfg.dataDir}/prismoire.db"
-          "PRISMOIRE_RP_ID=${cfg.rpId}"
-          "PRISMOIRE_RP_ORIGIN=${cfg.rpOrigin}"
-        ] ++ lib.optionals (cfg.setupTokenFile != null) [
-          "PRISMOIRE_SETUP_TOKEN_FILE=${cfg.setupTokenFile}"
-        ];
       };
     };
 

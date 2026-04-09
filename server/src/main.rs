@@ -6,6 +6,7 @@ use tokio::sync::Notify;
 
 use axum::Router;
 use axum::routing::{delete, get, post};
+use prismoire_config::Config;
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqlitePoolOptions;
 use tower_http::services::{ServeDir, ServeFile};
@@ -48,20 +49,16 @@ async fn configure_pool(pool: &SqlitePool) {
         .expect("failed to set busy_timeout");
 }
 
-/// Build the WebAuthn relying party configuration from environment variables.
+/// Build the WebAuthn relying party configuration from config values.
 ///
-/// Reads `PRISMOIRE_RP_ID` (defaults to "localhost") and `PRISMOIRE_RP_ORIGIN`
-/// (defaults to "http://localhost:3000") to configure the WebAuthn ceremony
-/// parameters.
-fn build_webauthn() -> Arc<webauthn_rs::Webauthn> {
-    let rp_id = std::env::var("PRISMOIRE_RP_ID").unwrap_or_else(|_| "localhost".to_string());
-    let rp_origin_str = std::env::var("PRISMOIRE_RP_ORIGIN")
-        .unwrap_or_else(|_| "http://localhost:3000".to_string());
-    let rp_origin = Url::parse(&rp_origin_str).expect("invalid PRISMOIRE_RP_ORIGIN URL");
+/// The rp_origin URL is already validated during config loading.
+fn build_webauthn(config: &Config) -> Arc<webauthn_rs::Webauthn> {
+    let rp_origin =
+        Url::parse(&config.webauthn.rp_origin).expect("rp_origin validated during config load");
 
     let is_dev = rp_origin.host_str() == Some("localhost");
 
-    let builder = WebauthnBuilder::new(&rp_id, &rp_origin)
+    let builder = WebauthnBuilder::new(&config.webauthn.rp_id, &rp_origin)
         .expect("failed to create WebauthnBuilder")
         .rp_name("Prismoire")
         .allow_any_port(is_dev);
@@ -77,34 +74,17 @@ async fn has_admin(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
     Ok(row.is_some())
 }
 
-/// Read the setup token from the file path in `PRISMOIRE_SETUP_TOKEN_FILE`.
-///
-/// Returns `None` if the env var is not set. Returns an error if the file
-/// cannot be read or contains an empty token (misconfiguration should fail
-/// loud at startup).
-fn load_setup_token() -> Result<Option<String>, Box<dyn std::error::Error>> {
-    let path = match std::env::var("PRISMOIRE_SETUP_TOKEN_FILE") {
-        Ok(p) => p,
-        Err(_) => return Ok(None),
-    };
-    let contents = std::fs::read_to_string(&path)
-        .map_err(|e| format!("failed to read setup token file {path}: {e}"))?;
-    let token = contents.trim().to_string();
-    if token.is_empty() {
-        return Err(format!("setup token file {path} is empty").into());
-    }
-    Ok(Some(token))
-}
-
 /// Start the Prismoire API server and listen for connections.
 ///
-/// Connects to SQLite, runs migrations, configures WebAuthn, checks for
-/// admin bootstrap state, then serves the SvelteKit static build from
-/// `web/build/` as a fallback behind the API routes.
+/// Loads TOML config, connects to SQLite, runs migrations, configures
+/// WebAuthn, checks for admin bootstrap state, then serves the SvelteKit
+/// static build as a fallback behind the API routes.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db_path = std::env::var("PRISMOIRE_DB").unwrap_or_else(|_| "prismoire.db".to_string());
-    let db_url = format!("sqlite:{db_path}?mode=rwc");
+    let config_arg = prismoire_config::parse_config_arg()?;
+    let config = prismoire_config::load_config(config_arg.as_deref())?;
+
+    let db_url = format!("sqlite:{}?mode=rwc", config.server.database);
 
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
@@ -115,18 +95,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     sqlx::migrate!().run(&pool).await?;
 
     let admin_exists = has_admin(&pool).await?;
-    let setup_token = load_setup_token()?;
+
+    let setup_token = match &config.server.setup_token_file {
+        Some(path) => Some(prismoire_config::read_secret_file(path)?),
+        None => None,
+    };
 
     if !admin_exists && setup_token.is_none() {
         eprintln!(
-            "error: no admin account exists and PRISMOIRE_SETUP_TOKEN_FILE is not configured.\n\
-             Set PRISMOIRE_SETUP_TOKEN_FILE to a file containing a one-time setup token,\n\
+            "error: no admin account exists and server.setup_token_file is not configured.\n\
+             Set setup_token_file in the [server] section of your config file,\n\
              then visit /setup in the browser to create the initial admin account."
         );
         std::process::exit(1);
     }
 
-    let webauthn = build_webauthn();
+    let webauthn = build_webauthn(&config);
 
     let trust_graph_notify = Arc::new(Notify::new());
     let trust_graph = Arc::new(RwLock::new(Arc::new(trust::TrustGraph::empty())));
@@ -246,13 +230,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
         .with_state(shared_state);
 
-    let web_build: PathBuf = std::env::var("PRISMOIRE_WEB_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            [env!("CARGO_MANIFEST_DIR"), "..", "web", "build"]
-                .iter()
-                .collect()
-        });
+    let web_build: PathBuf = config.server.web_dir.map(PathBuf::from).unwrap_or_else(|| {
+        [env!("CARGO_MANIFEST_DIR"), "..", "web", "build"]
+            .iter()
+            .collect()
+    });
 
     if !web_build.exists() {
         eprintln!(
@@ -267,11 +249,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = api.fallback_service(spa_fallback);
 
-    let port = std::env::var("PRISMOIRE_PORT")
-        .ok()
-        .and_then(|p| p.parse::<u16>().ok())
-        .unwrap_or(3000);
-    let addr = format!("127.0.0.1:{port}");
+    let addr = format!("127.0.0.1:{}", config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     println!("listening on http://{addr}");
     axum::serve(listener, app).await?;

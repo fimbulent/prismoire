@@ -45,19 +45,35 @@ WebAuthn (passkeys) requires a secure context. Generate locally-trusted TLS cert
 
 ```sh
 just web-certs   # one-time setup
-just dev         # automatically serves over HTTPS when certs exist
+just dev         # serves over HTTPS
 ```
 
-### Environment Variables
+`just dev` uses `dev.toml`, which sets the WebAuthn origin to the Vite HTTPS dev server (`https://localhost:5173`).
 
-| Variable                      | Description                              | Default                                        |
-|-------------------------------|------------------------------------------|------------------------------------------------|
-| `PRISMOIRE_DB`                | Path to the SQLite database file         | `prismoire.db` (relative to working directory) |
-| `PRISMOIRE_WEB_DIR`           | Path to the SvelteKit build output       | `web/build/` (relative to repo root)           |
-| `PRISMOIRE_RP_ID`             | WebAuthn relying party ID (domain)       | `localhost`                                    |
-| `PRISMOIRE_RP_ORIGIN`         | WebAuthn relying party origin URL        | `http://localhost:3000`                        |
-| `PRISMOIRE_PORT`              | Port the server listens on               | `3000`                                         |
-| `PRISMOIRE_SETUP_TOKEN_FILE`  | Path to file containing the setup token  | *(none — required on first boot)*              |
+### Configuration
+
+The server reads configuration from a TOML file. The config file is resolved in order:
+
+1. `--config <path>` CLI argument
+2. `PRISMOIRE_CONFIG` environment variable
+3. `prismoire.toml` in the working directory (if it exists)
+4. Built-in defaults (suitable for local development)
+
+With no config file, all defaults apply — no configuration is needed for `just serve`. `just dev` uses `dev.toml` to set the WebAuthn origin for the Vite dev server.
+
+```toml
+[server]
+port = 3000                     # default: 3000
+database = "prismoire.db"       # default: "prismoire.db"
+web_dir = "web/build"           # default: relative to binary
+setup_token_file = "/run/secrets/prismoire-setup-token"  # required on first boot
+
+[webauthn]
+rp_id = "community.example.com"                    # default: "localhost"
+rp_origin = "https://community.example.com"         # default: "http://localhost:3000"
+```
+
+Secrets use file indirection (`*_file` keys) — the server reads the file at startup and trims whitespace. Never put secrets directly in the config file.
 
 ### Admin Bootstrap
 
@@ -66,9 +82,19 @@ On a fresh instance with no admin account, the server requires a one-time setup 
 ```sh
 # Generate a setup token
 just setup-token > /path/to/setup-token
+```
 
-# Start the server with the token
-PRISMOIRE_SETUP_TOKEN_FILE=/path/to/setup-token just serve
+Create a `prismoire.toml` (or pass `--config`):
+
+```toml
+[server]
+setup_token_file = "/path/to/setup-token"
+```
+
+Then start the server:
+
+```sh
+just serve
 ```
 
 Visit `/setup` in the browser, paste the token, choose a display name, and register a passkey. The admin account is created and the setup route is permanently disabled.
@@ -78,6 +104,9 @@ To grant or revoke admin role on an existing account:
 ```sh
 just admin-grant <user-id>
 just admin-revoke <user-id>
+
+# Or with an explicit config file:
+prismoire --config /path/to/config.toml admin grant <user-id>
 ```
 
 ### Offline Query Checking (Nix / CI)
