@@ -31,8 +31,7 @@ pub struct UserProfileResponse {
     pub bio: Option<String>,
     pub role: String,
     pub is_self: bool,
-    pub you_trust: bool,
-    pub you_distrust: bool,
+    pub trust_stance: String,
     pub trust: TrustInfo,
     pub trust_score: Option<f64>,
 }
@@ -130,6 +129,19 @@ pub struct UpdateBioRequest {
     pub bio: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct SetTrustEdgeRequest {
+    #[serde(rename = "type")]
+    pub edge_type: TrustEdgeType,
+}
+
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum TrustEdgeType {
+    Trust,
+    Distrust,
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -151,22 +163,21 @@ async fn resolve_user(
     Ok(row)
 }
 
-/// Check whether `source_user` has a trust edge of the given type to `target_user`.
-async fn has_trust_edge(
+/// Look up the viewer's trust stance toward `target_user`.
+/// Returns "trust", "distrust", or "neutral".
+async fn get_trust_stance(
     db: &sqlx::SqlitePool,
     source_user: &str,
     target_user: &str,
-    trust_type: &str,
-) -> Result<bool, AppError> {
-    let row: Option<(i64,)> = sqlx::query_as(
-        "SELECT 1 FROM trust_edges WHERE source_user = ? AND target_user = ? AND trust_type = ?",
+) -> Result<String, AppError> {
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT trust_type FROM trust_edges WHERE source_user = ? AND target_user = ?",
     )
     .bind(source_user)
     .bind(target_user)
-    .bind(trust_type)
     .fetch_optional(db)
     .await?;
-    Ok(row.is_some())
+    Ok(row.map(|(t,)| t).unwrap_or_else(|| "neutral".into()))
 }
 
 /// Build a UUID→display_name map for a set of UUIDs.
@@ -203,16 +214,12 @@ pub async fn get_profile(
         resolve_user(&state.db, &username).await?;
 
     let is_self = user.user_id == target_id;
-    let you_trust = if is_self {
-        false
+    let trust_stance = if is_self {
+        "neutral".to_string()
     } else {
-        has_trust_edge(&state.db, &user.user_id, &target_id, "trust").await?
+        get_trust_stance(&state.db, &user.user_id, &target_id).await?
     };
-    let you_distrust = if is_self {
-        false
-    } else {
-        has_trust_edge(&state.db, &user.user_id, &target_id, "distrust").await?
-    };
+    let you_distrust = trust_stance == "distrust";
 
     let graph = state.get_trust_graph()?;
     let viewer_uuid =
@@ -248,8 +255,7 @@ pub async fn get_profile(
         bio,
         role,
         is_self,
-        you_trust,
-        you_distrust,
+        trust_stance,
         trust,
         trust_score,
     }))
@@ -745,130 +751,75 @@ pub async fn update_bio(
 }
 
 // ---------------------------------------------------------------------------
-// POST /api/users/:username/trust — Create trust
+// PUT /api/users/:username/trust-edge — Set trust or distrust
 // ---------------------------------------------------------------------------
 
-/// Trust a user. Replaces an existing distrust if present.
-pub async fn create_trust(
+/// Set a trust or distrust edge. Replaces any existing edge atomically.
+pub async fn set_trust_edge(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(username): Path<String>,
+    Json(req): Json<SetTrustEdgeRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let (target_id, ..) = resolve_user(&state.db, &username).await?;
+
+    if user.user_id == target_id {
+        return Err(AppError::BadRequest(
+            "cannot set trust edge on yourself".into(),
+        ));
+    }
+
+    let trust_type = match req.edge_type {
+        TrustEdgeType::Trust => "trust",
+        TrustEdgeType::Distrust => "distrust",
+    };
+
+    let mut tx = state.db.begin().await?;
+
+    sqlx::query("DELETE FROM trust_edges WHERE source_user = ? AND target_user = ?")
+        .bind(&user.user_id)
+        .bind(&target_id)
+        .execute(&mut *tx)
+        .await?;
+
+    let id = Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO trust_edges (id, source_user, target_user, trust_type) VALUES (?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(&user.user_id)
+    .bind(&target_id)
+    .bind(trust_type)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    state.trust_graph_notify.notify_one();
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /api/users/:username/trust-edge — Remove trust edge (go neutral)
+// ---------------------------------------------------------------------------
+
+/// Remove any trust/distrust edge from the viewer to this user.
+pub async fn delete_trust_edge(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
     Path(username): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     let (target_id, ..) = resolve_user(&state.db, &username).await?;
 
-    if user.user_id == target_id {
-        return Err(AppError::BadRequest("cannot trust yourself".into()));
-    }
-
-    // Remove any existing edge (trust or distrust) from viewer to target
-    sqlx::query("DELETE FROM trust_edges WHERE source_user = ? AND target_user = ?")
+    let result = sqlx::query("DELETE FROM trust_edges WHERE source_user = ? AND target_user = ?")
         .bind(&user.user_id)
         .bind(&target_id)
         .execute(&state.db)
         .await?;
 
-    let id = Uuid::new_v4().to_string();
-    sqlx::query(
-        "INSERT INTO trust_edges (id, source_user, target_user, trust_type) VALUES (?, ?, ?, 'trust')",
-    )
-    .bind(&id)
-    .bind(&user.user_id)
-    .bind(&target_id)
-    .execute(&state.db)
-    .await?;
-
-    state.trust_graph_notify.notify_one();
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
-// ---------------------------------------------------------------------------
-// DELETE /api/users/:username/trust — Revoke trust
-// ---------------------------------------------------------------------------
-
-/// Remove the viewer's trust for this user.
-pub async fn revoke_trust(
-    State(state): State<Arc<AppState>>,
-    user: AuthUser,
-    Path(username): Path<String>,
-) -> Result<impl IntoResponse, AppError> {
-    let (target_id, ..) = resolve_user(&state.db, &username).await?;
-
-    let result =
-        sqlx::query("DELETE FROM trust_edges WHERE source_user = ? AND target_user = ? AND trust_type = 'trust'")
-            .bind(&user.user_id)
-            .bind(&target_id)
-            .execute(&state.db)
-            .await?;
-
     if result.rows_affected() == 0 {
-        return Err(AppError::NotFound("no trust to revoke".into()));
-    }
-
-    state.trust_graph_notify.notify_one();
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
-// ---------------------------------------------------------------------------
-// POST /api/users/:username/distrust — Create distrust
-// ---------------------------------------------------------------------------
-
-/// Distrust a user. Replaces an existing trust if present.
-pub async fn create_distrust(
-    State(state): State<Arc<AppState>>,
-    user: AuthUser,
-    Path(username): Path<String>,
-) -> Result<impl IntoResponse, AppError> {
-    let (target_id, ..) = resolve_user(&state.db, &username).await?;
-
-    if user.user_id == target_id {
-        return Err(AppError::BadRequest("cannot distrust yourself".into()));
-    }
-
-    // Remove any existing edge (trust or distrust) from viewer to target
-    sqlx::query("DELETE FROM trust_edges WHERE source_user = ? AND target_user = ?")
-        .bind(&user.user_id)
-        .bind(&target_id)
-        .execute(&state.db)
-        .await?;
-
-    let id = Uuid::new_v4().to_string();
-    sqlx::query(
-        "INSERT INTO trust_edges (id, source_user, target_user, trust_type) VALUES (?, ?, ?, 'distrust')",
-    )
-    .bind(&id)
-    .bind(&user.user_id)
-    .bind(&target_id)
-    .execute(&state.db)
-    .await?;
-
-    state.trust_graph_notify.notify_one();
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
-// ---------------------------------------------------------------------------
-// DELETE /api/users/:username/distrust — Revoke distrust
-// ---------------------------------------------------------------------------
-
-/// Remove the viewer's distrust on this user.
-pub async fn revoke_distrust(
-    State(state): State<Arc<AppState>>,
-    user: AuthUser,
-    Path(username): Path<String>,
-) -> Result<impl IntoResponse, AppError> {
-    let (target_id, ..) = resolve_user(&state.db, &username).await?;
-
-    let result =
-        sqlx::query("DELETE FROM trust_edges WHERE source_user = ? AND target_user = ? AND trust_type = 'distrust'")
-            .bind(&user.user_id)
-            .bind(&target_id)
-            .execute(&state.db)
-            .await?;
-
-    if result.rows_affected() == 0 {
-        return Err(AppError::NotFound("no distrust to revoke".into()));
+        return Err(AppError::NotFound("no trust edge to remove".into()));
     }
 
     state.trust_graph_notify.notify_one();

@@ -7,10 +7,8 @@
 		getTrustDetail,
 		getActivity,
 		updateBio,
-		trustUser,
-		revokeTrust,
-		distrustUser,
-		revokeDistrust,
+		setTrustEdge,
+		deleteTrustEdge,
 		type UserProfile,
 		type TrustDetailResponse,
 		type ActivityItem
@@ -39,15 +37,13 @@
 	let activityFilter = $state<string>('all');
 	let activityLoading = $state(false);
 
-	let moreMenuOpen = $state(false);
-	let moreMenuEl = $state<HTMLElement | null>(null);
-
 	let editingBio = $state(false);
 	let bioText = $state('');
 	let bioSaving = $state(false);
 	let bioError = $state<string | null>(null);
 
 	let actionLoading = $state(false);
+	let actionError = $state<string | null>(null);
 
 	$effect(() => {
 		if (session.loading) return;
@@ -56,24 +52,6 @@
 			return;
 		}
 		loadProfile();
-	});
-
-	$effect(() => {
-		if (!moreMenuOpen) return;
-		function handleClickOutside(e: MouseEvent) {
-			if (moreMenuEl && !moreMenuEl.contains(e.target as Node)) {
-				moreMenuOpen = false;
-			}
-		}
-		function handleEscape(e: KeyboardEvent) {
-			if (e.key === 'Escape') moreMenuOpen = false;
-		}
-		document.addEventListener('click', handleClickOutside, true);
-		document.addEventListener('keydown', handleEscape);
-		return () => {
-			document.removeEventListener('click', handleClickOutside, true);
-			document.removeEventListener('keydown', handleEscape);
-		};
 	});
 
 	async function loadProfile() {
@@ -150,42 +128,21 @@
 		loadActivity(true);
 	}
 
-	async function handleTrust() {
+	async function handleStance(stance: 'trust' | 'distrust' | 'neutral') {
 		if (!profile || actionLoading) return;
+		if (stance === profile.trust_stance) return;
 		actionLoading = true;
+		actionError = null;
 		try {
-			if (profile.you_trust) {
-				await revokeTrust(username);
-				profile.you_trust = false;
+			if (stance === 'neutral') {
+				await deleteTrustEdge(username);
 			} else {
-				await trustUser(username);
-				profile.you_trust = true;
-				profile.you_distrust = false;
+				await setTrustEdge(username, stance);
 			}
+			profile.trust_stance = stance;
 			await refreshAfterAction();
 		} catch {
-			// silently fail
-		} finally {
-			actionLoading = false;
-		}
-	}
-
-	async function handleDistrust() {
-		if (!profile || actionLoading) return;
-		actionLoading = true;
-		moreMenuOpen = false;
-		try {
-			if (profile.you_distrust) {
-				await revokeDistrust(username);
-				profile.you_distrust = false;
-			} else {
-				await distrustUser(username);
-				profile.you_distrust = true;
-				profile.you_trust = false;
-			}
-			await refreshAfterAction();
-		} catch {
-			// silently fail
+			actionError = 'Something went wrong. Try again.';
 		} finally {
 			actionLoading = false;
 		}
@@ -261,44 +218,34 @@
 				</div>
 
 				{#if !profile.is_self}
-					<div class="flex gap-2">
-						<button
-							onclick={handleTrust}
-							disabled={actionLoading}
-							class="text-sm px-4 py-2 rounded-md cursor-pointer font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed {profile.you_trust ? 'border border-border bg-transparent text-text-secondary hover:bg-bg-hover' : 'border border-accent bg-accent text-bg hover:opacity-90'}"
-						>
-							{profile.you_trust ? 'Trusted' : 'Trust'}
-						</button>
-						<div class="relative" bind:this={moreMenuEl}>
+					<div class="flex flex-col items-end gap-1">
+						<div class="trust-stance-group">
 							<button
-								onclick={() => (moreMenuOpen = !moreMenuOpen)}
-								class="text-sm px-3 py-2 rounded-md cursor-pointer border border-border bg-transparent text-text-muted font-medium hover:bg-bg-hover hover:text-text-secondary transition-colors"
-								title="More options"
-							>⋯</button>
-							{#if moreMenuOpen}
-								<div class="absolute right-0 top-full mt-1 w-40 bg-bg-surface border border-border rounded-md shadow-lg py-1 z-50">
-									<button
-										onclick={handleDistrust}
-										class="w-full text-left px-3 py-2 text-sm cursor-pointer transition-colors {profile.you_distrust ? 'text-text-secondary hover:bg-bg-hover hover:text-text-primary' : 'text-danger hover:bg-bg-hover'}"
-									>
-										{profile.you_distrust ? 'Undo Distrust' : 'Distrust'}
-									</button>
-								</div>
-							{/if}
+								onclick={() => handleStance('distrust')}
+								disabled={actionLoading}
+								class="trust-stance-btn {profile.trust_stance === 'distrust' ? 'active-distrust' : ''}"
+							>Distrust</button>
+							<button
+								onclick={() => handleStance('neutral')}
+								disabled={actionLoading}
+								class="trust-stance-btn {profile.trust_stance === 'neutral' ? 'active-neutral' : ''}"
+							>Neutral</button>
+							<button
+								onclick={() => handleStance('trust')}
+								disabled={actionLoading}
+								class="trust-stance-btn {profile.trust_stance === 'trust' ? 'active-trust' : ''}"
+							>Trust</button>
 						</div>
+						{#if actionError}
+							<span class="text-xs text-danger">{actionError}</span>
+						{/if}
 					</div>
 				{/if}
 			</div>
 
-			<!-- Distrusted banner -->
-			{#if !profile.is_self && profile.you_distrust}
-				<div class="flex items-center justify-between gap-3 px-4 py-3 rounded-md distrusted-badge border border-danger/20 mb-4">
+			{#if !profile.is_self && profile.trust_stance === 'distrust'}
+				<div class="flex items-center gap-3 px-4 py-3 rounded-md distrusted-badge border border-danger/20 mb-4">
 					<span class="text-sm text-danger">You have distrusted this user.</span>
-					<button
-						onclick={handleDistrust}
-						disabled={actionLoading}
-						class="text-xs px-3 py-1.5 rounded-md cursor-pointer font-medium border border-danger/30 text-danger hover:bg-danger/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-					>Undo Distrust</button>
 				</div>
 			{/if}
 
@@ -585,5 +532,52 @@
 
 	.distrusted-badge {
 		background: color-mix(in srgb, var(--danger) 12%, transparent);
+	}
+
+	.trust-stance-group {
+		display: flex;
+		border: 1px solid var(--border);
+		border-radius: 0.375rem;
+		overflow: hidden;
+	}
+
+	.trust-stance-btn {
+		font-size: 0.8125rem;
+		padding: 0.375rem 0.75rem;
+		cursor: pointer;
+		font-weight: 500;
+		border: none;
+		background: transparent;
+		color: var(--text-muted);
+		transition: background 0.15s, color 0.15s;
+	}
+
+	.trust-stance-btn:not(:last-child) {
+		border-right: 1px solid var(--border);
+	}
+
+	.trust-stance-btn:hover:not(:disabled) {
+		background: var(--bg-hover);
+		color: var(--text-secondary);
+	}
+
+	.trust-stance-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.trust-stance-btn.active-trust {
+		background: var(--accent);
+		color: var(--bg);
+	}
+
+	.trust-stance-btn.active-neutral {
+		background: var(--bg-surface-raised);
+		color: var(--text-primary);
+	}
+
+	.trust-stance-btn.active-distrust {
+		background: var(--danger);
+		color: var(--bg);
 	}
 </style>

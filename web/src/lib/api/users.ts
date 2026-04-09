@@ -12,8 +12,7 @@ export interface UserProfile {
 	bio: string | null;
 	role: string;
 	is_self: boolean;
-	you_trust: boolean;
-	you_distrust: boolean;
+	trust_stance: 'trust' | 'distrust' | 'neutral';
 	trust: TrustInfo;
 	trust_score: number | null;
 }
@@ -139,9 +138,14 @@ export async function updateBio(username: string, bio: string | null): Promise<v
 	}
 }
 
-export async function trustUser(username: string): Promise<void> {
-	const res = await fetch(`/api/users/${encodeURIComponent(username)}/trust`, {
-		method: 'POST'
+export async function setTrustEdge(
+	username: string,
+	edgeType: 'trust' | 'distrust'
+): Promise<void> {
+	const res = await fetch(`/api/users/${encodeURIComponent(username)}/trust-edge`, {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ type: edgeType })
 	});
 	if (!res.ok) {
 		const err: ApiError = await res.json();
@@ -149,28 +153,8 @@ export async function trustUser(username: string): Promise<void> {
 	}
 }
 
-export async function revokeTrust(username: string): Promise<void> {
-	const res = await fetch(`/api/users/${encodeURIComponent(username)}/trust`, {
-		method: 'DELETE'
-	});
-	if (!res.ok) {
-		const err: ApiError = await res.json();
-		throw new Error(err.error);
-	}
-}
-
-export async function distrustUser(username: string): Promise<void> {
-	const res = await fetch(`/api/users/${encodeURIComponent(username)}/distrust`, {
-		method: 'POST'
-	});
-	if (!res.ok) {
-		const err: ApiError = await res.json();
-		throw new Error(err.error);
-	}
-}
-
-export async function revokeDistrust(username: string): Promise<void> {
-	const res = await fetch(`/api/users/${encodeURIComponent(username)}/distrust`, {
+export async function deleteTrustEdge(username: string): Promise<void> {
+	const res = await fetch(`/api/users/${encodeURIComponent(username)}/trust-edge`, {
 		method: 'DELETE'
 	});
 	if (!res.ok) {

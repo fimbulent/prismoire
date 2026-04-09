@@ -228,8 +228,8 @@ pub async fn signup_complete(
     let trust2_id = Uuid::new_v4().to_string();
 
     sqlx::query(
-        "INSERT INTO trust_edges (id, source_user, target_user, trust_type, weight) \
-         VALUES (?, ?, ?, 'trust', 1.0)",
+        "INSERT INTO trust_edges (id, source_user, target_user, trust_type) \
+         VALUES (?, ?, ?, 'trust')",
     )
     .bind(&trust1_id)
     .bind(&inviter_id)
@@ -238,8 +238,8 @@ pub async fn signup_complete(
     .await?;
 
     sqlx::query(
-        "INSERT INTO trust_edges (id, source_user, target_user, trust_type, weight) \
-         VALUES (?, ?, ?, 'trust', 1.0)",
+        "INSERT INTO trust_edges (id, source_user, target_user, trust_type) \
+         VALUES (?, ?, ?, 'trust')",
     )
     .bind(&trust2_id)
     .bind(&user_id)

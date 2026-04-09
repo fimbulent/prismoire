@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::Notify;
 
 use axum::Router;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use prismoire_config::Config;
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqlitePoolOptions;
@@ -185,12 +185,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(users::get_trust_edges),
         )
         .route(
-            "/api/users/{username}/trust",
-            post(users::create_trust).delete(users::revoke_trust),
-        )
-        .route(
-            "/api/users/{username}/distrust",
-            post(users::create_distrust).delete(users::revoke_distrust),
+            "/api/users/{username}/trust-edge",
+            put(users::set_trust_edge).delete(users::delete_trust_edge),
         )
         .route(
             "/api/settings",
