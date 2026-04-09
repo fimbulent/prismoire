@@ -116,8 +116,11 @@ pub async fn create_thread(
                 retracted_at: None,
                 children: vec![],
                 trust: TrustInfo::self_trust(),
+                has_more_children: false,
             },
             reply_count: 0,
+            total_reply_count: 0,
+            has_more_replies: false,
         }),
     ))
 }

@@ -100,7 +100,6 @@ CREATE TABLE posts (
     retraction_signature BLOB,
     revision_count INTEGER NOT NULL DEFAULT 1
 );
-CREATE INDEX idx_posts_thread ON posts(thread);
 CREATE INDEX idx_posts_author ON posts(author);
 CREATE INDEX idx_posts_parent ON posts(parent);
 CREATE TABLE post_revisions (
@@ -154,3 +153,4 @@ CREATE TABLE thread_recent_repliers (
     replied_at TEXT NOT NULL,
     PRIMARY KEY (thread_id, reply_rank)
 );
+CREATE INDEX idx_posts_thread_created ON posts(thread, created_at);

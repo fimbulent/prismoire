@@ -122,6 +122,10 @@
 								{oncancelremove}
 							/>
 						{/if}
+					{:else if reply.has_more_children}
+						<div class="py-2">
+							<MoreButton onclick={() => oncontinuethread?.(reply)}>Continue thread</MoreButton>
+						</div>
 					{/if}
 				</div>
 			{/each}

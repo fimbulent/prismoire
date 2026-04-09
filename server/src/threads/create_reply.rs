@@ -96,16 +96,48 @@ pub async fn create_reply(
         .execute(&state.db)
         .await?;
 
-    // These three statements (bump ranks, insert rank 0, trim overflow) are
-    // not wrapped in an explicit transaction, but SQLite serializes all writers
-    // via its WAL write lock, so concurrent replies cannot interleave.
+    // Shift recent-repliers ranks up by 1 and insert the new reply at rank 0.
+    //
+    // A naive UPDATE ... SET reply_rank = reply_rank + 1 fails because SQLite
+    // processes rows in arbitrary order — bumping rank 0→1 can collide with
+    // the existing rank 1 row (PK violation). The fix: use negative
+    // intermediate values so no two rows ever share a rank during the UPDATE.
+    //
+    // All within a transaction to prevent concurrent interleaving.
+    let mut tx = state.db.begin().await?;
+
+    // 1. Trim the tail to make room after the shift.
     sqlx::query(
-        "UPDATE thread_recent_repliers SET reply_rank = reply_rank + 1 WHERE thread_id = ?",
+        "DELETE FROM thread_recent_repliers \
+         WHERE thread_id = ? AND reply_rank >= ? - 1",
     )
     .bind(&thread_id)
-    .execute(&state.db)
+    .bind(RECENT_REPLIERS_BUFFER)
+    .execute(&mut *tx)
     .await?;
 
+    // 2. Shift to negative intermediates: rank 0 → -1, 1 → -2, etc.
+    //    All values are unique and don't collide with each other.
+    sqlx::query(
+        "UPDATE thread_recent_repliers \
+         SET reply_rank = -(reply_rank + 1) \
+         WHERE thread_id = ?",
+    )
+    .bind(&thread_id)
+    .execute(&mut *tx)
+    .await?;
+
+    // 3. Flip back to positive: -1 → 1, -2 → 2, etc. (shifted +1).
+    sqlx::query(
+        "UPDATE thread_recent_repliers \
+         SET reply_rank = -reply_rank \
+         WHERE thread_id = ? AND reply_rank < 0",
+    )
+    .bind(&thread_id)
+    .execute(&mut *tx)
+    .await?;
+
+    // 4. Insert new reply at rank 0.
     sqlx::query(
         "INSERT INTO thread_recent_repliers (thread_id, reply_rank, replier_id, replied_at) \
          VALUES (?, 0, ?, ?)",
@@ -113,14 +145,10 @@ pub async fn create_reply(
     .bind(&thread_id)
     .bind(&user.user_id)
     .bind(&post_created_at)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
 
-    sqlx::query("DELETE FROM thread_recent_repliers WHERE thread_id = ? AND reply_rank >= ?")
-        .bind(&thread_id)
-        .bind(RECENT_REPLIERS_BUFFER)
-        .execute(&state.db)
-        .await?;
+    tx.commit().await?;
 
     Ok((
         axum::http::StatusCode::CREATED,
@@ -137,6 +165,7 @@ pub async fn create_reply(
             retracted_at: None,
             children: vec![],
             trust: TrustInfo::self_trust(),
+            has_more_children: false,
         }),
     ))
 }

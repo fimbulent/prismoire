@@ -19,9 +19,10 @@
 		onreply?: (postId: string) => void;
 		onremove?: (postId: string) => void;
 		extraActions?: Snippet;
+		compact?: boolean;
 	}
 
-	let { post, onreply, onremove, extraActions }: Props = $props();
+	let { post, onreply, onremove, extraActions, compact = false }: Props = $props();
 
 	let editingPostId = $state<string | null>(null);
 	let editBody = $state('');
@@ -251,6 +252,7 @@
 	<Markdown source={getDisplayBody()} profile={post.parent_id === null ? 'full' : 'reply'} />
 {/if}
 
+{#if !compact}
 <!-- Actions -->
 <div class="mt-2.5 flex gap-4">
 	{#if !post.retracted_at && post.parent_id !== null && onreply}
@@ -297,4 +299,5 @@
 </div>
 {#if retractError && retractConfirmId === post.id}
 	<div class="text-danger text-xs mt-1">{retractError}</div>
+{/if}
 {/if}

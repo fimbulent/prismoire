@@ -35,6 +35,7 @@ export interface PostResponse {
 	retracted_at: string | null;
 	children: PostResponse[];
 	trust: TrustInfo;
+	has_more_children?: boolean;
 }
 
 export interface ThreadDetail {
@@ -50,6 +51,37 @@ export interface ThreadDetail {
 	room_public: boolean;
 	post: PostResponse;
 	reply_count: number;
+	total_reply_count: number;
+	has_more_replies?: boolean;
+}
+
+export interface ThreadHeader {
+	id: string;
+	title: string;
+	author_id: string;
+	author_name: string;
+	room_id: string;
+	room_name: string;
+	room_slug: string;
+	created_at: string;
+	locked: boolean;
+	room_public: boolean;
+}
+
+export interface FocusedThreadResponse {
+	thread: ThreadHeader;
+	ancestors: PostResponse[];
+	focused_post: PostResponse;
+	total_reply_count: number;
+}
+
+export interface SubtreeResponse {
+	post: PostResponse;
+}
+
+export interface RepliesPageResponse {
+	replies: PostResponse[];
+	has_more: boolean;
 }
 
 export interface CreateThreadRequest {
@@ -107,6 +139,54 @@ export type ThreadDetailSort = 'trust' | 'new';
 export async function getThread(id: string, sort?: ThreadDetailSort): Promise<ThreadDetail> {
 	const params = sort && sort !== 'trust' ? `?sort=${sort}` : '';
 	const res = await fetch(`/api/threads/${encodeURIComponent(id)}${params}`);
+	if (!res.ok) {
+		const err: ApiError = await res.json();
+		throw new Error(err.error);
+	}
+	return res.json();
+}
+
+export async function getThreadFocused(
+	id: string,
+	focusPostId: string,
+	sort?: ThreadDetailSort
+): Promise<FocusedThreadResponse> {
+	const params = new URLSearchParams({ focus: focusPostId });
+	if (sort && sort !== 'trust') params.set('sort', sort);
+	const res = await fetch(`/api/threads/${encodeURIComponent(id)}?${params.toString()}`);
+	if (!res.ok) {
+		const err: ApiError = await res.json();
+		throw new Error(err.error);
+	}
+	return res.json();
+}
+
+export async function getThreadReplies(
+	id: string,
+	offset: number,
+	sort?: ThreadDetailSort
+): Promise<RepliesPageResponse> {
+	const params = new URLSearchParams({ offset: String(offset) });
+	if (sort && sort !== 'trust') params.set('sort', sort);
+	const res = await fetch(`/api/threads/${encodeURIComponent(id)}/replies?${params.toString()}`);
+	if (!res.ok) {
+		const err: ApiError = await res.json();
+		throw new Error(err.error);
+	}
+	return res.json();
+}
+
+export async function getThreadSubtree(
+	threadId: string,
+	postId: string,
+	sort?: ThreadDetailSort
+): Promise<SubtreeResponse> {
+	const params = new URLSearchParams();
+	if (sort && sort !== 'trust') params.set('sort', sort);
+	const qs = params.toString();
+	const res = await fetch(
+		`/api/threads/${encodeURIComponent(threadId)}/subtree/${encodeURIComponent(postId)}${qs ? `?${qs}` : ''}`
+	);
 	if (!res.ok) {
 		const err: ApiError = await res.json();
 		throw new Error(err.error);

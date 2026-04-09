@@ -135,6 +135,7 @@ pub async fn edit_post(
         retracted_at: None,
         children: vec![],
         trust: TrustInfo::self_trust(),
+        has_more_children: false,
     }))
 }
 

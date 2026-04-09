@@ -1,8 +1,12 @@
 <script lang="ts">
 	import {
 		getThread,
+		getThreadFocused,
+		getThreadReplies,
+		getThreadSubtree,
 		replyToThread,
 		type ThreadDetail,
+		type FocusedThreadResponse,
 		type PostResponse,
 		type ThreadDetailSort
 	} from '$lib/api/threads';
@@ -18,10 +22,12 @@
 	import ReplyTree from '$lib/components/post/ReplyTree.svelte';
 	import LockIcon from '$lib/components/ui/LockIcon.svelte';
 	import Badge from '$lib/components/ui/Badge.svelte';
+	import MoreButton from '$lib/components/ui/MoreButton.svelte';
 	import { session } from '$lib/stores/session.svelte';
 	import { goto } from '$app/navigation';
 
 	let thread = $state<ThreadDetail | null>(null);
+	let focused = $state<FocusedThreadResponse | null>(null);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 
@@ -50,33 +56,36 @@
 		return findPost(thread.post, id);
 	});
 
+	let loadingMoreReplies = $state(false);
+	let renderedTopLevelIds = $state(new Set<string>());
+
 	function pushViewRoot(id: string) {
 		viewRootStack = [...viewRootStack, id];
 		pushState('', { viewRootStack: [...viewRootStack] });
 	}
 
 	function popViewRoot() {
+		viewRootStack = viewRootStack.slice(0, -1);
 		history.back();
 	}
 
-	// Guard: wait for the session store to finish loading before fetching the
-	// thread. Without this, a hard refresh races — the fetch fires before the
-	// session cookie is available, the catch block sees !session.isLoggedIn
-	// (still loading), and incorrectly redirects to /login.
-	//
-	// We also track lastLoadedThreadId so the effect doesn't re-fire (and
-	// reset viewRootStack) when session.loading transitions from true→false
-	// for the *same* thread. Only a change in the route param triggers a
-	// fresh load.
 	let lastLoadedThreadId = $state<string | null>(null);
+	let lastLoadedFocusId = $state<string | null>(null);
 
 	$effect(() => {
 		if (session.loading) return;
 		const threadId = page.params.thread;
-		if (threadId && threadId !== lastLoadedThreadId) {
+		const focusId = page.url?.searchParams.get('post') ?? null;
+		if (threadId && (threadId !== lastLoadedThreadId || focusId !== lastLoadedFocusId)) {
 			lastLoadedThreadId = threadId;
+			lastLoadedFocusId = focusId;
 			viewRootStack = [];
-			loadThread(threadId);
+			if (focusId) {
+				loadFocused(threadId, focusId);
+			} else {
+				focused = null;
+				loadThread(threadId);
+			}
 		}
 	});
 
@@ -89,6 +98,7 @@
 				goto('/login', { replaceState: true });
 				return;
 			}
+			renderedTopLevelIds = new Set(thread.post.children.map((c) => c.id));
 		} catch (e) {
 			if (!session.isLoggedIn) {
 				goto('/login', { replaceState: true });
@@ -98,6 +108,76 @@
 		} finally {
 			loading = false;
 		}
+	}
+
+	async function loadFocused(threadId: string, postId: string, sort?: ThreadDetailSort) {
+		loading = true;
+		error = null;
+		try {
+			focused = await getThreadFocused(threadId, postId, sort);
+			thread = null;
+		} catch (e) {
+			if (!session.isLoggedIn) {
+				goto('/login', { replaceState: true });
+				return;
+			}
+			error = e instanceof Error ? e.message : 'Failed to load post';
+		} finally {
+			loading = false;
+		}
+	}
+
+	async function loadMoreReplies() {
+		if (!thread || loadingMoreReplies) return;
+		loadingMoreReplies = true;
+		try {
+			const offset = thread.post.children.length;
+			const res = await getThreadReplies(thread.id, offset, sortMode);
+			const newReplies = res.replies.filter((r) => !renderedTopLevelIds.has(r.id));
+			for (const r of newReplies) {
+				renderedTopLevelIds.add(r.id);
+			}
+			thread.post.children = [...thread.post.children, ...newReplies];
+			thread.has_more_replies = res.has_more;
+			thread.reply_count += newReplies.reduce(
+				(n, r) => n + 1 + countDescendants(r),
+				0
+			);
+			thread = thread;
+		} catch {
+		} finally {
+			loadingMoreReplies = false;
+		}
+	}
+
+	function countDescendants(post: PostResponse): number {
+		let count = post.children.length;
+		for (const child of post.children) {
+			count += countDescendants(child);
+		}
+		return count;
+	}
+
+	async function handleContinueThread(post: PostResponse) {
+		if (!thread) return;
+		try {
+			const res = await getThreadSubtree(thread.id, post.id, sortMode);
+			replaceSubtree(thread.post, post.id, res.post);
+			thread = thread;
+		} catch {
+		}
+		pushViewRoot(post.id);
+	}
+
+	function replaceSubtree(root: PostResponse, targetId: string, replacement: PostResponse): boolean {
+		for (let i = 0; i < root.children.length; i++) {
+			if (root.children[i].id === targetId) {
+				root.children[i] = replacement;
+				return true;
+			}
+			if (replaceSubtree(root.children[i], targetId, replacement)) return true;
+		}
+		return false;
 	}
 
 	function startReplying(postId: string) {
@@ -164,8 +244,13 @@
 		return null;
 	}
 
+	// Fallback for browser back/forward buttons (popViewRoot handles the
+	// in-app button case). page.state may be stale when this fires (SvelteKit
+	// hasn't updated it yet), so read from history.state directly. SvelteKit
+	// stores pushState user state under the 'sveltekit:states' key.
 	function handlePopState() {
-		viewRootStack = page.state.viewRootStack ?? [];
+		const states = (history.state as Record<string, unknown>)?.['sveltekit:states'] as Record<string, unknown> | undefined;
+		viewRootStack = (states?.viewRootStack as string[]) ?? [];
 	}
 
 	let adminError = $state<string | null>(null);
@@ -229,12 +314,19 @@
 		removeTarget = null;
 		removeError = null;
 	}
+
+	let focusedTitle = $derived(focused ? focused.thread.title : null);
+	let focusedRoomSlug = $derived(focused ? focused.thread.room_slug : null);
+	let focusedThreadId = $derived(focused ? focused.thread.id : null);
+	let threadTitle = $derived(thread ? thread.title : focusedTitle);
+	let isLocked = $derived(thread ? thread.locked : focused?.thread.locked ?? false);
+	let isPublic = $derived(thread ? thread.room_public : focused?.thread.room_public ?? false);
 </script>
 
 <svelte:window onpopstate={handlePopState} />
 
 <svelte:head>
-	<title>{thread ? `${thread.title} — Prismoire` : 'Thread — Prismoire'}</title>
+	<title>{threadTitle ? `${threadTitle} — Prismoire` : 'Thread — Prismoire'}</title>
 </svelte:head>
 
 <div class="max-w-4xl mx-auto px-6 pt-6 pb-16">
@@ -242,6 +334,42 @@
 		<div class="text-center text-text-muted py-12">Loading thread…</div>
 	{:else if error}
 		<div class="text-center text-danger py-12">{error}</div>
+	{:else if focused}
+		<!-- Focused post view -->
+		<div class="mb-4">
+			<a
+				href="/room/{focusedRoomSlug}/{focusedThreadId}"
+				class="text-xs text-accent hover:text-text-primary"
+			>&larr; View full thread: {focused.thread.title}</a>
+		</div>
+
+		{#if focused.ancestors.length > 0}
+			<div class="mb-4 space-y-2 opacity-60">
+				{#each focused.ancestors as ancestor (ancestor.id)}
+					<div class="bg-bg-surface border border-border-subtle rounded-md p-3">
+						<PostCard post={ancestor} compact />
+					</div>
+				{/each}
+			</div>
+		{/if}
+
+		<div class="bg-bg-surface border border-border rounded-md p-5 mb-6">
+			<PostCard post={focused.focused_post} onreply={isLocked ? undefined : startReplying} />
+			{#if focused.focused_post.children.length > 0}
+				<ReplyTree
+					parentId={focused.focused_post.id}
+					children={focused.focused_post.children}
+					maxDepth={MAX_DEPTH}
+					{replyingToId}
+					{replySaving}
+					{replyError}
+					onreply={isLocked ? undefined : startReplying}
+					oncancelreply={cancelReplying}
+					onsubmitreply={submitReply}
+					oncontinuethread={(post) => pushViewRoot(post.id)}
+				/>
+			{/if}
+		</div>
 	{:else if thread}
 		<!-- OP -->
 		<div class="bg-bg-surface border border-border rounded-md p-5 mb-6">
@@ -339,7 +467,7 @@
 						onreply={thread.locked ? undefined : startReplying}
 						oncancelreply={cancelReplying}
 						onsubmitreply={submitReply}
-						oncontinuethread={(post) => pushViewRoot(post.id)}
+						oncontinuethread={handleContinueThread}
 						onremove={session.isAdmin ? (postId) => { removeTarget = postId; removeError = null; } : undefined}
 						removeTargetId={removeTarget}
 						{removeSaving}
@@ -351,12 +479,14 @@
 			</div>
 		{:else}
 			<!-- Replies -->
-			{#if thread.post.children.length > 0}
+			{#if thread.post.children.length > 0 || thread.has_more_replies}
 				<div class="text-xs mb-2 flex items-center gap-1.5 text-text-muted">
+					<span>{thread.total_reply_count} {thread.total_reply_count === 1 ? 'reply' : 'replies'}</span>
+					<span class="mx-1">·</span>
 					<span>Sort by:</span>
 					<select
 						bind:value={sortMode}
-						onchange={async () => { if (thread) { const t = await getThread(thread.id, sortMode); thread.post.children = t.post.children; thread.reply_count = t.reply_count; } }}
+						onchange={async () => { if (thread) { const t = await getThread(thread.id, sortMode); thread.post.children = t.post.children; thread.reply_count = t.reply_count; thread.has_more_replies = t.has_more_replies; thread.total_reply_count = t.total_reply_count; renderedTopLevelIds = new Set(t.post.children.map((c) => c.id)); } }}
 						class="font-sans text-xs bg-bg-surface text-text-secondary border border-border rounded-md px-2 py-1 cursor-pointer hover:border-accent-muted focus:outline-none focus:border-accent-muted"
 					>
 						<option value="trust">Trust</option>
@@ -384,7 +514,7 @@
 								onreply={thread.locked ? undefined : startReplying}
 								oncancelreply={cancelReplying}
 								onsubmitreply={submitReply}
-								oncontinuethread={(post) => pushViewRoot(post.id)}
+								oncontinuethread={handleContinueThread}
 								onremove={session.isAdmin ? (postId) => { removeTarget = postId; removeError = null; } : undefined}
 								removeTargetId={removeTarget}
 								{removeSaving}
@@ -395,6 +525,12 @@
 						{/if}
 					</div>
 				{/each}
+
+				{#if thread.has_more_replies}
+					<div class="py-4 text-center">
+						<MoreButton onclick={loadMoreReplies} loading={loadingMoreReplies}>Load more replies</MoreButton>
+					</div>
+				{/if}
 			{:else}
 				<div class="text-center text-text-muted py-8">No replies yet.</div>
 			{/if}

@@ -83,6 +83,8 @@ pub struct PostResponse {
     pub retracted_at: Option<String>,
     pub children: Vec<PostResponse>,
     pub trust: TrustInfo,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub has_more_children: bool,
 }
 
 #[derive(Serialize)]
@@ -99,6 +101,46 @@ pub struct ThreadDetailResponse {
     pub room_public: bool,
     pub post: PostResponse,
     pub reply_count: i64,
+    pub total_reply_count: i64,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub has_more_replies: bool,
+}
+
+/// Thread header metadata for focused/subtree responses.
+#[derive(Serialize)]
+pub struct ThreadHeader {
+    pub id: String,
+    pub title: String,
+    pub author_id: String,
+    pub author_name: String,
+    pub room_id: String,
+    pub room_name: String,
+    pub room_slug: String,
+    pub created_at: String,
+    pub locked: bool,
+    pub room_public: bool,
+}
+
+/// Response for `?focus=POST_ID` — shows a specific post with ancestor context.
+#[derive(Serialize)]
+pub struct FocusedThreadResponse {
+    pub thread: ThreadHeader,
+    pub ancestors: Vec<PostResponse>,
+    pub focused_post: PostResponse,
+    pub total_reply_count: i64,
+}
+
+/// Response for the subtree expansion endpoint.
+#[derive(Serialize)]
+pub struct SubtreeResponse {
+    pub post: PostResponse,
+}
+
+/// Response for top-level replies pagination.
+#[derive(Serialize)]
+pub struct RepliesPageResponse {
+    pub replies: Vec<PostResponse>,
+    pub has_more: bool,
 }
 
 // ---------------------------------------------------------------------------

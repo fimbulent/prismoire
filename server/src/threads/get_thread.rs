@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -12,7 +12,21 @@ use crate::session::OptionalAuthUser;
 use crate::state::AppState;
 use crate::trust::{MINIMUM_TRUST_THRESHOLD, TrustInfo, load_block_set};
 
-use super::common::{PostResponse, ThreadDetailResponse};
+use super::common::{
+    FocusedThreadResponse, PostResponse, RepliesPageResponse, SubtreeResponse,
+    ThreadDetailResponse, ThreadHeader, sql_placeholders,
+};
+
+/// Maximum number of top-level replies returned in the initial thread view.
+const TOP_LEVEL_LIMIT: usize = 30;
+
+/// Maximum depth of nested replies below the OP (matches frontend MAX_DEPTH=4
+/// which renders 5 levels: the top-level reply in the page + 4 ReplyTree
+/// recursion levels).
+const MAX_DEPTH: usize = 5;
+
+/// Page size for the top-level replies expansion endpoint.
+const REPLIES_PAGE_SIZE: usize = 30;
 
 /// Sort mode for thread detail view (post ordering within the tree).
 #[derive(Deserialize, Default, Clone, Copy, PartialEq, Eq)]
@@ -28,55 +42,329 @@ pub enum PostSort {
 pub struct ThreadDetailQuery {
     #[serde(default)]
     sort: PostSort,
+    focus: Option<String>,
 }
 
-// TODO: Two-pass query to reduce memory. Pass 1: fetch post metadata
-// without bodies (id, parent, author, created_at, retracted_at), build
-// tree, apply visibility/sort, truncate to M top-level × depth D.
-// Pass 2: fetch bodies only for surviving posts via PK lookup.
-// Current approach loads all bodies upfront (~100MB for 10K-post thread).
-/// Get thread detail including all posts as a nested reply tree.
-///
-/// Fetches every post in the thread with its latest revision, then
-/// reconstructs the parent-child tree in memory. The OP (parent IS NULL)
-/// is returned as `post`, with its `children` populated recursively.
-///
-/// Trust-aware behaviour (authenticated readers only):
-/// - **Visibility filtering (reverse trust):** A post is hidden — along with
-///   its entire subtree — unless the author's trust in the reader meets
-///   `MINIMUM_TRUST_THRESHOLD`. Exceptions: the reader's own posts, OP in
-///   public rooms, and the reply visibility grant (the direct parent author
-///   can always see a reply to their post).
-/// - **Relevance sorting (forward trust):** Within each sibling group,
-///   children are sorted by the reader's forward trust distance to the
-///   author (ascending — closest/highest trust first), with `created_at`
-///   as a tiebreaker.
-///
-/// Accepts an optional `?sort=new` query parameter (default: trust sort).
-pub async fn get_thread(
-    State(state): State<Arc<AppState>>,
-    Path(thread_id): Path<String>,
-    Query(query): Query<ThreadDetailQuery>,
-    OptionalAuthUser(user): OptionalAuthUser,
-) -> Result<impl IntoResponse, AppError> {
-    let sort_by_new = query.sort == PostSort::New;
-    let (trust_map, reverse_map, block_set, reader_id) = match user.as_ref() {
-        Some(u) => {
-            let reader_uuid = Uuid::parse_str(&u.user_id).unwrap_or(Uuid::nil());
-            let graph = state.get_trust_graph()?;
-            let dm = graph.distance_map(reader_uuid);
-            let rm = graph.reverse_score_map(reader_uuid);
-            let bs = load_block_set(&state.db, &u.user_id).await?;
-            (dm, rm, bs, Some(u.user_id.clone()))
+#[derive(Deserialize, Default)]
+pub struct RepliesQuery {
+    #[serde(default)]
+    sort: PostSort,
+    #[serde(default)]
+    offset: usize,
+}
+
+#[derive(Deserialize, Default)]
+pub struct SubtreeQuery {
+    #[serde(default)]
+    sort: PostSort,
+}
+
+// ---------------------------------------------------------------------------
+// Pass 1 metadata row (no body)
+// ---------------------------------------------------------------------------
+
+struct PostMeta {
+    id: String,
+    parent_id: Option<String>,
+    author_id: String,
+    author_name: String,
+    created_at: String,
+    retracted_at: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Shared tree-building infrastructure
+// ---------------------------------------------------------------------------
+
+/// Thread-level metadata fetched once and shared across all endpoints.
+struct ThreadInfo {
+    id: String,
+    title: String,
+    author_id: String,
+    author_name: String,
+    created_at: String,
+    room_id: String,
+    room_name: String,
+    room_slug: String,
+    locked: bool,
+    room_public: bool,
+}
+
+impl ThreadInfo {
+    fn header(&self) -> ThreadHeader {
+        ThreadHeader {
+            id: self.id.clone(),
+            title: self.title.clone(),
+            author_id: self.author_id.clone(),
+            author_name: self.author_name.clone(),
+            room_id: self.room_id.clone(),
+            room_name: self.room_name.clone(),
+            room_slug: self.room_slug.clone(),
+            created_at: self.created_at.clone(),
+            locked: self.locked,
+            room_public: self.room_public,
         }
-        None => (
-            Arc::new(HashMap::new()),
-            Arc::new(HashMap::new()),
-            HashSet::new(),
-            None,
-        ),
-    };
-    let thread = sqlx::query_as::<
+    }
+}
+
+/// All the viewer-specific context needed for visibility and sorting.
+struct ViewerCtx {
+    trust_map: Arc<HashMap<String, f64>>,
+    reverse_map: Arc<HashMap<String, f64>>,
+    block_set: HashSet<String>,
+    reader_id: Option<String>,
+}
+
+/// Intermediate tree built from metadata (no bodies yet).
+struct MetaTree {
+    metas: Vec<PostMeta>,
+    id_to_index: HashMap<String, usize>,
+    children_map: HashMap<usize, Vec<usize>>,
+    retracted: HashSet<usize>,
+    author_of: Vec<String>,
+    parent_author_of: Vec<Option<String>>,
+    root_idx: usize,
+    op_author_id: String,
+}
+
+/// Build the metadata tree from pass-1 rows.
+fn build_meta_tree(rows: Vec<PostMeta>) -> Result<MetaTree, AppError> {
+    let mut id_to_index: HashMap<String, usize> = HashMap::with_capacity(rows.len());
+    let mut retracted: HashSet<usize> = HashSet::new();
+    let mut author_of: Vec<String> = Vec::with_capacity(rows.len());
+    let mut parent_author_of: Vec<Option<String>> = Vec::with_capacity(rows.len());
+
+    for (idx, meta) in rows.iter().enumerate() {
+        id_to_index.insert(meta.id.clone(), idx);
+        if meta.retracted_at.is_some() {
+            retracted.insert(idx);
+        }
+        author_of.push(meta.author_id.clone());
+        parent_author_of.push(None);
+    }
+
+    let mut children_map: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut root_idx: Option<usize> = None;
+
+    for (i, meta) in rows.iter().enumerate() {
+        if let Some(ref pid) = meta.parent_id {
+            if let Some(&parent_idx) = id_to_index.get(pid) {
+                children_map.entry(parent_idx).or_default().push(i);
+                parent_author_of[i] = Some(author_of[parent_idx].clone());
+            }
+        } else {
+            root_idx = Some(i);
+        }
+    }
+
+    let root_idx =
+        root_idx.ok_or_else(|| AppError::Internal("thread has no opening post".into()))?;
+    let op_author_id = author_of[root_idx].clone();
+
+    Ok(MetaTree {
+        metas: rows,
+        id_to_index,
+        children_map,
+        retracted,
+        author_of,
+        parent_author_of,
+        root_idx,
+        op_author_id,
+    })
+}
+
+struct TreeCtx<'a> {
+    tree: &'a MetaTree,
+    viewer: &'a ViewerCtx,
+    room_public: bool,
+    sort_by_new: bool,
+}
+
+impl TreeCtx<'_> {
+    /// Check whether a post at `idx` is visible to the current reader.
+    fn is_visible(&self, idx: usize, is_root: bool) -> bool {
+        let reader = match self.viewer.reader_id {
+            Some(ref r) => r,
+            None => return true,
+        };
+        let author = &self.tree.author_of[idx];
+        if author == reader {
+            return true;
+        }
+        if is_root && self.room_public {
+            return true;
+        }
+        if let Some(&score) = self.viewer.reverse_map.get(author)
+            && score >= MINIMUM_TRUST_THRESHOLD
+        {
+            return true;
+        }
+        if let Some(ref parent_author) = self.tree.parent_author_of[idx]
+            && parent_author == reader
+        {
+            return true;
+        }
+        false
+    }
+
+    /// Sort child indices according to the current sort mode.
+    fn sort_children(&self, children: &mut [usize]) {
+        if self.sort_by_new {
+            children.sort_by(|&a, &b| {
+                let ts_a = self.tree.metas[a].created_at.as_str();
+                let ts_b = self.tree.metas[b].created_at.as_str();
+                ts_b.cmp(ts_a)
+            });
+        } else {
+            let sort_key = |idx: usize| -> f64 {
+                let author = &self.tree.author_of[idx];
+                if self.viewer.reader_id.as_ref().is_some_and(|r| r == author) {
+                    0.0
+                } else {
+                    self.viewer
+                        .trust_map
+                        .get(author)
+                        .copied()
+                        .unwrap_or(f64::MAX)
+                }
+            };
+            children.sort_by(|&a, &b| {
+                sort_key(a)
+                    .partial_cmp(&sort_key(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        let ts_a = self.tree.metas[a].created_at.as_str();
+                        let ts_b = self.tree.metas[b].created_at.as_str();
+                        ts_a.cmp(ts_b)
+                    })
+            });
+        }
+    }
+
+    /// Filter children to only visible posts, sorted according to sort mode.
+    fn visible_sorted_children(&self, idx: usize) -> Vec<usize> {
+        let mut child_indices: Vec<usize> = self
+            .tree
+            .children_map
+            .get(&idx)
+            .cloned()
+            .unwrap_or_default();
+
+        self.sort_children(&mut child_indices);
+
+        child_indices
+            .into_iter()
+            .filter(|&ci| {
+                if self.tree.retracted.contains(&ci) && !self.tree.children_map.contains_key(&ci) {
+                    return false;
+                }
+                self.is_visible(ci, false)
+            })
+            .collect()
+    }
+
+    /// Collect post IDs for a subtree, respecting depth limit. Returns the
+    /// set of IDs to fetch bodies for and annotates which nodes were truncated.
+    fn collect_truncated(
+        &self,
+        idx: usize,
+        current_depth: usize,
+        max_depth: usize,
+        ids: &mut Vec<String>,
+        truncated: &mut HashSet<usize>,
+    ) {
+        ids.push(self.tree.metas[idx].id.clone());
+
+        let children = self.visible_sorted_children(idx);
+        if children.is_empty() {
+            return;
+        }
+
+        if current_depth >= max_depth {
+            truncated.insert(idx);
+            return;
+        }
+
+        for &ci in &children {
+            self.collect_truncated(ci, current_depth + 1, max_depth, ids, truncated);
+        }
+    }
+
+    /// Build a PostResponse tree from metadata + fetched bodies, respecting
+    /// depth limits. Bodies are looked up from the provided map.
+    fn build_tree(
+        &self,
+        idx: usize,
+        current_depth: usize,
+        max_depth: usize,
+        bodies: &HashMap<String, BodyInfo>,
+    ) -> PostResponse {
+        let meta = &self.tree.metas[idx];
+        let body_info = bodies.get(&meta.id);
+
+        let children = self.visible_sorted_children(idx);
+        let has_more_children = current_depth >= max_depth && !children.is_empty();
+
+        let child_posts: Vec<PostResponse> = if current_depth >= max_depth {
+            vec![]
+        } else {
+            children
+                .into_iter()
+                .map(|ci| self.build_tree(ci, current_depth + 1, max_depth, bodies))
+                .collect()
+        };
+
+        let (body, edited_at, revision) = match body_info {
+            Some(bi) => (bi.body.clone(), bi.edited_at.clone(), bi.revision),
+            None => (String::new(), None, 0),
+        };
+
+        PostResponse {
+            trust: TrustInfo::build(
+                &meta.author_id,
+                &self.viewer.trust_map,
+                &self.viewer.block_set,
+            ),
+            id: meta.id.clone(),
+            parent_id: meta.parent_id.clone(),
+            author_id: meta.author_id.clone(),
+            author_name: meta.author_name.clone(),
+            body,
+            created_at: meta.created_at.clone(),
+            edited_at,
+            revision,
+            is_op: meta.author_id == self.tree.op_author_id,
+            retracted_at: meta.retracted_at.clone(),
+            children: child_posts,
+            has_more_children,
+        }
+    }
+
+    /// Count total visible replies in the full tree (no truncation).
+    fn count_visible_replies(&self, idx: usize) -> i64 {
+        let children = self.visible_sorted_children(idx);
+        let mut count = children.len() as i64;
+        for ci in children {
+            count += self.count_visible_replies(ci);
+        }
+        count
+    }
+}
+
+/// Body data fetched in pass 2.
+struct BodyInfo {
+    body: String,
+    edited_at: Option<String>,
+    revision: i64,
+}
+
+// ---------------------------------------------------------------------------
+// Shared database helpers
+// ---------------------------------------------------------------------------
+
+/// Fetch thread metadata (pass 0).
+async fn fetch_thread_info(db: &sqlx::SqlitePool, thread_id: &str) -> Result<ThreadInfo, AppError> {
+    let row = sqlx::query_as::<
         _,
         (
             String,
@@ -98,251 +386,436 @@ pub async fn get_thread(
          JOIN rooms r ON r.id = t.room \
          WHERE t.id = ?",
     )
-    .bind(&thread_id)
-    .fetch_optional(&state.db)
+    .bind(thread_id)
+    .fetch_optional(db)
     .await?
     .ok_or_else(|| AppError::NotFound("thread not found".into()))?;
 
-    let (
-        id,
-        title,
-        thread_author_id,
-        thread_author_name,
-        created_at,
-        room_id,
-        room_name,
-        room_slug,
-        locked,
-        room_public,
-    ) = thread;
+    Ok(ThreadInfo {
+        id: row.0,
+        title: row.1,
+        author_id: row.2,
+        author_name: row.3,
+        created_at: row.4,
+        room_id: row.5,
+        room_name: row.6,
+        room_slug: row.7,
+        locked: row.8,
+        room_public: row.9,
+    })
+}
 
-    let rows = sqlx::query_as::<_, (String, Option<String>, String, String, String, String, i64, Option<String>, String)>(
-        "SELECT p.id, p.parent, p.author, u.display_name, pr.body, pr.created_at, pr.revision, \
-         p.retracted_at, \
-         (SELECT pr0.created_at FROM post_revisions pr0 WHERE pr0.post_id = p.id AND pr0.revision = 0) AS original_at \
+/// Pass 1: fetch post metadata without bodies.
+async fn fetch_post_metadata(
+    db: &sqlx::SqlitePool,
+    thread_id: &str,
+) -> Result<Vec<PostMeta>, AppError> {
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+            Option<String>,
+        ),
+    >(
+        "SELECT p.id, p.parent, p.author, u.display_name, p.created_at, p.retracted_at \
          FROM posts p \
          JOIN users u ON u.id = p.author \
-         JOIN post_revisions pr ON pr.post_id = p.id AND pr.revision = ( \
-             SELECT MAX(pr2.revision) FROM post_revisions pr2 WHERE pr2.post_id = p.id \
-         ) \
          WHERE p.thread = ? \
          ORDER BY p.created_at ASC",
     )
-    .bind(&thread_id)
-    .fetch_all(&state.db)
+    .bind(thread_id)
+    .fetch_all(db)
     .await?;
 
-    let op_author_id = thread_author_id.clone();
+    Ok(rows
+        .into_iter()
+        .map(
+            |(id, parent_id, author_id, author_name, created_at, retracted_at)| PostMeta {
+                id,
+                parent_id,
+                author_id,
+                author_name,
+                created_at,
+                retracted_at,
+            },
+        )
+        .collect())
+}
 
-    let mut posts: Vec<Option<PostResponse>> = Vec::with_capacity(rows.len());
-    let mut id_to_index: HashMap<String, usize> = HashMap::new();
-    let mut retracted: HashSet<usize> = HashSet::new();
-    let mut author_of: Vec<String> = Vec::with_capacity(rows.len());
-    let mut parent_author_of: Vec<Option<String>> = Vec::with_capacity(rows.len());
+/// Pass 2: fetch bodies for a set of post IDs.
+async fn fetch_bodies(
+    db: &sqlx::SqlitePool,
+    post_ids: &[String],
+) -> Result<HashMap<String, BodyInfo>, AppError> {
+    if post_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
 
-    for (
-        post_id,
-        parent_id,
-        author_id,
-        author_name,
-        body,
-        latest_revision_at,
-        revision,
-        retracted_at,
-        original_at,
-    ) in &rows
-    {
-        let edited_at = if *revision > 0 {
-            Some(latest_revision_at.clone())
+    let placeholders = sql_placeholders(post_ids.len());
+    let sql = format!(
+        "SELECT pr.post_id, pr.body, pr.created_at, pr.revision, \
+         (SELECT pr0.created_at FROM post_revisions pr0 WHERE pr0.post_id = pr.post_id AND pr0.revision = 0) AS original_at \
+         FROM post_revisions pr \
+         WHERE pr.post_id IN {placeholders} \
+           AND pr.revision = ( \
+               SELECT MAX(pr2.revision) FROM post_revisions pr2 WHERE pr2.post_id = pr.post_id \
+           )"
+    );
+
+    let mut query = sqlx::query_as::<_, (String, String, String, i64, String)>(&sql);
+    for id in post_ids {
+        query = query.bind(id);
+    }
+
+    let rows = query.fetch_all(db).await?;
+
+    let mut map = HashMap::with_capacity(rows.len());
+    for (post_id, body, latest_revision_at, revision, _original_at) in rows {
+        let edited_at = if revision > 0 {
+            Some(latest_revision_at)
         } else {
             None
         };
-        let idx = posts.len();
-        id_to_index.insert(post_id.clone(), idx);
-        if retracted_at.is_some() {
-            retracted.insert(idx);
-        }
-        author_of.push(author_id.clone());
-        parent_author_of.push(None);
-        posts.push(Some(PostResponse {
-            trust: TrustInfo::build(author_id, &trust_map, &block_set),
-            id: post_id.clone(),
-            parent_id: parent_id.clone(),
-            author_id: author_id.clone(),
-            author_name: author_name.clone(),
-            body: body.clone(),
-            created_at: original_at.clone(),
-            edited_at,
-            revision: *revision,
-            is_op: author_id == &op_author_id,
-            retracted_at: retracted_at.clone(),
-            children: vec![],
-        }));
+        map.insert(
+            post_id,
+            BodyInfo {
+                body,
+                edited_at,
+                revision,
+            },
+        );
     }
+    Ok(map)
+}
 
-    let mut children_map: HashMap<usize, Vec<usize>> = HashMap::new();
-    let mut root_idx: Option<usize> = None;
-
-    for (i, post) in posts.iter().enumerate() {
-        let post = post.as_ref().expect("post not yet taken");
-        if let Some(ref pid) = post.parent_id {
-            if let Some(&parent_idx) = id_to_index.get(pid) {
-                children_map.entry(parent_idx).or_default().push(i);
-                parent_author_of[i] = Some(author_of[parent_idx].clone());
-            }
-        } else {
-            root_idx = Some(i);
+/// Load viewer context (trust maps, block set, reader ID).
+fn load_viewer_ctx(
+    state: &AppState,
+    user: &Option<crate::session::AuthUser>,
+) -> Result<ViewerCtx, AppError> {
+    match user.as_ref() {
+        Some(u) => {
+            let reader_uuid = Uuid::parse_str(&u.user_id).unwrap_or(Uuid::nil());
+            let graph = state.get_trust_graph()?;
+            let dm = graph.distance_map(reader_uuid);
+            let rm = graph.reverse_score_map(reader_uuid);
+            Ok(ViewerCtx {
+                trust_map: dm,
+                reverse_map: rm,
+                block_set: HashSet::new(),
+                reader_id: Some(u.user_id.clone()),
+            })
         }
+        None => Ok(ViewerCtx {
+            trust_map: Arc::new(HashMap::new()),
+            reverse_map: Arc::new(HashMap::new()),
+            block_set: HashSet::new(),
+            reader_id: None,
+        }),
     }
+}
 
-    struct TreeCtx<'a> {
-        children_map: &'a HashMap<usize, Vec<usize>>,
-        retracted: &'a HashSet<usize>,
-        reader_id: &'a Option<String>,
-        author_of: &'a [String],
-        parent_author_of: &'a [Option<String>],
-        reverse_map: &'a HashMap<String, f64>,
-        trust_map: &'a HashMap<String, f64>,
-        room_public: bool,
-        sort_by_new: bool,
+/// Load viewer context including block set (requires async).
+async fn load_viewer_ctx_full(
+    state: &AppState,
+    user: &Option<crate::session::AuthUser>,
+) -> Result<ViewerCtx, AppError> {
+    let mut ctx = load_viewer_ctx(state, user)?;
+    if let Some(u) = user.as_ref() {
+        ctx.block_set = load_block_set(&state.db, &u.user_id).await?;
     }
+    Ok(ctx)
+}
 
-    impl TreeCtx<'_> {
-        /// Check whether a post at `idx` is visible to the current reader.
-        ///
-        /// A post is visible if any of the following hold:
-        /// 1. No authenticated reader (unauthenticated viewers see all).
-        /// 2. The reader is the post's author.
-        /// 3. The post is the OP in a public room.
-        /// 4. The author's trust-in-reader (reverse score) meets the threshold.
-        /// 5. Reply visibility grant: the reader authored the direct parent.
-        fn is_visible(&self, idx: usize, is_root: bool) -> bool {
-            let reader = match self.reader_id {
-                Some(r) => r,
-                None => return true,
-            };
-            let author = &self.author_of[idx];
-            if author == reader {
-                return true;
-            }
-            if is_root && self.room_public {
-                return true;
-            }
-            if let Some(&score) = self.reverse_map.get(author)
-                && score >= MINIMUM_TRUST_THRESHOLD
-            {
-                return true;
-            }
-            if let Some(ref parent_author) = self.parent_author_of[idx]
-                && parent_author == reader
-            {
-                return true;
-            }
-            false
-        }
+// ---------------------------------------------------------------------------
+// GET /api/threads/{id} — main thread detail (with optional ?focus=)
+// ---------------------------------------------------------------------------
 
-        /// Recursively build the nested reply tree with trust-aware visibility
-        /// filtering and relevance sorting.
-        fn build_tree(&self, idx: usize, posts: &mut Vec<Option<PostResponse>>) -> PostResponse {
-            let mut child_indices: Vec<usize> =
-                self.children_map.get(&idx).cloned().unwrap_or_default();
+/// Get thread detail including all posts as a nested reply tree.
+///
+/// Uses a two-pass approach: pass 1 fetches metadata only (no bodies),
+/// builds the tree, applies visibility filtering / trust sorting /
+/// truncation, then pass 2 fetches bodies only for the surviving posts.
+///
+/// Supports `?focus=POST_ID` to return a focused view centered on a
+/// specific post with its ancestor chain.
+pub async fn get_thread(
+    State(state): State<Arc<AppState>>,
+    Path(thread_id): Path<String>,
+    Query(query): Query<ThreadDetailQuery>,
+    OptionalAuthUser(user): OptionalAuthUser,
+) -> Result<Response, AppError> {
+    let thread_info = fetch_thread_info(&state.db, &thread_id).await?;
+    let viewer = load_viewer_ctx_full(&state, &user).await?;
+    let meta_rows = fetch_post_metadata(&state.db, &thread_id).await?;
+    let meta_tree = build_meta_tree(meta_rows)?;
 
-            if self.sort_by_new {
-                child_indices.sort_by(|&a, &b| {
-                    let ts_a = posts[a]
-                        .as_ref()
-                        .map(|p| p.created_at.as_str())
-                        .unwrap_or("");
-                    let ts_b = posts[b]
-                        .as_ref()
-                        .map(|p| p.created_at.as_str())
-                        .unwrap_or("");
-                    ts_b.cmp(ts_a)
-                });
-            } else {
-                // Sort key: reader's own posts first (0.0), then by forward trust
-                // distance (ascending — closest first), then unknown/untrusted last
-                // (f64::MAX). Tiebreaker: created_at ascending.
-                let sort_key = |idx: usize| -> f64 {
-                    let author = &self.author_of[idx];
-                    if self.reader_id.as_ref().is_some_and(|r| r == author) {
-                        0.0
-                    } else {
-                        self.trust_map.get(author).copied().unwrap_or(f64::MAX)
-                    }
-                };
-                child_indices.sort_by(|&a, &b| {
-                    sort_key(a)
-                        .partial_cmp(&sort_key(b))
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then_with(|| {
-                            let ts_a = posts[a]
-                                .as_ref()
-                                .map(|p| p.created_at.as_str())
-                                .unwrap_or("");
-                            let ts_b = posts[b]
-                                .as_ref()
-                                .map(|p| p.created_at.as_str())
-                                .unwrap_or("");
-                            ts_a.cmp(ts_b)
-                        })
-                });
-            }
-
-            let children: Vec<PostResponse> = child_indices
-                .into_iter()
-                .filter_map(|ci| {
-                    if self.retracted.contains(&ci) && !self.children_map.contains_key(&ci) {
-                        return None;
-                    }
-                    if !self.is_visible(ci, false) {
-                        return None;
-                    }
-                    Some(self.build_tree(ci, posts))
-                })
-                .collect();
-            let mut post = posts[idx].take().expect("post already taken from tree");
-            post.children = children;
-            post
-        }
-    }
-
-    let root_idx =
-        root_idx.ok_or_else(|| AppError::Internal("thread has no opening post".into()))?;
     let ctx = TreeCtx {
-        children_map: &children_map,
-        retracted: &retracted,
-        reader_id: &reader_id,
-        author_of: &author_of,
-        parent_author_of: &parent_author_of,
-        reverse_map: &reverse_map,
-        trust_map: &trust_map,
-        room_public,
-        sort_by_new,
+        tree: &meta_tree,
+        viewer: &viewer,
+        room_public: thread_info.room_public,
+        sort_by_new: query.sort == PostSort::New,
     };
-    let op = ctx.build_tree(root_idx, &mut posts);
 
-    fn count_replies(post: &PostResponse) -> i64 {
-        let mut count = post.children.len() as i64;
-        for child in &post.children {
-            count += count_replies(child);
-        }
-        count
+    if let Some(focus_id) = &query.focus {
+        return build_focused_response(&ctx, &meta_tree, &thread_info, focus_id, &state.db)
+            .await
+            .map(IntoResponse::into_response);
     }
-    let reply_count = count_replies(&op);
+
+    let total_reply_count = ctx.count_visible_replies(meta_tree.root_idx);
+
+    let all_top_level = ctx.visible_sorted_children(meta_tree.root_idx);
+    let has_more_replies = all_top_level.len() > TOP_LEVEL_LIMIT;
+    let top_level: Vec<usize> = all_top_level.into_iter().take(TOP_LEVEL_LIMIT).collect();
+
+    let mut post_ids = vec![meta_tree.metas[meta_tree.root_idx].id.clone()];
+    let mut truncated: HashSet<usize> = HashSet::new();
+
+    for &tl_idx in &top_level {
+        ctx.collect_truncated(tl_idx, 1, MAX_DEPTH, &mut post_ids, &mut truncated);
+    }
+
+    let bodies = fetch_bodies(&state.db, &post_ids).await?;
+
+    let op_meta = &meta_tree.metas[meta_tree.root_idx];
+    let op_body = bodies.get(&op_meta.id);
+    let (op_body_str, op_edited, op_rev) = match op_body {
+        Some(bi) => (bi.body.clone(), bi.edited_at.clone(), bi.revision),
+        None => (String::new(), None, 0),
+    };
+
+    let op_children: Vec<PostResponse> = top_level
+        .into_iter()
+        .map(|ci| ctx.build_tree(ci, 1, MAX_DEPTH, &bodies))
+        .collect();
+
+    let reply_count = count_tree_replies(&op_children);
+
+    let op = PostResponse {
+        trust: TrustInfo::build(&op_meta.author_id, &viewer.trust_map, &viewer.block_set),
+        id: op_meta.id.clone(),
+        parent_id: None,
+        author_id: op_meta.author_id.clone(),
+        author_name: op_meta.author_name.clone(),
+        body: op_body_str,
+        created_at: op_meta.created_at.clone(),
+        edited_at: op_edited,
+        revision: op_rev,
+        is_op: true,
+        retracted_at: op_meta.retracted_at.clone(),
+        children: op_children,
+        has_more_children: false,
+    };
 
     Ok(Json(ThreadDetailResponse {
-        id,
-        title,
-        author_id: thread_author_id,
-        author_name: thread_author_name,
-        room_id,
-        room_name,
-        room_slug,
-        created_at,
-        locked,
-        room_public,
+        id: thread_info.id,
+        title: thread_info.title,
+        author_id: thread_info.author_id,
+        author_name: thread_info.author_name,
+        room_id: thread_info.room_id,
+        room_name: thread_info.room_name,
+        room_slug: thread_info.room_slug,
+        created_at: thread_info.created_at,
+        locked: thread_info.locked,
+        room_public: thread_info.room_public,
         post: op,
         reply_count,
-    }))
+        total_reply_count,
+        has_more_replies,
+    })
+    .into_response())
+}
+
+/// Count replies in an already-built PostResponse tree.
+fn count_tree_replies(children: &[PostResponse]) -> i64 {
+    let mut count = children.len() as i64;
+    for child in children {
+        count += count_tree_replies(&child.children);
+    }
+    count
+}
+
+/// Build a focused response centered on a specific post.
+async fn build_focused_response(
+    ctx: &TreeCtx<'_>,
+    meta_tree: &MetaTree,
+    thread_info: &ThreadInfo,
+    focus_id: &str,
+    db: &sqlx::SqlitePool,
+) -> Result<Response, AppError> {
+    let focus_idx = meta_tree
+        .id_to_index
+        .get(focus_id)
+        .copied()
+        .ok_or_else(|| AppError::NotFound("focused post not found".into()))?;
+
+    if !ctx.is_visible(focus_idx, focus_idx == meta_tree.root_idx) {
+        return Err(AppError::NotFound("focused post not found".into()));
+    }
+
+    let mut ancestor_indices = Vec::new();
+    let mut current = focus_idx;
+    while let Some(ref pid) = meta_tree.metas[current].parent_id {
+        if let Some(&parent_idx) = meta_tree.id_to_index.get(pid) {
+            ancestor_indices.push(parent_idx);
+            current = parent_idx;
+        } else {
+            break;
+        }
+    }
+    ancestor_indices.reverse();
+
+    let mut post_ids: Vec<String> = ancestor_indices
+        .iter()
+        .map(|&idx| meta_tree.metas[idx].id.clone())
+        .collect();
+
+    let mut truncated: HashSet<usize> = HashSet::new();
+    ctx.collect_truncated(focus_idx, 0, MAX_DEPTH, &mut post_ids, &mut truncated);
+
+    let bodies = fetch_bodies(db, &post_ids).await?;
+    let total_reply_count = ctx.count_visible_replies(meta_tree.root_idx);
+
+    let ancestors: Vec<PostResponse> = ancestor_indices
+        .iter()
+        .map(|&idx| {
+            let meta = &meta_tree.metas[idx];
+            let body_info = bodies.get(&meta.id);
+            let (body, edited_at, revision) = match body_info {
+                Some(bi) => (bi.body.clone(), bi.edited_at.clone(), bi.revision),
+                None => (String::new(), None, 0),
+            };
+            PostResponse {
+                trust: TrustInfo::build(
+                    &meta.author_id,
+                    &ctx.viewer.trust_map,
+                    &ctx.viewer.block_set,
+                ),
+                id: meta.id.clone(),
+                parent_id: meta.parent_id.clone(),
+                author_id: meta.author_id.clone(),
+                author_name: meta.author_name.clone(),
+                body,
+                created_at: meta.created_at.clone(),
+                edited_at,
+                revision,
+                is_op: meta.author_id == meta_tree.op_author_id,
+                retracted_at: meta.retracted_at.clone(),
+                children: vec![],
+                has_more_children: false,
+            }
+        })
+        .collect();
+
+    let focused_post = ctx.build_tree(focus_idx, 0, MAX_DEPTH, &bodies);
+
+    Ok(Json(FocusedThreadResponse {
+        thread: thread_info.header(),
+        ancestors,
+        focused_post,
+        total_reply_count,
+    })
+    .into_response())
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/threads/{id}/replies — paginate top-level replies
+// ---------------------------------------------------------------------------
+
+/// Paginate top-level replies (children of the OP) beyond the initial page.
+///
+/// Uses the same two-pass pattern: full metadata tree → visibility/sort →
+/// offset into top-level children → fetch bodies for that page.
+pub async fn get_thread_replies(
+    State(state): State<Arc<AppState>>,
+    Path(thread_id): Path<String>,
+    Query(query): Query<RepliesQuery>,
+    OptionalAuthUser(user): OptionalAuthUser,
+) -> Result<impl IntoResponse, AppError> {
+    let thread_info = fetch_thread_info(&state.db, &thread_id).await?;
+    let viewer = load_viewer_ctx_full(&state, &user).await?;
+    let meta_rows = fetch_post_metadata(&state.db, &thread_id).await?;
+    let meta_tree = build_meta_tree(meta_rows)?;
+
+    let ctx = TreeCtx {
+        tree: &meta_tree,
+        viewer: &viewer,
+        room_public: thread_info.room_public,
+        sort_by_new: query.sort == PostSort::New,
+    };
+
+    let all_top_level = ctx.visible_sorted_children(meta_tree.root_idx);
+    let page: Vec<usize> = all_top_level
+        .into_iter()
+        .skip(query.offset)
+        .take(REPLIES_PAGE_SIZE + 1)
+        .collect();
+
+    let has_more = page.len() > REPLIES_PAGE_SIZE;
+    let page: Vec<usize> = page.into_iter().take(REPLIES_PAGE_SIZE).collect();
+
+    let mut post_ids: Vec<String> = Vec::new();
+    let mut truncated: HashSet<usize> = HashSet::new();
+    for &tl_idx in &page {
+        ctx.collect_truncated(tl_idx, 1, MAX_DEPTH, &mut post_ids, &mut truncated);
+    }
+
+    let bodies = fetch_bodies(&state.db, &post_ids).await?;
+
+    let replies: Vec<PostResponse> = page
+        .into_iter()
+        .map(|ci| ctx.build_tree(ci, 1, MAX_DEPTH, &bodies))
+        .collect();
+
+    Ok(Json(RepliesPageResponse { replies, has_more }))
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/threads/{id}/subtree/{post_id} — expand a subtree
+// ---------------------------------------------------------------------------
+
+/// Load a subtree rooted at a specific post, for "continue thread" expansion.
+///
+/// Returns the post and its children truncated to depth D.
+pub async fn get_thread_subtree(
+    State(state): State<Arc<AppState>>,
+    Path((thread_id, post_id)): Path<(String, String)>,
+    Query(query): Query<SubtreeQuery>,
+    OptionalAuthUser(user): OptionalAuthUser,
+) -> Result<impl IntoResponse, AppError> {
+    let thread_info = fetch_thread_info(&state.db, &thread_id).await?;
+    let viewer = load_viewer_ctx_full(&state, &user).await?;
+    let meta_rows = fetch_post_metadata(&state.db, &thread_id).await?;
+    let meta_tree = build_meta_tree(meta_rows)?;
+
+    let ctx = TreeCtx {
+        tree: &meta_tree,
+        viewer: &viewer,
+        room_public: thread_info.room_public,
+        sort_by_new: query.sort == PostSort::New,
+    };
+
+    let subtree_root = meta_tree
+        .id_to_index
+        .get(&post_id)
+        .copied()
+        .ok_or_else(|| AppError::NotFound("post not found".into()))?;
+
+    if !ctx.is_visible(subtree_root, subtree_root == meta_tree.root_idx) {
+        return Err(AppError::NotFound("post not found".into()));
+    }
+
+    let mut post_ids: Vec<String> = Vec::new();
+    let mut truncated: HashSet<usize> = HashSet::new();
+    ctx.collect_truncated(subtree_root, 0, MAX_DEPTH, &mut post_ids, &mut truncated);
+
+    let bodies = fetch_bodies(&state.db, &post_ids).await?;
+    let post = ctx.build_tree(subtree_root, 0, MAX_DEPTH, &bodies);
+
+    Ok(Json(SubtreeResponse { post }))
 }

@@ -63,6 +63,7 @@ export interface TrustEdgesResponse {
 
 export interface ActivityItem {
 	type: string;
+	post_id: string;
 	thread_id: string;
 	thread_title: string;
 	room_name: string;
