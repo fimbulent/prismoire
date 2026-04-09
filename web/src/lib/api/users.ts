@@ -2,7 +2,7 @@ import type { ApiError } from './auth';
 
 export interface TrustInfo {
 	distance: number | null;
-	blocked: boolean;
+	distrusted: boolean;
 }
 
 export interface UserProfile {
@@ -13,7 +13,7 @@ export interface UserProfile {
 	role: string;
 	is_self: boolean;
 	you_trust: boolean;
-	you_block: boolean;
+	you_distrust: boolean;
 	trust: TrustInfo;
 	trust_score: number | null;
 }
@@ -42,7 +42,7 @@ export interface TrustEdgeUser {
 export interface TrustDetailResponse {
 	trusts_given: number;
 	trusts_received: number;
-	blocks_issued: number;
+	distrusts_issued: number;
 	reads: number;
 	readers: number;
 	trust_score: number | null;
@@ -159,8 +159,8 @@ export async function revokeTrust(username: string): Promise<void> {
 	}
 }
 
-export async function blockUser(username: string): Promise<void> {
-	const res = await fetch(`/api/users/${encodeURIComponent(username)}/block`, {
+export async function distrustUser(username: string): Promise<void> {
+	const res = await fetch(`/api/users/${encodeURIComponent(username)}/distrust`, {
 		method: 'POST'
 	});
 	if (!res.ok) {
@@ -169,8 +169,8 @@ export async function blockUser(username: string): Promise<void> {
 	}
 }
 
-export async function revokeBlock(username: string): Promise<void> {
-	const res = await fetch(`/api/users/${encodeURIComponent(username)}/block`, {
+export async function revokeDistrust(username: string): Promise<void> {
+	const res = await fetch(`/api/users/${encodeURIComponent(username)}/distrust`, {
 		method: 'DELETE'
 	});
 	if (!res.ok) {

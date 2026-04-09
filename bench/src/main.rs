@@ -15,11 +15,11 @@ const DECAY: f64 = 0.7;
 /// Maximum BFS depth for trust traversal.
 const MAX_DEPTH: u32 = 3;
 
-/// Per-blocked-target penalty for reliability computation.
-const BLOCK_PENALTY: f64 = 0.25;
+/// Per-distrusted-target penalty for reliability computation.
+const DISTRUST_PENALTY: f64 = 0.25;
 
-/// Maps blocker's dense node ID → set of blocked dense node IDs.
-type BlockSets = HashMap<u32, HashSet<u32>>;
+/// Maps distruster's dense node ID → set of distrusted dense node IDs.
+type DistrustSets = HashMap<u32, HashSet<u32>>;
 
 // ---------------------------------------------------------------------------
 // CSR graph representation
@@ -170,19 +170,19 @@ impl PathGroupsU32 {
 }
 
 // ---------------------------------------------------------------------------
-// Block reliability
+// Distrust reliability
 // ---------------------------------------------------------------------------
 
 /// Compute the reliability factor for a node given its outgoing neighbors and
-/// the viewer's block set. Each neighbor that appears in `viewer_blocks`
+/// the viewer's distrust set. Each neighbor that appears in `viewer_distrusts`
 /// contributes an independent multiplicative penalty.
 #[inline]
-fn reliability(neighbors: &[u32], viewer_blocks: &HashSet<u32>) -> f64 {
+fn reliability(neighbors: &[u32], viewer_distrusts: &HashSet<u32>) -> f64 {
     let count = neighbors
         .iter()
-        .filter(|n| viewer_blocks.contains(n))
+        .filter(|n| viewer_distrusts.contains(n))
         .count() as i32;
-    (1.0 - BLOCK_PENALTY).powi(count)
+    (1.0 - DISTRUST_PENALTY).powi(count)
 }
 
 // ---------------------------------------------------------------------------
@@ -190,20 +190,20 @@ fn reliability(neighbors: &[u32], viewer_blocks: &HashSet<u32>) -> f64 {
 // ---------------------------------------------------------------------------
 
 /// Compute trust scores from a single source using bottleneck-grouped BFS
-/// on the forward CSR graph with block propagation.
+/// on the forward CSR graph with distrust propagation.
 ///
 /// Paths are grouped by the source's direct (first-hop) neighbor. Within each
 /// group, only the max path score is kept. Across groups, scores combine via
 /// probabilistic independence.
 ///
-/// Block propagation: each visited node's score is multiplied by a reliability
-/// factor based on how many of its trust targets the viewer has blocked.
-/// After BFS, directly blocked users are overridden to score 0.0.
+/// Distrust propagation: each visited node's score is multiplied by a reliability
+/// factor based on how many of its trust targets the viewer has distrusted.
+/// After BFS, directly distrusted users are overridden to score 0.0.
 ///
 /// Returns a vec of (target_node, combined_score) for all reachable nodes.
-fn forward_bfs(source: u32, graph: &CsrGraph, block_sets: &BlockSets) -> Vec<(u32, f64)> {
+fn forward_bfs(source: u32, graph: &CsrGraph, distrust_sets: &DistrustSets) -> Vec<(u32, f64)> {
     let empty = HashSet::new();
-    let viewer_blocks = block_sets.get(&source).unwrap_or(&empty);
+    let viewer_distrusts = distrust_sets.get(&source).unwrap_or(&empty);
 
     // BFS state: (current_node, depth, first_hop, path_score)
     let mut queue: VecDeque<(u32, u32, u32, f64)> = VecDeque::new();
@@ -218,7 +218,7 @@ fn forward_bfs(source: u32, graph: &CsrGraph, block_sets: &BlockSets) -> Vec<(u3
         if neighbor == source {
             continue;
         }
-        let penalized = reliability(graph.neighbors(neighbor), viewer_blocks);
+        let penalized = reliability(graph.neighbors(neighbor), viewer_distrusts);
         queue.push_back((neighbor, 1, neighbor, penalized));
         target_groups
             .entry(neighbor)
@@ -246,7 +246,7 @@ fn forward_bfs(source: u32, graph: &CsrGraph, block_sets: &BlockSets) -> Vec<(u3
             }
             visited.insert(next);
 
-            let r = reliability(graph.neighbors(next), viewer_blocks);
+            let r = reliability(graph.neighbors(next), viewer_distrusts);
             let next_score = path_score * DECAY * r;
 
             target_groups
@@ -263,10 +263,10 @@ fn forward_bfs(source: u32, graph: &CsrGraph, block_sets: &BlockSets) -> Vec<(u3
         .map(|(target, groups)| (target, groups.combined_score()))
         .collect();
 
-    // Direct block override: blocked users get effective trust 0.0.
-    if !viewer_blocks.is_empty() {
+    // Direct distrust override: distrusted users get effective trust 0.0.
+    if !viewer_distrusts.is_empty() {
         for entry in &mut results {
-            if viewer_blocks.contains(&entry.0) {
+            if viewer_distrusts.contains(&entry.0) {
                 entry.1 = 0.0;
             }
         }
@@ -298,11 +298,11 @@ fn forward_bfs(source: u32, graph: &CsrGraph, block_sets: &BlockSets) -> Vec<(u3
 ///   safe because re-expansion would only produce lower scores downstream
 ///   (deeper paths have strictly lower path_score due to multiplicative decay).
 ///
-/// NOTE: This function does NOT apply block propagation. Block penalties are
-/// viewer-specific (each source A has its own block set), so they cannot be
+/// NOTE: This function does NOT apply distrust propagation. Distrust penalties are
+/// viewer-specific (each source A has its own distrust set), so they cannot be
 /// folded into the shared path_score of a single reverse pass. The scores
-/// returned here are an approximation that ignores blocks. For exact
-/// block-penalized trust(A, reader), use forward_bfs from A directly.
+/// returned here are an approximation that ignores distrusts. For exact
+/// distrust-penalized trust(A, reader), use forward_bfs from A directly.
 fn reverse_bfs(reader: u32, reverse_graph: &CsrGraph) -> Vec<(u32, f64)> {
     // BFS state: (current_node, depth, path_score)
     // No first_hop tag — the group key is determined by expansion context.
@@ -411,7 +411,7 @@ impl GraphConfig {
 /// Generated graph with metadata about node ranges.
 struct SyntheticGraph {
     edges: Vec<(u32, u32)>,
-    block_edges: Vec<(u32, u32)>,
+    distrust_edges: Vec<(u32, u32)>,
     num_nodes: u32,
     /// Range of local user node indices.
     local_range: std::ops::Range<u32>,
@@ -447,17 +447,17 @@ fn generate_graph(config: &GraphConfig, rng: &mut ChaCha8Rng) -> SyntheticGraph 
         }
     }
 
-    // --- Block edges ---
-    // ~10% of local users block 1-2 random local users.
-    let num_blockers = (config.local_users / 10).max(1);
-    let mut block_edges: Vec<(u32, u32)> = Vec::new();
-    for i in 0..num_blockers {
-        let blocker = local_start + i;
-        let num_blocks = rng.gen_range(1..=2u32);
-        for _ in 0..num_blocks {
+    // --- Distrust edges ---
+    // ~10% of local users distrust 1-2 random local users.
+    let num_distrusters = (config.local_users / 10).max(1);
+    let mut distrust_edges: Vec<(u32, u32)> = Vec::new();
+    for i in 0..num_distrusters {
+        let distruster = local_start + i;
+        let num_distrusts = rng.gen_range(1..=2u32);
+        for _ in 0..num_distrusts {
             let target = rng.gen_range(local_start..local_end);
-            if target != blocker {
-                block_edges.push((blocker, target));
+            if target != distruster {
+                distrust_edges.push((distruster, target));
             }
         }
     }
@@ -466,7 +466,7 @@ fn generate_graph(config: &GraphConfig, rng: &mut ChaCha8Rng) -> SyntheticGraph 
         return SyntheticGraph {
             num_nodes: next_node,
             edges,
-            block_edges,
+            distrust_edges,
             local_range: local_start..local_end,
         };
     }
@@ -520,16 +520,16 @@ fn generate_graph(config: &GraphConfig, rng: &mut ChaCha8Rng) -> SyntheticGraph 
     SyntheticGraph {
         num_nodes: next_node,
         edges,
-        block_edges,
+        distrust_edges,
         local_range: local_start..local_end,
     }
 }
 
-/// Build a BlockSets lookup from a list of (blocker, blocked) pairs.
-fn build_block_sets(block_edges: &[(u32, u32)]) -> BlockSets {
-    let mut sets: BlockSets = HashMap::new();
-    for &(blocker, blocked) in block_edges {
-        sets.entry(blocker).or_default().insert(blocked);
+/// Build a DistrustSets lookup from a list of (distruster, distrusted) pairs.
+fn build_distrust_sets(distrust_edges: &[(u32, u32)]) -> DistrustSets {
+    let mut sets: DistrustSets = HashMap::new();
+    for &(distruster, distrusted) in distrust_edges {
+        sets.entry(distruster).or_default().insert(distrusted);
     }
     sets
 }
@@ -554,14 +554,14 @@ impl HashMapGraph {
 }
 
 /// Reference forward BFS on HashMap graph (mirrors server/src/trust.rs logic)
-/// with block propagation.
+/// with distrust propagation.
 fn reference_forward_bfs(
     source: u32,
     graph: &HashMapGraph,
-    block_sets: &BlockSets,
+    distrust_sets: &DistrustSets,
 ) -> Vec<(u32, f64)> {
-    let empty_blocks = HashSet::new();
-    let viewer_blocks = block_sets.get(&source).unwrap_or(&empty_blocks);
+    let empty_distrusts = HashSet::new();
+    let viewer_distrusts = distrust_sets.get(&source).unwrap_or(&empty_distrusts);
     let empty_neighbors: Vec<u32> = Vec::new();
 
     let mut queue: VecDeque<(u32, u32, u32, f64)> = VecDeque::new();
@@ -574,7 +574,7 @@ fn reference_forward_bfs(
                 continue;
             }
             let nbr_targets = graph.adj.get(&neighbor).unwrap_or(&empty_neighbors);
-            let r = reliability(nbr_targets, viewer_blocks);
+            let r = reliability(nbr_targets, viewer_distrusts);
             let penalized = 1.0 * r;
             queue.push_back((neighbor, 1, neighbor, penalized));
             target_groups
@@ -605,7 +605,7 @@ fn reference_forward_bfs(
                 visited.insert(next);
 
                 let next_targets = graph.adj.get(&next).unwrap_or(&empty_neighbors);
-                let r = reliability(next_targets, viewer_blocks);
+                let r = reliability(next_targets, viewer_distrusts);
                 let next_score = path_score * DECAY * r;
                 target_groups
                     .entry(next)
@@ -621,9 +621,9 @@ fn reference_forward_bfs(
         .map(|(target, groups)| (target, groups.combined_score()))
         .collect();
 
-    if !viewer_blocks.is_empty() {
+    if !viewer_distrusts.is_empty() {
         for entry in &mut results {
-            if viewer_blocks.contains(&entry.0) {
+            if viewer_distrusts.contains(&entry.0) {
                 entry.1 = 0.0;
             }
         }
@@ -746,22 +746,22 @@ fn run_benchmark(name: &str, config: &GraphConfig) {
         .map(|i| synth.local_range.start + (i * step) as u32)
         .collect();
 
-    let block_sets = build_block_sets(&synth.block_edges);
+    let distrust_sets = build_distrust_sets(&synth.distrust_edges);
     println!(
-        "  block edges: {}  blockers: {}",
-        synth.block_edges.len(),
-        block_sets.len()
+        "  distrust edges: {}  distrusters: {}",
+        synth.distrust_edges.len(),
+        distrust_sets.len()
     );
 
     // Warm up (one run to populate caches).
-    let _ = forward_bfs(sample_sources[0], &dual.forward, &block_sets);
+    let _ = forward_bfs(sample_sources[0], &dual.forward, &distrust_sets);
     let _ = reverse_bfs(sample_sources[0], &dual.reverse);
 
     let mut forward_times = Vec::with_capacity(num_samples);
     let mut forward_result_counts = Vec::with_capacity(num_samples);
     for &src in &sample_sources {
         let t = Instant::now();
-        let results = forward_bfs(src, &dual.forward, &block_sets);
+        let results = forward_bfs(src, &dual.forward, &distrust_sets);
         forward_times.push(t.elapsed().as_secs_f64() * 1000.0);
         forward_result_counts.push(results.len());
     }
@@ -810,7 +810,7 @@ fn run_benchmark(name: &str, config: &GraphConfig) {
     let mut dual_times = Vec::with_capacity(num_samples);
     for &src in &sample_sources {
         let t = Instant::now();
-        let _fwd = forward_bfs(src, &dual.forward, &block_sets);
+        let _fwd = forward_bfs(src, &dual.forward, &distrust_sets);
         let _rev = reverse_bfs(src, &dual.reverse);
         dual_times.push(t.elapsed().as_secs_f64() * 1000.0);
     }
@@ -900,7 +900,7 @@ fn run_tests() {
     // Helper: build CSR + HashMap from edge list, run forward BFS on both,
     // return score maps.
     let to_map = |v: Vec<(u32, f64)>| -> HashMap<u32, f64> { v.into_iter().collect() };
-    let no_blocks: BlockSets = HashMap::new();
+    let no_distrusts: DistrustSets = HashMap::new();
 
     // --- Test 1: Linear chain A→B→C→D ---
     {
@@ -908,8 +908,8 @@ fn run_tests() {
         let csr = CsrGraph::from_edges(4, &edges);
         let href = HashMapGraph::from_edges(&edges);
 
-        let csr_scores = to_map(forward_bfs(0, &csr, &no_blocks));
-        let ref_scores = to_map(reference_forward_bfs(0, &href, &no_blocks));
+        let csr_scores = to_map(forward_bfs(0, &csr, &no_distrusts));
+        let ref_scores = to_map(reference_forward_bfs(0, &href, &no_distrusts));
 
         assert_near!(csr_scores[&1], 1.0, 0.001, "linear chain: B=1.0 (CSR)");
         assert_near!(csr_scores[&2], 0.7, 0.001, "linear chain: C=0.7 (CSR)");
@@ -940,8 +940,8 @@ fn run_tests() {
         let csr = CsrGraph::from_edges(4, &edges);
         let href = HashMapGraph::from_edges(&edges);
 
-        let csr_scores = to_map(forward_bfs(0, &csr, &no_blocks));
-        let ref_scores = to_map(reference_forward_bfs(0, &href, &no_blocks));
+        let csr_scores = to_map(forward_bfs(0, &csr, &no_distrusts));
+        let ref_scores = to_map(reference_forward_bfs(0, &href, &no_distrusts));
 
         // 1-(1-0.7)(1-0.7) = 0.91
         assert_near!(csr_scores[&3], 0.91, 0.001, "two paths: D=0.91 (CSR)");
@@ -959,7 +959,7 @@ fn run_tests() {
         // A=0, H=1, M=2, S1=3, S2=4
         let edges = vec![(0, 1), (1, 2), (1, 3), (1, 4), (3, 2), (4, 2)];
         let csr = CsrGraph::from_edges(5, &edges);
-        let csr_scores = to_map(forward_bfs(0, &csr, &no_blocks));
+        let csr_scores = to_map(forward_bfs(0, &csr, &no_distrusts));
 
         // All paths through H — max in group H is A→H→M = 0.7
         assert_near!(csr_scores[&2], 0.7, 0.001, "sybil: M=0.7 (collapsed)");
@@ -970,7 +970,7 @@ fn run_tests() {
         // A→B→C→D→E (4 hops, E unreachable)
         let edges = vec![(0, 1), (1, 2), (2, 3), (3, 4)];
         let csr = CsrGraph::from_edges(5, &edges);
-        let csr_scores = to_map(forward_bfs(0, &csr, &no_blocks));
+        let csr_scores = to_map(forward_bfs(0, &csr, &no_distrusts));
 
         assert_true!(csr_scores.contains_key(&3), "depth limit: D reachable");
         assert_true!(!csr_scores.contains_key(&4), "depth limit: E unreachable");
@@ -981,7 +981,7 @@ fn run_tests() {
         // A→B→A
         let edges = vec![(0, 1), (1, 0)];
         let csr = CsrGraph::from_edges(2, &edges);
-        let csr_scores = to_map(forward_bfs(0, &csr, &no_blocks));
+        let csr_scores = to_map(forward_bfs(0, &csr, &no_distrusts));
 
         assert_true!(
             !csr_scores.contains_key(&0),
@@ -1018,7 +1018,7 @@ fn run_tests() {
         let edges = vec![(0, 1), (0, 2), (1, 3), (2, 3)];
         let dual = DualCsrGraph::from_edges(4, &edges);
 
-        let fwd_scores = to_map(forward_bfs(0, &dual.forward, &no_blocks));
+        let fwd_scores = to_map(forward_bfs(0, &dual.forward, &no_distrusts));
         let rev_scores = to_map(reverse_bfs(3, &dual.reverse));
 
         assert_near!(
@@ -1036,7 +1036,7 @@ fn run_tests() {
         let edges = vec![(0, 1), (1, 2), (1, 3), (1, 4), (3, 2), (4, 2)];
         let dual = DualCsrGraph::from_edges(5, &edges);
 
-        let fwd_scores = to_map(forward_bfs(0, &dual.forward, &no_blocks));
+        let fwd_scores = to_map(forward_bfs(0, &dual.forward, &no_distrusts));
         let rev_scores = to_map(reverse_bfs(2, &dual.reverse));
 
         // Forward trust(A, R) = group H only, max = A→H→R = 0.7
@@ -1053,7 +1053,7 @@ fn run_tests() {
         let edges = vec![(0, 1), (0, 2), (1, 3), (2, 1)];
         let dual = DualCsrGraph::from_edges(4, &edges);
 
-        let fwd_scores = to_map(forward_bfs(0, &dual.forward, &no_blocks));
+        let fwd_scores = to_map(forward_bfs(0, &dual.forward, &no_distrusts));
         let rev_scores = to_map(reverse_bfs(3, &dual.reverse));
 
         // Forward: group X = 0.7 (A→X→R), group Y = 0.49 (A→Y→X→R)
@@ -1072,12 +1072,12 @@ fn run_tests() {
         );
     }
 
-    // --- Test 10: Forward/reverse agreement on random graph (no blocks) ---
+    // --- Test 10: Forward/reverse agreement on random graph (no distrusts) ---
     {
         // Generate a small random graph. For every (source, target) pair
         // reachable in both directions, verify forward_bfs and reverse_bfs
         // produce the same trust score. Agreement is expected only without
-        // blocks — reverse BFS is an approximation that ignores block
+        // distrusts — reverse BFS is an approximation that ignores distrust
         // penalties (see reverse_bfs docstring).
         let mut rng = ChaCha8Rng::seed_from_u64(123);
         let n = 50u32;
@@ -1102,7 +1102,7 @@ fn run_tests() {
         let mut mismatches = 0;
         let mut comparisons = 0;
         for src in 0..10u32 {
-            let fwd = to_map(forward_bfs(src, &dual.forward, &no_blocks));
+            let fwd = to_map(forward_bfs(src, &dual.forward, &no_distrusts));
             for tgt in 0..n {
                 if tgt == src {
                     continue;
@@ -1154,8 +1154,8 @@ fn run_tests() {
         let mut mismatches = 0;
         let mut comparisons = 0;
         for src in 0..n {
-            let csr_scores = to_map(forward_bfs(src, &csr, &no_blocks));
-            let ref_scores = to_map(reference_forward_bfs(src, &href, &no_blocks));
+            let csr_scores = to_map(forward_bfs(src, &csr, &no_distrusts));
+            let ref_scores = to_map(reference_forward_bfs(src, &href, &no_distrusts));
 
             // Every target in either map should match.
             let all_targets: HashSet<u32> = csr_scores
@@ -1223,39 +1223,44 @@ fn run_tests() {
         );
     }
 
-    // --- Test 14: Single blocked target penalizes intermediary ---
+    // --- Test 14: Single distrusted target penalizes intermediary ---
     {
-        // V→A→B, A trusts E (blocked by V)
+        // V→A→B, A trusts E (distrusted by V)
         // V=0, A=1, B=2, E=3
         let edges = vec![(0, 1), (1, 2), (1, 3)];
         let blocks = HashMap::from([(0u32, HashSet::from([3u32]))]);
         let csr = CsrGraph::from_edges(4, &edges);
         let scores = to_map(forward_bfs(0, &csr, &blocks));
 
-        // A trusts E (blocked) → reliability = 0.75
-        assert_near!(scores[&1], 0.75, 0.001, "block single: A=0.75");
+        // A trusts E (distrusted) → reliability = 0.75
+        assert_near!(scores[&1], 0.75, 0.001, "distrust single: A=0.75");
         // B = 0.75 * DECAY * reliability(B) = 0.75 * 0.7 * 1.0 = 0.525
-        assert_near!(scores[&2], 0.525, 0.001, "block single: B=0.525");
-        // E is directly blocked → 0.0
-        assert_near!(scores[&3], 0.0, 0.001, "block single: E=0.0 (blocked)");
+        assert_near!(scores[&2], 0.525, 0.001, "distrust single: B=0.525");
+        // E is directly distrusted → 0.0
+        assert_near!(
+            scores[&3],
+            0.0,
+            0.001,
+            "distrust single: E=0.0 (distrusted)"
+        );
     }
 
-    // --- Test 15: Multiple blocked targets compound ---
+    // --- Test 15: Multiple distrusted targets compound ---
     {
-        // V→A, A trusts E1 and E2 (both blocked by V)
+        // V→A, A trusts E1 and E2 (both distrusted by V)
         // V=0, A=1, E1=2, E2=3
         let edges = vec![(0, 1), (1, 2), (1, 3)];
         let blocks = HashMap::from([(0u32, HashSet::from([2u32, 3u32]))]);
         let csr = CsrGraph::from_edges(4, &edges);
         let scores = to_map(forward_bfs(0, &csr, &blocks));
 
-        // A trusts 2 blocked → reliability = 0.75^2 = 0.5625
-        assert_near!(scores[&1], 0.5625, 0.001, "block multi: A=0.5625");
+        // A trusts 2 distrusted → reliability = 0.75^2 = 0.5625
+        assert_near!(scores[&1], 0.5625, 0.001, "distrust multi: A=0.5625");
     }
 
     // --- Test 16: No penalty for clean node ---
     {
-        // V→A→B, V blocks E (not connected to A)
+        // V→A→B, V distrusts E (not connected to A)
         // V=0, A=1, B=2, E=3
         let edges = vec![(0, 1), (1, 2), (0, 3)];
         let blocks = HashMap::from([(0u32, HashSet::from([3u32]))]);
@@ -1263,13 +1268,13 @@ fn run_tests() {
         let scores = to_map(forward_bfs(0, &csr, &blocks));
 
         // A doesn't trust E → no penalty
-        assert_near!(scores[&1], 1.0, 0.001, "block clean: A=1.0");
-        assert_near!(scores[&2], 0.7, 0.001, "block clean: B=0.7");
+        assert_near!(scores[&1], 1.0, 0.001, "distrust clean: A=1.0");
+        assert_near!(scores[&2], 0.7, 0.001, "distrust clean: B=0.7");
     }
 
-    // --- Test 17: Multi-path recovery with blocks ---
+    // --- Test 17: Multi-path recovery with distrusts ---
     {
-        // V→A→T, V→C→T. A trusts blocked E, C is clean. T is clean.
+        // V→A→T, V→C→T. A trusts distrusted E, C is clean. T is clean.
         // V=0, A=1, C=2, T=3, E=4
         let edges = vec![(0, 1), (0, 2), (1, 3), (2, 3), (1, 4)];
         let blocks = HashMap::from([(0u32, HashSet::from([4u32]))]);
@@ -1279,12 +1284,12 @@ fn run_tests() {
         // Group A: A reliability=0.75, T via A = 0.75 * 0.7 = 0.525
         // Group C: C reliability=1.0, T via C = 1.0 * 0.7 = 0.7
         // Combined: 1 - (1-0.525)(1-0.7) = 1 - 0.1425 = 0.8575
-        assert_near!(scores[&3], 0.8575, 0.001, "block multipath: T=0.8575");
+        assert_near!(scores[&3], 0.8575, 0.001, "distrust multipath: T=0.8575");
     }
 
     // --- Test 18: Penalty compounds along path ---
     {
-        // V→A→B→C, A trusts E1 (blocked), B trusts E2 (blocked)
+        // V→A→B→C, A trusts E1 (distrusted), B trusts E2 (distrusted)
         // V=0, A=1, B=2, C=3, E1=4, E2=5
         let edges = vec![(0, 1), (1, 2), (2, 3), (1, 4), (2, 5)];
         let blocks = HashMap::from([(0u32, HashSet::from([4u32, 5u32]))]);
@@ -1292,16 +1297,16 @@ fn run_tests() {
         let scores = to_map(forward_bfs(0, &csr, &blocks));
 
         // A: reliability = 0.75 (trusts E1) → 0.75
-        assert_near!(scores[&1], 0.75, 0.001, "block compound: A=0.75");
+        assert_near!(scores[&1], 0.75, 0.001, "distrust compound: A=0.75");
         // B: 0.75 * DECAY * reliability(B) = 0.75 * 0.7 * 0.75 = 0.39375
-        assert_near!(scores[&2], 0.394, 0.001, "block compound: B≈0.394");
+        assert_near!(scores[&2], 0.394, 0.001, "distrust compound: B≈0.394");
         // C: 0.394 * DECAY * 1.0 = 0.276
-        assert_near!(scores[&3], 0.276, 0.01, "block compound: C≈0.276");
+        assert_near!(scores[&3], 0.276, 0.01, "distrust compound: C≈0.276");
     }
 
-    // --- Test 19: Block penalty + Sybil resistance ---
+    // --- Test 19: Distrust penalty + Sybil resistance ---
     {
-        // V→H→M, V→H→S1→M, V→H→S2→M. H trusts E (blocked by V).
+        // V→H→M, V→H→S1→M, V→H→S2→M. H trusts E (distrusted by V).
         // V=0, H=1, M=2, S1=3, S2=4, E=5
         let edges = vec![(0, 1), (1, 2), (1, 3), (1, 4), (3, 2), (4, 2), (1, 5)];
         let blocks = HashMap::from([(0u32, HashSet::from([5u32]))]);
@@ -1310,18 +1315,18 @@ fn run_tests() {
 
         // All paths through first-hop H. H reliability = 0.75 (trusts E).
         // H score = 0.75. Best path to M in group H: H→M = 0.75 * 0.7 * r(M)
-        // M doesn't trust blocked users → r(M)=1.0 → H→M = 0.525
+        // M doesn't trust distrusted users → r(M)=1.0 → H→M = 0.525
         // Sybil paths: H→S1→M = 0.75*0.7*1.0*0.7*1.0 = 0.3675
         // Max in group H = 0.525. Sybils can't inflate.
         assert_near!(
             scores[&2],
             0.525,
             0.001,
-            "block sybil: M=0.525 (sybils don't help)"
+            "distrust sybil: M=0.525 (sybils don't help)"
         );
     }
 
-    // --- Test 20: CSR matches reference with blocks ---
+    // --- Test 20: CSR matches reference with distrusts ---
     {
         let edges = vec![(0, 1), (1, 2), (1, 3), (2, 4), (0, 5), (5, 4)];
         let blocks = HashMap::from([(0u32, HashSet::from([3u32]))]);
@@ -1339,7 +1344,7 @@ fn run_tests() {
         {
             let cs = csr_scores.get(tgt).copied().unwrap_or(0.0);
             let rs = ref_scores.get(tgt).copied().unwrap_or(0.0);
-            assert_near!(cs, rs, 0.001, &format!("block CSR vs ref: target {tgt}"));
+            assert_near!(cs, rs, 0.001, &format!("distrust CSR vs ref: target {tgt}"));
         }
     }
 
@@ -1361,7 +1366,7 @@ mod tests {
         v.into_iter().collect()
     }
 
-    fn empty_blocks() -> BlockSets {
+    fn empty_distrusts() -> DistrustSets {
         HashMap::new()
     }
 
@@ -1369,7 +1374,7 @@ mod tests {
     fn test_csr_linear_chain() {
         let edges = vec![(0, 1), (1, 2), (2, 3)];
         let csr = CsrGraph::from_edges(4, &edges);
-        let scores = to_map(forward_bfs(0, &csr, &empty_blocks()));
+        let scores = to_map(forward_bfs(0, &csr, &empty_distrusts()));
 
         assert!((scores[&1] - 1.0).abs() < 0.001);
         assert!((scores[&2] - 0.7).abs() < 0.001);
@@ -1380,7 +1385,7 @@ mod tests {
     fn test_csr_two_independent_paths() {
         let edges = vec![(0, 1), (0, 2), (1, 3), (2, 3)];
         let csr = CsrGraph::from_edges(4, &edges);
-        let scores = to_map(forward_bfs(0, &csr, &empty_blocks()));
+        let scores = to_map(forward_bfs(0, &csr, &empty_distrusts()));
 
         assert!((scores[&3] - 0.91).abs() < 0.001);
     }
@@ -1389,7 +1394,7 @@ mod tests {
     fn test_csr_sybil_resistance() {
         let edges = vec![(0, 1), (1, 2), (1, 3), (1, 4), (3, 2), (4, 2)];
         let csr = CsrGraph::from_edges(5, &edges);
-        let scores = to_map(forward_bfs(0, &csr, &empty_blocks()));
+        let scores = to_map(forward_bfs(0, &csr, &empty_distrusts()));
 
         assert!((scores[&2] - 0.7).abs() < 0.001);
     }
@@ -1398,7 +1403,7 @@ mod tests {
     fn test_csr_depth_limit() {
         let edges = vec![(0, 1), (1, 2), (2, 3), (3, 4)];
         let csr = CsrGraph::from_edges(5, &edges);
-        let scores = to_map(forward_bfs(0, &csr, &empty_blocks()));
+        let scores = to_map(forward_bfs(0, &csr, &empty_distrusts()));
 
         assert!(scores.contains_key(&3));
         assert!(!scores.contains_key(&4));
@@ -1408,7 +1413,7 @@ mod tests {
     fn test_csr_no_self_loop() {
         let edges = vec![(0, 1), (1, 0)];
         let csr = CsrGraph::from_edges(2, &edges);
-        let scores = to_map(forward_bfs(0, &csr, &empty_blocks()));
+        let scores = to_map(forward_bfs(0, &csr, &empty_distrusts()));
 
         assert!(!scores.contains_key(&0));
         assert!(scores.contains_key(&1));
@@ -1430,7 +1435,7 @@ mod tests {
         let edges = vec![(0, 1), (0, 2), (1, 3), (2, 3)];
         let dual = DualCsrGraph::from_edges(4, &edges);
 
-        let fwd = to_map(forward_bfs(0, &dual.forward, &empty_blocks()));
+        let fwd = to_map(forward_bfs(0, &dual.forward, &empty_distrusts()));
         let rev = to_map(reverse_bfs(3, &dual.reverse));
 
         assert!((fwd[&3] - rev[&0]).abs() < 0.001);
@@ -1441,7 +1446,7 @@ mod tests {
         let edges = vec![(0, 1), (1, 2), (1, 3), (1, 4), (3, 2), (4, 2)];
         let dual = DualCsrGraph::from_edges(5, &edges);
 
-        let fwd = to_map(forward_bfs(0, &dual.forward, &empty_blocks()));
+        let fwd = to_map(forward_bfs(0, &dual.forward, &empty_distrusts()));
         let rev = to_map(reverse_bfs(2, &dual.reverse));
 
         assert!((fwd[&2] - 0.7).abs() < 0.001);
@@ -1454,7 +1459,7 @@ mod tests {
         let edges = vec![(0, 1), (0, 2), (1, 3), (2, 1)];
         let dual = DualCsrGraph::from_edges(4, &edges);
 
-        let fwd = to_map(forward_bfs(0, &dual.forward, &empty_blocks()));
+        let fwd = to_map(forward_bfs(0, &dual.forward, &empty_distrusts()));
         let rev = to_map(reverse_bfs(3, &dual.reverse));
 
         assert!((fwd[&3] - 0.847).abs() < 0.001);
@@ -1484,8 +1489,8 @@ mod tests {
     }
 
     /// Exhaustive forward/reverse agreement on a random 50-node graph.
-    /// Uses empty block sets — agreement is expected only without blocks.
-    /// Reverse BFS is an approximation that ignores block penalties (see
+    /// Uses empty distrust sets — agreement is expected only without distrusts.
+    /// Reverse BFS is an approximation that ignores distrust penalties (see
     /// reverse_bfs docstring).
     #[test]
     fn test_forward_reverse_agreement_random() {
@@ -1509,7 +1514,7 @@ mod tests {
         let dual = DualCsrGraph::from_edges(n, &edges);
 
         for src in 0..n {
-            let fwd = to_map(forward_bfs(src, &dual.forward, &empty_blocks()));
+            let fwd = to_map(forward_bfs(src, &dual.forward, &empty_distrusts()));
             for tgt in 0..n {
                 if tgt == src {
                     continue;
@@ -1551,8 +1556,8 @@ mod tests {
         let href = HashMapGraph::from_edges(&edges);
 
         for src in 0..n {
-            let csr_scores = to_map(forward_bfs(src, &csr, &empty_blocks()));
-            let ref_scores = to_map(reference_forward_bfs(src, &href, &empty_blocks()));
+            let csr_scores = to_map(forward_bfs(src, &csr, &empty_distrusts()));
+            let ref_scores = to_map(reference_forward_bfs(src, &href, &empty_distrusts()));
 
             let all_targets: HashSet<u32> = csr_scores
                 .keys()
@@ -1570,11 +1575,11 @@ mod tests {
         }
     }
 
-    // -- Block propagation tests --
+    // -- Distrust propagation tests --
 
     #[test]
-    fn test_block_single_target() {
-        // V→A→B, A trusts E (blocked by V). V=0, A=1, B=2, E=3.
+    fn test_distrust_single_target() {
+        // V→A→B, A trusts E (distrusted by V). V=0, A=1, B=2, E=3.
         let edges = vec![(0, 1), (1, 2), (1, 3)];
         let blocks = HashMap::from([(0u32, HashSet::from([3u32]))]);
         let csr = CsrGraph::from_edges(4, &edges);
@@ -1586,8 +1591,8 @@ mod tests {
     }
 
     #[test]
-    fn test_block_multiple_targets() {
-        // V→A, A trusts E1 and E2 (both blocked). V=0, A=1, E1=2, E2=3.
+    fn test_distrust_multiple_targets() {
+        // V→A, A trusts E1 and E2 (both distrusted). V=0, A=1, E1=2, E2=3.
         let edges = vec![(0, 1), (1, 2), (1, 3)];
         let blocks = HashMap::from([(0u32, HashSet::from([2u32, 3u32]))]);
         let csr = CsrGraph::from_edges(4, &edges);
@@ -1597,8 +1602,8 @@ mod tests {
     }
 
     #[test]
-    fn test_block_no_penalty_clean_node() {
-        // V→A→B, V blocks E (not trusted by A). V=0, A=1, B=2, E=3.
+    fn test_distrust_no_penalty_clean_node() {
+        // V→A→B, V distrusts E (not trusted by A). V=0, A=1, B=2, E=3.
         let edges = vec![(0, 1), (1, 2), (0, 3)];
         let blocks = HashMap::from([(0u32, HashSet::from([3u32]))]);
         let csr = CsrGraph::from_edges(4, &edges);
@@ -1609,8 +1614,8 @@ mod tests {
     }
 
     #[test]
-    fn test_block_multipath_recovery() {
-        // V→A→T, V→C→T. A trusts E (blocked), C clean. V=0, A=1, C=2, T=3, E=4.
+    fn test_distrust_multipath_recovery() {
+        // V→A→T, V→C→T. A trusts E (distrusted), C clean. V=0, A=1, C=2, T=3, E=4.
         let edges = vec![(0, 1), (0, 2), (1, 3), (2, 3), (1, 4)];
         let blocks = HashMap::from([(0u32, HashSet::from([4u32]))]);
         let csr = CsrGraph::from_edges(5, &edges);
@@ -1622,8 +1627,8 @@ mod tests {
     }
 
     #[test]
-    fn test_block_compounds_along_path() {
-        // V→A→B→C, A trusts E1 (blocked), B trusts E2 (blocked).
+    fn test_distrust_compounds_along_path() {
+        // V→A→B→C, A trusts E1 (distrusted), B trusts E2 (distrusted).
         // V=0, A=1, B=2, C=3, E1=4, E2=5.
         let edges = vec![(0, 1), (1, 2), (2, 3), (1, 4), (2, 5)];
         let blocks = HashMap::from([(0u32, HashSet::from([4u32, 5u32]))]);
@@ -1636,8 +1641,8 @@ mod tests {
     }
 
     #[test]
-    fn test_block_sybil_resistance() {
-        // V→H→M, V→H→S1→M, V→H→S2→M. H trusts E (blocked).
+    fn test_distrust_sybil_resistance() {
+        // V→H→M, V→H→S1→M, V→H→S2→M. H trusts E (distrusted).
         // V=0, H=1, M=2, S1=3, S2=4, E=5.
         let edges = vec![(0, 1), (1, 2), (1, 3), (1, 4), (3, 2), (4, 2), (1, 5)];
         let blocks = HashMap::from([(0u32, HashSet::from([5u32]))]);
@@ -1650,7 +1655,7 @@ mod tests {
     }
 
     #[test]
-    fn test_block_csr_matches_reference() {
+    fn test_distrust_csr_matches_reference() {
         let edges = vec![(0, 1), (1, 2), (1, 3), (2, 4), (0, 5), (5, 4)];
         let blocks = HashMap::from([(0u32, HashSet::from([3u32]))]);
         let csr = CsrGraph::from_edges(6, &edges);

@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::error::AppError;
 use crate::session::AuthUser;
 use crate::state::AppState;
-use crate::trust::{MINIMUM_TRUST_THRESHOLD, TrustInfo, TrustPath, load_block_set};
+use crate::trust::{MINIMUM_TRUST_THRESHOLD, TrustInfo, TrustPath, load_distrust_set};
 
 const MAX_BIO_LEN: usize = 500;
 const ACTIVITY_PAGE_SIZE: i64 = 10;
@@ -32,7 +32,7 @@ pub struct UserProfileResponse {
     pub role: String,
     pub is_self: bool,
     pub you_trust: bool,
-    pub you_block: bool,
+    pub you_distrust: bool,
     pub trust: TrustInfo,
     pub trust_score: Option<f64>,
 }
@@ -61,7 +61,7 @@ pub struct ScoreReduction {
 pub struct TrustDetailResponse {
     pub trusts_given: i64,
     pub trusts_received: i64,
-    pub blocks_issued: i64,
+    pub distrusts_issued: i64,
     pub reads: u32,
     pub readers: u32,
     pub trust_score: Option<f64>,
@@ -208,10 +208,10 @@ pub async fn get_profile(
     } else {
         has_trust_edge(&state.db, &user.user_id, &target_id, "trust").await?
     };
-    let you_block = if is_self {
+    let you_distrust = if is_self {
         false
     } else {
-        has_trust_edge(&state.db, &user.user_id, &target_id, "block").await?
+        has_trust_edge(&state.db, &user.user_id, &target_id, "distrust").await?
     };
 
     let graph = state.get_trust_graph()?;
@@ -228,14 +228,14 @@ pub async fn get_profile(
                 Some(score),
                 TrustInfo {
                     distance,
-                    blocked: you_block,
+                    distrusted: you_distrust,
                 },
             ),
             None => (
                 None,
                 TrustInfo {
                     distance: None,
-                    blocked: you_block,
+                    distrusted: you_distrust,
                 },
             ),
         }
@@ -249,7 +249,7 @@ pub async fn get_profile(
         role,
         is_self,
         you_trust,
-        you_block,
+        you_distrust,
         trust,
         trust_score,
     }))
@@ -284,8 +284,8 @@ pub async fn get_trust_detail(
     .fetch_one(&state.db)
     .await?;
 
-    let (blocks_issued,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM trust_edges WHERE source_user = ? AND trust_type = 'block'",
+    let (distrusts_issued,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM trust_edges WHERE source_user = ? AND trust_type = 'distrust'",
     )
     .bind(&target_id)
     .fetch_one(&state.db)
@@ -308,18 +308,18 @@ pub async fn get_trust_detail(
     // they sort first rather than falling through to f64::MAX (untrusted).
     distance_map.insert(user.user_id.clone(), 0.0);
 
-    let block_set = load_block_set(&state.db, &user.user_id).await?;
-    let you_block = !is_self && block_set.contains(&target_id);
+    let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
+    let you_distrust = !is_self && distrust_set.contains(&target_id);
 
-    // When the viewer has blocked the target, trust is fixed at 0 — skip
+    // When the viewer has distrusted the target, trust is fixed at 0 — skip
     // paths and score reductions since they have no effect.
-    let (trust_score, trust, paths, score_reductions) = if is_self || you_block {
+    let (trust_score, trust, paths, score_reductions) = if is_self || you_distrust {
         let trust = if is_self {
             TrustInfo::self_trust()
         } else {
             TrustInfo {
                 distance: None,
-                blocked: true,
+                distrusted: true,
             }
         };
         (None, trust, Vec::new(), Vec::new())
@@ -359,7 +359,7 @@ pub async fn get_trust_detail(
                                 .get(&via)
                                 .cloned()
                                 .unwrap_or_else(|| "unknown".into()),
-                            trust: TrustInfo::build(&id, &distance_map, &block_set),
+                            trust: TrustInfo::build(&id, &distance_map, &distrust_set),
                         }),
                         via2: None,
                     }
@@ -374,14 +374,14 @@ pub async fn get_trust_detail(
                                 .get(&via1)
                                 .cloned()
                                 .unwrap_or_else(|| "unknown".into()),
-                            trust: TrustInfo::build(&id1, &distance_map, &block_set),
+                            trust: TrustInfo::build(&id1, &distance_map, &distrust_set),
                         }),
                         via2: Some(TrustUserRef {
                             display_name: name_map
                                 .get(&via2)
                                 .cloned()
                                 .unwrap_or_else(|| "unknown".into()),
-                            trust: TrustInfo::build(&id2, &distance_map, &block_set),
+                            trust: TrustInfo::build(&id2, &distance_map, &distrust_set),
                         }),
                     }
                 }
@@ -392,7 +392,7 @@ pub async fn get_trust_detail(
             "SELECT u.display_name FROM trust_edges te \
              JOIN users u ON u.id = te.target_user \
              WHERE te.source_user = ? AND te.trust_type = 'trust' \
-             AND te.target_user IN (SELECT target_user FROM trust_edges WHERE source_user = ? AND trust_type = 'block')",
+             AND te.target_user IN (SELECT target_user FROM trust_edges WHERE source_user = ? AND trust_type = 'distrust')",
         )
         .bind(&target_id)
         .bind(&user.user_id)
@@ -401,7 +401,7 @@ pub async fn get_trust_detail(
         .into_iter()
         .map(|(name,)| ScoreReduction {
             display_name: name,
-            reason: "blocked by you".into(),
+            reason: "distrusted by you".into(),
         })
         .collect();
 
@@ -409,7 +409,7 @@ pub async fn get_trust_detail(
             score,
             TrustInfo {
                 distance,
-                blocked: false,
+                distrusted: false,
             },
             built_paths,
             reductions,
@@ -451,7 +451,7 @@ pub async fn get_trust_detail(
         trusts_batch
             .into_iter()
             .map(|(name, uid)| TrustEdgeUser {
-                trust: TrustInfo::build(&uid, &distance_map, &block_set),
+                trust: TrustInfo::build(&uid, &distance_map, &distrust_set),
                 display_name: name,
             })
             .collect(),
@@ -482,7 +482,7 @@ pub async fn get_trust_detail(
         trusted_by_batch
             .into_iter()
             .map(|(name, uid)| TrustEdgeUser {
-                trust: TrustInfo::build(&uid, &distance_map, &block_set),
+                trust: TrustInfo::build(&uid, &distance_map, &distrust_set),
                 display_name: name,
             })
             .collect(),
@@ -497,7 +497,7 @@ pub async fn get_trust_detail(
     Ok(Json(TrustDetailResponse {
         trusts_given,
         trusts_received,
-        blocks_issued,
+        distrusts_issued,
         reads,
         readers,
         trust_score,
@@ -676,12 +676,12 @@ pub async fn get_trust_edges(
         }
     };
 
-    let block_set = load_block_set(&state.db, &user.user_id).await?;
+    let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
 
     let mut users: Vec<TrustEdgeUser> = rows
         .into_iter()
         .map(|(name, uid)| {
-            let trust = TrustInfo::build(&uid, &distance_map, &block_set);
+            let trust = TrustInfo::build(&uid, &distance_map, &distrust_set);
             TrustEdgeUser {
                 display_name: name,
                 trust,
@@ -748,7 +748,7 @@ pub async fn update_bio(
 // POST /api/users/:username/trust — Create trust
 // ---------------------------------------------------------------------------
 
-/// Trust a user. Replaces an existing block if present.
+/// Trust a user. Replaces an existing distrust if present.
 pub async fn create_trust(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -760,7 +760,7 @@ pub async fn create_trust(
         return Err(AppError::BadRequest("cannot trust yourself".into()));
     }
 
-    // Remove any existing edge (trust or block) from viewer to target
+    // Remove any existing edge (trust or distrust) from viewer to target
     sqlx::query("DELETE FROM trust_edges WHERE source_user = ? AND target_user = ?")
         .bind(&user.user_id)
         .bind(&target_id)
@@ -811,11 +811,11 @@ pub async fn revoke_trust(
 }
 
 // ---------------------------------------------------------------------------
-// POST /api/users/:username/block — Create block
+// POST /api/users/:username/distrust — Create distrust
 // ---------------------------------------------------------------------------
 
-/// Block a user. Replaces an existing trust if present.
-pub async fn create_block(
+/// Distrust a user. Replaces an existing trust if present.
+pub async fn create_distrust(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
     Path(username): Path<String>,
@@ -823,10 +823,10 @@ pub async fn create_block(
     let (target_id, ..) = resolve_user(&state.db, &username).await?;
 
     if user.user_id == target_id {
-        return Err(AppError::BadRequest("cannot block yourself".into()));
+        return Err(AppError::BadRequest("cannot distrust yourself".into()));
     }
 
-    // Remove any existing edge (trust or block) from viewer to target
+    // Remove any existing edge (trust or distrust) from viewer to target
     sqlx::query("DELETE FROM trust_edges WHERE source_user = ? AND target_user = ?")
         .bind(&user.user_id)
         .bind(&target_id)
@@ -835,7 +835,7 @@ pub async fn create_block(
 
     let id = Uuid::new_v4().to_string();
     sqlx::query(
-        "INSERT INTO trust_edges (id, source_user, target_user, trust_type) VALUES (?, ?, ?, 'block')",
+        "INSERT INTO trust_edges (id, source_user, target_user, trust_type) VALUES (?, ?, ?, 'distrust')",
     )
     .bind(&id)
     .bind(&user.user_id)
@@ -849,11 +849,11 @@ pub async fn create_block(
 }
 
 // ---------------------------------------------------------------------------
-// DELETE /api/users/:username/block — Revoke block
+// DELETE /api/users/:username/distrust — Revoke distrust
 // ---------------------------------------------------------------------------
 
-/// Remove the viewer's block on this user.
-pub async fn revoke_block(
+/// Remove the viewer's distrust on this user.
+pub async fn revoke_distrust(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
     Path(username): Path<String>,
@@ -861,14 +861,14 @@ pub async fn revoke_block(
     let (target_id, ..) = resolve_user(&state.db, &username).await?;
 
     let result =
-        sqlx::query("DELETE FROM trust_edges WHERE source_user = ? AND target_user = ? AND trust_type = 'block'")
+        sqlx::query("DELETE FROM trust_edges WHERE source_user = ? AND target_user = ? AND trust_type = 'distrust'")
             .bind(&user.user_id)
             .bind(&target_id)
             .execute(&state.db)
             .await?;
 
     if result.rows_affected() == 0 {
-        return Err(AppError::NotFound("no block to revoke".into()));
+        return Err(AppError::NotFound("no distrust to revoke".into()));
     }
 
     state.trust_graph_notify.notify_one();

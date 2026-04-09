@@ -42,11 +42,11 @@ impl Weighter<Uuid, Arc<HashMap<String, f64>>> for BfsWeighter {
 
 type BfsCache = Cache<Uuid, Arc<HashMap<String, f64>>, BfsWeighter>;
 
-/// Per-blocked-target penalty for reliability computation.
-const BLOCK_PENALTY: f64 = 0.25;
+/// Per-distrusted-target penalty for reliability computation.
+const DISTRUST_PENALTY: f64 = 0.25;
 
-/// Maps blocker's dense node ID → set of blocked dense node IDs.
-type BlockSets = HashMap<u32, HashSet<u32>>;
+/// Maps distruster's dense node ID → set of distrusted dense node IDs.
+type DistrustSets = HashMap<u32, HashSet<u32>>;
 
 // ---------------------------------------------------------------------------
 // CSR graph representation
@@ -216,19 +216,19 @@ impl PathGroups {
 }
 
 // ---------------------------------------------------------------------------
-// Block reliability
+// Distrust reliability
 // ---------------------------------------------------------------------------
 
 /// Compute the reliability factor for a node given its outgoing neighbors and
-/// the viewer's block set. Each neighbor that appears in `viewer_blocks`
+/// the viewer's distrust set. Each neighbor that appears in `viewer_distrusts`
 /// contributes an independent multiplicative penalty.
 #[inline]
-fn reliability(neighbors: &[u32], viewer_blocks: &HashSet<u32>) -> f64 {
+fn reliability(neighbors: &[u32], viewer_distrusts: &HashSet<u32>) -> f64 {
     let count = neighbors
         .iter()
-        .filter(|n| viewer_blocks.contains(n))
+        .filter(|n| viewer_distrusts.contains(n))
         .count() as i32;
-    (1.0 - BLOCK_PENALTY).powi(count)
+    (1.0 - DISTRUST_PENALTY).powi(count)
 }
 
 // ---------------------------------------------------------------------------
@@ -236,18 +236,18 @@ fn reliability(neighbors: &[u32], viewer_blocks: &HashSet<u32>) -> f64 {
 // ---------------------------------------------------------------------------
 
 /// Compute trust scores from a single source using bottleneck-grouped BFS
-/// on the forward CSR graph with block propagation.
+/// on the forward CSR graph with distrust propagation.
 ///
 /// Paths are grouped by the source's direct (first-hop) neighbor. Within each
 /// group, only the max path score is kept. Across groups, scores combine via
 /// probabilistic independence.
 ///
-/// Block propagation: each visited node's score is multiplied by a reliability
-/// factor based on how many of its trust targets the viewer has blocked.
-/// After BFS, directly blocked users are overridden to score 0.0.
-fn forward_bfs(source: u32, graph: &CsrGraph, block_sets: &BlockSets) -> Vec<(u32, f64)> {
+/// Distrust propagation: each visited node's score is multiplied by a reliability
+/// factor based on how many of its trust targets the viewer has distrusted.
+/// After BFS, directly distrusted users are overridden to score 0.0.
+fn forward_bfs(source: u32, graph: &CsrGraph, distrust_sets: &DistrustSets) -> Vec<(u32, f64)> {
     let empty = HashSet::new();
-    let viewer_blocks = block_sets.get(&source).unwrap_or(&empty);
+    let viewer_distrusts = distrust_sets.get(&source).unwrap_or(&empty);
 
     // BFS state: (current_node, depth, first_hop, path_score)
     let mut queue: VecDeque<(u32, u32, u32, f64)> = VecDeque::new();
@@ -262,7 +262,7 @@ fn forward_bfs(source: u32, graph: &CsrGraph, block_sets: &BlockSets) -> Vec<(u3
         if neighbor == source {
             continue;
         }
-        let penalized = reliability(graph.neighbors(neighbor), viewer_blocks);
+        let penalized = reliability(graph.neighbors(neighbor), viewer_distrusts);
         queue.push_back((neighbor, 1, neighbor, penalized));
         target_groups
             .entry(neighbor)
@@ -290,7 +290,7 @@ fn forward_bfs(source: u32, graph: &CsrGraph, block_sets: &BlockSets) -> Vec<(u3
             }
             visited.insert(next);
 
-            let r = reliability(graph.neighbors(next), viewer_blocks);
+            let r = reliability(graph.neighbors(next), viewer_distrusts);
             let next_score = path_score * DECAY * r;
 
             target_groups
@@ -307,10 +307,10 @@ fn forward_bfs(source: u32, graph: &CsrGraph, block_sets: &BlockSets) -> Vec<(u3
         .map(|(target, groups)| (target, groups.combined_score()))
         .collect();
 
-    // Direct block override: blocked users get effective trust 0.0.
-    if !viewer_blocks.is_empty() {
+    // Direct distrust override: distrusted users get effective trust 0.0.
+    if !viewer_distrusts.is_empty() {
         for entry in &mut results {
-            if viewer_blocks.contains(&entry.0) {
+            if viewer_distrusts.contains(&entry.0) {
                 entry.1 = 0.0;
             }
         }
@@ -342,11 +342,11 @@ fn forward_bfs(source: u32, graph: &CsrGraph, block_sets: &BlockSets) -> Vec<(u3
 ///   safe because re-expansion would only produce lower scores downstream
 ///   (deeper paths have strictly lower path_score due to multiplicative decay).
 ///
-/// NOTE: This function does NOT apply block propagation. Block penalties are
-/// viewer-specific (each source A has its own block set), so they cannot be
+/// NOTE: This function does NOT apply distrust propagation. Distrust penalties are
+/// viewer-specific (each source A has its own distrust set), so they cannot be
 /// folded into the shared path_score of a single reverse pass. The scores
-/// returned here are an approximation that ignores blocks. For exact
-/// block-penalized trust(A, reader), use forward_bfs from A directly.
+/// returned here are an approximation that ignores distrusts. For exact
+/// distrust-penalized trust(A, reader), use forward_bfs from A directly.
 fn reverse_bfs(reader: u32, reverse_graph: &CsrGraph) -> Vec<(u32, f64)> {
     // BFS state: (current_node, depth, path_score)
     // No first_hop tag — the group key is determined by expansion context.
@@ -417,33 +417,33 @@ fn reverse_bfs(reader: u32, reverse_graph: &CsrGraph) -> Vec<(u32, f64)> {
 
 /// Trust metadata attached to any user reference in API responses.
 ///
-/// Built from a distance map (forward BFS results) and block set (viewer's
-/// block targets) via `TrustInfo::build`. Serializes as a nested `"trust"`
-/// object, e.g. `{ "trust": { "distance": 1.5, "blocked": false } }`.
+/// Built from a distance map (forward BFS results) and distrust set (viewer's
+/// distrust targets) via `TrustInfo::build`. Serializes as a nested `"trust"`
+/// object, e.g. `{ "trust": { "distance": 1.5, "distrusted": false } }`.
 #[derive(Clone, serde::Serialize)]
 pub struct TrustInfo {
     pub distance: Option<f64>,
-    pub blocked: bool,
+    pub distrusted: bool,
 }
 
 impl TrustInfo {
-    /// Build TrustInfo for a user from the viewer's distance map and block set.
+    /// Build TrustInfo for a user from the viewer's distance map and distrust set.
     pub fn build(
         user_id: &str,
         distance_map: &HashMap<String, f64>,
-        block_set: &HashSet<String>,
+        distrust_set: &HashSet<String>,
     ) -> Self {
         Self {
             distance: distance_map.get(user_id).copied(),
-            blocked: block_set.contains(user_id),
+            distrusted: distrust_set.contains(user_id),
         }
     }
 
-    /// TrustInfo for the viewer themselves (distance 0, not blocked).
+    /// TrustInfo for the viewer themselves (distance 0, not distrusted).
     pub fn self_trust() -> Self {
         Self {
             distance: None,
-            blocked: false,
+            distrusted: false,
         }
     }
 
@@ -451,18 +451,18 @@ impl TrustInfo {
     pub fn unknown() -> Self {
         Self {
             distance: None,
-            blocked: false,
+            distrusted: false,
         }
     }
 }
 
-/// Load the set of user IDs that the viewer has blocked.
-pub async fn load_block_set(
+/// Load the set of user IDs that the viewer has distrusted.
+pub async fn load_distrust_set(
     db: &sqlx::SqlitePool,
     viewer_id: &str,
 ) -> Result<HashSet<String>, sqlx::Error> {
     let rows = sqlx::query_as::<_, (String,)>(
-        "SELECT target_user FROM trust_edges WHERE source_user = ? AND trust_type = 'block'",
+        "SELECT target_user FROM trust_edges WHERE source_user = ? AND trust_type = 'distrust'",
     )
     .bind(viewer_id)
     .fetch_all(db)
@@ -522,7 +522,7 @@ pub struct TrustGraph {
     forward: CsrGraph,
     reverse: CsrGraph,
     index: NodeIndex,
-    block_sets: BlockSets,
+    distrust_sets: DistrustSets,
     /// Per-user cache of forward BFS distance maps (reader → {target_uuid_str → distance}).
     forward_cache: BfsCache,
     /// Per-user cache of reverse BFS score maps (reader → {author_uuid_str → score}).
@@ -564,37 +564,37 @@ impl TrustGraph {
         let forward = CsrGraph::from_edges(index.num_nodes(), &dense_edges);
         let reverse = forward.transpose();
 
-        // Load block edges into per-user block sets (not into the CSR graph).
-        let block_rows = sqlx::query_as::<_, (String, String)>(
-            "SELECT source_user, target_user FROM trust_edges WHERE trust_type = 'block'",
+        // Load distrust edges into per-user distrust sets (not into the CSR graph).
+        let distrust_rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT source_user, target_user FROM trust_edges WHERE trust_type = 'distrust'",
         )
         .fetch_all(db)
         .await?;
 
-        let mut block_sets: BlockSets = HashMap::new();
-        for (src_str, tgt_str) in &block_rows {
+        let mut distrust_sets: DistrustSets = HashMap::new();
+        for (src_str, tgt_str) in &distrust_rows {
             let src_uuid =
                 Uuid::parse_str(src_str).expect("invalid UUID in trust_edges.source_user");
             let tgt_uuid =
                 Uuid::parse_str(tgt_str).expect("invalid UUID in trust_edges.target_user");
             if let (Some(src_id), Some(tgt_id)) = (index.get_id(&src_uuid), index.get_id(&tgt_uuid))
             {
-                block_sets.entry(src_id).or_default().insert(tgt_id);
+                distrust_sets.entry(src_id).or_default().insert(tgt_id);
             }
         }
 
         eprintln!(
-            "trust graph built: {} nodes, {} trust edges, {} block edges",
+            "trust graph built: {} nodes, {} trust edges, {} distrust edges",
             index.num_nodes(),
             dense_edges.len(),
-            block_rows.len()
+            distrust_rows.len()
         );
 
         Ok(Self {
             forward,
             reverse,
             index,
-            block_sets,
+            distrust_sets,
             forward_cache: Self::make_bfs_cache(bfs_cache_bytes / 2),
             reverse_cache: Self::make_bfs_cache(bfs_cache_bytes / 2),
         })
@@ -609,7 +609,7 @@ impl TrustGraph {
                 uuid_to_id: HashMap::new(),
                 id_to_uuid: Vec::new(),
             },
-            block_sets: HashMap::new(),
+            distrust_sets: HashMap::new(),
             forward_cache: Self::make_bfs_cache(0),
             reverse_cache: Self::make_bfs_cache(0),
         }
@@ -635,18 +635,19 @@ impl TrustGraph {
             return Vec::new();
         };
 
-        let mut scores: Vec<TrustScore> = forward_bfs(source_id, &self.forward, &self.block_sets)
-            .into_iter()
-            .filter(|&(_, score)| score >= MINIMUM_TRUST_THRESHOLD)
-            .map(|(target_id, score)| {
-                let distance = score_to_distance(score);
-                TrustScore {
-                    target_user: self.index.get_uuid(target_id),
-                    score,
-                    distance,
-                }
-            })
-            .collect();
+        let mut scores: Vec<TrustScore> =
+            forward_bfs(source_id, &self.forward, &self.distrust_sets)
+                .into_iter()
+                .filter(|&(_, score)| score >= MINIMUM_TRUST_THRESHOLD)
+                .map(|(target_id, score)| {
+                    let distance = score_to_distance(score);
+                    TrustScore {
+                        target_user: self.index.get_uuid(target_id),
+                        score,
+                        distance,
+                    }
+                })
+                .collect();
 
         scores.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap());
         scores
@@ -691,12 +692,12 @@ impl TrustGraph {
                     .reverse_scores(reader)
                     .into_iter()
                     .map(|(uuid, score)| {
-                        // Direct block override: if this author has blocked the
+                        // Direct distrust override: if this author has distrusted the
                         // reader, their trust-in-reader is 0.0 regardless of
                         // graph paths.
                         let effective = if let Some(author_id) = self.index.get_id(&uuid)
-                            && let Some(blocked) = self.block_sets.get(&author_id)
-                            && blocked.contains(&reader_id)
+                            && let Some(distrusted) = self.distrust_sets.get(&author_id)
+                            && distrusted.contains(&reader_id)
                         {
                             0.0
                         } else {
@@ -718,8 +719,8 @@ impl TrustGraph {
     /// reader: if the author is in this map and their score meets their read
     /// threshold, the content is visible.
     ///
-    /// NOTE: These scores do NOT include block propagation — they are an
-    /// approximation. For exact block-penalized trust(author, reader), use
+    /// NOTE: These scores do NOT include distrust propagation — they are an
+    /// approximation. For exact distrust-penalized trust(author, reader), use
     /// `trust_between(author, reader)` which runs forward BFS from the author.
     pub fn reverse_scores(&self, reader: Uuid) -> HashMap<Uuid, f64> {
         let Some(reader_id) = self.index.get_id(&reader) else {
@@ -747,8 +748,11 @@ impl TrustGraph {
             return Vec::new();
         }
 
-        let empty_blocks = HashSet::new();
-        let blocked = self.block_sets.get(&source_id).unwrap_or(&empty_blocks);
+        let empty_distrusts = HashSet::new();
+        let distrusted = self
+            .distrust_sets
+            .get(&source_id)
+            .unwrap_or(&empty_distrusts);
 
         let mut paths = Vec::new();
 
@@ -759,7 +763,7 @@ impl TrustGraph {
         }
 
         for &mid in source_neighbors {
-            if mid == source_id || mid == target_id || blocked.contains(&mid) {
+            if mid == source_id || mid == target_id || distrusted.contains(&mid) {
                 continue;
             }
             if self.forward.neighbors(mid).contains(&target_id) {
@@ -770,11 +774,14 @@ impl TrustGraph {
         }
 
         for &mid1 in source_neighbors {
-            if mid1 == source_id || mid1 == target_id || blocked.contains(&mid1) {
+            if mid1 == source_id || mid1 == target_id || distrusted.contains(&mid1) {
                 continue;
             }
             for &mid2 in self.forward.neighbors(mid1) {
-                if mid2 == source_id || mid2 == target_id || mid2 == mid1 || blocked.contains(&mid2)
+                if mid2 == source_id
+                    || mid2 == target_id
+                    || mid2 == mid1
+                    || distrusted.contains(&mid2)
                 {
                     continue;
                 }
@@ -795,7 +802,7 @@ impl TrustGraph {
         let Some(source_id) = self.index.get_id(&user) else {
             return 0;
         };
-        forward_bfs(source_id, &self.forward, &self.block_sets)
+        forward_bfs(source_id, &self.forward, &self.distrust_sets)
             .into_iter()
             .filter(|&(_, score)| score >= threshold)
             .count() as u32
@@ -822,7 +829,7 @@ impl TrustGraph {
         let source_id = self.index.get_id(&source)?;
         let target_id = self.index.get_id(&target)?;
 
-        for (node, score) in forward_bfs(source_id, &self.forward, &self.block_sets) {
+        for (node, score) in forward_bfs(source_id, &self.forward, &self.distrust_sets) {
             if node == target_id {
                 let distance = if score >= MINIMUM_TRUST_THRESHOLD {
                     Some(score_to_distance(score))
@@ -970,13 +977,13 @@ mod tests {
 
     /// Build a TrustGraph directly from UUID edges (no database).
     fn graph_from_edges(edges: &[(Uuid, Uuid)]) -> TrustGraph {
-        graph_from_edges_with_blocks(edges, &[])
+        graph_from_edges_with_distrusts(edges, &[])
     }
 
-    /// Build a TrustGraph with both trust and block edges (no database).
-    fn graph_from_edges_with_blocks(
+    /// Build a TrustGraph with both trust and distrust edges (no database).
+    fn graph_from_edges_with_distrusts(
         edges: &[(Uuid, Uuid)],
-        block_edges: &[(Uuid, Uuid)],
+        distrust_edges: &[(Uuid, Uuid)],
     ) -> TrustGraph {
         let index = NodeIndex::from_edges(edges);
         let dense: Vec<(u32, u32)> = edges
@@ -986,12 +993,15 @@ mod tests {
         let forward = CsrGraph::from_edges(index.num_nodes(), &dense);
         let reverse = forward.transpose();
 
-        let mut block_sets: BlockSets = HashMap::new();
-        for &(blocker, blocked) in block_edges {
-            if let (Some(blocker_id), Some(blocked_id)) =
-                (index.get_id(&blocker), index.get_id(&blocked))
+        let mut distrust_sets: DistrustSets = HashMap::new();
+        for &(distruster, distrusted) in distrust_edges {
+            if let (Some(distruster_id), Some(distrusted_id)) =
+                (index.get_id(&distruster), index.get_id(&distrusted))
             {
-                block_sets.entry(blocker_id).or_default().insert(blocked_id);
+                distrust_sets
+                    .entry(distruster_id)
+                    .or_default()
+                    .insert(distrusted_id);
             }
         }
 
@@ -999,7 +1009,7 @@ mod tests {
             forward,
             reverse,
             index,
-            block_sets,
+            distrust_sets,
             forward_cache: TrustGraph::make_bfs_cache(1024 * 1024),
             reverse_cache: TrustGraph::make_bfs_cache(1024 * 1024),
         }
@@ -1297,41 +1307,41 @@ mod tests {
         assert!(paths.contains(&TrustPath::TwoHop { via: B }));
     }
 
-    // -- Block propagation tests --
+    // -- Distrust propagation tests --
 
     #[test]
-    fn test_block_single_target_penalizes_intermediary() {
-        // A→B→C, B trusts E (blocked by A)
-        let g = graph_from_edges_with_blocks(&[(A, B), (B, C), (B, E)], &[(A, E)]);
+    fn test_distrust_single_target_penalizes_intermediary() {
+        // A→B→C, B trusts E (distrusted by A)
+        let g = graph_from_edges_with_distrusts(&[(A, B), (B, C), (B, E)], &[(A, E)]);
         let scores = g.forward_scores(A);
         let map: HashMap<Uuid, f64> = scores.iter().map(|s| (s.target_user, s.score)).collect();
 
-        // B trusts E (blocked) → reliability = 0.75
+        // B trusts E (distrusted) → reliability = 0.75
         assert!((map[&B] - 0.75).abs() < 0.001);
         // C = 0.75 * DECAY * 1.0 = 0.525
         assert!((map[&C] - 0.525).abs() < 0.001);
-        // E is directly blocked → 0.0, filtered out by threshold
+        // E is directly distrusted → 0.0, filtered out by threshold
         assert!(!map.contains_key(&E));
     }
 
     #[test]
-    fn test_block_multiple_targets_compound() {
-        // A→B, B trusts C and D (both blocked by A)
-        let g = graph_from_edges_with_blocks(&[(A, B), (B, C), (B, D)], &[(A, C), (A, D)]);
+    fn test_distrust_multiple_targets_compound() {
+        // A→B, B trusts C and D (both distrusted by A)
+        let g = graph_from_edges_with_distrusts(&[(A, B), (B, C), (B, D)], &[(A, C), (A, D)]);
         let scores = g.forward_scores(A);
         let map: HashMap<Uuid, f64> = scores.iter().map(|s| (s.target_user, s.score)).collect();
 
-        // B trusts 2 blocked → reliability = 0.75^2 = 0.5625
+        // B trusts 2 distrusted → reliability = 0.75^2 = 0.5625
         assert!((map[&B] - 0.5625).abs() < 0.001);
-        // C and D are directly blocked → filtered out by threshold
+        // C and D are directly distrusted → filtered out by threshold
         assert!(!map.contains_key(&C));
         assert!(!map.contains_key(&D));
     }
 
     #[test]
-    fn test_block_no_penalty_clean_node() {
-        // A→B→C, A→E. A blocks E. B doesn't trust E → no penalty.
-        let g = graph_from_edges_with_blocks(&[(A, B), (B, C), (A, E)], &[(A, E)]);
+    fn test_distrust_no_penalty_clean_node() {
+        // A→B→C, A→E. A distrusts E. B doesn't trust E → no penalty.
+        let g = graph_from_edges_with_distrusts(&[(A, B), (B, C), (A, E)], &[(A, E)]);
         let scores = g.forward_scores(A);
         let map: HashMap<Uuid, f64> = scores.iter().map(|s| (s.target_user, s.score)).collect();
 
@@ -1340,9 +1350,10 @@ mod tests {
     }
 
     #[test]
-    fn test_block_multipath_recovery() {
-        // A→B→D, A→C→D. B trusts E (blocked by A), C is clean.
-        let g = graph_from_edges_with_blocks(&[(A, B), (A, C), (B, D), (C, D), (B, E)], &[(A, E)]);
+    fn test_distrust_multipath_recovery() {
+        // A→B→D, A→C→D. B trusts E (distrusted by A), C is clean.
+        let g =
+            graph_from_edges_with_distrusts(&[(A, B), (A, C), (B, D), (C, D), (B, E)], &[(A, E)]);
         let scores = g.forward_scores(A);
         let map: HashMap<Uuid, f64> = scores.iter().map(|s| (s.target_user, s.score)).collect();
 
@@ -1352,9 +1363,9 @@ mod tests {
     }
 
     #[test]
-    fn test_block_compounds_along_path() {
-        // A→B→C→D, B trusts E (blocked), C trusts F (blocked)
-        let g = graph_from_edges_with_blocks(
+    fn test_distrust_compounds_along_path() {
+        // A→B→C→D, B trusts E (distrusted), C trusts F (distrusted)
+        let g = graph_from_edges_with_distrusts(
             &[(A, B), (B, C), (C, D), (B, E), (C, F)],
             &[(A, E), (A, F)],
         );
@@ -1367,22 +1378,22 @@ mod tests {
         assert!(!map.contains_key(&C));
         // D: 0.39375 * 0.7 ≈ 0.2756 — below threshold, filtered
         assert!(!map.contains_key(&D));
-        // E, F blocked → filtered
+        // E, F distrusted → filtered
         assert!(!map.contains_key(&E));
         assert!(!map.contains_key(&F));
     }
 
     #[test]
-    fn test_block_sybil_resistance() {
-        // A→H, H→M, H→S1→M, H→S2→M, H→E. A blocks E.
-        let g = graph_from_edges_with_blocks(
+    fn test_distrust_sybil_resistance() {
+        // A→H, H→M, H→S1→M, H→S2→M, H→E. A distrusts E.
+        let g = graph_from_edges_with_distrusts(
             &[(A, H), (H, M), (H, S1), (H, S2), (S1, M), (S2, M), (H, E)],
             &[(A, E)],
         );
         let scores = g.forward_scores(A);
         let map: HashMap<Uuid, f64> = scores.iter().map(|s| (s.target_user, s.score)).collect();
 
-        // All via first-hop H. H reliability = 0.75 (trusts E).
+        // All via first-hop H. H reliability = 0.75 (trusts E, distrusted by A).
         // Best in group: H→M = 0.75 * 0.7 = 0.525
         assert!((map[&M] - 0.525).abs() < 0.001);
     }

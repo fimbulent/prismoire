@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::error::AppError;
 use crate::session::OptionalAuthUser;
 use crate::state::AppState;
-use crate::trust::{MINIMUM_TRUST_THRESHOLD, TrustInfo, load_block_set};
+use crate::trust::{MINIMUM_TRUST_THRESHOLD, TrustInfo, load_distrust_set};
 
 use super::common::{
     PostResponse, RepliesPageResponse, SubtreeResponse, ThreadDetailResponse, sql_placeholders,
@@ -93,7 +93,7 @@ struct ThreadInfo {
 struct ViewerCtx {
     trust_map: Arc<HashMap<String, f64>>,
     reverse_map: Arc<HashMap<String, f64>>,
-    block_set: HashSet<String>,
+    distrust_set: HashSet<String>,
     reader_id: Option<String>,
 }
 
@@ -329,7 +329,7 @@ impl TreeCtx<'_> {
             trust: TrustInfo::build(
                 &meta.author_id,
                 &self.viewer.trust_map,
-                &self.viewer.block_set,
+                &self.viewer.distrust_set,
             ),
             id: meta.id.clone(),
             parent_id: meta.parent_id.clone(),
@@ -512,27 +512,27 @@ fn load_viewer_ctx(
             Ok(ViewerCtx {
                 trust_map: dm,
                 reverse_map: rm,
-                block_set: HashSet::new(),
+                distrust_set: HashSet::new(),
                 reader_id: Some(u.user_id.clone()),
             })
         }
         None => Ok(ViewerCtx {
             trust_map: Arc::new(HashMap::new()),
             reverse_map: Arc::new(HashMap::new()),
-            block_set: HashSet::new(),
+            distrust_set: HashSet::new(),
             reader_id: None,
         }),
     }
 }
 
-/// Load viewer context including block set (requires async).
+/// Load viewer context including distrust set (requires async).
 async fn load_viewer_ctx_full(
     state: &AppState,
     user: &Option<crate::session::AuthUser>,
 ) -> Result<ViewerCtx, AppError> {
     let mut ctx = load_viewer_ctx(state, user)?;
     if let Some(u) = user.as_ref() {
-        ctx.block_set = load_block_set(&state.db, &u.user_id).await?;
+        ctx.distrust_set = load_distrust_set(&state.db, &u.user_id).await?;
     }
     Ok(ctx)
 }
@@ -618,7 +618,7 @@ pub async fn get_thread(
     let reply_count = count_tree_replies(&op_children);
 
     let op = PostResponse {
-        trust: TrustInfo::build(&op_meta.author_id, &viewer.trust_map, &viewer.block_set),
+        trust: TrustInfo::build(&op_meta.author_id, &viewer.trust_map, &viewer.distrust_set),
         id: op_meta.id.clone(),
         parent_id: None,
         author_id: op_meta.author_id.clone(),
@@ -747,7 +747,7 @@ async fn build_focused_response(
     let reply_count = count_tree_replies(&op_children);
 
     let op = PostResponse {
-        trust: TrustInfo::build(&op_meta.author_id, &viewer.trust_map, &viewer.block_set),
+        trust: TrustInfo::build(&op_meta.author_id, &viewer.trust_map, &viewer.distrust_set),
         id: op_meta.id.clone(),
         parent_id: None,
         author_id: op_meta.author_id.clone(),

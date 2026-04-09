@@ -20,7 +20,7 @@ pub struct AppState {
     /// One-time setup token read from the `server.setup_token_file` config path at startup.
     /// `None` after setup completes (or if the instance already has an admin).
     pub setup_token: Option<String>,
-    /// Notified when trust edges are mutated (trust, block, invite signup).
+    /// Notified when trust edges are mutated (trust, distrust, invite signup).
     /// The background rebuild loop waits on this to trigger debounced rebuilds.
     pub trust_graph_notify: Arc<Notify>,
     /// In-memory trust graph (dual CSR) for on-demand BFS queries.

@@ -82,7 +82,7 @@ CSR build:         6.8ms
   reverse:  offsets=10001 targets=100000
   memory:   859 KB (forward + reverse CSR, no index)
   RSS delta: 1.8 MB → 3.6 MB (+1.8 MB)
-  block edges: 1532  blockers: 1000
+  distrust edges: 1532  distrusters: 1000
 
 Forward BFS (relevance) — 100 samples:
   min: 0.474ms  p50: 0.488ms  p99: 1.124ms  max: 1.124ms  mean: 0.546ms
@@ -110,7 +110,7 @@ CSR build:         97.8ms
   reverse:  offsets=1120001 targets=1210000
   memory:   17.8 MB (forward + reverse CSR, no index)
   RSS delta: 2.6 MB → 37.8 MB (+35.2 MB)
-  block edges: 1532  blockers: 1000
+  distrust edges: 1532  distrusters: 1000
 
 Forward BFS (relevance) — 100 samples:
   min: 0.634ms  p50: 0.654ms  p99: 1.133ms  max: 1.133ms  mean: 0.702ms

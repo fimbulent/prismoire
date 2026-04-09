@@ -131,19 +131,6 @@ CREATE TABLE IF NOT EXISTS "admin_log" (
 );
 CREATE INDEX idx_admin_log_created_at ON admin_log(created_at);
 CREATE INDEX idx_users_invite_id ON users(invite_id);
-CREATE TABLE IF NOT EXISTS "trust_edges" (
-    id TEXT PRIMARY KEY NOT NULL,
-    source_user TEXT NOT NULL REFERENCES users(id),
-    target_user TEXT NOT NULL REFERENCES users(id),
-    trust_type TEXT NOT NULL CHECK (trust_type IN ('trust', 'block')),
-    weight REAL NOT NULL DEFAULT 1.0 CHECK (weight >= 0.0 AND weight <= 1.0),
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    expires_at TEXT,
-    reason TEXT,
-    UNIQUE(source_user, target_user)
-);
-CREATE INDEX idx_trust_edges_source ON trust_edges(source_user);
-CREATE INDEX idx_trust_edges_target ON trust_edges(target_user);
 CREATE INDEX idx_threads_last_activity ON threads(last_activity);
 CREATE INDEX idx_threads_created_at ON threads(created_at);
 CREATE TABLE thread_recent_repliers (
@@ -158,3 +145,16 @@ CREATE TABLE user_settings (
     user_id TEXT PRIMARY KEY NOT NULL REFERENCES users(id),
     theme TEXT NOT NULL DEFAULT 'rose-pine'
 );
+CREATE TABLE IF NOT EXISTS "trust_edges" (
+    id TEXT PRIMARY KEY NOT NULL,
+    source_user TEXT NOT NULL REFERENCES users(id),
+    target_user TEXT NOT NULL REFERENCES users(id),
+    trust_type TEXT NOT NULL CHECK (trust_type IN ('trust', 'distrust')),
+    weight REAL NOT NULL DEFAULT 1.0 CHECK (weight >= 0.0 AND weight <= 1.0),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    expires_at TEXT,
+    reason TEXT,
+    UNIQUE(source_user, target_user)
+);
+CREATE INDEX idx_trust_edges_source ON trust_edges(source_user);
+CREATE INDEX idx_trust_edges_target ON trust_edges(target_user);

@@ -9,8 +9,8 @@
 		updateBio,
 		trustUser,
 		revokeTrust,
-		blockUser,
-		revokeBlock,
+		distrustUser,
+		revokeDistrust,
 		type UserProfile,
 		type TrustDetailResponse,
 		type ActivityItem
@@ -160,7 +160,7 @@
 			} else {
 				await trustUser(username);
 				profile.you_trust = true;
-				profile.you_block = false;
+				profile.you_distrust = false;
 			}
 			await refreshAfterAction();
 		} catch {
@@ -170,17 +170,17 @@
 		}
 	}
 
-	async function handleBlock() {
+	async function handleDistrust() {
 		if (!profile || actionLoading) return;
 		actionLoading = true;
 		moreMenuOpen = false;
 		try {
-			if (profile.you_block) {
-				await revokeBlock(username);
-				profile.you_block = false;
+			if (profile.you_distrust) {
+				await revokeDistrust(username);
+				profile.you_distrust = false;
 			} else {
-				await blockUser(username);
-				profile.you_block = true;
+				await distrustUser(username);
+				profile.you_distrust = true;
 				profile.you_trust = false;
 			}
 			await refreshAfterAction();
@@ -278,10 +278,10 @@
 							{#if moreMenuOpen}
 								<div class="absolute right-0 top-full mt-1 w-40 bg-bg-surface border border-border rounded-md shadow-lg py-1 z-50">
 									<button
-										onclick={handleBlock}
-										class="w-full text-left px-3 py-2 text-sm cursor-pointer transition-colors {profile.you_block ? 'text-text-secondary hover:bg-bg-hover hover:text-text-primary' : 'text-danger hover:bg-bg-hover'}"
+										onclick={handleDistrust}
+										class="w-full text-left px-3 py-2 text-sm cursor-pointer transition-colors {profile.you_distrust ? 'text-text-secondary hover:bg-bg-hover hover:text-text-primary' : 'text-danger hover:bg-bg-hover'}"
 									>
-										{profile.you_block ? 'Unblock' : 'Block'}
+										{profile.you_distrust ? 'Undo Distrust' : 'Distrust'}
 									</button>
 								</div>
 							{/if}
@@ -290,15 +290,15 @@
 				{/if}
 			</div>
 
-			<!-- Blocked banner -->
-			{#if !profile.is_self && profile.you_block}
-				<div class="flex items-center justify-between gap-3 px-4 py-3 rounded-md blocked-badge border border-danger/20 mb-4">
-					<span class="text-sm text-danger">You have blocked this user.</span>
+			<!-- Distrusted banner -->
+			{#if !profile.is_self && profile.you_distrust}
+				<div class="flex items-center justify-between gap-3 px-4 py-3 rounded-md distrusted-badge border border-danger/20 mb-4">
+					<span class="text-sm text-danger">You have distrusted this user.</span>
 					<button
-						onclick={handleBlock}
+						onclick={handleDistrust}
 						disabled={actionLoading}
 						class="text-xs px-3 py-1.5 rounded-md cursor-pointer font-medium border border-danger/30 text-danger hover:bg-danger/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-					>Unblock</button>
+					>Undo Distrust</button>
 				</div>
 			{/if}
 
@@ -368,8 +368,8 @@
 							<div class="stat-label">Seen by <Tooltip text="Users who can see their content" position="bottom"><span class="trust-score-hint">?</span></Tooltip></div>
 						</div>
 						<div class="flex-1 text-center min-w-0">
-							<div class="stat-value">{trustDetail.blocks_issued}</div>
-							<div class="stat-label">Blocks issued</div>
+							<div class="stat-value">{trustDetail.distrusts_issued}</div>
+							<div class="stat-label">Distrusts issued</div>
 						</div>
 					</div>
 
@@ -379,7 +379,7 @@
 							<h2 class="text-sm font-semibold uppercase tracking-wider text-text-muted mb-3">Your trust</h2>
 							<div class="flex items-center gap-3 mb-3">
 								<TrustBadge trust={trustDetail.trust} />
-								<Tooltip text={trustDetail.trust_score != null ? `Computed from trust and block relationships. Raw score: ${trustDetail.trust_score.toFixed(2)}` : 'No trust path exists to this user'}>
+								<Tooltip text={trustDetail.trust_score != null ? `Computed from trust and distrust relationships. Raw score: ${trustDetail.trust_score.toFixed(2)}` : 'No trust path exists to this user'}>
 									<span class="trust-score-hint">?</span>
 								</Tooltip>
 							</div>
@@ -408,7 +408,7 @@
 										<div class="flex items-center gap-2 flex-wrap">
 											<span class="text-text-muted text-xs">▼</span>
 											<span class="text-text-muted">Trusts</span>
-											<UserName name={reduction.display_name} trust={{ distance: null, blocked: true }} compact />
+											<UserName name={reduction.display_name} trust={{ distance: null, distrusted: true }} compact />
 										</div>
 									{/each}
 								</div>
@@ -583,7 +583,7 @@
 		user-select: none;
 	}
 
-	.blocked-badge {
+	.distrusted-badge {
 		background: color-mix(in srgb, var(--danger) 12%, transparent);
 	}
 </style>

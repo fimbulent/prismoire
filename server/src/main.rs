@@ -189,8 +189,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             post(users::create_trust).delete(users::revoke_trust),
         )
         .route(
-            "/api/users/{username}/block",
-            post(users::create_block).delete(users::revoke_block),
+            "/api/users/{username}/distrust",
+            post(users::create_distrust).delete(users::revoke_distrust),
         )
         .route(
             "/api/settings",

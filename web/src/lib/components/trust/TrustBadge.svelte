@@ -9,7 +9,7 @@
 	let { trust, compact = false }: Props = $props();
 
 	let distance = $derived(trust?.distance ?? null);
-	let blocked = $derived(trust?.blocked ?? false);
+	let distrusted = $derived(trust?.distrusted ?? false);
 
 	type TrustLevel = 'direct' | '1_5hop' | '2hop' | '2_5hop' | '3hop' | 'untrusted';
 
@@ -47,9 +47,9 @@
 	};
 </script>
 
-{#if blocked}<span
-	class="trust-badge trust-badge-blocked inline-flex items-center gap-0.5 text-xs leading-none rounded font-semibold {compact ? 'px-1 py-1' : 'px-1.5 py-1.5'}"
-	title="Blocked"
+{#if distrusted}<span
+	class="trust-badge trust-badge-distrusted inline-flex items-center gap-0.5 text-xs leading-none rounded font-semibold {compact ? 'px-1 py-1' : 'px-1.5 py-1.5'}"
+	title="Distrusted"
 ><svg class={compact ? 'w-2.5 h-2.5' : 'w-3 h-3'} viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1"><circle cx="4" cy="4" r="3.25" /><line x1="1.5" y1="1.5" x2="6.5" y2="6.5" /></svg></span>
 {:else}<span
 	class="trust-badge trust-badge-{level()} inline-flex items-center gap-0.5 text-xs leading-none rounded font-semibold {compact ? 'px-1 py-1' : 'px-1.5 py-1.5'}"
@@ -63,5 +63,5 @@
 	.trust-badge-2_5hop { color: var(--trust-2_5hop); background: color-mix(in srgb, var(--trust-2_5hop) 12%, transparent); }
 	.trust-badge-3hop { color: var(--trust-3hop); background: color-mix(in srgb, var(--trust-3hop) 12%, transparent); }
 	.trust-badge-untrusted { color: var(--trust-untrusted); background: color-mix(in srgb, var(--trust-untrusted) 10%, transparent); }
-	.trust-badge-blocked { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+	.trust-badge-distrusted { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
 </style>

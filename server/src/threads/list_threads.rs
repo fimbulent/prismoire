@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::error::AppError;
 use crate::session::AuthUser;
 use crate::state::AppState;
-use crate::trust::{TrustInfo, load_block_set};
+use crate::trust::{TrustInfo, load_distrust_set};
 
 use super::common::{
     MAX_SEEN_IDS, PAGE_SIZE, PaginationParams, RecentReplier, ThreadListResponse, ThreadSort,
@@ -73,7 +73,7 @@ type RoomThreadsRow = (
 fn all_threads_to_summary(
     row: AllThreadsRow,
     trust_map: &HashMap<String, f64>,
-    block_set: &HashSet<String>,
+    distrust_set: &HashSet<String>,
 ) -> ThreadSummary {
     let (
         id,
@@ -89,7 +89,7 @@ fn all_threads_to_summary(
         reply_count,
         last_activity,
     ) = row;
-    let trust = TrustInfo::build(&author_id, trust_map, block_set);
+    let trust = TrustInfo::build(&author_id, trust_map, distrust_set);
     ThreadSummary {
         trust,
         id,
@@ -114,10 +114,10 @@ fn room_threads_to_summary(
     room_slug: &str,
     room_public: bool,
     trust_map: &HashMap<String, f64>,
-    block_set: &HashSet<String>,
+    distrust_set: &HashSet<String>,
 ) -> ThreadSummary {
     let (id, title, author_id, author_name, created_at, locked, reply_count, last_activity) = row;
-    let trust = TrustInfo::build(&author_id, trust_map, block_set);
+    let trust = TrustInfo::build(&author_id, trust_map, distrust_set);
     ThreadSummary {
         trust,
         id,
@@ -377,14 +377,14 @@ pub async fn list_all_threads(
     let graph = state.get_trust_graph()?;
     let trust_map = graph.distance_map(reader_uuid);
     let reverse_map = graph.reverse_score_map(reader_uuid);
-    let block_set = load_block_set(&state.db, &user.user_id).await?;
+    let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
 
     if params.sort == ThreadSort::Warm || params.sort == ThreadSort::Trusted {
         let sort = params.sort;
         let batch = fetch_warm_candidates_all(
             &state.db,
             &trust_map,
-            &block_set,
+            &distrust_set,
             &reverse_map,
             &user.user_id,
             WARM_CANDIDATE_LIMIT,
@@ -474,7 +474,7 @@ pub async fn list_all_threads(
         .filter(|(_, _, author_id, _, _, _, _, _, _, room_public, _, _)| {
             is_thread_visible(author_id, *room_public, &user.user_id, &reverse_map)
         })
-        .map(|row| all_threads_to_summary(row, &trust_map, &block_set))
+        .map(|row| all_threads_to_summary(row, &trust_map, &distrust_set))
         .collect();
 
     apply_visible_reply_counts(&state.db, &mut threads, &reverse_map, &user.user_id).await?;
@@ -510,7 +510,7 @@ pub async fn list_threads(
     let graph = state.get_trust_graph()?;
     let trust_map = graph.distance_map(reader_uuid);
     let reverse_map = graph.reverse_score_map(reader_uuid);
-    let block_set = load_block_set(&state.db, &user.user_id).await?;
+    let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
     let room: Option<(String, String, String, bool)> = sqlx::query_as(
         "SELECT id, name, slug, public FROM rooms WHERE (id = ? OR slug = ?) AND merged_into IS NULL",
     )
@@ -527,7 +527,7 @@ pub async fn list_threads(
         let batch = fetch_warm_candidates_room(
             &state.db,
             &trust_map,
-            &block_set,
+            &distrust_set,
             &reverse_map,
             &user.user_id,
             &room_id,
@@ -627,7 +627,7 @@ pub async fn list_threads(
                 &room_slug,
                 room_public,
                 &trust_map,
-                &block_set,
+                &distrust_set,
             )
         })
         .collect();
@@ -674,7 +674,7 @@ pub async fn load_more_all_threads(
     let graph = state.get_trust_graph()?;
     let trust_map = graph.distance_map(reader_uuid);
     let reverse_map = graph.reverse_score_map(reader_uuid);
-    let block_set = load_block_set(&state.db, &user.user_id).await?;
+    let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
 
     let seen_ids: HashSet<String> = body.seen_ids.into_iter().collect();
 
@@ -685,7 +685,7 @@ pub async fn load_more_all_threads(
     let batch = fetch_warm_candidates_all(
         &state.db,
         &trust_map,
-        &block_set,
+        &distrust_set,
         &reverse_map,
         &user.user_id,
         fetch_limit,
@@ -742,7 +742,7 @@ pub async fn load_more_room_threads(
     let graph = state.get_trust_graph()?;
     let trust_map = graph.distance_map(reader_uuid);
     let reverse_map = graph.reverse_score_map(reader_uuid);
-    let block_set = load_block_set(&state.db, &user.user_id).await?;
+    let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
 
     let room: Option<(String, String, String, bool)> = sqlx::query_as(
         "SELECT id, name, slug, public FROM rooms WHERE (id = ? OR slug = ?) AND merged_into IS NULL",
@@ -761,7 +761,7 @@ pub async fn load_more_room_threads(
     let batch = fetch_warm_candidates_room(
         &state.db,
         &trust_map,
-        &block_set,
+        &distrust_set,
         &reverse_map,
         &user.user_id,
         &room_id,
@@ -1056,7 +1056,7 @@ fn compute_fetch_limit(visibility_rate: f64, seen_count: usize) -> i64 {
 async fn fetch_warm_candidates_all(
     db: &sqlx::SqlitePool,
     trust_map: &HashMap<String, f64>,
-    block_set: &HashSet<String>,
+    distrust_set: &HashSet<String>,
     reverse_map: &HashMap<String, f64>,
     reader_id: &str,
     limit: i64,
@@ -1125,7 +1125,7 @@ async fn fetch_warm_candidates_all(
         .filter(|(_, _, author_id, _, _, _, _, _, _, room_public, _, _)| {
             is_thread_visible(author_id, *room_public, reader_id, reverse_map)
         })
-        .map(|row| all_threads_to_summary(row, trust_map, block_set))
+        .map(|row| all_threads_to_summary(row, trust_map, distrust_set))
         .collect();
 
     Ok(CandidateBatch {
@@ -1141,7 +1141,7 @@ async fn fetch_warm_candidates_all(
 async fn fetch_warm_candidates_room(
     db: &sqlx::SqlitePool,
     trust_map: &HashMap<String, f64>,
-    block_set: &HashSet<String>,
+    distrust_set: &HashSet<String>,
     reverse_map: &HashMap<String, f64>,
     reader_id: &str,
     room_id: &str,
@@ -1212,7 +1212,7 @@ async fn fetch_warm_candidates_room(
                 room_slug,
                 room_public,
                 trust_map,
-                block_set,
+                distrust_set,
             )
         })
         .collect();
