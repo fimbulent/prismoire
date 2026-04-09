@@ -1,12 +1,10 @@
 <script lang="ts">
 	import {
 		getThread,
-		getThreadFocused,
 		getThreadReplies,
 		getThreadSubtree,
 		replyToThread,
 		type ThreadDetail,
-		type FocusedThreadResponse,
 		type PostResponse,
 		type ThreadDetailSort
 	} from '$lib/api/threads';
@@ -25,9 +23,9 @@
 	import MoreButton from '$lib/components/ui/MoreButton.svelte';
 	import { session } from '$lib/stores/session.svelte';
 	import { goto } from '$app/navigation';
+	import { tick } from 'svelte';
 
 	let thread = $state<ThreadDetail | null>(null);
-	let focused = $state<FocusedThreadResponse | null>(null);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 
@@ -80,25 +78,25 @@
 			lastLoadedThreadId = threadId;
 			lastLoadedFocusId = focusId;
 			viewRootStack = [];
-			if (focusId) {
-				loadFocused(threadId, focusId);
-			} else {
-				focused = null;
-				loadThread(threadId);
-			}
+			loadThread(threadId, undefined, focusId ?? undefined);
 		}
 	});
 
-	async function loadThread(id: string, sort?: ThreadDetailSort) {
+	async function loadThread(id: string, sort?: ThreadDetailSort, focusPostId?: string) {
 		loading = true;
 		error = null;
 		try {
-			thread = await getThread(id, sort);
+			thread = await getThread(id, sort, focusPostId);
 			if (!session.isLoggedIn && !thread.room_public) {
 				goto('/login', { replaceState: true });
 				return;
 			}
 			renderedTopLevelIds = new Set(thread.post.children.map((c) => c.id));
+
+			if (thread.focused_post_id) {
+				await tick();
+				scrollToFocusedPost(thread.focused_post_id);
+			}
 		} catch (e) {
 			if (!session.isLoggedIn) {
 				goto('/login', { replaceState: true });
@@ -110,21 +108,65 @@
 		}
 	}
 
-	async function loadFocused(threadId: string, postId: string, sort?: ThreadDetailSort) {
-		loading = true;
-		error = null;
-		try {
-			focused = await getThreadFocused(threadId, postId, sort);
-			thread = null;
-		} catch (e) {
-			if (!session.isLoggedIn) {
-				goto('/login', { replaceState: true });
-				return;
+	function scrollToFocusedPost(focusId: string) {
+		const depth = findPostDepth(thread!.post, focusId, 0);
+		if (depth !== null && depth > MAX_DEPTH) {
+			const ancestorId = findAncestorAtDepth(thread!.post, focusId, depth, MAX_DEPTH);
+			if (ancestorId) {
+				pushViewRoot(ancestorId);
 			}
-			error = e instanceof Error ? e.message : 'Failed to load post';
-		} finally {
-			loading = false;
 		}
+
+		requestAnimationFrame(() => {
+			const el = document.getElementById(`post-${focusId}`);
+			if (el) {
+				el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+				el.classList.add('post-highlight');
+				setTimeout(() => el.classList.remove('post-highlight'), 2000);
+			}
+		});
+	}
+
+	function findPostDepth(root: PostResponse, targetId: string, currentDepth: number): number | null {
+		if (root.id === targetId) return currentDepth;
+		for (const child of root.children) {
+			const found = findPostDepth(child, targetId, currentDepth + 1);
+			if (found !== null) return found;
+		}
+		return null;
+	}
+
+	// Find the ancestor ~MAX_DEPTH levels above the target so the target is
+	// visible within the re-rooted view.
+	function findAncestorAtDepth(
+		root: PostResponse,
+		targetId: string,
+		targetDepth: number,
+		maxDepth: number
+	): string | null {
+		const desiredRootDepth = targetDepth - maxDepth;
+		if (desiredRootDepth <= 0) return null;
+		return findPostAtDepth(root, targetId, 0, desiredRootDepth);
+	}
+
+	// Walk toward the target; return the post ID at the desired depth along
+	// the path.
+	function findPostAtDepth(
+		root: PostResponse,
+		targetId: string,
+		currentDepth: number,
+		desiredDepth: number
+	): string | null {
+		if (root.id === targetId) {
+			return currentDepth >= desiredDepth ? root.id : null;
+		}
+		for (const child of root.children) {
+			const found = findPostAtDepth(child, targetId, currentDepth + 1, desiredDepth);
+			if (found !== null) {
+				return currentDepth === desiredDepth ? root.id : found;
+			}
+		}
+		return null;
 	}
 
 	async function loadMoreReplies() {
@@ -315,12 +357,8 @@
 		removeError = null;
 	}
 
-	let focusedTitle = $derived(focused ? focused.thread.title : null);
-	let focusedRoomSlug = $derived(focused ? focused.thread.room_slug : null);
-	let focusedThreadId = $derived(focused ? focused.thread.id : null);
-	let threadTitle = $derived(thread ? thread.title : focusedTitle);
-	let isLocked = $derived(thread ? thread.locked : focused?.thread.locked ?? false);
-	let isPublic = $derived(thread ? thread.room_public : focused?.thread.room_public ?? false);
+	let threadTitle = $derived(thread ? thread.title : null);
+	let focusedPostId = $derived(thread?.focused_post_id ?? null);
 </script>
 
 <svelte:window onpopstate={handlePopState} />
@@ -334,43 +372,16 @@
 		<div class="text-center text-text-muted py-12">Loading thread…</div>
 	{:else if error}
 		<div class="text-center text-danger py-12">{error}</div>
-	{:else if focused}
-		<!-- Focused post view -->
-		<div class="mb-4">
-			<a
-				href="/room/{focusedRoomSlug}/{focusedThreadId}"
-				class="text-xs text-accent hover:text-text-primary"
-			>&larr; View full thread: {focused.thread.title}</a>
-		</div>
-
-		{#if focused.ancestors.length > 0}
-			<div class="mb-4 space-y-2 opacity-60">
-				{#each focused.ancestors as ancestor (ancestor.id)}
-					<div class="bg-bg-surface border border-border-subtle rounded-md p-3">
-						<PostCard post={ancestor} compact />
-					</div>
-				{/each}
+	{:else if thread}
+		{#if focusedPostId}
+			<div class="mb-4">
+				<a
+					href="/room/{thread.room_slug}/{thread.id}"
+					class="text-xs text-accent hover:text-text-primary"
+				>&larr; View full thread</a>
 			</div>
 		{/if}
 
-		<div class="bg-bg-surface border border-border rounded-md p-5 mb-6">
-			<PostCard post={focused.focused_post} onreply={isLocked ? undefined : startReplying} />
-			{#if focused.focused_post.children.length > 0}
-				<ReplyTree
-					parentId={focused.focused_post.id}
-					children={focused.focused_post.children}
-					maxDepth={MAX_DEPTH}
-					{replyingToId}
-					{replySaving}
-					{replyError}
-					onreply={isLocked ? undefined : startReplying}
-					oncancelreply={cancelReplying}
-					onsubmitreply={submitReply}
-					oncontinuethread={(post) => pushViewRoot(post.id)}
-				/>
-			{/if}
-		</div>
-	{:else if thread}
 		<!-- OP -->
 		<div class="bg-bg-surface border border-border rounded-md p-5 mb-6">
 			<h1 class="text-2xl font-bold leading-tight mb-2 flex items-center gap-2">
@@ -382,23 +393,25 @@
 					<LockIcon class="w-5 h-5" />
 				{/if}
 			</h1>
-			<PostCard post={thread.post} onreply={thread.locked ? undefined : startReplying} onremove={session.isAdmin ? (postId) => { removeTarget = postId; removeError = null; } : undefined}>
-				{#snippet extraActions()}
-					{#if session.isAdmin && thread}
-						{#if thread.locked}
-							<button
-								onclick={handleLock}
-								class="bg-transparent border-none text-text-muted cursor-pointer text-xs font-sans py-1 hover:text-text-secondary"
-							>Unlock</button>
-						{:else}
-							<button
-								onclick={() => { showLockForm = !showLockForm; }}
-								class="bg-transparent border-none text-text-muted cursor-pointer text-xs font-sans py-1 hover:text-text-secondary"
-							>Lock</button>
+			<div id="post-{thread.post.id}">
+				<PostCard post={thread.post} onreply={thread.locked ? undefined : startReplying} onremove={session.isAdmin ? (postId) => { removeTarget = postId; removeError = null; } : undefined}>
+					{#snippet extraActions()}
+						{#if session.isAdmin && thread}
+							{#if thread.locked}
+								<button
+									onclick={handleLock}
+									class="bg-transparent border-none text-text-muted cursor-pointer text-xs font-sans py-1 hover:text-text-secondary"
+								>Unlock</button>
+							{:else}
+								<button
+									onclick={() => { showLockForm = !showLockForm; }}
+									class="bg-transparent border-none text-text-muted cursor-pointer text-xs font-sans py-1 hover:text-text-secondary"
+								>Lock</button>
+							{/if}
 						{/if}
-					{/if}
-				{/snippet}
-			</PostCard>
+					{/snippet}
+				</PostCard>
+			</div>
 
 			{#if session.isAdmin && showLockForm && !thread.locked}
 				<div class="mt-3 bg-bg border border-border rounded-md p-4" transition:slide={{ duration: 150 }}>
@@ -449,7 +462,9 @@
 			>&larr; {viewRootStack.length <= 1 ? 'Back to full thread' : 'Previous comments'}</button>
 
 			<div class="py-4 border-b border-border-subtle">
-				<PostCard post={viewRoot} onreply={thread.locked ? undefined : startReplying} onremove={session.isAdmin ? (postId) => { removeTarget = postId; removeError = null; } : undefined} />
+				<div id="post-{viewRoot.id}">
+					<PostCard post={viewRoot} onreply={thread.locked ? undefined : startReplying} onremove={session.isAdmin ? (postId) => { removeTarget = postId; removeError = null; } : undefined} />
+				</div>
 				{#if replyingToId === viewRoot.id}
 					<ReplyForm saving={replySaving} error={replyError} onsubmit={submitReply} oncancel={cancelReplying} />
 				{/if}
@@ -496,7 +511,9 @@
 
 				{#each thread.post.children as reply (reply.id)}
 					<div class="py-4 border-b border-border-subtle">
-						<PostCard post={reply} onreply={thread.locked ? undefined : startReplying} onremove={session.isAdmin ? (postId) => { removeTarget = postId; removeError = null; } : undefined} />
+						<div id="post-{reply.id}">
+							<PostCard post={reply} onreply={thread.locked ? undefined : startReplying} onremove={session.isAdmin ? (postId) => { removeTarget = postId; removeError = null; } : undefined} />
+						</div>
 						{#if replyingToId === reply.id}
 							<ReplyForm saving={replySaving} error={replyError} onsubmit={submitReply} oncancel={cancelReplying} />
 						{/if}
@@ -575,3 +592,15 @@
 		{/if}
 	{/if}
 </div>
+
+<style>
+	:global(.post-highlight) {
+		animation: highlight-pulse 2s ease-out;
+	}
+
+	@keyframes highlight-pulse {
+		0% { outline: 2px solid var(--accent); outline-offset: 4px; }
+		70% { outline: 2px solid var(--accent); outline-offset: 4px; }
+		100% { outline: 2px solid transparent; outline-offset: 4px; }
+	}
+</style>

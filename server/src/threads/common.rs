@@ -104,30 +104,8 @@ pub struct ThreadDetailResponse {
     pub total_reply_count: i64,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub has_more_replies: bool,
-}
-
-/// Thread header metadata for focused/subtree responses.
-#[derive(Serialize)]
-pub struct ThreadHeader {
-    pub id: String,
-    pub title: String,
-    pub author_id: String,
-    pub author_name: String,
-    pub room_id: String,
-    pub room_name: String,
-    pub room_slug: String,
-    pub created_at: String,
-    pub locked: bool,
-    pub room_public: bool,
-}
-
-/// Response for `?focus=POST_ID` — shows a specific post with ancestor context.
-#[derive(Serialize)]
-pub struct FocusedThreadResponse {
-    pub thread: ThreadHeader,
-    pub ancestors: Vec<PostResponse>,
-    pub focused_post: PostResponse,
-    pub total_reply_count: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focused_post_id: Option<String>,
 }
 
 /// Response for the subtree expansion endpoint.

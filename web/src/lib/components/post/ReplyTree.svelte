@@ -88,7 +88,9 @@
 		<div transition:slide={{ duration: 200 }}>
 			{#each children as reply (reply.id)}
 				<div class="pl-4 py-3">
-					<PostCard post={reply} {onreply} {onremove} />
+					<div id="post-{reply.id}">
+						<PostCard post={reply} {onreply} {onremove} />
+					</div>
 					{#if replyingToId === reply.id && oncancelreply && onsubmitreply}
 						<ReplyForm saving={replySaving} error={replyError} onsubmit={onsubmitreply} oncancel={oncancelreply} />
 					{/if}

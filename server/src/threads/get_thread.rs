@@ -13,8 +13,7 @@ use crate::state::AppState;
 use crate::trust::{MINIMUM_TRUST_THRESHOLD, TrustInfo, load_block_set};
 
 use super::common::{
-    FocusedThreadResponse, PostResponse, RepliesPageResponse, SubtreeResponse,
-    ThreadDetailResponse, ThreadHeader, sql_placeholders,
+    PostResponse, RepliesPageResponse, SubtreeResponse, ThreadDetailResponse, sql_placeholders,
 };
 
 /// Maximum number of top-level replies returned in the initial thread view.
@@ -88,23 +87,6 @@ struct ThreadInfo {
     room_slug: String,
     locked: bool,
     room_public: bool,
-}
-
-impl ThreadInfo {
-    fn header(&self) -> ThreadHeader {
-        ThreadHeader {
-            id: self.id.clone(),
-            title: self.title.clone(),
-            author_id: self.author_id.clone(),
-            author_name: self.author_name.clone(),
-            room_id: self.room_id.clone(),
-            room_name: self.room_name.clone(),
-            room_slug: self.room_slug.clone(),
-            created_at: self.created_at.clone(),
-            locked: self.locked,
-            room_public: self.room_public,
-        }
-    }
 }
 
 /// All the viewer-specific context needed for visibility and sorting.
@@ -265,6 +247,8 @@ impl TreeCtx<'_> {
 
     /// Collect post IDs for a subtree, respecting depth limit. Returns the
     /// set of IDs to fetch bodies for and annotates which nodes were truncated.
+    /// Nodes on the `focus_path` bypass depth truncation so the full ancestor
+    /// chain to a focused post is always included.
     fn collect_truncated(
         &self,
         idx: usize,
@@ -272,6 +256,7 @@ impl TreeCtx<'_> {
         max_depth: usize,
         ids: &mut Vec<String>,
         truncated: &mut HashSet<usize>,
+        focus_path: &HashSet<usize>,
     ) {
         ids.push(self.tree.metas[idx].id.clone());
 
@@ -280,37 +265,58 @@ impl TreeCtx<'_> {
             return;
         }
 
-        if current_depth >= max_depth {
+        let on_focus_path = focus_path.contains(&idx);
+        if current_depth >= max_depth && !on_focus_path {
             truncated.insert(idx);
             return;
         }
 
         for &ci in &children {
-            self.collect_truncated(ci, current_depth + 1, max_depth, ids, truncated);
+            let child_depth = if on_focus_path && focus_path.contains(&ci) {
+                0
+            } else if on_focus_path {
+                1
+            } else {
+                current_depth + 1
+            };
+            self.collect_truncated(ci, child_depth, max_depth, ids, truncated, focus_path);
         }
     }
 
     /// Build a PostResponse tree from metadata + fetched bodies, respecting
-    /// depth limits. Bodies are looked up from the provided map.
+    /// depth limits. Bodies are looked up from the provided map. Nodes on the
+    /// `focus_path` bypass depth truncation.
     fn build_tree(
         &self,
         idx: usize,
         current_depth: usize,
         max_depth: usize,
         bodies: &HashMap<String, BodyInfo>,
+        focus_path: &HashSet<usize>,
     ) -> PostResponse {
         let meta = &self.tree.metas[idx];
         let body_info = bodies.get(&meta.id);
 
         let children = self.visible_sorted_children(idx);
-        let has_more_children = current_depth >= max_depth && !children.is_empty();
+        let on_focus_path = focus_path.contains(&idx);
+        let has_more_children =
+            current_depth >= max_depth && !on_focus_path && !children.is_empty();
 
-        let child_posts: Vec<PostResponse> = if current_depth >= max_depth {
+        let child_posts: Vec<PostResponse> = if current_depth >= max_depth && !on_focus_path {
             vec![]
         } else {
             children
                 .into_iter()
-                .map(|ci| self.build_tree(ci, current_depth + 1, max_depth, bodies))
+                .map(|ci| {
+                    let child_depth = if on_focus_path && focus_path.contains(&ci) {
+                        0
+                    } else if on_focus_path {
+                        1
+                    } else {
+                        current_depth + 1
+                    };
+                    self.build_tree(ci, child_depth, max_depth, bodies, focus_path)
+                })
                 .collect()
         };
 
@@ -562,9 +568,16 @@ pub async fn get_thread(
     };
 
     if let Some(focus_id) = &query.focus {
-        return build_focused_response(&ctx, &meta_tree, &thread_info, focus_id, &state.db)
-            .await
-            .map(IntoResponse::into_response);
+        return build_focused_response(
+            &ctx,
+            &meta_tree,
+            &thread_info,
+            focus_id,
+            &state.db,
+            &viewer,
+        )
+        .await
+        .map(IntoResponse::into_response);
     }
 
     let total_reply_count = ctx.count_visible_replies(meta_tree.root_idx);
@@ -573,11 +586,19 @@ pub async fn get_thread(
     let has_more_replies = all_top_level.len() > TOP_LEVEL_LIMIT;
     let top_level: Vec<usize> = all_top_level.into_iter().take(TOP_LEVEL_LIMIT).collect();
 
+    let no_focus = HashSet::new();
     let mut post_ids = vec![meta_tree.metas[meta_tree.root_idx].id.clone()];
     let mut truncated: HashSet<usize> = HashSet::new();
 
     for &tl_idx in &top_level {
-        ctx.collect_truncated(tl_idx, 1, MAX_DEPTH, &mut post_ids, &mut truncated);
+        ctx.collect_truncated(
+            tl_idx,
+            1,
+            MAX_DEPTH,
+            &mut post_ids,
+            &mut truncated,
+            &no_focus,
+        );
     }
 
     let bodies = fetch_bodies(&state.db, &post_ids).await?;
@@ -591,7 +612,7 @@ pub async fn get_thread(
 
     let op_children: Vec<PostResponse> = top_level
         .into_iter()
-        .map(|ci| ctx.build_tree(ci, 1, MAX_DEPTH, &bodies))
+        .map(|ci| ctx.build_tree(ci, 1, MAX_DEPTH, &bodies, &no_focus))
         .collect();
 
     let reply_count = count_tree_replies(&op_children);
@@ -627,6 +648,7 @@ pub async fn get_thread(
         reply_count,
         total_reply_count,
         has_more_replies,
+        focused_post_id: None,
     })
     .into_response())
 }
@@ -640,13 +662,16 @@ fn count_tree_replies(children: &[PostResponse]) -> i64 {
     count
 }
 
-/// Build a focused response centered on a specific post.
+/// Build a focused response that returns a normal `ThreadDetailResponse` with
+/// the full tree, ensuring the path from the OP to the focused post is always
+/// expanded regardless of depth/pagination limits.
 async fn build_focused_response(
     ctx: &TreeCtx<'_>,
     meta_tree: &MetaTree,
     thread_info: &ThreadInfo,
     focus_id: &str,
     db: &sqlx::SqlitePool,
+    viewer: &ViewerCtx,
 ) -> Result<Response, AppError> {
     let focus_idx = meta_tree
         .id_to_index
@@ -658,67 +683,101 @@ async fn build_focused_response(
         return Err(AppError::NotFound("focused post not found".into()));
     }
 
-    let mut ancestor_indices = Vec::new();
+    // Build focus path: set of indices from root to focused post (exclusive of
+    // the focused post itself, since the focused post's subtree uses normal
+    // depth counting).
+    let mut focus_path: HashSet<usize> = HashSet::new();
     let mut current = focus_idx;
     while let Some(ref pid) = meta_tree.metas[current].parent_id {
         if let Some(&parent_idx) = meta_tree.id_to_index.get(pid) {
-            ancestor_indices.push(parent_idx);
+            focus_path.insert(parent_idx);
             current = parent_idx;
         } else {
             break;
         }
     }
-    ancestor_indices.reverse();
 
-    let mut post_ids: Vec<String> = ancestor_indices
-        .iter()
-        .map(|&idx| meta_tree.metas[idx].id.clone())
-        .collect();
-
-    let mut truncated: HashSet<usize> = HashSet::new();
-    ctx.collect_truncated(focus_idx, 0, MAX_DEPTH, &mut post_ids, &mut truncated);
-
-    let bodies = fetch_bodies(db, &post_ids).await?;
     let total_reply_count = ctx.count_visible_replies(meta_tree.root_idx);
 
-    let ancestors: Vec<PostResponse> = ancestor_indices
+    // Determine which top-level child is on the focus path (if any) so we
+    // can ensure it's included even if it falls beyond TOP_LEVEL_LIMIT.
+    let all_top_level = ctx.visible_sorted_children(meta_tree.root_idx);
+    let focus_top_level_idx = all_top_level
         .iter()
-        .map(|&idx| {
-            let meta = &meta_tree.metas[idx];
-            let body_info = bodies.get(&meta.id);
-            let (body, edited_at, revision) = match body_info {
-                Some(bi) => (bi.body.clone(), bi.edited_at.clone(), bi.revision),
-                None => (String::new(), None, 0),
-            };
-            PostResponse {
-                trust: TrustInfo::build(
-                    &meta.author_id,
-                    &ctx.viewer.trust_map,
-                    &ctx.viewer.block_set,
-                ),
-                id: meta.id.clone(),
-                parent_id: meta.parent_id.clone(),
-                author_id: meta.author_id.clone(),
-                author_name: meta.author_name.clone(),
-                body,
-                created_at: meta.created_at.clone(),
-                edited_at,
-                revision,
-                is_op: meta.author_id == meta_tree.op_author_id,
-                retracted_at: meta.retracted_at.clone(),
-                children: vec![],
-                has_more_children: false,
-            }
-        })
+        .find(|&&idx| focus_path.contains(&idx))
+        .copied();
+    let has_more_replies = all_top_level.len() > TOP_LEVEL_LIMIT;
+    let mut top_level: Vec<usize> = all_top_level.into_iter().take(TOP_LEVEL_LIMIT).collect();
+
+    // If the focus-path top-level child was beyond the limit, append it.
+    if let Some(ftl) = focus_top_level_idx
+        && !top_level.contains(&ftl)
+    {
+        top_level.push(ftl);
+    }
+
+    let mut post_ids = vec![meta_tree.metas[meta_tree.root_idx].id.clone()];
+    let mut truncated: HashSet<usize> = HashSet::new();
+
+    for &tl_idx in &top_level {
+        ctx.collect_truncated(
+            tl_idx,
+            1,
+            MAX_DEPTH,
+            &mut post_ids,
+            &mut truncated,
+            &focus_path,
+        );
+    }
+
+    let bodies = fetch_bodies(db, &post_ids).await?;
+
+    let op_meta = &meta_tree.metas[meta_tree.root_idx];
+    let op_body = bodies.get(&op_meta.id);
+    let (op_body_str, op_edited, op_rev) = match op_body {
+        Some(bi) => (bi.body.clone(), bi.edited_at.clone(), bi.revision),
+        None => (String::new(), None, 0),
+    };
+
+    let op_children: Vec<PostResponse> = top_level
+        .into_iter()
+        .map(|ci| ctx.build_tree(ci, 1, MAX_DEPTH, &bodies, &focus_path))
         .collect();
 
-    let focused_post = ctx.build_tree(focus_idx, 0, MAX_DEPTH, &bodies);
+    let reply_count = count_tree_replies(&op_children);
 
-    Ok(Json(FocusedThreadResponse {
-        thread: thread_info.header(),
-        ancestors,
-        focused_post,
+    let op = PostResponse {
+        trust: TrustInfo::build(&op_meta.author_id, &viewer.trust_map, &viewer.block_set),
+        id: op_meta.id.clone(),
+        parent_id: None,
+        author_id: op_meta.author_id.clone(),
+        author_name: op_meta.author_name.clone(),
+        body: op_body_str,
+        created_at: op_meta.created_at.clone(),
+        edited_at: op_edited,
+        revision: op_rev,
+        is_op: true,
+        retracted_at: op_meta.retracted_at.clone(),
+        children: op_children,
+        has_more_children: false,
+    };
+
+    Ok(Json(ThreadDetailResponse {
+        id: thread_info.id.clone(),
+        title: thread_info.title.clone(),
+        author_id: thread_info.author_id.clone(),
+        author_name: thread_info.author_name.clone(),
+        room_id: thread_info.room_id.clone(),
+        room_name: thread_info.room_name.clone(),
+        room_slug: thread_info.room_slug.clone(),
+        created_at: thread_info.created_at.clone(),
+        locked: thread_info.locked,
+        room_public: thread_info.room_public,
+        post: op,
+        reply_count,
         total_reply_count,
+        has_more_replies,
+        focused_post_id: Some(focus_id.to_string()),
     })
     .into_response())
 }
@@ -759,17 +818,25 @@ pub async fn get_thread_replies(
     let has_more = page.len() > REPLIES_PAGE_SIZE;
     let page: Vec<usize> = page.into_iter().take(REPLIES_PAGE_SIZE).collect();
 
+    let no_focus = HashSet::new();
     let mut post_ids: Vec<String> = Vec::new();
     let mut truncated: HashSet<usize> = HashSet::new();
     for &tl_idx in &page {
-        ctx.collect_truncated(tl_idx, 1, MAX_DEPTH, &mut post_ids, &mut truncated);
+        ctx.collect_truncated(
+            tl_idx,
+            1,
+            MAX_DEPTH,
+            &mut post_ids,
+            &mut truncated,
+            &no_focus,
+        );
     }
 
     let bodies = fetch_bodies(&state.db, &post_ids).await?;
 
     let replies: Vec<PostResponse> = page
         .into_iter()
-        .map(|ci| ctx.build_tree(ci, 1, MAX_DEPTH, &bodies))
+        .map(|ci| ctx.build_tree(ci, 1, MAX_DEPTH, &bodies, &no_focus))
         .collect();
 
     Ok(Json(RepliesPageResponse { replies, has_more }))
@@ -810,12 +877,20 @@ pub async fn get_thread_subtree(
         return Err(AppError::NotFound("post not found".into()));
     }
 
+    let no_focus = HashSet::new();
     let mut post_ids: Vec<String> = Vec::new();
     let mut truncated: HashSet<usize> = HashSet::new();
-    ctx.collect_truncated(subtree_root, 0, MAX_DEPTH, &mut post_ids, &mut truncated);
+    ctx.collect_truncated(
+        subtree_root,
+        0,
+        MAX_DEPTH,
+        &mut post_ids,
+        &mut truncated,
+        &no_focus,
+    );
 
     let bodies = fetch_bodies(&state.db, &post_ids).await?;
-    let post = ctx.build_tree(subtree_root, 0, MAX_DEPTH, &bodies);
+    let post = ctx.build_tree(subtree_root, 0, MAX_DEPTH, &bodies, &no_focus);
 
     Ok(Json(SubtreeResponse { post }))
 }

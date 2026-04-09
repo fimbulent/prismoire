@@ -53,26 +53,7 @@ export interface ThreadDetail {
 	reply_count: number;
 	total_reply_count: number;
 	has_more_replies?: boolean;
-}
-
-export interface ThreadHeader {
-	id: string;
-	title: string;
-	author_id: string;
-	author_name: string;
-	room_id: string;
-	room_name: string;
-	room_slug: string;
-	created_at: string;
-	locked: boolean;
-	room_public: boolean;
-}
-
-export interface FocusedThreadResponse {
-	thread: ThreadHeader;
-	ancestors: PostResponse[];
-	focused_post: PostResponse;
-	total_reply_count: number;
+	focused_post_id?: string;
 }
 
 export interface SubtreeResponse {
@@ -136,24 +117,16 @@ export async function listPublicThreads(cursor?: string): Promise<ThreadListResp
 export type ThreadSort = 'warm' | 'new' | 'active' | 'trusted';
 export type ThreadDetailSort = 'trust' | 'new';
 
-export async function getThread(id: string, sort?: ThreadDetailSort): Promise<ThreadDetail> {
-	const params = sort && sort !== 'trust' ? `?sort=${sort}` : '';
-	const res = await fetch(`/api/threads/${encodeURIComponent(id)}${params}`);
-	if (!res.ok) {
-		const err: ApiError = await res.json();
-		throw new Error(err.error);
-	}
-	return res.json();
-}
-
-export async function getThreadFocused(
+export async function getThread(
 	id: string,
-	focusPostId: string,
-	sort?: ThreadDetailSort
-): Promise<FocusedThreadResponse> {
-	const params = new URLSearchParams({ focus: focusPostId });
+	sort?: ThreadDetailSort,
+	focusPostId?: string
+): Promise<ThreadDetail> {
+	const params = new URLSearchParams();
 	if (sort && sort !== 'trust') params.set('sort', sort);
-	const res = await fetch(`/api/threads/${encodeURIComponent(id)}?${params.toString()}`);
+	if (focusPostId) params.set('focus', focusPostId);
+	const qs = params.toString();
+	const res = await fetch(`/api/threads/${encodeURIComponent(id)}${qs ? `?${qs}` : ''}`);
 	if (!res.ok) {
 		const err: ApiError = await res.json();
 		throw new Error(err.error);
