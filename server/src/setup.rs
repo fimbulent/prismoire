@@ -219,6 +219,7 @@ pub async fn setup_complete(
             user_id,
             display_name,
             role: "admin".into(),
+            theme: crate::settings::DEFAULT_THEME.into(),
         }),
     ))
 }

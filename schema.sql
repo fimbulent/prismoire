@@ -154,3 +154,7 @@ CREATE TABLE thread_recent_repliers (
     PRIMARY KEY (thread_id, reply_rank)
 );
 CREATE INDEX idx_posts_thread_created ON posts(thread, created_at);
+CREATE TABLE user_settings (
+    user_id TEXT PRIMARY KEY NOT NULL REFERENCES users(id),
+    theme TEXT NOT NULL DEFAULT 'rose-pine'
+);

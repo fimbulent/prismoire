@@ -57,6 +57,7 @@ pub struct SessionResponse {
     pub user_id: String,
     pub display_name: String,
     pub role: String,
+    pub theme: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -258,6 +259,7 @@ pub async fn signup_complete(
             user_id,
             display_name,
             role: "user".into(),
+            theme: crate::settings::DEFAULT_THEME.into(),
         }),
     ))
 }
@@ -370,12 +372,15 @@ pub async fn login_complete(
     let mut headers = HeaderMap::new();
     headers.insert(SET_COOKIE, session_cookie(&token).parse().unwrap());
 
+    let theme = crate::settings::get_user_theme(&state.db, &user_id).await?;
+
     Ok((
         headers,
         Json(SessionResponse {
             user_id,
             display_name,
             role,
+            theme,
         }),
     ))
 }
@@ -479,6 +484,8 @@ pub async fn discover_complete(
 
     update_credential_counter(&state.db, &user_id, &auth_result).await?;
 
+    let theme = crate::settings::get_user_theme(&state.db, &user_id).await?;
+
     let token = create_session(&state.db, &user_id).await?;
     let mut headers = HeaderMap::new();
     headers.insert(SET_COOKIE, session_cookie(&token).parse().unwrap());
@@ -489,6 +496,7 @@ pub async fn discover_complete(
             user_id,
             display_name,
             role,
+            theme,
         }),
     ))
 }
@@ -530,12 +538,17 @@ async fn update_credential_counter(
 // ---------------------------------------------------------------------------
 
 /// Return the current authenticated user's info, or 401 if not logged in.
-pub async fn session_info(user: AuthUser) -> Json<SessionResponse> {
-    Json(SessionResponse {
+pub async fn session_info(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+) -> Result<Json<SessionResponse>, crate::error::AppError> {
+    let theme = crate::settings::get_user_theme(&state.db, &user.user_id).await?;
+    Ok(Json(SessionResponse {
         user_id: user.user_id,
         display_name: user.display_name,
         role: user.role,
-    })
+        theme,
+    }))
 }
 
 // ---------------------------------------------------------------------------

@@ -4,6 +4,8 @@ import {
 	logout as apiLogout,
 	type SessionInfo
 } from '$lib/api/auth';
+import { theme } from '$lib/stores/theme.svelte';
+import type { ThemeId } from '$lib/themes';
 
 let user = $state<SessionInfo | null>(null);
 let loading = $state(true);
@@ -33,6 +35,9 @@ export const session = {
 			needsSetup = status.needs_setup;
 			if (!needsSetup) {
 				user = await getSession();
+				if (user) {
+					theme.init(user.theme as ThemeId);
+				}
 			}
 		} catch {
 			user = null;
@@ -45,6 +50,7 @@ export const session = {
 		user = info;
 		needsSetup = false;
 		loading = false;
+		theme.init(info.theme as ThemeId);
 	},
 
 	async logout() {

@@ -21,6 +21,7 @@ mod posts;
 mod room_name;
 mod rooms;
 mod session;
+mod settings;
 mod setup;
 mod signing;
 mod state;
@@ -201,6 +202,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/users/{username}/block",
             post(users::create_block).delete(users::revoke_block),
+        )
+        .route(
+            "/api/settings",
+            get(settings::get_settings).patch(settings::update_settings),
         )
         .route("/api/admin/log", get(admin::get_admin_log))
         .route(
