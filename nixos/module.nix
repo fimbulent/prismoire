@@ -10,6 +10,7 @@ let
     server = {
       port = cfg.port;
       database = "${cfg.dataDir}/prismoire.db";
+      trust_proxy_headers = cfg.trustProxyHeaders;
     } // lib.optionalAttrs (cfg.setupTokenFile != null) {
       setup_token_file = cfg.setupTokenFile;
     };
@@ -63,6 +64,27 @@ in
       description = ''
         Path to a file containing the one-time setup token for creating the
         initial admin account. Required on first boot; ignored after setup.
+      '';
+    };
+
+    trustProxyHeaders = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Whether to trust `X-Forwarded-For`, `X-Real-IP`, and `Forwarded`
+        headers when determining the client IP for per-IP rate limiting.
+        Set this based on your deployment topology — the two cases are
+        mutually exclusive:
+
+        - **Behind a trusted reverse proxy** (Caddy, nginx, etc.) that
+          overwrites these headers with the real peer IP: set to
+          `true`. Otherwise every request appears to come from the
+          proxy's single IP and the per-IP limit collapses onto one
+          bucket shared by all clients.
+        - **Directly exposed to clients** (no reverse proxy in front):
+          leave at the `false` default. Otherwise a malicious client
+          can forge these headers on every request and trivially
+          bypass the per-IP limit.
       '';
     };
 

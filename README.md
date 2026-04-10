@@ -66,6 +66,7 @@ With no config file, all defaults apply — no configuration is needed for `just
 port = 3000                     # default: 3000
 database = "prismoire.db"       # default: "prismoire.db"
 web_dir = "web/build"           # default: relative to binary
+trust_proxy_headers = false     # default: false — see note below
 setup_token_file = "/run/secrets/prismoire-setup-token"  # required on first boot
 
 [webauthn]
@@ -81,7 +82,10 @@ user_replenish_seconds = 1     # default: 1   — refill interval for per-user w
 user_burst_size = 20           # default: 20  — max burst for per-user writes
 ```
 
-The per-IP rate limiters honor `x-forwarded-for`, `x-real-ip`, and `forwarded` headers (falling back to the peer IP). This assumes the server runs behind a trusted reverse proxy — do not expose it directly to untrusted clients, or a malicious client could forge these headers to bypass per-IP limits.
+`trust_proxy_headers` controls where the per-IP rate limiter looks for the client IP:
+
+- **Behind a trusted reverse proxy** (Caddy, nginx, etc.): set to `true`, otherwise every request appears to come from the proxy and the per-IP limit collapses to a single shared bucket.
+- **Directly exposed to clients**: leave `false` (the default), otherwise a malicious client can forge `X-Forwarded-For` to bypass the limit.
 
 Secrets use file indirection (`*_file` keys) — the server reads the file at startup and trims whitespace. Never put secrets directly in the config file.
 
@@ -156,6 +160,11 @@ services.prismoire = {
   rpId = "example.com";
   rpOrigin = "https://example.com";
   setupTokenFile = "/run/secrets/prismoire-setup-token"; # required on first boot
+
+  # Required whenever the server sits behind a reverse proxy like the
+  # Caddy block below. Leave false only if you plan to expose Prismoire
+  # directly to clients without a proxy in front.
+  trustProxyHeaders = true;
 };
 
 # Use something like Caddy to serve:

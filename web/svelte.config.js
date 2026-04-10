@@ -1,4 +1,4 @@
-import adapter from '@sveltejs/adapter-static';
+import adapter from '@sveltejs/adapter-node';
 import { relative, sep } from 'node:path';
 
 /** @type {import('@sveltejs/kit').Config} */
@@ -13,8 +13,12 @@ const config = {
 		}
 	},
 	kit: {
+		// Node server adapter. The built app runs as a standalone Node
+		// process: `node build/index.js`. See docs/adapter-node.md for the
+		// deployment topology (Caddy in front, Axum alongside for /api).
 		adapter: adapter({
-			fallback: 'index.html'
+			out: 'build',
+			precompress: false
 		})
 	}
 };

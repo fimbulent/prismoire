@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use governor::clock::QuantaInstant;
@@ -6,17 +7,58 @@ use http::request::Request;
 use tower_governor::GovernorLayer;
 use tower_governor::errors::GovernorError;
 use tower_governor::governor::GovernorConfigBuilder;
-use tower_governor::key_extractor::{KeyExtractor, SmartIpKeyExtractor};
+use tower_governor::key_extractor::{KeyExtractor, PeerIpKeyExtractor, SmartIpKeyExtractor};
 
 use crate::session::parse_session_cookie;
 
+/// Client-IP key extractor that dispatches between [`PeerIpKeyExtractor`]
+/// and [`SmartIpKeyExtractor`] based on the `server.trust_proxy_headers`
+/// configuration flag.
+///
+/// - `Peer` (default): the key is the TCP peer address only. Forwarded
+///   headers are ignored entirely. This is the correct, safe choice when
+///   the server is directly exposed to clients (no reverse proxy).
+/// - `Smart`: the key is taken from `X-Forwarded-For`, `X-Real-IP`, or
+///   `Forwarded` (in that order), falling back to the peer address. This
+///   must only be enabled when the server is exclusively reachable via a
+///   trusted reverse proxy that strips these headers from inbound requests
+///   and sets its own — otherwise a malicious client can forge the
+///   headers to appear as a different IP on every request and trivially
+///   bypass the per-IP rate limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientIpKeyExtractor {
+    Peer,
+    Smart,
+}
+
+impl KeyExtractor for ClientIpKeyExtractor {
+    type Key = IpAddr;
+
+    fn extract<T>(&self, req: &Request<T>) -> Result<Self::Key, GovernorError> {
+        match self {
+            Self::Peer => PeerIpKeyExtractor.extract(req),
+            Self::Smart => SmartIpKeyExtractor.extract(req),
+        }
+    }
+}
+
+impl ClientIpKeyExtractor {
+    fn from_config(trust_proxy_headers: bool) -> Self {
+        if trust_proxy_headers {
+            Self::Smart
+        } else {
+            Self::Peer
+        }
+    }
+}
+
 /// Extracts the session cookie value as a rate-limiting key.
 ///
-/// Used for per-user rate limiting. Falls back to the client IP address
-/// (using [`SmartIpKeyExtractor`] logic) for unauthenticated requests so
-/// they are still rate-limited. The same `x-forwarded-for` / `x-real-ip` /
-/// `forwarded` headers are honored, which is safe as long as the server is
-/// only reachable via a trusted reverse proxy.
+/// Used for per-user rate limiting. Falls back to the configured client
+/// IP extractor for unauthenticated requests so they are still
+/// rate-limited. The IP fallback honors `server.trust_proxy_headers`:
+/// when that flag is unset, forwarded headers are ignored and the peer
+/// IP is used.
 ///
 /// This extractor deliberately keys on the **raw cookie string** without
 /// validating the session against the database. That makes it cheap
@@ -35,7 +77,9 @@ use crate::session::parse_session_cookie;
 /// request extensions — at the cost of reintroducing the DB-before-limit
 /// ordering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SessionKeyExtractor;
+pub struct SessionKeyExtractor {
+    ip_fallback: ClientIpKeyExtractor,
+}
 
 impl KeyExtractor for SessionKeyExtractor {
     type Key = String;
@@ -50,15 +94,13 @@ impl KeyExtractor for SessionKeyExtractor {
             return Ok(format!("session:{token}"));
         }
 
-        SmartIpKeyExtractor
-            .extract(req)
-            .map(|ip| format!("ip:{ip}"))
+        self.ip_fallback.extract(req).map(|ip| format!("ip:{ip}"))
     }
 }
 
-type IpLayer = GovernorLayer<SmartIpKeyExtractor, NoOpMiddleware<QuantaInstant>, axum::body::Body>;
+type IpLayer = GovernorLayer<ClientIpKeyExtractor, NoOpMiddleware<QuantaInstant>, axum::body::Body>;
 type AuthLayer =
-    GovernorLayer<SmartIpKeyExtractor, NoOpMiddleware<QuantaInstant>, axum::body::Body>;
+    GovernorLayer<ClientIpKeyExtractor, NoOpMiddleware<QuantaInstant>, axum::body::Body>;
 type UserLayer =
     GovernorLayer<SessionKeyExtractor, NoOpMiddleware<QuantaInstant>, axum::body::Body>;
 
@@ -69,17 +111,20 @@ type UserLayer =
 /// - Strict auth rate limit (applied to login/signup/setup endpoints)
 /// - Per-user rate limit (applied to authenticated endpoints)
 ///
-/// The IP-based layers use [`SmartIpKeyExtractor`], which checks
-/// `x-forwarded-for`, `x-real-ip`, and `forwarded` headers before falling
-/// back to the peer IP. This is the correct default for deployments behind
-/// a trusted reverse proxy (see the NixOS module for the recommended Caddy
-/// configuration). **Do not expose the server directly to untrusted
-/// clients without a reverse proxy** — a malicious client could forge
-/// these headers to bypass the per-IP rate limit.
-pub fn build_layers(config: &prismoire_config::RateLimitConfig) -> (IpLayer, AuthLayer, UserLayer) {
+/// `trust_proxy_headers` selects between peer-IP-only extraction (the
+/// safe default when the server is directly exposed) and
+/// [`SmartIpKeyExtractor`]-style extraction from `X-Forwarded-For` /
+/// `X-Real-IP` / `Forwarded` headers (correct only behind a trusted
+/// reverse proxy that strips client-supplied copies of those headers).
+pub fn build_layers(
+    config: &prismoire_config::RateLimitConfig,
+    trust_proxy_headers: bool,
+) -> (IpLayer, AuthLayer, UserLayer) {
+    let ip_extractor = ClientIpKeyExtractor::from_config(trust_proxy_headers);
+
     let ip_config = Arc::new(
         GovernorConfigBuilder::default()
-            .key_extractor(SmartIpKeyExtractor)
+            .key_extractor(ip_extractor)
             .per_second(config.ip_replenish_seconds)
             .burst_size(config.ip_burst_size)
             .finish()
@@ -88,7 +133,7 @@ pub fn build_layers(config: &prismoire_config::RateLimitConfig) -> (IpLayer, Aut
 
     let auth_config = Arc::new(
         GovernorConfigBuilder::default()
-            .key_extractor(SmartIpKeyExtractor)
+            .key_extractor(ip_extractor)
             .per_second(config.auth_replenish_seconds)
             .burst_size(config.auth_burst_size)
             .finish()
@@ -97,7 +142,9 @@ pub fn build_layers(config: &prismoire_config::RateLimitConfig) -> (IpLayer, Aut
 
     let user_config = Arc::new(
         GovernorConfigBuilder::default()
-            .key_extractor(SessionKeyExtractor)
+            .key_extractor(SessionKeyExtractor {
+                ip_fallback: ip_extractor,
+            })
             .per_second(config.user_replenish_seconds)
             .burst_size(config.user_burst_size)
             .finish()

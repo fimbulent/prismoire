@@ -1,5 +1,5 @@
 import { Marked, type Tokens } from 'marked';
-import DOMPurify from 'dompurify';
+import DOMPurify from 'isomorphic-dompurify';
 
 export type MarkdownProfile = 'full' | 'reply' | 'bio';
 

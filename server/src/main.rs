@@ -146,7 +146,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         trust::RebuildSchedule::default(),
     ));
 
-    let (ip_limiter, auth_limiter, user_limiter) = rate_limit::build_layers(&config.rate_limit);
+    let (ip_limiter, auth_limiter, user_limiter) =
+        rate_limit::build_layers(&config.rate_limit, config.server.trust_proxy_headers);
 
     let authed = Router::new()
         .route("/api/auth/session", get(auth::session_info))

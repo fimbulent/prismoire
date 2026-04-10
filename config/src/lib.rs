@@ -24,6 +24,18 @@ pub struct ServerConfig {
     pub database: String,
     pub web_dir: Option<String>,
     pub setup_token_file: Option<String>,
+    /// Whether to trust `X-Forwarded-For`, `X-Real-IP`, and `Forwarded`
+    /// headers for client-IP-based rate limiting.
+    ///
+    /// Set to `true` **only** when the server is exclusively reachable via
+    /// a trusted reverse proxy (e.g. Caddy / nginx) that strips these
+    /// headers from inbound requests and inserts its own. If the server is
+    /// directly reachable by clients, leaving this `false` prevents a
+    /// trivial rate-limit bypass in which a malicious client forges the
+    /// headers to appear as a different IP on every request.
+    ///
+    /// Default: `false` (peer IP only).
+    pub trust_proxy_headers: bool,
 }
 
 /// WebAuthn relying party configuration (`[webauthn]` section).
@@ -41,6 +53,7 @@ impl Default for ServerConfig {
             database: "prismoire.db".to_string(),
             web_dir: None,
             setup_token_file: None,
+            trust_proxy_headers: false,
         }
     }
 }
