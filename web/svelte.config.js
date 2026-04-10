@@ -14,8 +14,7 @@ const config = {
 	},
 	kit: {
 		// Node server adapter. The built app runs as a standalone Node
-		// process: `node build/index.js`. See docs/adapter-node.md for the
-		// deployment topology (Caddy in front, Axum alongside for /api).
+		// process: `node build/index.js`.
 		adapter: adapter({
 			out: 'build',
 			precompress: false

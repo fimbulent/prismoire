@@ -1,5 +1,5 @@
 import { Marked, type Tokens } from 'marked';
-import DOMPurify from 'isomorphic-dompurify';
+import sanitizeHtml from 'sanitize-html';
 
 export type MarkdownProfile = 'full' | 'reply' | 'bio';
 
@@ -12,8 +12,8 @@ function isSafeUrl(url: string): boolean {
 	}
 }
 
-const SANITIZE_CONFIG = {
-	ALLOWED_TAGS: [
+const SANITIZE_CONFIG: sanitizeHtml.IOptions = {
+	allowedTags: [
 		'p',
 		'br',
 		'strong',
@@ -38,12 +38,14 @@ const SANITIZE_CONFIG = {
 		'tbody',
 		'tr',
 		'th',
-		'td',
+		'td'
 	],
-	ALLOWED_ATTR: ['href', 'title'],
-	ALLOW_DATA_ATTR: false,
-	ADD_ATTR: ['target'],
-	FORBID_TAGS: ['img', 'iframe', 'style', 'script', 'object', 'embed', 'form']
+	allowedAttributes: {
+		a: ['href', 'title', 'target', 'rel']
+	},
+	allowedSchemes: ['http', 'https'],
+	allowProtocolRelative: false,
+	disallowedTagsMode: 'discard'
 };
 
 function createMarked(profile: MarkdownProfile): Marked {
@@ -117,17 +119,19 @@ const fullMarked = createMarked('full');
 const replyMarked = createMarked('reply');
 const bioMarked = createMarked('bio');
 
-const BIO_SANITIZE_CONFIG = {
-	ALLOWED_TAGS: ['p', 'br', 'strong', 'em', 'del', 'code', 'a'],
-	ALLOWED_ATTR: ['href', 'title'],
-	ALLOW_DATA_ATTR: false,
-	ADD_ATTR: ['target'],
-	FORBID_TAGS: ['img', 'iframe', 'style', 'script', 'object', 'embed', 'form']
+const BIO_SANITIZE_CONFIG: sanitizeHtml.IOptions = {
+	allowedTags: ['p', 'br', 'strong', 'em', 'del', 'code', 'a'],
+	allowedAttributes: {
+		a: ['href', 'title', 'target', 'rel']
+	},
+	allowedSchemes: ['http', 'https'],
+	allowProtocolRelative: false,
+	disallowedTagsMode: 'discard'
 };
 
 export function renderMarkdown(source: string, profile: MarkdownProfile = 'full'): string {
 	const marked = profile === 'full' ? fullMarked : profile === 'bio' ? bioMarked : replyMarked;
 	const raw = marked.parse(source) as string;
 	const config = profile === 'bio' ? BIO_SANITIZE_CONFIG : SANITIZE_CONFIG;
-	return DOMPurify.sanitize(raw, config);
+	return sanitizeHtml(raw, config);
 }
