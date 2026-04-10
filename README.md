@@ -71,7 +71,17 @@ setup_token_file = "/run/secrets/prismoire-setup-token"  # required on first boo
 [webauthn]
 rp_id = "community.example.com"                    # default: "localhost"
 rp_origin = "https://community.example.com"         # default: "http://localhost:3000"
+
+[rate_limit]
+ip_replenish_seconds = 1       # default: 1   — token refill interval for per-IP limit
+ip_burst_size = 50             # default: 50  — max burst for per-IP limit
+auth_replenish_seconds = 4     # default: 4   — refill interval for auth endpoints
+auth_burst_size = 5            # default: 5   — max burst for auth endpoints
+user_replenish_seconds = 1     # default: 1   — refill interval for per-user writes
+user_burst_size = 20           # default: 20  — max burst for per-user writes
 ```
+
+The per-IP rate limiters honor `x-forwarded-for`, `x-real-ip`, and `forwarded` headers (falling back to the peer IP). This assumes the server runs behind a trusted reverse proxy — do not expose it directly to untrusted clients, or a malicious client could forge these headers to bypass per-IP limits.
 
 Secrets use file indirection (`*_file` keys) — the server reads the file at startup and trims whitespace. Never put secrets directly in the config file.
 

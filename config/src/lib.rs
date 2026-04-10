@@ -12,6 +12,8 @@ pub struct Config {
     pub server: ServerConfig,
     #[serde(default)]
     pub webauthn: WebauthnConfig,
+    #[serde(default)]
+    pub rate_limit: RateLimitConfig,
 }
 
 /// Server configuration (`[server]` section).
@@ -48,6 +50,41 @@ impl Default for WebauthnConfig {
         Self {
             rp_id: "localhost".to_string(),
             rp_origin: "http://localhost:3000".to_string(),
+        }
+    }
+}
+
+/// Rate limiting configuration (`[rate_limit]` section).
+///
+/// Controls request rate limits at both the IP level and per-user level.
+/// Uses a token bucket algorithm: `burst_size` requests are allowed
+/// immediately, then one token is replenished every `replenish_seconds`.
+#[derive(Deserialize)]
+#[serde(default)]
+pub struct RateLimitConfig {
+    /// Seconds between token replenishment for general IP-based limits.
+    pub ip_replenish_seconds: u64,
+    /// Maximum burst size for general IP-based limits.
+    pub ip_burst_size: u32,
+    /// Seconds between token replenishment for auth endpoints (login/signup/setup).
+    pub auth_replenish_seconds: u64,
+    /// Maximum burst size for auth endpoints.
+    pub auth_burst_size: u32,
+    /// Seconds between token replenishment for per-user write limits.
+    pub user_replenish_seconds: u64,
+    /// Maximum burst size for per-user write limits.
+    pub user_burst_size: u32,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            ip_replenish_seconds: 1,
+            ip_burst_size: 50,
+            auth_replenish_seconds: 4,
+            auth_burst_size: 5,
+            user_replenish_seconds: 1,
+            user_burst_size: 20,
         }
     }
 }

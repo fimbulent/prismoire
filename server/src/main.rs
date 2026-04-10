@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
@@ -19,6 +20,7 @@ mod display_name;
 mod error;
 mod invites;
 mod posts;
+mod rate_limit;
 mod room_name;
 mod rooms;
 mod session;
@@ -134,6 +136,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         trust::RebuildSchedule::default(),
     ));
 
+    let (ip_limiter, auth_limiter, user_limiter) = rate_limit::build_layers(&config.rate_limit);
+
     let authed = Router::new()
         .route("/api/auth/session", get(auth::session_info))
         .route("/api/auth/logout", post(auth::logout))
@@ -198,28 +202,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             post(admin::lock_thread).delete(admin::unlock_thread),
         )
         .route("/api/admin/posts/{id}", delete(admin::remove_post))
+        .layer(user_limiter)
         .layer(axum::middleware::from_fn_with_state(
             shared_state.clone(),
             session::session_middleware,
         ));
 
-    let api = Router::new()
-        .route("/api/health", get(|| async { "ok" }))
-        .route("/api/threads/public", get(threads::list_public_threads))
-        .route("/api/setup/status", get(setup::setup_status))
+    let auth_routes = Router::new()
         .route("/api/setup/begin", post(setup::setup_begin))
         .route("/api/setup/complete", post(setup::setup_complete))
         .route("/api/auth/signup/begin", post(auth::signup_begin))
         .route("/api/auth/signup/complete", post(auth::signup_complete))
         .route("/api/auth/login/begin", post(auth::login_begin))
         .route("/api/auth/login/complete", post(auth::login_complete))
-        .route("/api/auth/discover/begin", get(auth::discover_begin))
         .route("/api/auth/discover/complete", post(auth::discover_complete))
+        .layer(auth_limiter);
+
+    let api = Router::new()
+        .route("/api/health", get(|| async { "ok" }))
+        .route("/api/threads/public", get(threads::list_public_threads))
+        .route("/api/setup/status", get(setup::setup_status))
+        .route("/api/auth/discover/begin", get(auth::discover_begin))
         .route(
             "/api/invites/{code}/validate",
             get(invites::validate_invite),
         )
+        .merge(auth_routes)
         .merge(authed)
+        .layer(ip_limiter)
         .layer(axum::middleware::from_fn_with_state(
             shared_state.clone(),
             setup::setup_guard_middleware,
@@ -248,7 +258,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("127.0.0.1:{}", config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     println!("listening on http://{addr}");
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }

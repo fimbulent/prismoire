@@ -17,6 +17,14 @@ let
       rp_id = cfg.rpId;
       rp_origin = cfg.rpOrigin;
     };
+    rate_limit = {
+      ip_replenish_seconds = cfg.rateLimitIpReplenishSeconds;
+      ip_burst_size = cfg.rateLimitIpBurstSize;
+      auth_replenish_seconds = cfg.rateLimitAuthReplenishSeconds;
+      auth_burst_size = cfg.rateLimitAuthBurstSize;
+      user_replenish_seconds = cfg.rateLimitUserReplenishSeconds;
+      user_burst_size = cfg.rateLimitUserBurstSize;
+    };
   };
 
   configFile = configFormat.generate "prismoire.toml" configAttrs;
@@ -56,6 +64,42 @@ in
         Path to a file containing the one-time setup token for creating the
         initial admin account. Required on first boot; ignored after setup.
       '';
+    };
+
+    rateLimitIpReplenishSeconds = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 1;
+      description = "Seconds between token replenishment for per-IP rate limiting.";
+    };
+
+    rateLimitIpBurstSize = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 50;
+      description = "Maximum burst size for per-IP rate limiting.";
+    };
+
+    rateLimitAuthReplenishSeconds = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 4;
+      description = "Seconds between token replenishment for auth endpoint rate limiting.";
+    };
+
+    rateLimitAuthBurstSize = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 5;
+      description = "Maximum burst size for auth endpoint rate limiting.";
+    };
+
+    rateLimitUserReplenishSeconds = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 1;
+      description = "Seconds between token replenishment for per-user write rate limiting.";
+    };
+
+    rateLimitUserBurstSize = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 20;
+      description = "Maximum burst size for per-user write rate limiting.";
     };
 
     openFirewall = lib.mkOption {

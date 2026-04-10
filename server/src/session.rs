@@ -134,18 +134,28 @@ pub fn clear_session_cookie() -> String {
     format!("{SESSION_COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0")
 }
 
-/// Extract the session token from the Cookie header.
-fn extract_session_token<B>(request: &Request<B>) -> Option<String> {
-    let cookie_header = request.headers().get(COOKIE)?.to_str().ok()?;
+/// Extract the session token from a Cookie header value.
+///
+/// Shared helper used by both the session middleware and the rate-limiting
+/// session key extractor. Parses the standard `name=value; name=value` cookie
+/// header format, returning the value of the session cookie if present and
+/// non-empty.
+pub fn parse_session_cookie(cookie_header: &str) -> Option<&str> {
     for pair in cookie_header.split(';') {
         let pair = pair.trim();
         if let Some(value) = pair.strip_prefix(&format!("{SESSION_COOKIE_NAME}="))
             && !value.is_empty()
         {
-            return Some(value.to_string());
+            return Some(value);
         }
     }
     None
+}
+
+/// Extract the session token from the Cookie header.
+fn extract_session_token<B>(request: &Request<B>) -> Option<String> {
+    let cookie_header = request.headers().get(COOKIE)?.to_str().ok()?;
+    parse_session_cookie(cookie_header).map(|s| s.to_string())
 }
 
 /// Session authentication and renewal middleware.
