@@ -17,6 +17,23 @@ use crate::session::parse_session_cookie;
 /// they are still rate-limited. The same `x-forwarded-for` / `x-real-ip` /
 /// `forwarded` headers are honored, which is safe as long as the server is
 /// only reachable via a trusted reverse proxy.
+///
+/// This extractor deliberately keys on the **raw cookie string** without
+/// validating the session against the database. That makes it cheap
+/// enough to run as the outermost layer on authed routes (outside
+/// `session_middleware`), so abusive traffic is rate-limited before any
+/// DB query happens. A bogus or expired cookie still gets a stable
+/// bucket — the bucket just won't correspond to a real user.
+///
+/// Implication for future session token rotation: the per-session bucket
+/// is keyed on the exact token string, so if session renewal ever starts
+/// rotating the token value (rather than extending the expiry of the
+/// same token as it does today), each rotation will reset the bucket and
+/// the per-user limit will effectively stop working for long-lived
+/// sessions. Key on the user ID instead at that point, by moving the
+/// extractor to run after `session_middleware` and reading from
+/// request extensions — at the cost of reintroducing the DB-before-limit
+/// ordering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionKeyExtractor;
 

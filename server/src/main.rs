@@ -19,6 +19,7 @@ mod auth;
 mod display_name;
 mod error;
 mod invites;
+mod middleware;
 mod posts;
 mod rate_limit;
 mod room_name;
@@ -114,6 +115,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let webauthn = build_webauthn(&config);
 
+    // Derive CSRF / security-header inputs from the validated rp_origin.
+    // rp_origin is checked during config load so parsing here cannot fail.
+    let rp_origin_url =
+        Url::parse(&config.webauthn.rp_origin).expect("rp_origin validated during config load");
+    let allowed_origin = middleware::csrf::AllowedOrigin::from_url(&rp_origin_url)
+        .expect("rp_origin must have a host");
+    let https_enabled =
+        middleware::security_headers::HttpsEnabled(rp_origin_url.scheme() == "https");
+
     let trust_graph_notify = Arc::new(Notify::new());
     let trust_graph = Arc::new(RwLock::new(Arc::new(trust::TrustGraph::empty())));
 
@@ -202,11 +212,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             post(admin::lock_thread).delete(admin::unlock_thread),
         )
         .route("/api/admin/posts/{id}", delete(admin::remove_post))
-        .layer(user_limiter)
         .layer(axum::middleware::from_fn_with_state(
             shared_state.clone(),
             session::session_middleware,
-        ));
+        ))
+        .layer(user_limiter);
 
     let auth_routes = Router::new()
         .route("/api/setup/begin", post(setup::setup_begin))
@@ -219,7 +229,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(auth_limiter);
 
     let api = Router::new()
-        .route("/api/health", get(|| async { "ok" }))
         .route("/api/threads/public", get(threads::list_public_threads))
         .route("/api/setup/status", get(setup::setup_status))
         .route("/api/auth/discover/begin", get(auth::discover_begin))
@@ -229,12 +238,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .merge(auth_routes)
         .merge(authed)
+        .layer(axum::middleware::from_fn_with_state(
+            allowed_origin,
+            middleware::csrf::csrf_origin_check,
+        ))
         .layer(ip_limiter)
         .layer(axum::middleware::from_fn_with_state(
             shared_state.clone(),
             setup::setup_guard_middleware,
         ))
+        // Cache-Control is the outermost API layer so every response
+        // — handler output, rate-limit 429s, CSRF 403s, setup 503s —
+        // gets `no-store` on the way out.
+        .layer(axum::middleware::from_fn(
+            middleware::cache_control::cache_control,
+        ))
         .with_state(shared_state);
+
+    // Health check lives outside the rate-limited `api` router so that
+    // monitoring probes (Prometheus, k8s liveness, etc.) cannot trip the
+    // IP rate limiter. It also bypasses setup_guard and CSRF — the endpoint
+    // is a safe GET with no side effects, and is already safelisted in
+    // setup_guard anyway.
+    let health_router = Router::new().route("/api/health", get(|| async { "ok" }));
 
     let web_build: PathBuf = config.server.web_dir.map(PathBuf::from).unwrap_or_else(|| {
         [env!("CARGO_MANIFEST_DIR"), "..", "web", "build"]
@@ -253,7 +279,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .append_index_html_on_directories(false)
         .fallback(ServeFile::new(web_build.join("index.html")));
 
-    let app = api.fallback_service(spa_fallback);
+    let app = api
+        .merge(health_router)
+        .fallback_service(spa_fallback)
+        .layer(axum::middleware::from_fn_with_state(
+            https_enabled,
+            middleware::security_headers::security_headers,
+        ));
 
     let addr = format!("127.0.0.1:{}", config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;

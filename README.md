@@ -163,10 +163,17 @@ services.caddy = {
   enable = true;
   virtualHosts."example.com" = {
     extraConfig = ''
+      # Long-cache content-hashed SvelteKit bundles.
       @immutable path /_app/immutable/*
       header @immutable Cache-Control "public, max-age=31536000, immutable"
-      @other not path /_app/immutable/*
-      header @other Cache-Control "no-cache"
+
+      # Everything else on the static frontend (index.html, manifest,
+      # icons) must revalidate so SPA updates are picked up promptly.
+      # API responses carry their own `Cache-Control: no-store` set by
+      # the server; do not override them here.
+      @static not path /_app/immutable/* /api/*
+      header @static Cache-Control "no-cache"
+
       reverse_proxy localhost:3000
     '';
   };
