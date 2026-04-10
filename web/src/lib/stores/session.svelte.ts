@@ -1,60 +1,45 @@
-import {
-	getSession,
-	getSetupStatus,
-	logout as apiLogout,
-	type SessionInfo
-} from '$lib/api/auth';
-import { theme } from '$lib/stores/theme.svelte';
-import type { ThemeId } from '$lib/themes';
+// SSR-safe session facade backed by the root `+layout.server.ts` load.
+//
+// There is intentionally NO module-level `$state` here: under
+// adapter-node, module scope is shared across concurrent requests, and
+// writing the logged-in user into it would leak one user's session into
+// another user's render. Instead every getter reads from `page.data`,
+// which SvelteKit scopes to the current request.
+//
+// For client-side auth ceremonies (login / signup / setup) the flow is
+// now: call the API, then `invalidateAll()` so the root layout load
+// re-runs and `page.data.session` reflects the new user. Route code no
+// longer writes to a client store.
 
-let user = $state<SessionInfo | null>(null);
-let loading = $state(true);
-let needsSetup = $state(false);
+import { page } from '$app/state';
+import { invalidateAll } from '$app/navigation';
+import { logout as apiLogout, type SessionInfo } from '$lib/api/auth';
 
 export const session = {
-	get user() {
-		return user;
+	get user(): SessionInfo | null {
+		return page.data.session ?? null;
 	},
-	get loading() {
-		return loading;
+	get isLoggedIn(): boolean {
+		return page.data.session != null;
 	},
-	get isLoggedIn() {
-		return user !== null;
+	get isAdmin(): boolean {
+		return page.data.session?.role === 'admin';
 	},
-	get isAdmin() {
-		return user?.role === 'admin';
-	},
-	get needsSetup() {
-		return needsSetup;
+	get needsSetup(): boolean {
+		return page.data.needsSetup === true;
 	},
 
-	async load() {
-		loading = true;
-		try {
-			const status = await getSetupStatus();
-			needsSetup = status.needs_setup;
-			if (!needsSetup) {
-				user = await getSession();
-				if (user) {
-					theme.init(user.theme as ThemeId);
-				}
-			}
-		} catch {
-			user = null;
-		} finally {
-			loading = false;
-		}
+	/**
+	 * Force the root layout load to re-run so `page.data.session`
+	 * reflects the latest server state. Called after client-driven
+	 * auth ceremonies (login, signup, setup).
+	 */
+	async refresh(): Promise<void> {
+		await invalidateAll();
 	},
 
-	set(info: SessionInfo) {
-		user = info;
-		needsSetup = false;
-		loading = false;
-		theme.init(info.theme as ThemeId);
-	},
-
-	async logout() {
+	async logout(): Promise<void> {
 		await apiLogout();
-		user = null;
+		await invalidateAll();
 	}
 };

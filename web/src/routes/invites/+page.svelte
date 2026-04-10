@@ -1,20 +1,13 @@
 <script lang="ts">
-	import { goto } from '$app/navigation';
 	import { slide } from 'svelte/transition';
-	import {
-		createInvite,
-		listInvites,
-		listInvitedUsers,
-		revokeInvite,
-		type Invite,
-		type InvitedUser
-	} from '$lib/api/invites';
+	import { createInvite, revokeInvite, type Invite } from '$lib/api/invites';
 	import { relativeTime } from '$lib/format';
-	import { session } from '$lib/stores/session.svelte';
 
-	let invites = $state<Invite[]>([]);
-	let invitedUsers = $state<InvitedUser[]>([]);
-	let loading = $state(true);
+	let { data } = $props();
+
+	// svelte-ignore state_referenced_locally
+	let invites = $state<Invite[]>(data.invites);
+	let invitedUsers = $derived(data.invitedUsers);
 	let error = $state<string | null>(null);
 	let creating = $state(false);
 	let createError = $state<string | null>(null);
@@ -32,25 +25,9 @@
 	];
 
 	$effect(() => {
-		if (session.loading) return;
-		if (!session.isLoggedIn) {
-			goto('/login');
-			return;
-		}
-		load();
-	});
-
-	async function load() {
-		loading = true;
+		invites = data.invites;
 		error = null;
-		try {
-			[invites, invitedUsers] = await Promise.all([listInvites(), listInvitedUsers()]);
-		} catch (e) {
-			error = e instanceof Error ? e.message : 'Failed to load invites';
-		} finally {
-			loading = false;
-		}
-	}
+	});
 
 	async function handleCreate() {
 		creating = true;
@@ -180,9 +157,7 @@
 		{/if}
 	</div>
 
-	{#if loading}
-		<div class="text-center text-text-muted py-12">Loading…</div>
-	{:else if error}
+	{#if error}
 		<div class="text-center text-danger py-12">{error}</div>
 	{:else if invites.length === 0}
 		<div

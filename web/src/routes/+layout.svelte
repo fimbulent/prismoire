@@ -2,8 +2,10 @@
 	import '../app.css';
 	import favicon from '$lib/assets/favicon.svg';
 	import { session } from '$lib/stores/session.svelte';
+	import { theme } from '$lib/stores/theme.svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
+	import { applyTheme } from '$lib/themes';
 
 	let { children } = $props();
 
@@ -11,12 +13,20 @@
 	let dropdownOpen = $state(false);
 	let dropdownEl = $state<HTMLElement | null>(null);
 
+	// Apply the current theme (from page data, with an optional client
+	// override for optimistic settings-page updates) to the document.
+	// Runs only in the browser; `applyTheme` no-ops on the server.
 	$effect(() => {
-		session.load();
+		applyTheme(theme.current);
+		// Clear any optimistic override once the session load has
+		// reflected the server-side choice back to us.
+		if (page.data.session?.theme === theme.current) {
+			theme.clearOverride();
+		}
 	});
 
 	$effect(() => {
-		if (!session.loading && session.needsSetup && page.url.pathname !== '/setup') {
+		if (session.needsSetup && page.url.pathname !== '/setup') {
 			goto('/setup');
 		}
 	});
@@ -44,7 +54,7 @@
 	async function handleLogout() {
 		dropdownOpen = false;
 		await session.logout();
-		goto('/login');
+		await goto('/login');
 	}
 
 	function navigateTo(path: string) {
@@ -62,9 +72,7 @@
 	<a href="/" class="text-accent font-bold tracking-wide text-lg hover:opacity-90">Prismoire</a>
 
 	<div class="flex items-center gap-4 text-sm">
-		{#if session.loading}
-			<span class="text-text-muted">…</span>
-		{:else if session.isLoggedIn}
+		{#if session.isLoggedIn}
 			<div class="relative" bind:this={dropdownEl}>
 				<button
 					onclick={() => (dropdownOpen = !dropdownOpen)}

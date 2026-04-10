@@ -1,6 +1,5 @@
 <script lang="ts">
 	import {
-		getThread,
 		getThreadReplies,
 		getThreadSubtree,
 		replyToThread,
@@ -12,7 +11,7 @@
 		lockThread, unlockThread, removePost
 	} from '$lib/api/admin';
 	import { page } from '$app/state';
-	import { pushState } from '$app/navigation';
+	import { pushState, goto } from '$app/navigation';
 	import { fade, slide } from 'svelte/transition';
 	import PostCard from '$lib/components/post/PostCard.svelte';
 	import ReplyForm from '$lib/components/post/ReplyForm.svelte';
@@ -22,14 +21,29 @@
 	import Badge from '$lib/components/ui/Badge.svelte';
 	import MoreButton from '$lib/components/ui/MoreButton.svelte';
 	import { session } from '$lib/stores/session.svelte';
-	import { goto } from '$app/navigation';
 	import { tick } from 'svelte';
 
-	let thread = $state<ThreadDetail | null>(null);
-	let loading = $state(true);
-	let error = $state<string | null>(null);
+	let { data } = $props();
 
-	let sortMode = $state<ThreadDetailSort>('trust');
+	// Thread tree is mutated locally (reply, remove, load more, continue
+	// subtree). Seed from server data and re-seed whenever SvelteKit re-runs
+	// the server load (nav, sort change, focus change). The initial-value
+	// warnings from svelte-check are false positives — the $effect below
+	// reassigns both on every data update.
+	// svelte-ignore state_referenced_locally
+	let thread = $state<ThreadDetail>(structuredClone(data.thread));
+	let sortMode = $derived(data.sort);
+	// svelte-ignore state_referenced_locally
+	let renderedTopLevelIds = $state(new Set<string>(data.thread.post.children.map((c) => c.id)));
+
+	$effect(() => {
+		thread = structuredClone(data.thread);
+		renderedTopLevelIds = new Set(data.thread.post.children.map((c) => c.id));
+		viewRootStack = [];
+		if (data.thread.focused_post_id) {
+			tick().then(() => scrollToFocusedPost(data.thread.focused_post_id!));
+		}
+	});
 
 	let replyingToId = $state<string | null>(null);
 	let replyError = $state<string | null>(null);
@@ -49,13 +63,12 @@
 	let viewRootStack = $state<string[]>([]);
 
 	let viewRoot = $derived.by(() => {
-		if (!thread || viewRootStack.length === 0) return null;
+		if (viewRootStack.length === 0) return null;
 		const id = viewRootStack[viewRootStack.length - 1];
 		return findPost(thread.post, id);
 	});
 
 	let loadingMoreReplies = $state(false);
-	let renderedTopLevelIds = $state(new Set<string>());
 
 	function pushViewRoot(id: string) {
 		viewRootStack = [...viewRootStack, id];
@@ -67,51 +80,23 @@
 		history.back();
 	}
 
-	let lastLoadedThreadId = $state<string | null>(null);
-	let lastLoadedFocusId = $state<string | null>(null);
+	function sortHref(sort: ThreadDetailSort): string {
+		const params = new URLSearchParams(page.url.searchParams);
+		if (sort === 'trust') params.delete('sort');
+		else params.set('sort', sort);
+		const qs = params.toString();
+		return `${page.url.pathname}${qs ? '?' + qs : ''}`;
+	}
 
-	$effect(() => {
-		if (session.loading) return;
-		const threadId = page.params.thread;
-		const focusId = page.url?.searchParams.get('post') ?? null;
-		if (threadId && (threadId !== lastLoadedThreadId || focusId !== lastLoadedFocusId)) {
-			lastLoadedThreadId = threadId;
-			lastLoadedFocusId = focusId;
-			viewRootStack = [];
-			loadThread(threadId, undefined, focusId ?? undefined);
-		}
-	});
-
-	async function loadThread(id: string, sort?: ThreadDetailSort, focusPostId?: string) {
-		loading = true;
-		error = null;
-		try {
-			thread = await getThread(id, sort, focusPostId);
-			if (!session.isLoggedIn && !thread.room_public) {
-				goto('/login', { replaceState: true });
-				return;
-			}
-			renderedTopLevelIds = new Set(thread.post.children.map((c) => c.id));
-
-			if (thread.focused_post_id) {
-				await tick();
-				scrollToFocusedPost(thread.focused_post_id);
-			}
-		} catch (e) {
-			if (!session.isLoggedIn) {
-				goto('/login', { replaceState: true });
-				return;
-			}
-			error = e instanceof Error ? e.message : 'Failed to load thread';
-		} finally {
-			loading = false;
-		}
+	function handleSortChange(e: Event) {
+		const sort = (e.currentTarget as HTMLSelectElement).value as ThreadDetailSort;
+		goto(sortHref(sort), { noScroll: true, keepFocus: true });
 	}
 
 	function scrollToFocusedPost(focusId: string) {
-		const depth = findPostDepth(thread!.post, focusId, 0);
+		const depth = findPostDepth(thread.post, focusId, 0);
 		if (depth !== null && depth > MAX_DEPTH) {
-			const ancestorId = findAncestorAtDepth(thread!.post, focusId, depth, MAX_DEPTH);
+			const ancestorId = findAncestorAtDepth(thread.post, focusId, depth, MAX_DEPTH);
 			if (ancestorId) {
 				pushViewRoot(ancestorId);
 			}
@@ -170,7 +155,7 @@
 	}
 
 	async function loadMoreReplies() {
-		if (!thread || loadingMoreReplies) return;
+		if (loadingMoreReplies) return;
 		loadingMoreReplies = true;
 		try {
 			const offset = thread.post.children.length;
@@ -201,7 +186,6 @@
 	}
 
 	async function handleContinueThread(post: PostResponse) {
-		if (!thread) return;
 		try {
 			const res = await getThreadSubtree(thread.id, post.id, sortMode);
 			replaceSubtree(thread.post, post.id, res.post);
@@ -233,12 +217,15 @@
 	}
 
 	async function submitReply(body: string) {
-		if (!thread || !replyingToId) return;
+		if (!replyingToId) return;
 		replySaving = true;
 		replyError = null;
 		try {
 			const newPost = await replyToThread(thread.id, replyingToId, body);
 			insertReply(thread.post, newPost);
+			if (newPost.parent_id === thread.post.id) {
+				renderedTopLevelIds.add(newPost.id);
+			}
 			thread.reply_count += 1;
 			thread = thread;
 			replyingToId = null;
@@ -250,12 +237,12 @@
 	}
 
 	async function submitTopLevelReply() {
-		if (!thread) return;
 		topLevelSaving = true;
 		topLevelError = null;
 		try {
 			const newPost = await replyToThread(thread.id, thread.post.id, topLevelBody);
 			insertReply(thread.post, newPost);
+			renderedTopLevelIds.add(newPost.id);
 			thread.reply_count += 1;
 			thread = thread;
 			topLevelBody = '';
@@ -303,7 +290,6 @@
 	let removeSaving = $state(false);
 
 	async function handleLock() {
-		if (!thread) return;
 		adminError = null;
 		try {
 			if (thread.locked) {
@@ -342,7 +328,7 @@
 				}
 				return false;
 			}
-			if (thread) markRemoved(thread.post);
+			markRemoved(thread.post);
 			thread = thread;
 			removeTarget = null;
 		} catch (e) {
@@ -357,23 +343,17 @@
 		removeError = null;
 	}
 
-	let threadTitle = $derived(thread ? thread.title : null);
-	let focusedPostId = $derived(thread?.focused_post_id ?? null);
+	let focusedPostId = $derived(thread.focused_post_id ?? null);
 </script>
 
 <svelte:window onpopstate={handlePopState} />
 
 <svelte:head>
-	<title>{threadTitle ? `${threadTitle} — Prismoire` : 'Thread — Prismoire'}</title>
+	<title>{thread.title} — Prismoire</title>
 </svelte:head>
 
 <div class="max-w-4xl mx-auto px-6 pt-6 pb-16">
-	{#if loading}
-		<div class="text-center text-text-muted py-12">Loading thread…</div>
-	{:else if error}
-		<div class="text-center text-danger py-12">{error}</div>
-	{:else if thread}
-		{#if focusedPostId}
+	{#if focusedPostId}
 			<div class="mb-4">
 				<a
 					href="/room/{thread.room_slug}/{thread.id}"
@@ -396,7 +376,7 @@
 			<div id="post-{thread.post.id}">
 				<PostCard post={thread.post} onreply={thread.locked ? undefined : startReplying} onremove={session.isAdmin ? (postId) => { removeTarget = postId; removeError = null; } : undefined}>
 					{#snippet extraActions()}
-						{#if session.isAdmin && thread}
+						{#if session.isAdmin}
 							{#if thread.locked}
 								<button
 									onclick={handleLock}
@@ -500,8 +480,8 @@
 					<span class="mx-1">·</span>
 					<span>Sort by:</span>
 					<select
-						bind:value={sortMode}
-						onchange={async () => { if (thread) { const t = await getThread(thread.id, sortMode); thread.post.children = t.post.children; thread.reply_count = t.reply_count; thread.has_more_replies = t.has_more_replies; thread.total_reply_count = t.total_reply_count; renderedTopLevelIds = new Set(t.post.children.map((c) => c.id)); } }}
+						value={sortMode}
+						onchange={handleSortChange}
 						class="font-sans text-xs bg-bg-surface text-text-secondary border border-border rounded-md px-2 py-1 cursor-pointer hover:border-accent-muted focus:outline-none focus:border-accent-muted"
 					>
 						<option value="trust">Trust</option>
@@ -590,7 +570,6 @@
 			</div>
 		</div>
 		{/if}
-	{/if}
 </div>
 
 <style>

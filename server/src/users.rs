@@ -522,6 +522,15 @@ pub async fn get_trust_detail(
 // ---------------------------------------------------------------------------
 
 /// Returns paginated recent activity (threads started and replies).
+//
+// TODO: pagination cursor is `p.created_at` with strict `<` comparison,
+// which is broken when multiple posts share the same timestamp: ties
+// aren't deterministically ordered so rows can be dropped entirely, and
+// if a single timestamp has more than ACTIVITY_PAGE_SIZE rows the cursor
+// fails to advance and the client loops on the same page. Switch to a
+// compound cursor of `(created_at, post_id)` using a tuple comparison
+// (`WHERE (p.created_at, p.id) < (?, ?) ORDER BY p.created_at DESC, p.id
+// DESC`) so the next-page filter excludes exactly the rows already seen.
 pub async fn get_activity(
     State(state): State<Arc<AppState>>,
     _user: AuthUser,

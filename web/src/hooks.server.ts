@@ -14,8 +14,9 @@
 // sets `ORIGIN = cfg.rpOrigin;` from the same option used for Axum's
 // `webauthn.rp_origin`.
 
-import type { Handle, HandleFetch } from '@sveltejs/kit';
+import type { Handle, HandleFetch, HandleServerError } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
+import { ApiRequestError } from '$lib/api/auth';
 
 const API_URL = env.API_URL ?? 'http://127.0.0.1:3000';
 
@@ -36,4 +37,38 @@ export const handleFetch: HandleFetch = async ({ event, request, fetch }) => {
 
 export const handle: Handle = async ({ event, resolve }) => {
 	return resolve(event);
+};
+
+/**
+ * Centralised server-side error handler. Any unexpected error thrown
+ * from a `load` function (anything that isn't a `redirect` or `kitError`)
+ * lands here. We:
+ *
+ *   1. Log a structured line with the request id, route, and — for
+ *      `ApiRequestError` — the upstream HTTP status and raw server
+ *      message. This is the ONE place raw backend messages are allowed
+ *      to appear in logs.
+ *   2. Return a generic, non-sensitive message to the client so the
+ *      backend internals never surface in the error page.
+ */
+export const handleError: HandleServerError = ({ error, event, status, message }) => {
+	const errorId = crypto.randomUUID();
+	const route = event.route.id ?? event.url.pathname;
+
+	if (error instanceof ApiRequestError) {
+		console.error(`[${errorId}] ${route}: upstream ${error.status} ${error.message}`);
+	} else if (error instanceof Error) {
+		console.error(`[${errorId}] ${route}: ${error.stack ?? error.message}`);
+	} else {
+		console.error(`[${errorId}] ${route}:`, error);
+	}
+
+	// `status` / `message` are populated by SvelteKit when the caller
+	// used `kitError(...)`; pass those through so the error page shows
+	// the intended user-facing text. For anything else we show a
+	// generic 500.
+	return {
+		message: status && status < 500 ? message : 'Something went wrong',
+		errorId
+	};
 };

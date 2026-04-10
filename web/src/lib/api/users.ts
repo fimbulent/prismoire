@@ -1,4 +1,4 @@
-import type { ApiError } from './auth';
+import { throwApiError, type FetchFn } from './auth';
 
 export interface TrustInfo {
 	distance: number | null;
@@ -76,89 +76,95 @@ export interface ActivityResponse {
 	next_cursor: string | null;
 }
 
-export async function getUserProfile(username: string): Promise<UserProfile> {
-	const res = await fetch(`/api/users/${encodeURIComponent(username)}`);
-	if (!res.ok) {
-		const err: ApiError = await res.json();
-		throw new Error(err.error);
-	}
+interface FetchOpts {
+	fetch?: FetchFn;
+}
+
+export async function getUserProfile(
+	username: string,
+	opts: FetchOpts = {}
+): Promise<UserProfile> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f(`/api/users/${encodeURIComponent(username)}`);
+	if (!res.ok) await throwApiError(res);
 	return res.json();
 }
 
-export async function getTrustDetail(username: string): Promise<TrustDetailResponse> {
-	const res = await fetch(`/api/users/${encodeURIComponent(username)}/trust`);
-	if (!res.ok) {
-		const err: ApiError = await res.json();
-		throw new Error(err.error);
-	}
+export async function getTrustDetail(
+	username: string,
+	opts: FetchOpts = {}
+): Promise<TrustDetailResponse> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f(`/api/users/${encodeURIComponent(username)}/trust`);
+	if (!res.ok) await throwApiError(res);
 	return res.json();
 }
 
 export async function getActivity(
 	username: string,
 	filter: string = 'all',
-	cursor?: string
+	cursor?: string,
+	opts: FetchOpts = {}
 ): Promise<ActivityResponse> {
+	const f = opts.fetch ?? globalThis.fetch;
 	const params = new URLSearchParams({ filter });
 	if (cursor) params.set('cursor', cursor);
-	const res = await fetch(
+	const res = await f(
 		`/api/users/${encodeURIComponent(username)}/activity?${params.toString()}`
 	);
-	if (!res.ok) {
-		const err: ApiError = await res.json();
-		throw new Error(err.error);
-	}
+	if (!res.ok) await throwApiError(res);
 	return res.json();
 }
 
 export async function getTrustEdges(
 	username: string,
-	direction: 'trusts' | 'trusted_by'
+	direction: 'trusts' | 'trusted_by',
+	opts: FetchOpts = {}
 ): Promise<TrustEdgesResponse> {
+	const f = opts.fetch ?? globalThis.fetch;
 	const params = new URLSearchParams({ direction });
-	const res = await fetch(
+	const res = await f(
 		`/api/users/${encodeURIComponent(username)}/trust/edges?${params.toString()}`
 	);
-	if (!res.ok) {
-		const err: ApiError = await res.json();
-		throw new Error(err.error);
-	}
+	if (!res.ok) await throwApiError(res);
 	return res.json();
 }
 
-export async function updateBio(username: string, bio: string | null): Promise<void> {
-	const res = await fetch(`/api/users/${encodeURIComponent(username)}`, {
+export async function updateBio(
+	username: string,
+	bio: string | null,
+	opts: FetchOpts = {}
+): Promise<void> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f(`/api/users/${encodeURIComponent(username)}`, {
 		method: 'PATCH',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ bio })
 	});
-	if (!res.ok) {
-		const err: ApiError = await res.json();
-		throw new Error(err.error);
-	}
+	if (!res.ok) await throwApiError(res);
 }
 
 export async function setTrustEdge(
 	username: string,
-	edgeType: 'trust' | 'distrust'
+	edgeType: 'trust' | 'distrust',
+	opts: FetchOpts = {}
 ): Promise<void> {
-	const res = await fetch(`/api/users/${encodeURIComponent(username)}/trust-edge`, {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f(`/api/users/${encodeURIComponent(username)}/trust-edge`, {
 		method: 'PUT',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ type: edgeType })
 	});
-	if (!res.ok) {
-		const err: ApiError = await res.json();
-		throw new Error(err.error);
-	}
+	if (!res.ok) await throwApiError(res);
 }
 
-export async function deleteTrustEdge(username: string): Promise<void> {
-	const res = await fetch(`/api/users/${encodeURIComponent(username)}/trust-edge`, {
+export async function deleteTrustEdge(
+	username: string,
+	opts: FetchOpts = {}
+): Promise<void> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f(`/api/users/${encodeURIComponent(username)}/trust-edge`, {
 		method: 'DELETE'
 	});
-	if (!res.ok) {
-		const err: ApiError = await res.json();
-		throw new Error(err.error);
-	}
+	if (!res.ok) await throwApiError(res);
 }

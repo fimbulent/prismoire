@@ -1,23 +1,12 @@
 <script lang="ts">
-	import { goto } from '$app/navigation';
 	import { updateSettings } from '$lib/api/settings';
-	import { session } from '$lib/stores/session.svelte';
 	import { theme } from '$lib/stores/theme.svelte';
 	import { themes, type ThemeId } from '$lib/themes';
 
-	let saving = $state(false);
 	let savedId = $state<ThemeId | null>(null);
-
-	$effect(() => {
-		if (session.loading) return;
-		if (!session.isLoggedIn) {
-			goto('/login');
-		}
-	});
 
 	async function selectTheme(id: ThemeId) {
 		theme.set(id);
-		saving = true;
 		try {
 			await updateSettings({ theme: id });
 			savedId = id;
@@ -26,8 +15,6 @@
 			}, 1500);
 		} catch {
 			// Silently fail — the theme is already applied visually
-		} finally {
-			saving = false;
 		}
 	}
 </script>

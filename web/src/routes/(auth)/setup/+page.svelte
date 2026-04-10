@@ -28,9 +28,9 @@
 		try {
 			const { challenge_id, ...options } = await setupBegin(token.trim(), displayName);
 			const credential = await createPasskey(options.publicKey as never);
-			const info = await setupComplete(challenge_id, credential);
-			session.set(info);
-			goto('/');
+			await setupComplete(challenge_id, credential);
+			await session.refresh();
+			await goto('/');
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Setup failed';
 		} finally {

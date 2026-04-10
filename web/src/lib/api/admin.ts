@@ -1,4 +1,4 @@
-import type { ApiError } from './auth';
+import { throwApiError, type FetchFn } from './auth';
 
 export interface AdminLogEntry {
 	id: string;
@@ -19,49 +19,55 @@ export interface AdminLogResponse {
 	next_cursor: string | null;
 }
 
-export async function getAdminLog(cursor?: string): Promise<AdminLogResponse> {
+interface FetchOpts {
+	fetch?: FetchFn;
+}
+
+export async function getAdminLog(
+	cursor?: string,
+	opts: FetchOpts = {}
+): Promise<AdminLogResponse> {
+	const f = opts.fetch ?? globalThis.fetch;
 	const params = new URLSearchParams();
 	if (cursor) params.set('cursor', cursor);
 	const qs = params.toString();
-	const res = await fetch(`/api/admin/log${qs ? `?${qs}` : ''}`);
-	if (!res.ok) {
-		const err: ApiError = await res.json();
-		throw new Error(err.error);
-	}
+	const res = await f(`/api/admin/log${qs ? `?${qs}` : ''}`);
+	if (!res.ok) await throwApiError(res);
 	return res.json();
 }
 
-export async function lockThread(threadId: string, reason: string): Promise<void> {
-	const res = await fetch(`/api/admin/threads/${encodeURIComponent(threadId)}/lock`, {
+export async function lockThread(
+	threadId: string,
+	reason: string,
+	opts: FetchOpts = {}
+): Promise<void> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f(`/api/admin/threads/${encodeURIComponent(threadId)}/lock`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ reason })
 	});
-	if (!res.ok) {
-		const err: ApiError = await res.json();
-		throw new Error(err.error);
-	}
+	if (!res.ok) await throwApiError(res);
 }
 
-export async function unlockThread(threadId: string): Promise<void> {
-	const res = await fetch(`/api/admin/threads/${encodeURIComponent(threadId)}/lock`, {
+export async function unlockThread(threadId: string, opts: FetchOpts = {}): Promise<void> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f(`/api/admin/threads/${encodeURIComponent(threadId)}/lock`, {
 		method: 'DELETE'
 	});
-	if (!res.ok) {
-		const err: ApiError = await res.json();
-		throw new Error(err.error);
-	}
+	if (!res.ok) await throwApiError(res);
 }
 
-export async function removePost(postId: string, reason: string): Promise<void> {
-	const res = await fetch(`/api/admin/posts/${encodeURIComponent(postId)}`, {
+export async function removePost(
+	postId: string,
+	reason: string,
+	opts: FetchOpts = {}
+): Promise<void> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f(`/api/admin/posts/${encodeURIComponent(postId)}`, {
 		method: 'DELETE',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ reason })
 	});
-	if (!res.ok) {
-		const err: ApiError = await res.json();
-		throw new Error(err.error);
-	}
+	if (!res.ok) await throwApiError(res);
 }
-

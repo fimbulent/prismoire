@@ -1,35 +1,12 @@
 <script lang="ts">
-	import { listRooms, type Room } from '$lib/api/rooms';
 	import { session } from '$lib/stores/session.svelte';
 	import { relativeTime } from '$lib/format';
 	import { goto } from '$app/navigation';
 	import Badge from '$lib/components/ui/Badge.svelte';
 
-	let rooms = $state<Room[]>([]);
-	let loading = $state(true);
-	let error = $state<string | null>(null);
+	let { data } = $props();
+	let rooms = $derived(data.rooms);
 	let searchQuery = $state('');
-
-	$effect(() => {
-		if (session.loading) return;
-		if (!session.isLoggedIn) {
-			goto('/login', { replaceState: true });
-			return;
-		}
-		loadRooms();
-	});
-
-	async function loadRooms() {
-		loading = true;
-		error = null;
-		try {
-			rooms = await listRooms();
-		} catch (e) {
-			error = e instanceof Error ? e.message : 'Failed to load rooms';
-		} finally {
-			loading = false;
-		}
-	}
 
 	let filteredRooms = $derived(
 		searchQuery.trim()
@@ -68,11 +45,7 @@
 </div>
 
 <div class="max-w-4xl mx-auto px-6 pb-16">
-	{#if loading}
-		<div class="text-center text-text-muted py-12">Loading rooms…</div>
-	{:else if error}
-		<div class="text-center text-danger py-12">{error}</div>
-	{:else if filteredRooms.length === 0}
+	{#if filteredRooms.length === 0}
 		<div class="text-center text-text-muted py-12">
 			{#if searchQuery.trim()}
 				No rooms match your search.

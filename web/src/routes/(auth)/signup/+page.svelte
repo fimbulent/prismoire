@@ -30,9 +30,9 @@
 
 			const credential = await createPasskey(options.publicKey as never);
 
-			const info = await signupComplete(challenge_id, credential);
-			session.set(info);
-			goto('/');
+			await signupComplete(challenge_id, credential);
+			await session.refresh();
+			await goto('/');
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Signup failed';
 		} finally {

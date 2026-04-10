@@ -1,8 +1,5 @@
 <script lang="ts">
-	import { getRoom, type Room } from '$lib/api/rooms';
 	import { createThread } from '$lib/api/threads';
-	import { session } from '$lib/stores/session.svelte';
-	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
 	import { slide } from 'svelte/transition';
 
@@ -11,7 +8,9 @@
 	const MAX_BODY = 50_000;
 	const BODY_COUNTER_THRESHOLD = 40_000;
 
-	let room = $state<Room | null>(null);
+	let { data } = $props();
+	let room = $derived(data.room);
+
 	let title = $state('');
 	let body = $state('');
 	let error = $state<string | null>(null);
@@ -27,24 +26,6 @@
 		if (titleLen > MAX_TITLE) return `Title must be at most ${MAX_TITLE} characters`;
 		return null;
 	});
-
-	$effect(() => {
-		if (session.loading) return;
-		if (!session.isLoggedIn) {
-			goto('/login', { replaceState: true });
-			return;
-		}
-		const roomSlug = page.params.room;
-		if (roomSlug) loadRoom(roomSlug);
-	});
-
-	async function loadRoom(slug: string) {
-		try {
-			room = await getRoom(slug);
-		} catch {
-			error = 'Failed to load room';
-		}
-	}
 
 	async function handleSubmit(e: SubmitEvent) {
 		e.preventDefault();
@@ -64,7 +45,7 @@
 		submitting = true;
 		error = null;
 		try {
-			const slug = room!.slug;
+			const slug = room.slug;
 			const req: import('$lib/api/threads').CreateThreadRequest = {
 				title: title.trim(),
 				body: body.trim()
@@ -80,89 +61,83 @@
 </script>
 
 <svelte:head>
-	<title>New Thread{room ? ` — ${room.name}` : ''} — Prismoire</title>
+	<title>New Thread — {room.name} — Prismoire</title>
 </svelte:head>
 
 <div class="max-w-4xl mx-auto px-6 pt-6 pb-16">
 	<h1 class="text-xl font-bold mb-6">New Thread</h1>
 
-	{#if !session.isLoggedIn && !session.loading}
-		<div class="text-center text-text-muted py-12">
-			<a href="/login" class="text-link hover:text-link-hover">Sign in</a> to create a thread.
-		</div>
-	{:else}
-		<form onsubmit={handleSubmit} class="space-y-4">
-			{#if error}
-				<div
-					transition:slide={{ duration: 150 }}
-					class="bg-bg-surface border border-danger rounded-md p-3 text-danger text-sm"
-				>
-					{error}
-				</div>
-			{/if}
+	<form onsubmit={handleSubmit} class="space-y-4">
+		{#if error}
+			<div
+				transition:slide={{ duration: 150 }}
+				class="bg-bg-surface border border-danger rounded-md p-3 text-danger text-sm"
+			>
+				{error}
+			</div>
+		{/if}
 
-			<div>
-				<label for="thread-title" class="block text-sm font-medium text-text-secondary mb-1"
-					>Title</label
-				>
-				<input
-					id="thread-title"
-					type="text"
-					bind:value={title}
-					maxlength={MAX_TITLE}
-					required
-					autocomplete="off"
-					disabled={submitting}
-					placeholder="What is this thread about?"
-					class="w-full bg-bg-surface border border-border rounded-md text-text-primary text-sm px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted"
-					class:border-danger={!!titleError}
-				/>
-				{#if titleError}
-					<p transition:slide={{ duration: 150 }} class="text-danger text-xs mt-1">
-						{titleError}
+		<div>
+			<label for="thread-title" class="block text-sm font-medium text-text-secondary mb-1"
+				>Title</label
+			>
+			<input
+				id="thread-title"
+				type="text"
+				bind:value={title}
+				maxlength={MAX_TITLE}
+				required
+				autocomplete="off"
+				disabled={submitting}
+				placeholder="What is this thread about?"
+				class="w-full bg-bg-surface border border-border rounded-md text-text-primary text-sm px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted"
+				class:border-danger={!!titleError}
+			/>
+			{#if titleError}
+				<p transition:slide={{ duration: 150 }} class="text-danger text-xs mt-1">
+					{titleError}
+				</p>
+			{/if}
+		</div>
+
+		<div>
+			<label for="thread-body" class="block text-sm font-medium text-text-secondary mb-1"
+				>Body</label
+			>
+			<textarea
+				id="thread-body"
+				bind:value={body}
+				placeholder="Write your post in Markdown..."
+				rows={10}
+				disabled={submitting}
+				class="w-full bg-bg-surface border border-border rounded-md text-text-primary text-sm font-mono px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted resize-y leading-relaxed"
+				class:border-danger={bodyLen > MAX_BODY}
+			></textarea>
+			<div class="flex items-center justify-between mt-1">
+				<p class="text-xs text-text-muted">Markdown supported</p>
+				{#if showBodyCounter}
+					<p
+						transition:slide={{ duration: 150, axis: 'x' }}
+						class="text-xs tabular-nums {bodyRemaining < 0 ? 'text-danger font-medium' : bodyRemaining < 2000 ? 'text-text-secondary' : 'text-text-muted'}"
+					>
+						{bodyRemaining.toLocaleString()} characters remaining
 					</p>
 				{/if}
 			</div>
+		</div>
 
-			<div>
-				<label for="thread-body" class="block text-sm font-medium text-text-secondary mb-1"
-					>Body</label
-				>
-				<textarea
-					id="thread-body"
-					bind:value={body}
-					placeholder="Write your post in Markdown..."
-					rows={10}
-					disabled={submitting}
-					class="w-full bg-bg-surface border border-border rounded-md text-text-primary text-sm font-mono px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted resize-y leading-relaxed"
-					class:border-danger={bodyLen > MAX_BODY}
-				></textarea>
-				<div class="flex items-center justify-between mt-1">
-					<p class="text-xs text-text-muted">Markdown supported</p>
-					{#if showBodyCounter}
-						<p
-							transition:slide={{ duration: 150, axis: 'x' }}
-							class="text-xs tabular-nums {bodyRemaining < 0 ? 'text-danger font-medium' : bodyRemaining < 2000 ? 'text-text-secondary' : 'text-text-muted'}"
-						>
-							{bodyRemaining.toLocaleString()} characters remaining
-						</p>
-					{/if}
-				</div>
-			</div>
-
-			<div class="flex items-center gap-3">
-				<button
-					type="submit"
-					disabled={submitting || !title.trim() || !body.trim() || !!titleError || bodyLen > MAX_BODY}
-					class="text-sm px-4 py-2 rounded-md cursor-pointer border border-accent bg-accent text-bg font-medium hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
-				>
-					{submitting ? 'Creating…' : 'Create Thread'}
-				</button>
-				<a
-					href="/room/{room ? encodeURIComponent(room.slug) : ''}"
-					class="text-sm text-text-muted hover:text-text-secondary">Cancel</a
-				>
-			</div>
-		</form>
-	{/if}
+		<div class="flex items-center gap-3">
+			<button
+				type="submit"
+				disabled={submitting || !title.trim() || !body.trim() || !!titleError || bodyLen > MAX_BODY}
+				class="text-sm px-4 py-2 rounded-md cursor-pointer border border-accent bg-accent text-bg font-medium hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
+			>
+				{submitting ? 'Creating…' : 'Create Thread'}
+			</button>
+			<a
+				href="/room/{encodeURIComponent(room.slug)}"
+				class="text-sm text-text-muted hover:text-text-secondary">Cancel</a
+			>
+		</div>
+	</form>
 </div>

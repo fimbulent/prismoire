@@ -1,4 +1,4 @@
-import type { ApiError } from './auth';
+import { throwApiError, type FetchFn } from './auth';
 import type { TrustInfo } from './users';
 
 export interface ThreadSummary {
@@ -70,47 +70,53 @@ export interface CreateThreadRequest {
 	body: string;
 }
 
+interface FetchOpts {
+	fetch?: FetchFn;
+}
+
 export async function listThreads(
 	roomIdOrSlug: string,
 	cursor?: string,
-	sort?: ThreadSort
+	sort?: ThreadSort,
+	opts: FetchOpts = {}
 ): Promise<ThreadListResponse> {
+	const f = opts.fetch ?? globalThis.fetch;
 	const params = new URLSearchParams();
 	if (cursor) params.set('cursor', cursor);
 	if (sort) params.set('sort', sort);
 	const qs = params.toString();
-	const res = await fetch(
+	const res = await f(
 		`/api/rooms/${encodeURIComponent(roomIdOrSlug)}/threads${qs ? `?${qs}` : ''}`
 	);
-	if (!res.ok) {
-		const err: ApiError = await res.json();
-		throw new Error(err.error);
-	}
+	if (!res.ok) await throwApiError(res);
 	return res.json();
 }
 
-export async function listAllThreads(cursor?: string, sort?: ThreadSort): Promise<ThreadListResponse> {
+export async function listAllThreads(
+	cursor?: string,
+	sort?: ThreadSort,
+	opts: FetchOpts = {}
+): Promise<ThreadListResponse> {
+	const f = opts.fetch ?? globalThis.fetch;
 	const params = new URLSearchParams();
 	if (cursor) params.set('cursor', cursor);
 	if (sort) params.set('sort', sort);
 	const qs = params.toString();
-	const res = await fetch(`/api/threads${qs ? `?${qs}` : ''}`);
-	if (!res.ok) {
-		const err: ApiError = await res.json();
-		throw new Error(err.error);
-	}
+	const res = await f(`/api/threads${qs ? `?${qs}` : ''}`);
+	if (!res.ok) await throwApiError(res);
 	return res.json();
 }
 
-export async function listPublicThreads(cursor?: string): Promise<ThreadListResponse> {
+export async function listPublicThreads(
+	cursor?: string,
+	opts: FetchOpts = {}
+): Promise<ThreadListResponse> {
+	const f = opts.fetch ?? globalThis.fetch;
 	const params = new URLSearchParams();
 	if (cursor) params.set('cursor', cursor);
 	const qs = params.toString();
-	const res = await fetch(`/api/threads/public${qs ? `?${qs}` : ''}`);
-	if (!res.ok) {
-		const err: ApiError = await res.json();
-		throw new Error(err.error);
-	}
+	const res = await f(`/api/threads/public${qs ? `?${qs}` : ''}`);
+	if (!res.ok) await throwApiError(res);
 	return res.json();
 }
 
@@ -124,17 +130,16 @@ export interface WarmPaginationRequest {
 /** Load more threads using warm/trusted pagination (POST). */
 export async function loadMoreThreads(
 	cursor: string,
-	seenIds: string[]
+	seenIds: string[],
+	opts: FetchOpts = {}
 ): Promise<ThreadListResponse> {
-	const res = await fetch('/api/threads/more', {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f('/api/threads/more', {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ cursor, seen_ids: seenIds })
 	});
-	if (!res.ok) {
-		const err: ApiError = await res.json();
-		throw new Error(err.error);
-	}
+	if (!res.ok) await throwApiError(res);
 	return res.json();
 }
 
@@ -142,17 +147,16 @@ export async function loadMoreThreads(
 export async function loadMoreRoomThreads(
 	roomIdOrSlug: string,
 	cursor: string,
-	seenIds: string[]
+	seenIds: string[],
+	opts: FetchOpts = {}
 ): Promise<ThreadListResponse> {
-	const res = await fetch(`/api/rooms/${encodeURIComponent(roomIdOrSlug)}/threads/more`, {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f(`/api/rooms/${encodeURIComponent(roomIdOrSlug)}/threads/more`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ cursor, seen_ids: seenIds })
 	});
-	if (!res.ok) {
-		const err: ApiError = await res.json();
-		throw new Error(err.error);
-	}
+	if (!res.ok) await throwApiError(res);
 	return res.json();
 }
 export type ThreadDetailSort = 'trust' | 'new';
@@ -160,74 +164,71 @@ export type ThreadDetailSort = 'trust' | 'new';
 export async function getThread(
 	id: string,
 	sort?: ThreadDetailSort,
-	focusPostId?: string
+	focusPostId?: string,
+	opts: FetchOpts = {}
 ): Promise<ThreadDetail> {
+	const f = opts.fetch ?? globalThis.fetch;
 	const params = new URLSearchParams();
 	if (sort && sort !== 'trust') params.set('sort', sort);
 	if (focusPostId) params.set('focus', focusPostId);
 	const qs = params.toString();
-	const res = await fetch(`/api/threads/${encodeURIComponent(id)}${qs ? `?${qs}` : ''}`);
-	if (!res.ok) {
-		const err: ApiError = await res.json();
-		throw new Error(err.error);
-	}
+	const res = await f(`/api/threads/${encodeURIComponent(id)}${qs ? `?${qs}` : ''}`);
+	if (!res.ok) await throwApiError(res);
 	return res.json();
 }
 
 export async function getThreadReplies(
 	id: string,
 	offset: number,
-	sort?: ThreadDetailSort
+	sort?: ThreadDetailSort,
+	opts: FetchOpts = {}
 ): Promise<RepliesPageResponse> {
+	const f = opts.fetch ?? globalThis.fetch;
 	const params = new URLSearchParams({ offset: String(offset) });
 	if (sort && sort !== 'trust') params.set('sort', sort);
-	const res = await fetch(`/api/threads/${encodeURIComponent(id)}/replies?${params.toString()}`);
-	if (!res.ok) {
-		const err: ApiError = await res.json();
-		throw new Error(err.error);
-	}
+	const res = await f(`/api/threads/${encodeURIComponent(id)}/replies?${params.toString()}`);
+	if (!res.ok) await throwApiError(res);
 	return res.json();
 }
 
 export async function getThreadSubtree(
 	threadId: string,
 	postId: string,
-	sort?: ThreadDetailSort
+	sort?: ThreadDetailSort,
+	opts: FetchOpts = {}
 ): Promise<SubtreeResponse> {
+	const f = opts.fetch ?? globalThis.fetch;
 	const params = new URLSearchParams();
 	if (sort && sort !== 'trust') params.set('sort', sort);
 	const qs = params.toString();
-	const res = await fetch(
+	const res = await f(
 		`/api/threads/${encodeURIComponent(threadId)}/subtree/${encodeURIComponent(postId)}${qs ? `?${qs}` : ''}`
 	);
-	if (!res.ok) {
-		const err: ApiError = await res.json();
-		throw new Error(err.error);
-	}
+	if (!res.ok) await throwApiError(res);
 	return res.json();
 }
 
-export async function editPost(postId: string, body: string): Promise<PostResponse> {
-	const res = await fetch(`/api/posts/${encodeURIComponent(postId)}`, {
+export async function editPost(
+	postId: string,
+	body: string,
+	opts: FetchOpts = {}
+): Promise<PostResponse> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f(`/api/posts/${encodeURIComponent(postId)}`, {
 		method: 'PATCH',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ body })
 	});
-	if (!res.ok) {
-		const err: ApiError = await res.json();
-		throw new Error(err.error);
-	}
+	if (!res.ok) await throwApiError(res);
 	return res.json();
 }
 
-export async function retractPost(postId: string): Promise<void> {
-	const res = await fetch(`/api/posts/${encodeURIComponent(postId)}`, {
+export async function retractPost(postId: string, opts: FetchOpts = {}): Promise<void> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f(`/api/posts/${encodeURIComponent(postId)}`, {
 		method: 'DELETE'
 	});
-	if (!res.ok) {
-		const err: ApiError = await res.json();
-		throw new Error(err.error);
-	}
+	if (!res.ok) await throwApiError(res);
 }
 
 export interface RevisionResponse {
@@ -244,44 +245,43 @@ export interface RevisionHistoryResponse {
 	revisions: RevisionResponse[];
 }
 
-export async function getPostRevisions(postId: string): Promise<RevisionHistoryResponse> {
-	const res = await fetch(`/api/posts/${encodeURIComponent(postId)}/revisions`);
-	if (!res.ok) {
-		const err: ApiError = await res.json();
-		throw new Error(err.error);
-	}
+export async function getPostRevisions(
+	postId: string,
+	opts: FetchOpts = {}
+): Promise<RevisionHistoryResponse> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f(`/api/posts/${encodeURIComponent(postId)}/revisions`);
+	if (!res.ok) await throwApiError(res);
 	return res.json();
 }
 
 export async function replyToThread(
 	threadId: string,
 	parentId: string,
-	body: string
+	body: string,
+	opts: FetchOpts = {}
 ): Promise<PostResponse> {
-	const res = await fetch(`/api/threads/${encodeURIComponent(threadId)}/posts`, {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f(`/api/threads/${encodeURIComponent(threadId)}/posts`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ parent_id: parentId, body })
 	});
-	if (!res.ok) {
-		const err: ApiError = await res.json();
-		throw new Error(err.error);
-	}
+	if (!res.ok) await throwApiError(res);
 	return res.json();
 }
 
 export async function createThread(
 	roomIdOrSlug: string,
-	req: CreateThreadRequest
+	req: CreateThreadRequest,
+	opts: FetchOpts = {}
 ): Promise<ThreadDetail> {
-	const res = await fetch(`/api/rooms/${encodeURIComponent(roomIdOrSlug)}/threads`, {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f(`/api/rooms/${encodeURIComponent(roomIdOrSlug)}/threads`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify(req)
 	});
-	if (!res.ok) {
-		const err: ApiError = await res.json();
-		throw new Error(err.error);
-	}
+	if (!res.ok) await throwApiError(res);
 	return res.json();
 }

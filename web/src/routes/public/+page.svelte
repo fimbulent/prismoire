@@ -1,49 +1,35 @@
 <script lang="ts">
 	import { listPublicThreads, type ThreadSummary } from '$lib/api/threads';
 	import { relativeTime } from '$lib/format';
-	import { session } from '$lib/stores/session.svelte';
-	import { goto } from '$app/navigation';
 	import Badge from '$lib/components/ui/Badge.svelte';
 	import LockIcon from '$lib/components/ui/LockIcon.svelte';
 	import UserName from '$lib/components/trust/UserName.svelte';
 	import MoreButton from '$lib/components/ui/MoreButton.svelte';
 
-	let threads = $state<ThreadSummary[]>([]);
-	let nextCursor = $state<string | null>(null);
+	let { data } = $props();
+
+	let appended = $state<ThreadSummary[]>([]);
+	let appendedCursor = $state<string | null>(null);
 	let loadingMore = $state(false);
-	let loading = $state(true);
 	let error = $state<string | null>(null);
 
 	$effect(() => {
-		if (session.loading) return;
-		if (session.isLoggedIn) {
-			goto('/room/all', { replaceState: true });
-			return;
-		}
-		load();
+		void data;
+		appended = [];
+		appendedCursor = null;
+		error = null;
 	});
 
-	async function load() {
-		loading = true;
-		error = null;
-		try {
-			const res = await listPublicThreads();
-			threads = res.threads;
-			nextCursor = res.next_cursor;
-		} catch (e) {
-			error = e instanceof Error ? e.message : 'Failed to load';
-		} finally {
-			loading = false;
-		}
-	}
+	let threads = $derived([...data.threads, ...appended]);
+	let nextCursor = $derived(appendedCursor ?? data.nextCursor);
 
 	async function loadMore() {
 		if (!nextCursor || loadingMore) return;
 		loadingMore = true;
 		try {
 			const res = await listPublicThreads(nextCursor);
-			threads = [...threads, ...res.threads];
-			nextCursor = res.next_cursor;
+			appended = [...appended, ...res.threads];
+			appendedCursor = res.next_cursor;
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to load more';
 		} finally {
@@ -61,9 +47,7 @@
 </svelte:head>
 
 <div class="max-w-4xl mx-auto px-6 pb-16">
-	{#if loading}
-		<div class="text-center text-text-muted py-12">Loading…</div>
-	{:else if error}
+	{#if error}
 		<div class="text-center text-danger py-12">{error}</div>
 	{:else}
 		<div class="pt-5 pb-3">

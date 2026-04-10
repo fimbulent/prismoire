@@ -259,6 +259,7 @@ export function getTheme(id: ThemeId): ThemeMeta {
 }
 
 export function applyTheme(id: ThemeId): void {
+	if (typeof document === 'undefined') return;
 	const theme = getTheme(id);
 	const root = document.documentElement;
 	for (const [prop, value] of Object.entries(theme.vars)) {

@@ -1,31 +1,19 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import { page } from '$app/state';
 	import { slide } from 'svelte/transition';
 	import { signupBegin, signupComplete } from '$lib/api/auth';
-	import { validateInvite, type InviteValidation } from '$lib/api/invites';
 	import { createPasskey } from '$lib/api/webauthn';
 	import { session } from '$lib/stores/session.svelte';
 	import { validateDisplayName } from '$lib/validation/display-name';
 
-	let validation = $state<InviteValidation | null>(null);
-	let loading = $state(true);
+	let { data } = $props();
+
+	let validation = $derived(data.validation);
+	let code = $derived(data.code);
 	let displayName = $state('');
 	let error = $state<string | null>(null);
 	let nameError = $derived(displayName.trim() ? validateDisplayName(displayName) : null);
 	let submitting = $state(false);
-
-	const code = $derived(page.params.code ?? '');
-
-	$effect(() => {
-		if (code) {
-			loading = true;
-			validateInvite(code).then((v) => {
-				validation = v;
-				loading = false;
-			});
-		}
-	});
 
 	async function handleSignup() {
 		const validationError = validateDisplayName(displayName);
@@ -41,9 +29,9 @@
 
 			const credential = await createPasskey(options.publicKey as never);
 
-			const info = await signupComplete(challenge_id, credential);
-			session.set(info);
-			goto('/');
+			await signupComplete(challenge_id, credential);
+			await session.refresh();
+			await goto('/');
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Signup failed';
 		} finally {
@@ -58,9 +46,7 @@
 
 <div class="grid place-items-center p-4 min-h-[calc(100dvh-var(--nav-height))]">
 	<div class="bg-bg-surface border border-border rounded-md p-8 max-w-sm w-full text-center">
-		{#if loading}
-			<p class="text-text-muted">Checking invite…</p>
-		{:else if validation?.valid}
+		{#if validation?.valid}
 			<h1 class="text-2xl font-bold text-accent mb-2 tracking-wide">You're Invited</h1>
 			<p class="text-text-secondary mb-6">
 				<span class="text-text-primary font-medium">{validation.inviter_display_name}</span>

@@ -1,15 +1,24 @@
 <script lang="ts">
 	import { getAdminLog, type AdminLogEntry } from '$lib/api/admin';
 	import { relativeTime } from '$lib/format';
-	import { session } from '$lib/stores/session.svelte';
-	import { goto } from '$app/navigation';
 	import MoreButton from '$lib/components/ui/MoreButton.svelte';
 
-	let entries = $state<AdminLogEntry[]>([]);
-	let nextCursor = $state<string | null>(null);
-	let loading = $state(true);
+	let { data } = $props();
+
+	let appended = $state<AdminLogEntry[]>([]);
+	let appendedCursor = $state<string | null>(null);
 	let loadingMore = $state(false);
 	let error = $state<string | null>(null);
+
+	$effect(() => {
+		void data;
+		appended = [];
+		appendedCursor = null;
+		error = null;
+	});
+
+	let entries = $derived([...data.entries, ...appended]);
+	let nextCursor = $derived(appendedCursor ?? data.nextCursor);
 
 	const actionLabels: Record<string, string> = {
 		lock_thread: 'Locked thread',
@@ -19,36 +28,13 @@
 		delete_room: 'Deleted room'
 	};
 
-	$effect(() => {
-		if (session.loading) return;
-		if (!session.isLoggedIn) {
-			goto('/login');
-			return;
-		}
-		load();
-	});
-
-	async function load() {
-		loading = true;
-		error = null;
-		try {
-			const res = await getAdminLog();
-			entries = res.entries;
-			nextCursor = res.next_cursor;
-		} catch (e) {
-			error = e instanceof Error ? e.message : 'Failed to load admin log';
-		} finally {
-			loading = false;
-		}
-	}
-
 	async function loadMore() {
 		if (!nextCursor || loadingMore) return;
 		loadingMore = true;
 		try {
 			const res = await getAdminLog(nextCursor);
-			entries = [...entries, ...res.entries];
-			nextCursor = res.next_cursor;
+			appended = [...appended, ...res.entries];
+			appendedCursor = res.next_cursor;
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to load more';
 		} finally {
@@ -68,9 +54,7 @@
 <div class="max-w-4xl mx-auto px-6 pt-6 pb-16">
 	<h1 class="text-lg font-bold mb-4">Admin Log</h1>
 
-	{#if loading}
-		<div class="text-center text-text-muted py-12">Loading…</div>
-	{:else if error}
+	{#if error}
 		<div class="text-center text-danger py-12">{error}</div>
 	{:else if entries.length === 0}
 		<div class="text-center text-text-muted py-12 border border-border-subtle rounded-md bg-bg-surface">

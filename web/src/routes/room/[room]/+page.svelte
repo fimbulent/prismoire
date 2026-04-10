@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { getRoom, type Room } from '$lib/api/rooms';
 	import {
 		listThreads,
 		listAllThreads,
@@ -17,63 +16,52 @@
 	import UserName from '$lib/components/trust/UserName.svelte';
 	import MoreButton from '$lib/components/ui/MoreButton.svelte';
 
+	let { data } = $props();
+
 	let isAll = $derived(page.params.room === 'all');
-	let room = $state<Room | null>(null);
-	let threads = $state<ThreadSummary[]>([]);
-	let nextCursor = $state<string | null>(null);
+	let room = $derived(data.room);
+	let sortMode = $derived(data.sort);
+
+	// Pagination state: the server load provides page 1. Each load-more
+	// call appends to `appended`. SvelteKit clears this automatically when
+	// `data` changes (new room or new sort) because the $derived resets.
+	let appended = $state<ThreadSummary[]>([]);
+	let appendedCursor = $state<string | null>(null);
 	let loadingMore = $state(false);
-	let loading = $state(true);
 	let error = $state<string | null>(null);
-	let sortMode = $state<ThreadSort>('warm');
 
-	// Track rendered thread IDs for warm/trusted deduplication.
-	// Maintained as an array (insertion order) so we can send the most
-	// recent 200 as seen_ids to the server.
-	const MAX_SEEN_IDS = 200;
-	let renderedThreadIds = $state<string[]>([]);
-
+	// Reset pagination buffer when server data changes (nav or sort change).
+	// `data` is referenced in the $derived so the effect re-fires on updates.
 	$effect(() => {
-		if (session.loading) return;
-		if (!session.isLoggedIn) {
-			goto('/login', { replaceState: true });
-			return;
-		}
-		const slug = page.params.room;
-		if (slug) load(slug, sortMode);
-
+		void data;
+		appended = [];
+		appendedCursor = null;
+		error = null;
 	});
 
-	async function load(slug: string, sort?: ThreadSort) {
-		loading = true;
-		error = null;
-		threads = [];
-		nextCursor = null;
-		renderedThreadIds = [];
-		try {
-			if (slug === 'all') {
-				room = null;
-				const res = await listAllThreads(undefined, sort);
-				threads = res.threads;
-				nextCursor = res.next_cursor;
-			} else {
-				const [roomData, threadData] = await Promise.all([
-					getRoom(slug),
-					listThreads(slug, undefined, sort)
-				]);
-				room = roomData;
-				threads = threadData.threads;
-				nextCursor = threadData.next_cursor;
-			}
-			renderedThreadIds = threads.map((t) => t.id);
-		} catch (e) {
-			error = e instanceof Error ? e.message : 'Failed to load';
-		} finally {
-			loading = false;
-		}
-	}
+	let threads = $derived([...data.threads, ...appended]);
+	let nextCursor = $derived(appendedCursor ?? data.nextCursor);
+
+	// Track rendered thread IDs for warm/trusted deduplication. Send the
+	// most recent 200 as seen_ids to the server on load-more.
+	const MAX_SEEN_IDS = 200;
+	let renderedThreadIds = $derived(threads.map((t) => t.id));
 
 	function isWarmCursor(cursor: string): boolean {
 		return cursor.startsWith('warm:') || cursor.startsWith('trusted:');
+	}
+
+	function sortHref(sort: ThreadSort): string {
+		const params = new URLSearchParams(page.url.searchParams);
+		if (sort === 'warm') params.delete('sort');
+		else params.set('sort', sort);
+		const qs = params.toString();
+		return `/room/${encodeURIComponent(page.params.room ?? '')}${qs ? '?' + qs : ''}`;
+	}
+
+	function handleSortChange(e: Event) {
+		const sort = (e.currentTarget as HTMLSelectElement).value as ThreadSort;
+		goto(sortHref(sort), { noScroll: true, keepFocus: true });
 	}
 
 	async function loadMore() {
@@ -81,30 +69,30 @@
 		loadingMore = true;
 		try {
 			const slug = page.params.room!;
+			const cursor = nextCursor;
 			let res;
 
-			if (isWarmCursor(nextCursor)) {
+			if (isWarmCursor(cursor)) {
 				// Warm/trusted pagination: POST with seen_ids (tail 200).
 				const seenIds = renderedThreadIds.slice(-MAX_SEEN_IDS);
 				res =
 					slug === 'all'
-						? await loadMoreThreads(nextCursor, seenIds)
-						: await loadMoreRoomThreads(slug, nextCursor, seenIds);
+						? await loadMoreThreads(cursor, seenIds)
+						: await loadMoreRoomThreads(slug, cursor, seenIds);
 			} else {
 				// Simple cursor pagination (new/active sorts): GET.
 				res =
 					slug === 'all'
-						? await listAllThreads(nextCursor, sortMode)
-						: await listThreads(slug, nextCursor, sortMode);
+						? await listAllThreads(cursor, sortMode)
+						: await listThreads(slug, cursor, sortMode);
 			}
 
 			// Client-side dedup safety net: filter out any threads already rendered.
 			const existingIds = new Set(renderedThreadIds);
 			const newThreads = res.threads.filter((t) => !existingIds.has(t.id));
 
-			threads = [...threads, ...newThreads];
-			renderedThreadIds = [...renderedThreadIds, ...newThreads.map((t) => t.id)];
-			nextCursor = res.next_cursor;
+			appended = [...appended, ...newThreads];
+			appendedCursor = res.next_cursor;
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to load more';
 		} finally {
@@ -124,16 +112,15 @@
 </svelte:head>
 
 <div class="max-w-4xl mx-auto px-6 pb-16">
-	{#if loading}
-		<div class="text-center text-text-muted py-12">Loading…</div>
-	{:else if error}
+	{#if error}
 		<div class="text-center text-danger py-12">{error}</div>
 	{:else}
 		<div class="pt-5 pb-3 flex items-center justify-between">
 			<div class="flex items-center gap-3">
 				<h1 class="text-lg font-bold">{heading}</h1>
 				<select
-					bind:value={sortMode}
+					value={sortMode}
+					onchange={handleSortChange}
 					class="font-sans text-xs bg-bg-surface text-text-secondary border border-border rounded-md px-2 py-1 cursor-pointer hover:border-accent-muted focus:outline-none focus:border-accent-muted"
 				>
 					<option value="warm">Warm</option>

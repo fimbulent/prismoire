@@ -32,9 +32,9 @@
 				conditionalAbort.signal
 			);
 
-			const info = await discoverComplete(challenge_id, credential);
-			session.set(info);
-			goto('/');
+			await discoverComplete(challenge_id, credential);
+			await session.refresh();
+			await goto('/');
 		} catch {
 			// Aborted or unsupported — fall back to manual login
 		}
@@ -55,9 +55,9 @@
 
 			const credential = await getPasskey(options.publicKey as never);
 
-			const info = await loginComplete(challenge_id, credential);
-			session.set(info);
-			goto('/');
+			await loginComplete(challenge_id, credential);
+			await session.refresh();
+			await goto('/');
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Login failed';
 		} finally {

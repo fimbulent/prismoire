@@ -1,4 +1,4 @@
-import type { ApiError } from './auth';
+import { throwApiError, type FetchFn } from './auth';
 
 export interface Room {
 	id: string;
@@ -24,22 +24,22 @@ export interface CreateRoomRequest {
 	public?: boolean;
 }
 
-export async function listRooms(): Promise<Room[]> {
-	const res = await fetch('/api/rooms');
-	if (!res.ok) {
-		const err: ApiError = await res.json();
-		throw new Error(err.error);
-	}
+interface FetchOpts {
+	fetch?: FetchFn;
+}
+
+export async function listRooms(opts: FetchOpts = {}): Promise<Room[]> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f('/api/rooms');
+	if (!res.ok) await throwApiError(res);
 	const data: RoomListResponse = await res.json();
 	return data.rooms;
 }
 
-export async function getRoom(idOrName: string): Promise<Room> {
-	const res = await fetch(`/api/rooms/${encodeURIComponent(idOrName)}`);
-	if (!res.ok) {
-		const err: ApiError = await res.json();
-		throw new Error(err.error);
-	}
+export async function getRoom(idOrName: string, opts: FetchOpts = {}): Promise<Room> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f(`/api/rooms/${encodeURIComponent(idOrName)}`);
+	if (!res.ok) await throwApiError(res);
 	return res.json();
 }
 
@@ -49,25 +49,21 @@ export interface RoomSummary {
 	public: boolean;
 }
 
-export async function topRooms(): Promise<RoomSummary[]> {
-	const res = await fetch('/api/rooms/top');
-	if (!res.ok) {
-		const err: ApiError = await res.json();
-		throw new Error(err.error);
-	}
+export async function topRooms(opts: FetchOpts = {}): Promise<RoomSummary[]> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f('/api/rooms/top');
+	if (!res.ok) await throwApiError(res);
 	const data: { rooms: RoomSummary[] } = await res.json();
 	return data.rooms;
 }
 
-export async function createRoom(req: CreateRoomRequest): Promise<Room> {
-	const res = await fetch('/api/rooms', {
+export async function createRoom(req: CreateRoomRequest, opts: FetchOpts = {}): Promise<Room> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f('/api/rooms', {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify(req)
 	});
-	if (!res.ok) {
-		const err: ApiError = await res.json();
-		throw new Error(err.error);
-	}
+	if (!res.ok) await throwApiError(res);
 	return res.json();
 }
