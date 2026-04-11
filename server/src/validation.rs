@@ -64,9 +64,13 @@ pub fn validate_name(raw: &str, rules: &NameRules) -> Result<String, String> {
         return Err(format!("{} is too long", rules.label));
     }
 
-    let first = normalized.chars().next().unwrap();
-    let last = normalized.chars().next_back().unwrap();
-    if rules.allowed_separators.contains(&first) || rules.allowed_separators.contains(&last) {
+    // `char_count >= rules.min_chars` (checked above) guarantees the string
+    // is non-empty as long as callers use `min_chars >= 1`.
+    let first = normalized.chars().next();
+    let last = normalized.chars().next_back();
+    if first.is_some_and(|c| rules.allowed_separators.contains(&c))
+        || last.is_some_and(|c| rules.allowed_separators.contains(&c))
+    {
         return Err(format!(
             "{} must not start or end with a separator",
             rules.label

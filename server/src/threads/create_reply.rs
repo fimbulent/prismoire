@@ -4,7 +4,7 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
 
-use crate::error::AppError;
+use crate::error::{AppError, ErrorCode};
 use crate::session::AuthUser;
 use crate::signing;
 use crate::state::AppState;
@@ -28,7 +28,8 @@ pub async fn create_reply(
     user: AuthUser,
     Json(req): Json<CreateReplyRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let body = validate_body(&req.body, MAX_REPLY_BODY_LEN).map_err(AppError::BadRequest)?;
+    let body = validate_body(&req.body, MAX_REPLY_BODY_LEN)
+        .map_err(|msg| AppError::with_message(ErrorCode::InvalidPostBody, msg))?;
 
     let thread = sqlx::query_as::<_, (String, bool, String)>(
         "SELECT id, locked, author FROM threads WHERE id = ?",
@@ -36,11 +37,11 @@ pub async fn create_reply(
     .bind(&thread_id)
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| AppError::NotFound("thread not found".into()))?;
+    .ok_or_else(|| AppError::code(ErrorCode::ThreadNotFound))?;
 
     let (_tid, locked, thread_author) = thread;
     if locked {
-        return Err(AppError::BadRequest("thread is locked".into()));
+        return Err(AppError::code(ErrorCode::ThreadLocked));
     }
 
     let parent = sqlx::query_as::<_, (String, String, Option<String>)>(
@@ -49,18 +50,14 @@ pub async fn create_reply(
     .bind(&req.parent_id)
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| AppError::NotFound("parent post not found".into()))?;
+    .ok_or_else(|| AppError::code(ErrorCode::PostNotFound))?;
 
     let (parent_id, parent_thread, parent_retracted) = parent;
     if parent_thread != thread_id {
-        return Err(AppError::BadRequest(
-            "parent post does not belong to this thread".into(),
-        ));
+        return Err(AppError::code(ErrorCode::ParentThreadMismatch));
     }
     if parent_retracted.is_some() {
-        return Err(AppError::BadRequest(
-            "cannot reply to a retracted post".into(),
-        ));
+        return Err(AppError::code(ErrorCode::ParentRetracted));
     }
 
     let signature = signing::sign_message(&state.db, &user.user_id, body.as_bytes()).await?;

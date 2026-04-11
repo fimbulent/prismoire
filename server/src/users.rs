@@ -8,7 +8,7 @@ use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::error::AppError;
+use crate::error::{AppError, ErrorCode};
 use crate::session::AuthUser;
 use crate::state::AppState;
 use crate::trust::{MINIMUM_TRUST_THRESHOLD, TrustInfo, TrustPath, load_distrust_set};
@@ -159,7 +159,7 @@ async fn resolve_user(
     .bind(username)
     .fetch_optional(db)
     .await?
-    .ok_or_else(|| AppError::NotFound("user not found".into()))?;
+    .ok_or_else(|| AppError::code(ErrorCode::UserNotFound))?;
     Ok(row)
 }
 
@@ -222,10 +222,14 @@ pub async fn get_profile(
     let you_distrust = trust_stance == "distrust";
 
     let graph = state.get_trust_graph()?;
-    let viewer_uuid =
-        Uuid::parse_str(&user.user_id).map_err(|_| AppError::Internal("invalid user id".into()))?;
-    let target_uuid =
-        Uuid::parse_str(&target_id).map_err(|_| AppError::Internal("invalid user id".into()))?;
+    let viewer_uuid = Uuid::parse_str(&user.user_id).map_err(|_| {
+        eprintln!("invalid user id in session: {}", user.user_id);
+        AppError::code(ErrorCode::Internal)
+    })?;
+    let target_uuid = Uuid::parse_str(&target_id).map_err(|_| {
+        eprintln!("invalid target user id: {target_id}");
+        AppError::code(ErrorCode::Internal)
+    })?;
 
     let (trust_score, trust) = if is_self {
         (None, TrustInfo::self_trust())
@@ -298,10 +302,14 @@ pub async fn get_trust_detail(
     .await?;
 
     let graph = state.get_trust_graph()?;
-    let viewer_uuid =
-        Uuid::parse_str(&user.user_id).map_err(|_| AppError::Internal("invalid user id".into()))?;
-    let target_uuid =
-        Uuid::parse_str(&target_id).map_err(|_| AppError::Internal("invalid user id".into()))?;
+    let viewer_uuid = Uuid::parse_str(&user.user_id).map_err(|_| {
+        eprintln!("invalid user id in session: {}", user.user_id);
+        AppError::code(ErrorCode::Internal)
+    })?;
+    let target_uuid = Uuid::parse_str(&target_id).map_err(|_| {
+        eprintln!("invalid target user id: {target_id}");
+        AppError::code(ErrorCode::Internal)
+    })?;
 
     // Single forward BFS from viewer — used for trust_between, distance_map, and path enrichment.
     let viewer_scores = graph.forward_scores(viewer_uuid);
@@ -649,8 +657,10 @@ pub async fn get_trust_edges(
     let (target_id, ..) = resolve_user(&state.db, &username).await?;
 
     let graph = state.get_trust_graph()?;
-    let viewer_uuid =
-        Uuid::parse_str(&user.user_id).map_err(|_| AppError::Internal("invalid user id".into()))?;
+    let viewer_uuid = Uuid::parse_str(&user.user_id).map_err(|_| {
+        eprintln!("invalid user id in session: {}", user.user_id);
+        AppError::code(ErrorCode::Internal)
+    })?;
     let cached_dm = graph.distance_map(viewer_uuid);
     // The viewer isn't included in their own distance map; pin them at 0 so
     // they sort first rather than falling through to f64::MAX (untrusted).
@@ -685,9 +695,7 @@ pub async fn get_trust_edges(
             (rows, total)
         }
         _ => {
-            return Err(AppError::BadRequest(
-                "direction must be 'trusts' or 'trusted_by'".into(),
-            ));
+            return Err(AppError::code(ErrorCode::InvalidTrustDirection));
         }
     };
 
@@ -734,18 +742,17 @@ pub async fn update_bio(
     Json(req): Json<UpdateBioRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     if user.display_name != username {
-        return Err(AppError::Unauthorized(
-            "can only edit your own profile".into(),
-        ));
+        return Err(AppError::code(ErrorCode::NotOwnProfile));
     }
 
     let bio = req.bio.as_deref().map(str::trim);
     if let Some(b) = bio
         && b.len() > MAX_BIO_LEN
     {
-        return Err(AppError::BadRequest(format!(
-            "bio must be at most {MAX_BIO_LEN} characters"
-        )));
+        return Err(AppError::with_message(
+            ErrorCode::BioTooLong,
+            format!("bio must be at most {MAX_BIO_LEN} characters"),
+        ));
     }
 
     let bio_value = bio.filter(|b| !b.is_empty());
@@ -773,9 +780,7 @@ pub async fn set_trust_edge(
     let (target_id, ..) = resolve_user(&state.db, &username).await?;
 
     if user.user_id == target_id {
-        return Err(AppError::BadRequest(
-            "cannot set trust edge on yourself".into(),
-        ));
+        return Err(AppError::code(ErrorCode::SelfTrustEdge));
     }
 
     let trust_type = match req.edge_type {
@@ -828,7 +833,7 @@ pub async fn delete_trust_edge(
         .await?;
 
     if result.rows_affected() == 0 {
-        return Err(AppError::NotFound("no trust edge to remove".into()));
+        return Err(AppError::code(ErrorCode::NoTrustEdge));
     }
 
     state.trust_graph_notify.notify_one();

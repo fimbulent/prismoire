@@ -6,7 +6,7 @@ use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::error::AppError;
+use crate::error::{AppError, ErrorCode};
 use crate::session::AuthUser;
 use crate::state::AppState;
 use crate::threads::parse_cursor;
@@ -59,7 +59,7 @@ pub struct RemovePostRequest {
 
 fn require_admin(user: &AuthUser) -> Result<(), AppError> {
     if !user.is_admin() {
-        return Err(AppError::Unauthorized("admin access required".into()));
+        return Err(AppError::code(ErrorCode::AdminRequired));
     }
     Ok(())
 }
@@ -104,18 +104,18 @@ pub async fn lock_thread(
 
     let reason = req.reason.trim().to_string();
     if reason.is_empty() {
-        return Err(AppError::BadRequest("reason is required".into()));
+        return Err(AppError::code(ErrorCode::ReasonRequired));
     }
 
     let thread = sqlx::query_as::<_, (String, bool)>("SELECT id, locked FROM threads WHERE id = ?")
         .bind(&thread_id)
         .fetch_optional(&state.db)
         .await?
-        .ok_or_else(|| AppError::NotFound("thread not found".into()))?;
+        .ok_or_else(|| AppError::code(ErrorCode::ThreadNotFound))?;
 
     let (tid, already_locked) = thread;
     if already_locked {
-        return Err(AppError::BadRequest("thread is already locked".into()));
+        return Err(AppError::code(ErrorCode::ThreadAlreadyLocked));
     }
 
     sqlx::query("UPDATE threads SET locked = 1 WHERE id = ?")
@@ -152,11 +152,11 @@ pub async fn unlock_thread(
         .bind(&thread_id)
         .fetch_optional(&state.db)
         .await?
-        .ok_or_else(|| AppError::NotFound("thread not found".into()))?;
+        .ok_or_else(|| AppError::code(ErrorCode::ThreadNotFound))?;
 
     let (tid, locked) = thread;
     if !locked {
-        return Err(AppError::BadRequest("thread is not locked".into()));
+        return Err(AppError::code(ErrorCode::ThreadNotLocked));
     }
 
     sqlx::query("UPDATE threads SET locked = 0 WHERE id = ?")
@@ -192,7 +192,7 @@ pub async fn remove_post(
 
     let reason = req.reason.trim().to_string();
     if reason.is_empty() {
-        return Err(AppError::BadRequest("reason is required".into()));
+        return Err(AppError::code(ErrorCode::ReasonRequired));
     }
 
     let post = sqlx::query_as::<_, (String, String, Option<String>)>(
@@ -201,11 +201,11 @@ pub async fn remove_post(
     .bind(&post_id)
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| AppError::NotFound("post not found".into()))?;
+    .ok_or_else(|| AppError::code(ErrorCode::PostNotFound))?;
 
     let (pid, thread_id, retracted_at) = post;
     if retracted_at.is_some() {
-        return Err(AppError::BadRequest("post is already retracted".into()));
+        return Err(AppError::code(ErrorCode::PostAlreadyRetracted));
     }
 
     sqlx::query(

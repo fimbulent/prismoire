@@ -2,6 +2,7 @@
 	import { getAdminLog, type AdminLogEntry } from '$lib/api/admin';
 	import { relativeTime } from '$lib/format';
 	import MoreButton from '$lib/components/ui/MoreButton.svelte';
+	import { errorMessage } from '$lib/i18n/errors';
 
 	let { data } = $props();
 
@@ -36,7 +37,7 @@
 			appended = [...appended, ...res.entries];
 			appendedCursor = res.next_cursor;
 		} catch (e) {
-			error = e instanceof Error ? e.message : 'Failed to load more';
+			error = errorMessage(e, 'Failed to load more');
 		} finally {
 			loadingMore = false;
 		}

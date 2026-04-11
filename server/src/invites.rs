@@ -8,7 +8,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::error::AppError;
+use crate::error::{AppError, ErrorCode};
 use crate::session::AuthUser;
 use crate::state::AppState;
 
@@ -83,7 +83,7 @@ pub async fn create_invite(
     if let Some(n) = max_uses
         && n < 1
     {
-        return Err(AppError::BadRequest("max_uses must be at least 1".into()));
+        return Err(AppError::code(ErrorCode::InviteMaxUsesInvalid));
     }
 
     // Cap expiry to 1 year to avoid nonsensical far-future dates.
@@ -92,12 +92,16 @@ pub async fn create_invite(
     let expires_at = match req.expires_in_seconds {
         Some(seconds) => {
             if seconds < 60 {
-                return Err(AppError::BadRequest(
-                    "expiry must be at least 60 seconds".into(),
+                return Err(AppError::with_message(
+                    ErrorCode::InviteExpiryInvalid,
+                    "expiry must be at least 60 seconds",
                 ));
             }
             if seconds > MAX_EXPIRY_SECONDS {
-                return Err(AppError::BadRequest("expiry must be at most 1 year".into()));
+                return Err(AppError::with_message(
+                    ErrorCode::InviteExpiryInvalid,
+                    "expiry must be at most 1 year",
+                ));
             }
             Some(
                 (chrono::Utc::now() + chrono::Duration::seconds(seconds))
@@ -284,12 +288,10 @@ pub async fn revoke_invite(
         .fetch_optional(&state.db)
         .await?;
 
-    let (created_by,) = row.ok_or_else(|| AppError::NotFound("invite not found".into()))?;
+    let (created_by,) = row.ok_or_else(|| AppError::code(ErrorCode::InviteNotFound))?;
 
     if created_by != user.user_id {
-        return Err(AppError::Unauthorized(
-            "you can only revoke your own invites".into(),
-        ));
+        return Err(AppError::code(ErrorCode::Forbidden));
     }
 
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
@@ -347,17 +349,15 @@ pub async fn validate_invite_for_signup(
     .await?;
 
     let Some((invite_id, inviter_id, max_uses, use_count, expires_at)) = row else {
-        return Err(AppError::BadRequest("invalid invite code".into()));
+        return Err(AppError::code(ErrorCode::InviteInvalid));
     };
 
     if is_exhausted(max_uses, use_count) {
-        return Err(AppError::BadRequest(
-            "invite code has been fully used".into(),
-        ));
+        return Err(AppError::code(ErrorCode::InviteExhausted));
     }
 
     if is_expired(&expires_at) {
-        return Err(AppError::BadRequest("invite code has expired".into()));
+        return Err(AppError::code(ErrorCode::InviteExpired));
     }
 
     Ok((invite_id, inviter_id))

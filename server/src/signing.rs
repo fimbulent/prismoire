@@ -97,15 +97,18 @@ impl std::fmt::Display for SignError {
 
 impl From<SignError> for crate::error::AppError {
     fn from(err: SignError) -> Self {
+        use crate::error::{AppError, ErrorCode};
         match err {
-            SignError::Db(e) => crate::error::AppError::from(e),
+            SignError::Db(e) => AppError::from(e),
             SignError::NoKey => {
-                crate::error::AppError::Internal("no active signing key for user".into())
+                eprintln!("signing error: no active signing key for user");
+                AppError::code(ErrorCode::Internal)
             }
-            SignError::InvalidKey => crate::error::AppError::Internal("invalid signing key".into()),
-            SignError::InvalidSignature => {
-                crate::error::AppError::BadRequest("invalid signature".into())
+            SignError::InvalidKey => {
+                eprintln!("signing error: invalid signing key format");
+                AppError::code(ErrorCode::Internal)
             }
+            SignError::InvalidSignature => AppError::code(ErrorCode::InvalidSignature),
         }
     }
 }

@@ -5,7 +5,7 @@ use axum::extract::{Path, State};
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 
-use crate::error::AppError;
+use crate::error::{AppError, ErrorCode};
 use crate::session::AuthUser;
 use crate::signing;
 use crate::state::AppState;
@@ -60,21 +60,20 @@ pub async fn edit_post(
     .bind(&post_id)
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| AppError::NotFound("post not found".into()))?;
+    .ok_or_else(|| AppError::code(ErrorCode::PostNotFound))?;
 
     let (author, retracted_at, parent) = post;
 
     let max_len = if parent.is_some() { 10_000 } else { 50_000 };
-    let body = validate_body(&req.body, max_len).map_err(AppError::BadRequest)?;
+    let body = validate_body(&req.body, max_len)
+        .map_err(|msg| AppError::with_message(ErrorCode::InvalidPostBody, msg))?;
 
     if author != user.user_id {
-        return Err(AppError::Unauthorized(
-            "you can only edit your own posts".into(),
-        ));
+        return Err(AppError::code(ErrorCode::NotPostAuthor));
     }
 
     if retracted_at.is_some() {
-        return Err(AppError::BadRequest("cannot edit a retracted post".into()));
+        return Err(AppError::code(ErrorCode::PostRetracted));
     }
 
     let signature = signing::sign_message(&state.db, &user.user_id, body.as_bytes()).await?;
@@ -159,18 +158,16 @@ pub async fn retract_post(
     .bind(&post_id)
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| AppError::NotFound("post not found".into()))?;
+    .ok_or_else(|| AppError::code(ErrorCode::PostNotFound))?;
 
     let (author, retracted_at) = post;
 
     if author != user.user_id {
-        return Err(AppError::Unauthorized(
-            "you can only retract your own posts".into(),
-        ));
+        return Err(AppError::code(ErrorCode::NotPostAuthor));
     }
 
     if retracted_at.is_some() {
-        return Err(AppError::BadRequest("post is already retracted".into()));
+        return Err(AppError::code(ErrorCode::PostAlreadyRetracted));
     }
 
     let retraction_message = format!("retract:{post_id}");
@@ -215,7 +212,7 @@ pub async fn list_revisions(
     .bind(&post_id)
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| AppError::NotFound("post not found".into()))?;
+    .ok_or_else(|| AppError::code(ErrorCode::PostNotFound))?;
 
     let (author_id, author_name, retracted_at) = post;
 

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::AppError;
+use crate::error::{AppError, ErrorCode};
 use crate::trust::TrustInfo;
 
 pub const MIN_TITLE_LEN: usize = 5;
@@ -197,16 +197,16 @@ pub fn validate_body(body: &str, max_len: usize) -> Result<String, String> {
 pub fn parse_cursor(cursor: &str) -> Result<(String, String), AppError> {
     let (ts, id) = cursor
         .split_once('|')
-        .ok_or_else(|| AppError::BadRequest("invalid cursor".into()))?;
+        .ok_or_else(|| AppError::code(ErrorCode::InvalidCursor))?;
     // Strip trailing 'Z' (UTC indicator) for NaiveDateTime validation;
     // the original timestamp string is preserved for SQL comparisons.
     let ts_clean = ts.strip_suffix('Z').unwrap_or(ts);
     let _: chrono::NaiveDateTime = ts_clean
         .parse()
-        .map_err(|_| AppError::BadRequest("invalid cursor".into()))?;
+        .map_err(|_| AppError::code(ErrorCode::InvalidCursor))?;
     let _: uuid::Uuid = id
         .parse()
-        .map_err(|_| AppError::BadRequest("invalid cursor".into()))?;
+        .map_err(|_| AppError::code(ErrorCode::InvalidCursor))?;
     Ok((ts.to_string(), id.to_string()))
 }
 
@@ -214,7 +214,7 @@ pub fn parse_cursor(cursor: &str) -> Result<(String, String), AppError> {
 ///
 /// Format: `<sort>:<last_activity>|<thread_id>:<visibility_rate>:<rank_offset>`
 pub fn parse_warm_cursor(cursor: &str) -> Result<WarmCursor, AppError> {
-    let bad = || AppError::BadRequest("invalid cursor".into());
+    let bad = || AppError::code(ErrorCode::InvalidCursor);
 
     // Split on first ':' to get sort prefix
     let (sort_str, rest) = cursor.split_once(':').ok_or_else(bad)?;

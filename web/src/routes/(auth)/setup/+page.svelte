@@ -5,6 +5,7 @@
 	import { createPasskey } from '$lib/api/webauthn';
 	import { session } from '$lib/stores/session.svelte';
 	import { validateDisplayName } from '$lib/validation/display-name';
+	import { errorMessage } from '$lib/i18n/errors';
 
 	let token = $state('');
 	let displayName = $state('');
@@ -32,7 +33,7 @@
 			await session.refresh();
 			await goto('/');
 		} catch (e) {
-			error = e instanceof Error ? e.message : 'Setup failed';
+			error = errorMessage(e, 'Setup failed');
 		} finally {
 			submitting = false;
 		}

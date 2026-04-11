@@ -4,7 +4,7 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
 
-use crate::error::AppError;
+use crate::error::{AppError, ErrorCode};
 use crate::session::AuthUser;
 use crate::signing;
 use crate::state::AppState;
@@ -26,8 +26,10 @@ pub async fn create_thread(
     user: AuthUser,
     Json(req): Json<CreateThreadRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let title = validate_title(&req.title).map_err(AppError::BadRequest)?;
-    let body = validate_body(&req.body, MAX_BODY_LEN).map_err(AppError::BadRequest)?;
+    let title = validate_title(&req.title)
+        .map_err(|msg| AppError::with_message(ErrorCode::InvalidThreadTitle, msg))?;
+    let body = validate_body(&req.body, MAX_BODY_LEN)
+        .map_err(|msg| AppError::with_message(ErrorCode::InvalidPostBody, msg))?;
 
     let room: Option<(String, bool)> = sqlx::query_as(
         "SELECT id, public FROM rooms WHERE (id = ? OR slug = ?) AND merged_into IS NULL",
@@ -37,12 +39,10 @@ pub async fn create_thread(
     .fetch_optional(&state.db)
     .await?;
 
-    let (room_id, room_public) = room.ok_or_else(|| AppError::NotFound("room not found".into()))?;
+    let (room_id, room_public) = room.ok_or_else(|| AppError::code(ErrorCode::RoomNotFound))?;
 
     if room_public && !user.is_admin() {
-        return Err(AppError::Unauthorized(
-            "only admins can post in public rooms".into(),
-        ));
+        return Err(AppError::code(ErrorCode::PublicRoomAdminOnly));
     }
 
     let signature = signing::sign_message(&state.db, &user.user_id, body.as_bytes()).await?;

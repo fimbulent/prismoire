@@ -21,6 +21,7 @@
 	import Badge from '$lib/components/ui/Badge.svelte';
 	import MoreButton from '$lib/components/ui/MoreButton.svelte';
 	import { session } from '$lib/stores/session.svelte';
+	import { errorMessage } from '$lib/i18n/errors';
 	import { tick } from 'svelte';
 
 	let { data } = $props();
@@ -230,7 +231,7 @@
 			thread = thread;
 			replyingToId = null;
 		} catch (e) {
-			replyError = e instanceof Error ? e.message : 'Failed to post reply';
+			replyError = errorMessage(e, 'Failed to post reply');
 		} finally {
 			replySaving = false;
 		}
@@ -247,7 +248,7 @@
 			thread = thread;
 			topLevelBody = '';
 		} catch (e) {
-			topLevelError = e instanceof Error ? e.message : 'Failed to post reply';
+			topLevelError = errorMessage(e, 'Failed to post reply');
 		} finally {
 			topLevelSaving = false;
 		}
@@ -307,7 +308,7 @@
 				lockReasonInput = '';
 			}
 		} catch (e) {
-			adminError = e instanceof Error ? e.message : 'Action failed';
+			adminError = errorMessage(e, 'Action failed');
 		}
 	}
 
@@ -332,7 +333,7 @@
 			thread = thread;
 			removeTarget = null;
 		} catch (e) {
-			removeError = e instanceof Error ? e.message : 'Action failed';
+			removeError = errorMessage(e, 'Action failed');
 		} finally {
 			removeSaving = false;
 		}

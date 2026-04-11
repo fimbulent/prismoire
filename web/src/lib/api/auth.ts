@@ -10,44 +10,142 @@ export interface AuthBeginResponse {
 	[key: string]: unknown;
 }
 
+/**
+ * Stable machine-readable error code union matching the Rust
+ * `ErrorCode` enum in `server/src/error.rs`. Every non-2xx API
+ * response carries one of these in the `code` field.
+ *
+ * Keep this in sync with the Rust enum — adding or renaming a variant
+ * is a breaking change to the wire contract.
+ */
+export type ErrorCode =
+	// Auth / session
+	| 'unauthenticated'
+	| 'forbidden'
+	| 'invalid_challenge'
+	| 'passkey_ceremony_failed'
+	| 'user_not_found'
+	| 'no_credentials'
+	| 'invalid_display_name'
+	| 'display_name_taken'
+	| 'invalid_signature'
+	| 'not_own_profile'
+	// Invites
+	| 'invite_not_found'
+	| 'invite_expired'
+	| 'invite_invalid'
+	| 'invite_exhausted'
+	| 'invite_required'
+	| 'invite_max_uses_invalid'
+	| 'invite_expiry_invalid'
+	// Setup
+	| 'setup_already_complete'
+	| 'setup_token_invalid'
+	| 'setup_token_missing'
+	// Rooms
+	| 'room_not_found'
+	| 'invalid_room_name'
+	| 'room_description_too_long'
+	| 'room_already_exists'
+	| 'public_room_admin_only'
+	// Threads
+	| 'thread_not_found'
+	| 'thread_locked'
+	| 'thread_already_locked'
+	| 'thread_not_locked'
+	| 'invalid_cursor'
+	| 'invalid_sort_mode'
+	| 'seen_ids_exceeded'
+	// Posts
+	| 'post_not_found'
+	| 'invalid_post_body'
+	| 'invalid_thread_title'
+	| 'post_retracted'
+	| 'post_already_retracted'
+	| 'not_post_author'
+	| 'parent_thread_mismatch'
+	| 'parent_retracted'
+	// Trust
+	| 'self_trust_edge'
+	| 'no_trust_edge'
+	| 'invalid_trust_direction'
+	// Misc user
+	| 'bio_too_long'
+	// Admin
+	| 'admin_required'
+	| 'reason_required'
+	// Settings
+	| 'invalid_theme'
+	// Catch-all
+	| 'bad_request'
+	| 'rate_limited'
+	| 'internal';
+
+/**
+ * Wire shape of a non-2xx API response.
+ *
+ * `code` is the stable machine-readable identifier new clients should
+ * branch on. `error` is a legacy free-form string kept for one
+ * release so clients that haven't migrated still render something
+ * reasonable. `fields` is an optional per-field validation map used
+ * by form endpoints.
+ */
 export interface ApiError {
-	error: string;
+	error?: string;
+	code?: ErrorCode;
+	fields?: Record<string, ErrorCode>;
 }
 
 /**
  * Error thrown by API client functions when the server returns a
- * non-2xx response. Carries the HTTP status so server-side loads can
- * branch on it to map to the right `kitError` / `redirect`.
+ * non-2xx response. Carries the HTTP status, the stable machine
+ * `code` (when the server provides one), an optional per-field
+ * validation map, and the legacy free-form message.
  *
- * IMPORTANT: `message` is currently the raw server-provided error
- * string. Client-side callers pipe it straight into the UI, which
- * means the Rust backend is implicitly responsible for ensuring every
- * `ApiError` it emits is safe to show to the user. See
- * `docs/fix-errors.md` for the plan to migrate this to a structured
- * `{code, fields?}` contract.
+ * UI code should prefer `errorMessage(e)` (from `$lib/i18n/errors`)
+ * over reading `e.message` directly — the latter is the legacy
+ * server string and will be dropped once all clients are on the
+ * `code` contract.
  */
 export class ApiRequestError extends Error {
 	status: number;
-	constructor(status: number, message: string) {
+	code: ErrorCode;
+	fields?: Record<string, ErrorCode>;
+	constructor(
+		status: number,
+		message: string,
+		code: ErrorCode = 'internal',
+		fields?: Record<string, ErrorCode>
+	) {
 		super(message);
 		this.name = 'ApiRequestError';
 		this.status = status;
+		this.code = code;
+		this.fields = fields;
 	}
 }
 
 /**
  * Parse an error response body and throw an {@link ApiRequestError}.
  * Callers should invoke this immediately after `if (!res.ok)`.
+ *
+ * Prefers the structured `code` / `fields` fields when present and
+ * falls back to the legacy `error` string (or the HTTP status text)
+ * so it still works against older server builds.
  */
 export async function throwApiError(res: Response): Promise<never> {
 	let message = res.statusText || `HTTP ${res.status}`;
+	let code: ErrorCode = 'internal';
+	let fields: Record<string, ErrorCode> | undefined;
 	try {
 		const err = (await res.json()) as ApiError;
 		if (err && typeof err.error === 'string') message = err.error;
+		if (err && typeof err.code === 'string') code = err.code;
+		if (err && err.fields && typeof err.fields === 'object') fields = err.fields;
 	} catch {
 		// response body was not JSON — keep the fallback message
 	}
-	throw new ApiRequestError(res.status, message);
+	throw new ApiRequestError(res.status, message, code, fields);
 }
 
 export type FetchFn = typeof fetch;

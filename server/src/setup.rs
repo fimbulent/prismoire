@@ -13,7 +13,7 @@ use webauthn_rs::prelude::*;
 
 use crate::auth::{AuthBeginResponse, SessionResponse};
 use crate::display_name::{display_name_skeleton, validate_display_name};
-use crate::error::AppError;
+use crate::error::{AppError, ErrorCode};
 use crate::session::{create_session, session_cookie};
 use crate::signing;
 use crate::state::AppState;
@@ -61,20 +61,20 @@ pub async fn setup_begin(
     Json(req): Json<SetupBeginRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     if !state.needs_setup.load(Ordering::Relaxed) {
-        return Err(AppError::Conflict("setup already completed".into()));
+        return Err(AppError::code(ErrorCode::SetupAlreadyComplete));
     }
 
-    let expected = state
-        .setup_token
-        .as_deref()
-        .ok_or_else(|| AppError::Internal("no setup token configured".into()))?;
+    let expected = state.setup_token.as_deref().ok_or_else(|| {
+        eprintln!("setup_begin: no setup token configured");
+        AppError::code(ErrorCode::SetupTokenMissing)
+    })?;
 
     if req.token.as_bytes().ct_ne(expected.as_bytes()).into() {
-        return Err(AppError::Unauthorized("invalid setup token".into()));
+        return Err(AppError::code(ErrorCode::SetupTokenInvalid));
     }
 
-    let display_name =
-        validate_display_name(&req.display_name).map_err(|msg| AppError::BadRequest(msg.into()))?;
+    let display_name = validate_display_name(&req.display_name)
+        .map_err(|msg| AppError::with_message(ErrorCode::InvalidDisplayName, msg))?;
     let skeleton = display_name_skeleton(&display_name);
 
     let existing: Option<(String,)> =
@@ -85,7 +85,7 @@ pub async fn setup_begin(
             .await?;
 
     if existing.is_some() {
-        return Err(AppError::Conflict("display name already taken".into()));
+        return Err(AppError::code(ErrorCode::DisplayNameTaken));
     }
 
     let user_uuid = Uuid::new_v4();
@@ -135,7 +135,7 @@ pub async fn setup_complete(
     Json(req): Json<SetupCompleteRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     if !state.needs_setup.load(Ordering::Relaxed) {
-        return Err(AppError::Conflict("setup already completed".into()));
+        return Err(AppError::code(ErrorCode::SetupAlreadyComplete));
     }
 
     let challenge = sqlx::query_as::<_, (Vec<u8>, Option<String>, Option<String>)>(
@@ -145,13 +145,17 @@ pub async fn setup_complete(
     .bind(&req.challenge_id)
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| AppError::BadRequest("invalid or expired challenge".into()))?;
+    .ok_or_else(|| AppError::code(ErrorCode::InvalidChallenge))?;
 
     let (state_bytes, display_name, user_id) = challenge;
-    let display_name = display_name
-        .ok_or_else(|| AppError::Internal("missing display_name in challenge".into()))?;
-    let user_id =
-        user_id.ok_or_else(|| AppError::Internal("missing user_id in challenge".into()))?;
+    let display_name = display_name.ok_or_else(|| {
+        eprintln!("setup_complete: missing display_name in challenge");
+        AppError::code(ErrorCode::Internal)
+    })?;
+    let user_id = user_id.ok_or_else(|| {
+        eprintln!("setup_complete: missing user_id in challenge");
+        AppError::code(ErrorCode::Internal)
+    })?;
 
     sqlx::query("DELETE FROM auth_challenges WHERE id = ?")
         .bind(&req.challenge_id)
@@ -178,7 +182,7 @@ pub async fn setup_complete(
             .await?;
     if admin_exists.is_some() {
         state.needs_setup.store(false, Ordering::Relaxed);
-        return Err(AppError::Conflict("setup already completed".into()));
+        return Err(AppError::code(ErrorCode::SetupAlreadyComplete));
     }
 
     sqlx::query(

@@ -5,7 +5,7 @@ use sqlx::SqlitePool;
 use tokio::sync::Notify;
 use webauthn_rs::Webauthn;
 
-use crate::error::AppError;
+use crate::error::{AppError, ErrorCode};
 use crate::trust::TrustGraph;
 
 /// Shared application state available to all request handlers.
@@ -40,7 +40,7 @@ impl AppState {
             .map(|guard| Arc::clone(&guard))
             .map_err(|_| {
                 eprintln!("trust graph lock poisoned");
-                AppError::Internal("internal server error".into())
+                AppError::code(ErrorCode::Internal)
             })
     }
 }

@@ -6,7 +6,7 @@ use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::error::AppError;
+use crate::error::{AppError, ErrorCode};
 use crate::room_name::{room_slug, validate_room_name};
 use crate::session::AuthUser;
 use crate::state::AppState;
@@ -145,7 +145,7 @@ pub async fn get_room(
     .bind(&id_or_slug)
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| AppError::NotFound("room not found".into()))?;
+    .ok_or_else(|| AppError::code(ErrorCode::RoomNotFound))?;
 
     let (
         id,
@@ -182,13 +182,14 @@ pub async fn create_room(
     user: AuthUser,
     Json(req): Json<CreateRoomRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let name = validate_room_name(&req.name).map_err(AppError::BadRequest)?;
+    let name = validate_room_name(&req.name)
+        .map_err(|msg| AppError::with_message(ErrorCode::InvalidRoomName, msg))?;
     let slug = room_slug(&name);
     let description = req.description.as_deref().unwrap_or("").trim().to_string();
     let public = req.public.unwrap_or(false) && user.is_admin();
 
     if description.len() > MAX_ROOM_DESCRIPTION_LEN {
-        return Err(AppError::BadRequest("description is too long".into()));
+        return Err(AppError::code(ErrorCode::RoomDescriptionTooLong));
     }
 
     let existing: Option<(String,)> =
@@ -198,9 +199,7 @@ pub async fn create_room(
             .await?;
 
     if existing.is_some() {
-        return Err(AppError::Conflict(
-            "a room with that name already exists".into(),
-        ));
+        return Err(AppError::code(ErrorCode::RoomAlreadyExists));
     }
 
     let id = Uuid::new_v4().to_string();

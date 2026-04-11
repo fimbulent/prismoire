@@ -6,7 +6,7 @@ use axum::extract::{Path, Query, State};
 use axum::response::IntoResponse;
 use uuid::Uuid;
 
-use crate::error::AppError;
+use crate::error::{AppError, ErrorCode};
 use crate::session::AuthUser;
 use crate::state::AppState;
 use crate::trust::{TrustInfo, load_distrust_set};
@@ -520,7 +520,7 @@ pub async fn list_threads(
     .await?;
 
     let (room_id, room_name, room_slug, room_public) =
-        room.ok_or_else(|| AppError::NotFound("room not found".into()))?;
+        room.ok_or_else(|| AppError::code(ErrorCode::RoomNotFound))?;
 
     if params.sort == ThreadSort::Warm || params.sort == ThreadSort::Trusted {
         let sort = params.sort;
@@ -664,9 +664,10 @@ pub async fn load_more_all_threads(
     Json(body): Json<WarmPaginationRequest>,
 ) -> Result<Json<ThreadListResponse>, AppError> {
     if body.seen_ids.len() > MAX_SEEN_IDS {
-        return Err(AppError::BadRequest(format!(
-            "seen_ids exceeds maximum of {MAX_SEEN_IDS}"
-        )));
+        return Err(AppError::with_message(
+            ErrorCode::SeenIdsExceeded,
+            format!("seen_ids exceeds maximum of {MAX_SEEN_IDS}"),
+        ));
     }
 
     let cursor = parse_warm_cursor(&body.cursor)?;
@@ -732,9 +733,10 @@ pub async fn load_more_room_threads(
     Json(body): Json<WarmPaginationRequest>,
 ) -> Result<Json<ThreadListResponse>, AppError> {
     if body.seen_ids.len() > MAX_SEEN_IDS {
-        return Err(AppError::BadRequest(format!(
-            "seen_ids exceeds maximum of {MAX_SEEN_IDS}"
-        )));
+        return Err(AppError::with_message(
+            ErrorCode::SeenIdsExceeded,
+            format!("seen_ids exceeds maximum of {MAX_SEEN_IDS}"),
+        ));
     }
 
     let cursor = parse_warm_cursor(&body.cursor)?;
@@ -753,7 +755,7 @@ pub async fn load_more_room_threads(
     .await?;
 
     let (room_id, room_name, room_slug, room_public) =
-        room.ok_or_else(|| AppError::NotFound("room not found".into()))?;
+        room.ok_or_else(|| AppError::code(ErrorCode::RoomNotFound))?;
 
     let seen_ids: HashSet<String> = body.seen_ids.into_iter().collect();
     let fetch_limit = compute_fetch_limit(cursor.visibility_rate, seen_ids.len());
@@ -847,7 +849,7 @@ async fn build_score_fn(
                 score_trusted_recent(threads, &tm, &uid, rank_offset);
             }))
         }
-        _ => Err(AppError::BadRequest("invalid cursor sort mode".into())),
+        _ => Err(AppError::code(ErrorCode::InvalidSortMode)),
     }
 }
 

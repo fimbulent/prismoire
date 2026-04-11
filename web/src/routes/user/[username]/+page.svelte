@@ -18,6 +18,7 @@
 	import Markdown from '$lib/components/ui/Markdown.svelte';
 	import Tooltip from '$lib/components/ui/Tooltip.svelte';
 	import MoreButton from '$lib/components/ui/MoreButton.svelte';
+	import { errorMessage } from '$lib/i18n/errors';
 
 	let { data } = $props();
 
@@ -170,7 +171,7 @@
 			profile.bio = value;
 			editingBio = false;
 		} catch (e) {
-			bioError = e instanceof Error ? e.message : 'Failed to save bio';
+			bioError = errorMessage(e, 'Failed to save bio');
 		} finally {
 			bioSaving = false;
 		}

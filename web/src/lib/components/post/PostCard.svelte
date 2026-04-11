@@ -10,6 +10,7 @@
 	import { session } from '$lib/stores/session.svelte';
 	import UserName from '$lib/components/trust/UserName.svelte';
 	import Markdown from '$lib/components/ui/Markdown.svelte';
+	import { errorMessage } from '$lib/i18n/errors';
 	import { slide } from 'svelte/transition';
 
 	import type { Snippet } from 'svelte';
@@ -76,7 +77,7 @@
 			historyPostId = null;
 			delete viewingRevisions[post.id];
 		} catch (e) {
-			editError = e instanceof Error ? e.message : 'Failed to save edit';
+			editError = errorMessage(e, 'Failed to save edit');
 		} finally {
 			editSaving = false;
 		}
@@ -91,7 +92,7 @@
 			post.body = '';
 			retractConfirmId = null;
 		} catch (e) {
-			retractError = e instanceof Error ? e.message : 'Failed to retract post';
+			retractError = errorMessage(e, 'Failed to retract post');
 		} finally {
 			retracting = false;
 		}
@@ -108,7 +109,7 @@
 			try {
 				historyData = await getPostRevisions(post.id);
 			} catch (e) {
-				historyError = e instanceof Error ? e.message : 'Failed to load history';
+				historyError = errorMessage(e, 'Failed to load history');
 			} finally {
 				historyLoading = false;
 			}

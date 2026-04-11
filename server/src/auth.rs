@@ -10,7 +10,7 @@ use uuid::Uuid;
 use webauthn_rs::prelude::*;
 
 use crate::display_name::{display_name_skeleton, validate_display_name};
-use crate::error::AppError;
+use crate::error::{AppError, ErrorCode};
 use crate::invites;
 use crate::session::{
     AuthUser, clear_session_cookie, create_session, delete_session, session_cookie,
@@ -75,8 +75,8 @@ pub async fn signup_begin(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SignupBeginRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let display_name =
-        validate_display_name(&req.display_name).map_err(|msg| AppError::BadRequest(msg.into()))?;
+    let display_name = validate_display_name(&req.display_name)
+        .map_err(|msg| AppError::with_message(ErrorCode::InvalidDisplayName, msg))?;
     let skeleton = display_name_skeleton(&display_name);
 
     let existing: Option<(String,)> =
@@ -87,14 +87,14 @@ pub async fn signup_begin(
             .await?;
 
     if existing.is_some() {
-        return Err(AppError::Conflict("display name already taken".into()));
+        return Err(AppError::code(ErrorCode::DisplayNameTaken));
     }
 
     let invite_code = req
         .invite_code
         .as_deref()
         .filter(|c| !c.is_empty())
-        .ok_or_else(|| AppError::BadRequest("invite code required".into()))?;
+        .ok_or_else(|| AppError::code(ErrorCode::InviteRequired))?;
 
     invites::validate_invite_for_signup(&state.db, invite_code).await?;
 
@@ -161,13 +161,17 @@ pub async fn signup_complete(
     .bind(&req.challenge_id)
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| AppError::BadRequest("invalid or expired challenge".into()))?;
+    .ok_or_else(|| AppError::code(ErrorCode::InvalidChallenge))?;
 
     let (state_bytes, display_name, invite_code, user_id) = challenge;
-    let display_name = display_name
-        .ok_or_else(|| AppError::Internal("missing display_name in challenge".into()))?;
-    let user_id =
-        user_id.ok_or_else(|| AppError::Internal("missing user_id in challenge".into()))?;
+    let display_name = display_name.ok_or_else(|| {
+        eprintln!("signup_complete: missing display_name in challenge");
+        AppError::code(ErrorCode::Internal)
+    })?;
+    let user_id = user_id.ok_or_else(|| {
+        eprintln!("signup_complete: missing user_id in challenge");
+        AppError::code(ErrorCode::Internal)
+    })?;
 
     sqlx::query("DELETE FROM auth_challenges WHERE id = ?")
         .bind(&req.challenge_id)
@@ -180,8 +184,10 @@ pub async fn signup_complete(
         .webauthn
         .finish_passkey_registration(&req.credential, &reg_state)?;
 
-    let invite_code =
-        invite_code.ok_or_else(|| AppError::Internal("missing invite_code in challenge".into()))?;
+    let invite_code = invite_code.ok_or_else(|| {
+        eprintln!("signup_complete: missing invite_code in challenge");
+        AppError::code(ErrorCode::Internal)
+    })?;
 
     let (invite_id, inviter_id) =
         invites::validate_invite_for_signup(&state.db, &invite_code).await?;
@@ -284,7 +290,7 @@ pub async fn login_begin(
             .fetch_optional(&state.db)
             .await?;
 
-    let (user_id,) = user.ok_or_else(|| AppError::NotFound("user not found".into()))?;
+    let (user_id,) = user.ok_or_else(|| AppError::code(ErrorCode::UserNotFound))?;
 
     let cred_rows: Vec<(Vec<u8>,)> =
         sqlx::query_as("SELECT public_key FROM credentials WHERE user_id = ?")
@@ -293,7 +299,7 @@ pub async fn login_begin(
             .await?;
 
     if cred_rows.is_empty() {
-        return Err(AppError::NotFound("no credentials registered".into()));
+        return Err(AppError::code(ErrorCode::NoCredentials));
     }
 
     let passkeys: Vec<Passkey> = cred_rows
@@ -342,11 +348,13 @@ pub async fn login_complete(
     .bind(&req.challenge_id)
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| AppError::BadRequest("invalid or expired challenge".into()))?;
+    .ok_or_else(|| AppError::code(ErrorCode::InvalidChallenge))?;
 
     let (state_bytes, display_name) = challenge;
-    let display_name = display_name
-        .ok_or_else(|| AppError::Internal("missing display_name in challenge".into()))?;
+    let display_name = display_name.ok_or_else(|| {
+        eprintln!("login_complete: missing display_name in challenge");
+        AppError::code(ErrorCode::Internal)
+    })?;
 
     sqlx::query("DELETE FROM auth_challenges WHERE id = ?")
         .bind(&req.challenge_id)
@@ -437,7 +445,7 @@ pub async fn discover_complete(
     .bind(&req.challenge_id)
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| AppError::BadRequest("invalid or expired challenge".into()))?;
+    .ok_or_else(|| AppError::code(ErrorCode::InvalidChallenge))?;
 
     let (state_bytes,) = challenge;
 
@@ -458,7 +466,7 @@ pub async fn discover_complete(
     .bind(user_uuid.to_string())
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| AppError::NotFound("user not found".into()))?;
+    .ok_or_else(|| AppError::code(ErrorCode::UserNotFound))?;
 
     let (user_id, display_name, role) = user;
 

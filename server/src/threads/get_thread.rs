@@ -7,7 +7,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::error::AppError;
+use crate::error::{AppError, ErrorCode};
 use crate::session::OptionalAuthUser;
 use crate::state::AppState;
 use crate::trust::{MINIMUM_TRUST_THRESHOLD, TrustInfo, load_distrust_set};
@@ -139,8 +139,10 @@ fn build_meta_tree(rows: Vec<PostMeta>) -> Result<MetaTree, AppError> {
         }
     }
 
-    let root_idx =
-        root_idx.ok_or_else(|| AppError::Internal("thread has no opening post".into()))?;
+    let root_idx = root_idx.ok_or_else(|| {
+        eprintln!("thread has no opening post");
+        AppError::code(ErrorCode::Internal)
+    })?;
     let op_author_id = author_of[root_idx].clone();
 
     Ok(MetaTree {
@@ -395,7 +397,7 @@ async fn fetch_thread_info(db: &sqlx::SqlitePool, thread_id: &str) -> Result<Thr
     .bind(thread_id)
     .fetch_optional(db)
     .await?
-    .ok_or_else(|| AppError::NotFound("thread not found".into()))?;
+    .ok_or_else(|| AppError::code(ErrorCode::ThreadNotFound))?;
 
     Ok(ThreadInfo {
         id: row.0,
@@ -677,10 +679,10 @@ async fn build_focused_response(
         .id_to_index
         .get(focus_id)
         .copied()
-        .ok_or_else(|| AppError::NotFound("focused post not found".into()))?;
+        .ok_or_else(|| AppError::code(ErrorCode::PostNotFound))?;
 
     if !ctx.is_visible(focus_idx, focus_idx == meta_tree.root_idx) {
-        return Err(AppError::NotFound("focused post not found".into()));
+        return Err(AppError::code(ErrorCode::PostNotFound));
     }
 
     // Build focus path: set of indices from root to focused post (exclusive of
@@ -871,10 +873,10 @@ pub async fn get_thread_subtree(
         .id_to_index
         .get(&post_id)
         .copied()
-        .ok_or_else(|| AppError::NotFound("post not found".into()))?;
+        .ok_or_else(|| AppError::code(ErrorCode::PostNotFound))?;
 
     if !ctx.is_visible(subtree_root, subtree_root == meta_tree.root_idx) {
-        return Err(AppError::NotFound("post not found".into()));
+        return Err(AppError::code(ErrorCode::PostNotFound));
     }
 
     let no_focus = HashSet::new();

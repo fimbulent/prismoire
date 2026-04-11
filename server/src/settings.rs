@@ -5,7 +5,7 @@ use axum::extract::State;
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 
-use crate::error::AppError;
+use crate::error::{AppError, ErrorCode};
 use crate::session::AuthUser;
 use crate::state::AppState;
 
@@ -62,7 +62,7 @@ pub async fn update_settings(
 ) -> Result<impl IntoResponse, AppError> {
     if let Some(ref theme) = req.theme {
         if !VALID_THEMES.contains(&theme.as_str()) {
-            return Err(AppError::BadRequest("invalid theme".into()));
+            return Err(AppError::code(ErrorCode::InvalidTheme));
         }
 
         sqlx::query(

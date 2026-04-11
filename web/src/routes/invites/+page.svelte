@@ -2,6 +2,7 @@
 	import { slide } from 'svelte/transition';
 	import { createInvite, revokeInvite, type Invite } from '$lib/api/invites';
 	import { relativeTime } from '$lib/format';
+	import { errorMessage } from '$lib/i18n/errors';
 
 	let { data } = $props();
 
@@ -45,7 +46,7 @@
 			invites = [invite, ...invites];
 			copyLink(invite);
 		} catch (e) {
-			createError = e instanceof Error ? e.message : 'Failed to create invite';
+			createError = errorMessage(e, 'Failed to create invite');
 		} finally {
 			creating = false;
 		}
@@ -56,7 +57,7 @@
 			await revokeInvite(id);
 			invites = invites.map((i) => (i.id === id ? { ...i, revoked: true } : i));
 		} catch (e) {
-			error = e instanceof Error ? e.message : 'Failed to revoke invite';
+			error = errorMessage(e, 'Failed to revoke invite');
 		}
 	}
 

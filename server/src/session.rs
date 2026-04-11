@@ -1,14 +1,15 @@
 use std::sync::Arc;
 
 use axum::extract::{FromRequestParts, State};
+use axum::http::Request;
 use axum::http::header::{COOKIE, SET_COOKIE};
 use axum::http::request::Parts;
-use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::{Duration, Utc};
 use rand::RngCore;
 use sqlx::SqlitePool;
 
+use crate::error::{AppError, ErrorCode};
 use crate::state::AppState;
 
 pub const SESSION_COOKIE_NAME: &str = "prismoire_session";
@@ -54,7 +55,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
         let session = parts
             .extensions
             .get::<AuthSession>()
-            .ok_or_else(|| StatusCode::UNAUTHORIZED.into_response())?;
+            .ok_or_else(|| AppError::code(ErrorCode::Unauthenticated).into_response())?;
         Ok(AuthUser {
             user_id: session.user_id.clone(),
             display_name: session.display_name.clone(),

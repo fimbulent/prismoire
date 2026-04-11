@@ -15,6 +15,7 @@
 	import Badge from '$lib/components/ui/Badge.svelte';
 	import UserName from '$lib/components/trust/UserName.svelte';
 	import MoreButton from '$lib/components/ui/MoreButton.svelte';
+	import { errorMessage } from '$lib/i18n/errors';
 
 	let { data } = $props();
 
@@ -94,7 +95,7 @@
 			appended = [...appended, ...newThreads];
 			appendedCursor = res.next_cursor;
 		} catch (e) {
-			error = e instanceof Error ? e.message : 'Failed to load more';
+			error = errorMessage(e, 'Failed to load more');
 		} finally {
 			loadingMore = false;
 		}

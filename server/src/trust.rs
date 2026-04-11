@@ -543,6 +543,10 @@ impl TrustGraph {
         .fetch_all(db)
         .await?;
 
+        // Invariant: `trust_edges.source_user` / `target_user` are only ever
+        // written as `Uuid::to_string()`. A parse failure here means the row
+        // was corrupted or edited externally — crash loudly at startup rather
+        // than silently dropping edges.
         let uuid_edges: Vec<(Uuid, Uuid)> = rows
             .into_iter()
             .map(|(src, tgt)| {
@@ -556,9 +560,15 @@ impl TrustGraph {
 
         let index = NodeIndex::from_edges(&uuid_edges);
 
+        // Safe: `index` was just built from `uuid_edges`, so every endpoint is present.
         let dense_edges: Vec<(u32, u32)> = uuid_edges
             .iter()
-            .map(|(src, tgt)| (index.get_id(src).unwrap(), index.get_id(tgt).unwrap()))
+            .map(|(src, tgt)| {
+                (
+                    index.get_id(src).expect("edge endpoint must be in index"),
+                    index.get_id(tgt).expect("edge endpoint must be in index"),
+                )
+            })
             .collect();
 
         let forward = CsrGraph::from_edges(index.num_nodes(), &dense_edges);
@@ -649,7 +659,7 @@ impl TrustGraph {
                 })
                 .collect();
 
-        scores.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap());
+        scores.sort_by(|a, b| a.distance.total_cmp(&b.distance));
         scores
     }
 

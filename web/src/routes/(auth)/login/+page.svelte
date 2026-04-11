@@ -9,6 +9,7 @@
 	} from '$lib/api/auth';
 	import { getPasskey, getPasskeyConditional } from '$lib/api/webauthn';
 	import { session } from '$lib/stores/session.svelte';
+	import { errorMessage } from '$lib/i18n/errors';
 
 	let displayName = $state('');
 	let error = $state<string | null>(null);
@@ -59,7 +60,7 @@
 			await session.refresh();
 			await goto('/');
 		} catch (e) {
-			error = e instanceof Error ? e.message : 'Login failed';
+			error = errorMessage(e, 'Login failed');
 		} finally {
 			submitting = false;
 		}

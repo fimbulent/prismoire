@@ -6,6 +6,7 @@
 	import { createPasskey } from '$lib/api/webauthn';
 	import { session } from '$lib/stores/session.svelte';
 	import { validateDisplayName } from '$lib/validation/display-name';
+	import { errorMessage } from '$lib/i18n/errors';
 
 	const inviteCode = $derived(page.url.searchParams.get('invite') ?? '');
 	let displayName = $state('');
@@ -34,7 +35,7 @@
 			await session.refresh();
 			await goto('/');
 		} catch (e) {
-			error = e instanceof Error ? e.message : 'Signup failed';
+			error = errorMessage(e, 'Signup failed');
 		} finally {
 			submitting = false;
 		}

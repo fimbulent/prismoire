@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { createThread } from '$lib/api/threads';
+	import { errorMessage } from '$lib/i18n/errors';
 	import { goto } from '$app/navigation';
 	import { slide } from 'svelte/transition';
 
@@ -53,7 +54,7 @@
 			const thread = await createThread(slug, req);
 			goto(`/room/${encodeURIComponent(slug)}/${thread.id}`);
 		} catch (e) {
-			error = e instanceof Error ? e.message : 'Failed to create thread';
+			error = errorMessage(e, 'Failed to create thread');
 		} finally {
 			submitting = false;
 		}

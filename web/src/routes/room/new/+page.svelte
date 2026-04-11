@@ -2,6 +2,7 @@
 	import { createRoom } from '$lib/api/rooms';
 	import { session } from '$lib/stores/session.svelte';
 	import { validateRoomName } from '$lib/validation/room-name';
+	import { errorMessage } from '$lib/i18n/errors';
 	import { goto } from '$app/navigation';
 	import { slide } from 'svelte/transition';
 
@@ -39,7 +40,7 @@
 			const room = await createRoom(req);
 			goto(`/room/${encodeURIComponent(room.slug)}`);
 		} catch (e) {
-			error = e instanceof Error ? e.message : 'Failed to create room';
+			error = errorMessage(e, 'Failed to create room');
 		} finally {
 			submitting = false;
 		}
