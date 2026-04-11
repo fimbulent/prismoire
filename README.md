@@ -65,7 +65,6 @@ With no config file, all defaults apply — no configuration is needed for `just
 [server]
 port = 3000                     # default: 3000
 database = "prismoire.db"       # default: "prismoire.db"
-web_dir = "web/build"           # default: relative to binary
 trust_proxy_headers = false     # default: false — see note below
 setup_token_file = "/run/secrets/prismoire-setup-token"  # required on first boot
 
@@ -156,34 +155,46 @@ Then enable it in your `configuration.nix` file:
 ```nix
 services.prismoire = {
   enable = true;
-  port = 3000;
+  port = 3000;     # internal Axum API port (loopback)
+  webPort = 3001;  # internal SvelteKit Node port (loopback, default)
   rpId = "example.com";
   rpOrigin = "https://example.com";
   setupTokenFile = "/run/secrets/prismoire-setup-token"; # required on first boot
 
   # Required whenever the server sits behind a reverse proxy like the
-  # Caddy block below. Leave false only if you plan to expose Prismoire
-  # directly to clients without a proxy in front.
+  # Caddy block below. Leave false only if you plan to expose the Prismoire
+  # API directly to clients without a proxy in front.
   trustProxyHeaders = true;
 };
 
-# Use something like Caddy to serve:
+# Use something like Caddy to serve. Prismoire runs as two loopback
+# processes — the Axum API on :3000 and the SvelteKit Node frontend on
+# :3001 — so the reverse proxy fans out by path:
 services.caddy = {
   enable = true;
   virtualHosts."example.com" = {
     extraConfig = ''
-      # Long-cache content-hashed SvelteKit bundles.
-      @immutable path /_app/immutable/*
-      header @immutable Cache-Control "public, max-age=31536000, immutable"
+      encode zstd gzip
 
-      # Everything else on the static frontend (index.html, manifest,
-      # icons) must revalidate so SPA updates are picked up promptly.
-      # API responses carry their own `Cache-Control: no-store` set by
-      # the server; do not override them here.
-      @static not path /_app/immutable/* /api/*
-      header @static Cache-Control "no-cache"
+      # API + feeds go to the Axum server. API responses already carry
+      # `Cache-Control: no-store`; do not override them here.
+      @api path /api/*
+      handle @api {
+        reverse_proxy 127.0.0.1:3000
+      }
 
-      reverse_proxy localhost:3000
+      # Long-cache content-hashed SvelteKit bundles. These are
+      # fingerprinted by the build so a year of caching is safe.
+      handle /_app/immutable/* {
+        header Cache-Control "public, max-age=31536000, immutable"
+        reverse_proxy 127.0.0.1:3001
+      }
+
+      # Everything else (SSR HTML, static assets) goes to the Node
+      # frontend. SSR responses set their own Cache-Control per page.
+      handle {
+        reverse_proxy 127.0.0.1:3001
+      }
     '';
   };
 };

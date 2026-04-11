@@ -114,20 +114,12 @@
           cargoBuildFlags = [ "--package" "prismoire-bench" ];
           doCheck = false;
         };
-        defaultConfig = (pkgs.formats.toml {}).generate "prismoire.toml" {
-          server.web_dir = "${web}";
-        };
       in {
         inherit server cli web bench;
 
         default = pkgs.symlinkJoin {
           name = "prismoire";
           paths = [ server cli ];
-          nativeBuildInputs = [ pkgs.makeWrapper ];
-          postBuild = ''
-            wrapProgram $out/bin/prismoire-server \
-              --set PRISMOIRE_CONFIG "${defaultConfig}"
-          '';
         };
       });
 

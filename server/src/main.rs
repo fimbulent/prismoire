@@ -1,5 +1,4 @@
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 
@@ -10,7 +9,6 @@ use axum::routing::{delete, get, post, put};
 use prismoire_config::Config;
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqlitePoolOptions;
-use tower_http::services::{ServeDir, ServeFile};
 use url::Url;
 use webauthn_rs::WebauthnBuilder;
 
@@ -80,8 +78,10 @@ async fn has_admin(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
 /// Start the Prismoire API server and listen for connections.
 ///
 /// Loads TOML config, connects to SQLite, runs migrations, configures
-/// WebAuthn, checks for admin bootstrap state, then serves the SvelteKit
-/// static build as a fallback behind the API routes.
+/// WebAuthn, checks for admin bootstrap state, then serves the JSON API.
+/// The SvelteKit frontend runs as a separate `adapter-node` process;
+/// a reverse proxy (Caddy / nginx) routes `/api/*` here and everything
+/// else to the Node process.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_arg = prismoire_config::parse_config_arg()?;
@@ -263,26 +263,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // setup_guard anyway.
     let health_router = Router::new().route("/api/health", get(|| async { "ok" }));
 
-    let web_build: PathBuf = config.server.web_dir.map(PathBuf::from).unwrap_or_else(|| {
-        [env!("CARGO_MANIFEST_DIR"), "..", "web", "build"]
-            .iter()
-            .collect()
-    });
-
-    if !web_build.exists() {
-        eprintln!(
-            "warning: web build directory not found at {}. Run `pnpm --dir web build` first.",
-            web_build.display()
-        );
-    }
-
-    let spa_fallback = ServeDir::new(&web_build)
-        .append_index_html_on_directories(false)
-        .fallback(ServeFile::new(web_build.join("index.html")));
-
     let app = api
         .merge(health_router)
-        .fallback_service(spa_fallback)
         .layer(axum::middleware::from_fn_with_state(
             https_enabled,
             middleware::security_headers::security_headers,

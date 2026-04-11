@@ -22,7 +22,6 @@ pub struct Config {
 pub struct ServerConfig {
     pub port: u16,
     pub database: String,
-    pub web_dir: Option<String>,
     pub setup_token_file: Option<String>,
     /// Whether to trust `X-Forwarded-For`, `X-Real-IP`, and `Forwarded`
     /// headers for client-IP-based rate limiting.
@@ -51,7 +50,6 @@ impl Default for ServerConfig {
         Self {
             port: 3000,
             database: "prismoire.db".to_string(),
-            web_dir: None,
             setup_token_file: None,
             trust_proxy_headers: false,
         }

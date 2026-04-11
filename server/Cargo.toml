@@ -20,10 +20,8 @@ sqlx = { workspace = true, features = ["migrate"] }
 tokio = { workspace = true }
 unicode-normalization = "0.1"
 unicode-security = "0.1"
-tower-http = { version = "0.6", features = ["fs"] }
 tower_governor = { version = "0.8", features = ["axum"] }
 url = "2"
 uuid = { workspace = true, features = ["v4", "serde"] }
 # conditional-ui: enables discoverable credentials for passkey autofill
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation", "conditional-ui"] }
-webauthn-rs-proto = "0.5"

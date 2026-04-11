@@ -126,14 +126,76 @@ in
 
     openFirewall = lib.mkOption {
       type = lib.types.bool;
-      default = true;
-      description = "Whether to open the firewall for the Prismoire server port.";
+      default = false;
+      description = ''
+        Whether to open the firewall for the Prismoire server port.
+
+        Defaults to `false` because in the standard two-process
+        deployment (Axum API + SvelteKit Node frontend) **both**
+        services bind to loopback and only a reverse proxy
+        (Caddy / nginx) is reachable from outside. The operator
+        exposes the proxy's port(s) themselves — typically 80/443 —
+        which is unrelated to `services.prismoire.port`.
+
+        Set this to `true` only if you are exposing the Axum API
+        directly to clients without a proxy in front (not
+        recommended; also disables the per-IP rate limiting
+        protection offered by `trustProxyHeaders`).
+      '';
+    };
+
+    webPort = lib.mkOption {
+      type = lib.types.port;
+      default = 3001;
+      description = ''
+        Loopback port the SvelteKit Node (adapter-node) process
+        listens on. Only the reverse proxy should reach this port;
+        do not firewall it open.
+      '';
+    };
+
+    webHost = lib.mkOption {
+      type = lib.types.str;
+      default = "127.0.0.1";
+      description = ''
+        Bind address for the SvelteKit Node process. Defaults to
+        loopback, which is correct for a reverse-proxy deployment.
+      '';
+    };
+
+    bodySizeLimit = lib.mkOption {
+      type = lib.types.str;
+      default = "1M";
+      description = ''
+        adapter-node `BODY_SIZE_LIMIT` — the maximum request body
+        size the Node process will accept. Accepts a plain byte
+        count or a human-readable suffix like `512K` / `1M`.
+        Matches the adapter-node env var contract directly.
+      '';
     };
 
     package = lib.mkOption {
       type = lib.types.package;
       default = flake.packages.${pkgs.stdenv.hostPlatform.system}.default;
-      description = "The Prismoire server package to use.";
+      description = "The Prismoire server package (Axum API binary).";
+    };
+
+    webPackage = lib.mkOption {
+      type = lib.types.package;
+      default = flake.packages.${pkgs.stdenv.hostPlatform.system}.web;
+      description = ''
+        The built SvelteKit frontend (`web/build` output of
+        `adapter-node`). Must contain an `index.js` at its root.
+      '';
+    };
+
+    nodePackage = lib.mkOption {
+      type = lib.types.package;
+      default = pkgs.nodejs_22;
+      description = ''
+        Node.js runtime used to execute the SvelteKit Node build.
+        Pinned to match the version used to build `webPackage`.
+      '';
     };
   };
 
@@ -145,7 +207,7 @@ in
     users.groups.prismoire = {};
 
     systemd.services.prismoire-server = {
-      description = "Prismoire server";
+      description = "Prismoire API server (Axum)";
       wantedBy = [ "multi-user.target" ];
       after = [ "network.target" ];
       serviceConfig = {
@@ -156,6 +218,59 @@ in
         RestartSec = 5;
         StateDirectory = "prismoire";
         WorkingDirectory = cfg.dataDir;
+      };
+    };
+
+    # SvelteKit frontend as a separate Node process. Bound to loopback
+    # and reached via the operator-provided reverse proxy (see README
+    # for a Caddy example). Configured entirely through env vars
+    # because that is adapter-node's native contract — see
+    # `web/CLAUDE.md` ("Runtime configuration: env vars, not TOML")
+    # for the rationale.
+    #
+    # Invariant: `ORIGIN` must equal `rpOrigin` so server-side fetches
+    # from SvelteKit load functions carry an Origin that Axum's CSRF
+    # middleware accepts. Drift here shows up as blanket 403s on every
+    # non-GET server-side fetch.
+    systemd.services.prismoire-web = {
+      description = "Prismoire frontend (SvelteKit adapter-node)";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "network.target" "prismoire-server.service" ];
+      wants = [ "prismoire-server.service" ];
+      environment = {
+        HOST = cfg.webHost;
+        PORT = toString cfg.webPort;
+        ORIGIN = cfg.rpOrigin;
+        API_URL = "http://127.0.0.1:${toString cfg.port}";
+        BODY_SIZE_LIMIT = cfg.bodySizeLimit;
+        NODE_ENV = "production";
+      };
+      serviceConfig = {
+        ExecStart = "${cfg.nodePackage}/bin/node ${cfg.webPackage}";
+        User = "prismoire";
+        Group = "prismoire";
+        Restart = "on-failure";
+        RestartSec = 5;
+
+        # Hardening: the web process is stateless and has no
+        # filesystem needs beyond the read-only Nix store.
+        NoNewPrivileges = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectKernelLogs = true;
+        ProtectControlGroups = true;
+        PrivateTmp = true;
+        PrivateDevices = true;
+        RestrictSUIDSGID = true;
+        RestrictNamespaces = true;
+        LockPersonality = true;
+        # V8's JIT needs writable+executable pages, so
+        # MemoryDenyWriteExecute is intentionally omitted.
+
+        MemoryHigh = "256M";
+        MemoryMax = "512M";
       };
     };
 
