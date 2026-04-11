@@ -9,7 +9,10 @@ import { getTrustEdges } from '$lib/api/users';
 import { ApiRequestError } from '$lib/api/auth';
 
 export const load: PageServerLoad = async ({ parent, fetch, params }) => {
-	const { session } = await parent();
+	const { session, sessionError } = await parent();
+	if (sessionError) {
+		throw kitError(503, 'Session service temporarily unavailable');
+	}
 	if (!session) {
 		throw redirect(307, '/login');
 	}

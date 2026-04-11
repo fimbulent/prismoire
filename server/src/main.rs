@@ -156,7 +156,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         rate_limit::build_layers(&config.rate_limit, config.server.trust_proxy_headers);
 
     let authed = Router::new()
-        .route("/api/auth/session", get(auth::session_info))
         .route("/api/auth/logout", post(auth::logout))
         .route(
             "/api/rooms",
@@ -225,6 +224,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
         .layer(user_limiter);
 
+    // `/api/auth/session` is intentionally separated from the rest of
+    // the authed routes so it does not carry the per-session
+    // `user_limiter`. The endpoint is cheap, idempotent, and called by
+    // the SvelteKit root layout load on every SSR — including tap
+    // preloads — so a brief burst of navigations would otherwise
+    // exhaust the per-session bucket and start returning 429s. A 429
+    // here would surface to the user as a 503 error page (see the
+    // `sessionError` handling in `web/src/routes/+layout.server.ts`),
+    // which is correct as a safety net but a poor day-to-day
+    // experience. The endpoint still gets the global `ip_limiter` from
+    // the outer `api` router, so abuse from a single source is still
+    // bounded; we just stop conflating "look up my session" with the
+    // write-endpoint budget.
+    let session_route = Router::new()
+        .route("/api/auth/session", get(auth::session_info))
+        .layer(axum::middleware::from_fn_with_state(
+            shared_state.clone(),
+            session::session_middleware,
+        ));
+
     let auth_routes = Router::new()
         .route("/api/setup/begin", post(setup::setup_begin))
         .route("/api/setup/complete", post(setup::setup_complete))
@@ -244,6 +263,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(invites::validate_invite),
         )
         .merge(auth_routes)
+        .merge(session_route)
         .merge(authed)
         .layer(axum::middleware::from_fn_with_state(
             allowed_origin,

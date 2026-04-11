@@ -16,7 +16,10 @@ function parseSort(raw: string | null): ThreadSort {
 }
 
 export const load: PageServerLoad = async ({ parent, fetch, params, url }) => {
-	const { session } = await parent();
+	const { session, sessionError } = await parent();
+	if (sessionError) {
+		throw kitError(503, 'Session service temporarily unavailable');
+	}
 	if (!session) {
 		throw redirect(307, '/login');
 	}

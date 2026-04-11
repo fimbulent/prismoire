@@ -17,6 +17,7 @@
 import type { Handle, HandleFetch, HandleServerError } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
 import { ApiRequestError } from '$lib/api/auth';
+import { DEFAULT_THEME } from '$lib/themes';
 
 const API_URL = env.API_URL ?? 'http://127.0.0.1:3000';
 
@@ -35,8 +36,21 @@ export const handleFetch: HandleFetch = async ({ event, request, fetch }) => {
 	return fetch(request);
 };
 
+// Root `<html>` placeholder substituted via `transformPageChunk`.
+// Kept as a narrow, well-known token so the replacement is O(1) and
+// scoped strictly to the `data-theme` attribute on the outer `<html>`
+// tag emitted by `src/app.html`.
+const THEME_PLACEHOLDER = '%theme%';
+
 export const handle: Handle = async ({ event, resolve }) => {
-	return resolve(event);
+	// Default until the root layout load resolves the session-backed
+	// theme. `event.locals.theme` is mutable from `+layout.server.ts`
+	// and read (just below) after the loads have run.
+	event.locals.theme = DEFAULT_THEME;
+
+	return resolve(event, {
+		transformPageChunk: ({ html }) => html.replace(THEME_PLACEHOLDER, event.locals.theme)
+	});
 };
 
 /**

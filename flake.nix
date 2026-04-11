@@ -104,9 +104,50 @@
             runHook postBuild
           '';
 
+          # `installPhase` ships two things side by side in `$out`:
+          #
+          #   1. The SvelteKit adapter-node output (`build/`), copied
+          #      to `$out` so `$out/index.js` is the entrypoint Node
+          #      runs as `node ${cfg.webPackage}` from the systemd
+          #      unit.
+          #   2. A pruned production `node_modules/` next to it.
+          #      adapter-node leaves runtime `dependencies`
+          #      (`date-fns`, `marked`, `sanitize-html`) as bare
+          #      ESM specifiers in the built server chunks, so Node's
+          #      nearest-ancestor `node_modules` lookup has to find
+          #      them at runtime — otherwise a page refresh that
+          #      dynamically imports an un-seen route chunk fails
+          #      with `ERR_MODULE_NOT_FOUND`. (docs/adapter-node.md
+          #      calls this out: "The node_modules copy matters —
+          #      adapter-node's build/index.js does requires against
+          #      node_modules at runtime.")
+          #
+          # The prod `node_modules/` is materialized with a second
+          # pnpm install into a staging directory, in `hoisted` node
+          # linker mode so the result is a flat `node_modules` tree
+          # with no symlinks back into the build sandbox's temporary
+          # pnpm store. `--prod` drops `devDependencies` (Vite,
+          # svelte-check, esbuild, @types/*, ...) which keeps the
+          # store closure roughly an order of magnitude smaller than
+          # shipping the build-time `node_modules` wholesale.
           installPhase = ''
             runHook preInstall
+
             cp -r build $out
+
+            echo "Installing production node_modules (hoisted)"
+            mkdir -p "$TMPDIR/prod-install"
+            cp package.json pnpm-lock.yaml "$TMPDIR/prod-install/"
+            pushd "$TMPDIR/prod-install"
+            pnpm install \
+              --offline \
+              --prod \
+              --ignore-scripts \
+              --frozen-lockfile \
+              --config.node-linker=hoisted
+            popd
+            cp -r "$TMPDIR/prod-install/node_modules" "$out/node_modules"
+
             runHook postInstall
           '';
         });

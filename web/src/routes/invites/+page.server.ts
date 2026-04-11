@@ -8,7 +8,10 @@ import type { PageServerLoad } from './$types';
 import { listInvites, listInvitedUsers } from '$lib/api/invites';
 
 export const load: PageServerLoad = async ({ parent, fetch }) => {
-	const { session } = await parent();
+	const { session, sessionError } = await parent();
+	if (sessionError) {
+		throw kitError(503, 'Session service temporarily unavailable');
+	}
 	if (!session) {
 		throw redirect(307, '/login');
 	}

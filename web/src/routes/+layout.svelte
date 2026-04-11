@@ -9,13 +9,20 @@
 
 	let { children } = $props();
 
-	let navHeight = $state(0);
 	let dropdownOpen = $state(false);
 	let dropdownEl = $state<HTMLElement | null>(null);
 
-	// Apply the current theme (from page data, with an optional client
-	// override for optimistic settings-page updates) to the document.
-	// Runs only in the browser; `applyTheme` no-ops on the server.
+	// Keep the `<html data-theme>` attribute in sync with the current
+	// theme when it changes (e.g. after `invalidateAll()` re-runs the
+	// root layout load following login/setup). On initial hydration
+	// this is a no-op because `hooks.server.ts` already substituted
+	// the correct `data-theme` into `app.html` server-side. Settings-
+	// page clicks call `theme.set()` which also calls `applyTheme`
+	// directly for an instant optimistic swap.
+	//
+	// `applyTheme` is a single `setAttribute('data-theme', ...)` call,
+	// which the browser does NOT treat as an inline `style` attribute,
+	// so it is safe under our `style-src-attr: 'self'` CSP.
 	$effect(() => {
 		applyTheme(theme.current);
 		// Clear any optimistic override once the session load has
@@ -67,8 +74,8 @@
 	<link rel="icon" href={favicon} />
 </svelte:head>
 
-<div class="bg-bg text-text-primary min-h-screen flex flex-col" style:--nav-height="{navHeight}px">
-<nav bind:clientHeight={navHeight} class="bg-bg-surface border-b border-border px-4 py-3 flex items-center justify-between">
+<div class="bg-bg text-text-primary min-h-screen flex flex-col">
+<nav class="h-[var(--nav-height)] bg-bg-surface border-b border-border px-4 flex items-center justify-between">
 	<a href="/" class="text-accent font-bold tracking-wide text-lg hover:opacity-90">Prismoire</a>
 
 	<div class="flex items-center gap-4 text-sm">

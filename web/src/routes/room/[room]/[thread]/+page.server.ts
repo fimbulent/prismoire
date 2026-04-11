@@ -18,7 +18,14 @@ function parseSort(raw: string | null): ThreadDetailSort {
 }
 
 export const load: PageServerLoad = async ({ parent, fetch, params, url }) => {
-	const { session } = await parent();
+	const { session, sessionError } = await parent();
+	// If we couldn't determine session state at all, surface a 503
+	// rather than treating the user as anonymous (which would either
+	// downgrade them to the public payload or boot them to /login on
+	// a private thread). See web/src/routes/+layout.server.ts.
+	if (sessionError) {
+		throw kitError(503, 'Session service temporarily unavailable');
+	}
 	const sort = parseSort(url.searchParams.get('sort'));
 	const focus = url.searchParams.get('post') ?? undefined;
 

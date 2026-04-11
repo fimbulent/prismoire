@@ -140,10 +140,22 @@ export async function loginComplete(
 	);
 }
 
+/**
+ * Fetch the current session.
+ *
+ * Returns `null` **only** when the server explicitly says the session
+ * is invalid (HTTP 401). Any other non-2xx response — 429 from the
+ * per-session rate limiter, 5xx from a transient Axum outage, a
+ * network error — is surfaced as an {@link ApiRequestError} so the
+ * caller can distinguish "genuinely logged out" from "couldn't reach
+ * the auth service right now" and avoid booting a logged-in user to
+ * `/login` on a transient blip.
+ */
 export async function getSession(opts: FetchOpts = {}): Promise<SessionInfo | null> {
 	const f = opts.fetch ?? globalThis.fetch;
 	const res = await f('/api/auth/session');
-	if (!res.ok) return null;
+	if (res.status === 401) return null;
+	if (!res.ok) await throwApiError(res);
 	return res.json();
 }
 
