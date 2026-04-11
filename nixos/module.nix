@@ -29,6 +29,14 @@ let
   };
 
   configFile = configFormat.generate "prismoire.toml" configAttrs;
+
+  # Wrapper that pre-supplies `--config` so operators can run e.g.
+  # `prismoire admin csp-reports` on the host without remembering the
+  # generated config path. The underlying binary still accepts an
+  # explicit `--config` for ad-hoc use against a different config.
+  prismoireCli = pkgs.writeShellScriptBin "prismoire" ''
+    exec ${cfg.package}/bin/prismoire --config ${configFile} "$@"
+  '';
 in
 {
   options.services.prismoire = {
@@ -275,5 +283,10 @@ in
     };
 
     networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [ cfg.port ];
+
+    # Expose the `prismoire` admin CLI on PATH, pre-wired to the
+    # generated config. Operators run it as the service user, e.g.
+    # `sudo -u prismoire prismoire admin csp-reports`.
+    environment.systemPackages = [ prismoireCli ];
   };
 }

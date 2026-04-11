@@ -18,7 +18,37 @@ const config = {
 		adapter: adapter({
 			out: 'build',
 			precompress: false
-		})
+		}),
+		// Nonce-based CSP. SvelteKit injects a freshly generated nonce
+		// into every inline <script> and <style> it emits for each SSR
+		// response, and sets the corresponding Content-Security-Policy
+		// header on the response. This lets us drop 'unsafe-inline'
+		// entirely from the SSR HTML CSP — the Axum middleware's CSP
+		// only covers /api/* responses (see
+		// server/src/middleware/security_headers.rs).
+		//
+		// 'self' keeps same-origin script/style loading (the hashed
+		// bundles under /_app/immutable/*). connect-src 'self' allows
+		// client-side fetches back to /api/* via the reverse proxy.
+		// img-src allows inline data: URIs for tiny UI icons. Everything
+		// else stays default-src 'self' so new attack surfaces are
+		// closed by default.
+		csp: {
+			mode: 'nonce',
+			directives: {
+				'default-src': ['self'],
+				'script-src': ['self'],
+				'style-src': ['self'],
+				'img-src': ['self', 'data:'],
+				'font-src': ['self'],
+				'connect-src': ['self'],
+				'object-src': ['none'],
+				'base-uri': ['self'],
+				'form-action': ['self'],
+				'frame-ancestors': ['none'],
+				'report-uri': ['/api/csp-report']
+			}
+		}
 	}
 };
 

@@ -103,13 +103,34 @@ type AuthLayer =
     GovernorLayer<ClientIpKeyExtractor, NoOpMiddleware<QuantaInstant>, axum::body::Body>;
 type UserLayer =
     GovernorLayer<SessionKeyExtractor, NoOpMiddleware<QuantaInstant>, axum::body::Body>;
+type CspReportLayer =
+    GovernorLayer<ClientIpKeyExtractor, NoOpMiddleware<QuantaInstant>, axum::body::Body>;
+
+/// Replenish interval for the `/api/csp-report` per-IP bucket, in seconds.
+///
+/// CSP reports are browser-driven telemetry — a page that triggers one
+/// violation on first load is normal, but a hostile page can generate a
+/// flood of blocked-URI variations. Bucket refills every two seconds
+/// keep legitimate reporters working while capping a single IP to ~30
+/// reports per minute sustained.
+const CSP_REPORT_REPLENISH_SECONDS: u64 = 2;
+
+/// Burst size for the `/api/csp-report` per-IP bucket.
+///
+/// A single page load with a broken CSP may emit several reports back to
+/// back (one per violated directive on the initial render). Five tokens
+/// absorb that burst without dropping reports that are actually useful.
+const CSP_REPORT_BURST_SIZE: u32 = 5;
 
 /// Build rate limiting layers from configuration.
 ///
-/// Returns three governor layers:
+/// Returns four governor layers:
 /// - General IP rate limit (applied to all API routes)
 /// - Strict auth rate limit (applied to login/signup/setup endpoints)
 /// - Per-user rate limit (applied to authenticated endpoints)
+/// - Tight per-IP limit for the `/api/csp-report` endpoint, applied on
+///   top of the general IP limit so a flood of reports cannot crowd out
+///   the rest of the API.
 ///
 /// `trust_proxy_headers` selects between peer-IP-only extraction (the
 /// safe default when the server is directly exposed) and
@@ -119,7 +140,7 @@ type UserLayer =
 pub fn build_layers(
     config: &prismoire_config::RateLimitConfig,
     trust_proxy_headers: bool,
-) -> (IpLayer, AuthLayer, UserLayer) {
+) -> (IpLayer, AuthLayer, UserLayer, CspReportLayer) {
     let ip_extractor = ClientIpKeyExtractor::from_config(trust_proxy_headers);
 
     let ip_config = Arc::new(
@@ -151,9 +172,19 @@ pub fn build_layers(
             .expect("invalid user rate limit config"),
     );
 
+    let csp_report_config = Arc::new(
+        GovernorConfigBuilder::default()
+            .key_extractor(ip_extractor)
+            .per_second(CSP_REPORT_REPLENISH_SECONDS)
+            .burst_size(CSP_REPORT_BURST_SIZE)
+            .finish()
+            .expect("invalid CSP report rate limit config"),
+    );
+
     (
         GovernorLayer::new(ip_config),
         GovernorLayer::new(auth_config),
         GovernorLayer::new(user_config),
+        GovernorLayer::new(csp_report_config),
     )
 }

@@ -7,33 +7,35 @@
 //!
 //! # Content Security Policy
 //!
-//! The CSP is tuned for a self-hosted, single-origin SvelteKit static
-//! build served by Axum. Notable choices:
+//! Since the adapter-node migration, Axum only serves `/api/*` (and
+//! `/api/health`) — the SvelteKit Node process serves all HTML, and the
+//! reverse proxy routes each origin to its owner. The CSP here therefore
+//! only needs to cover API JSON responses. No HTML, no scripts, no
+//! fonts, no images are served from this origin.
 //!
-//! - `script-src 'self' 'unsafe-inline'`: SvelteKit's `adapter-static`
-//!   output includes a small inline bootstrap `<script>` that imports the
-//!   hydration entry points. A nonce would require SSR; hashing would
-//!   require regenerating the CSP every build. `'unsafe-inline'` is
-//!   acceptable here because (a) user-authored content is Markdown,
-//!   rendered through DOMPurify on the client, never as raw HTML that
-//!   could inject `<script>` tags, and (b) the inline script is
-//!   build-time output, not reflected user input.
+//! The SSR HTML CSP is emitted by SvelteKit itself via `kit.csp` in
+//! `web/svelte.config.js` — it uses a per-response nonce for inline
+//! `<script>` / `<style>` tags and does not need `'unsafe-inline'`. Both
+//! origins point `report-uri` at `/api/csp-report` so violations from
+//! either surface land in the same `csp_reports` table.
 //!
-//!   TODO: when the frontend switches from `adapter-static` to
-//!   `adapter-node` (see web/CLAUDE.md "Future: adapter-node"), replace
-//!   `'unsafe-inline'` with a per-response nonce injected by SvelteKit's
-//!   SSR into the bootstrap `<script>` and echoed in this CSP header.
-//! - `connect-src 'self'`: JSON fetches from the SvelteKit app back to
-//!   the Axum API on the same origin. WebAuthn ceremonies run entirely
-//!   in the browser via the Credential Management API — they do not
-//!   issue additional network requests that CSP would see.
-//! - `frame-ancestors 'none'`: hard deny framing the site (clickjacking
-//!   defense, strictly stronger than `X-Frame-Options: DENY`).
-//! - `img-src 'self' data:`: allow inline data URIs for tiny UI icons.
-//!   External image hotlinking is disallowed by spec (tracking pixel
-//!   prevention).
-//! - `object-src 'none'`, `base-uri 'self'`, `form-action 'self'`: close
-//!   off legacy attack vectors.
+//! Notable choices:
+//!
+//! - `default-src 'none'`: an API that never emits HTML has nothing to
+//!   load; deny everything by default.
+//! - `connect-src 'self'`: preflight / XHR fetches targeting this origin.
+//!   Not strictly required (browsers only enforce CSP on the response's
+//!   own document, and an API response is rarely a document) but costs
+//!   nothing and makes the policy self-describing.
+//! - `frame-ancestors 'none'`: hard deny framing API responses
+//!   (clickjacking defense for anything that might be rendered).
+//! - `base-uri 'none'`, `form-action 'none'`, `object-src 'none'`: close
+//!   off legacy attack vectors on the off chance a client ever renders
+//!   an API response as HTML.
+//! - `report-uri /api/csp-report`: Firefox reporting transport. Chromium
+//!   uses the sibling `Reporting-Endpoints` header plus the `report-to`
+//!   directive; both are emitted so both families of browsers funnel
+//!   reports into the same endpoint.
 //!
 //! # HSTS
 //!
@@ -41,62 +43,30 @@
 //! `https://`. Sending it over plain HTTP is a no-op for browsers but
 //! confusing for operators — omitting it makes the local-dev case
 //! (`http://localhost:3000`) behave cleanly.
-//!
-//! # CSP reporting
-//!
-//! No `report-uri` or `report-to` directive is set. Reporting is a rollout
-//! tool, and the CSP is currently stable — there is no policy tightening
-//! in flight that reports would inform. Collecting CSP violation noise
-//! (which is dominated by browser extensions and translation tools) with
-//! no one watching the reports has negative value.
-//!
-//! TODO: add CSP reporting as part of the `adapter-node` / nonce
-//! migration described above. The recommended pattern, when that work
-//! happens:
-//!
-//! 1. Add an Axum handler at `/api/csp-report` that accepts `POST`,
-//!    parses the JSON body (`application/csp-report` or
-//!    `application/reports+json`), filters reports whose `source-file`
-//!    begins with `chrome-extension://`, `moz-extension://`,
-//!    `safari-extension://`, `safari-web-extension://`, or similar
-//!    extension schemes, and writes the remaining reports to a dedicated
-//!    `csp_reports` table with an aggressive retention window (e.g. 14
-//!    days, purged by a periodic job).
-//! 2. Apply a tight per-IP rate limit to just that endpoint. CSP reports
-//!    are browser-driven and a malicious page can trigger a flood of
-//!    blocked-URI variations.
-//! 3. Emit both `report-uri /api/csp-report` (for current Firefox) and
-//!    `report-to csp-endpoint` plus a `Reporting-Endpoints:
-//!    csp-endpoint="/api/csp-report"` response header (for Chromium).
-//! 4. Ship a stricter `Content-Security-Policy-Report-Only` header
-//!    alongside the enforcing CSP during the migration. The report-only
-//!    policy represents the target state (no `'unsafe-inline'`,
-//!    `strict-dynamic`, etc.); it is tightened iteratively based on
-//!    reports until the enforcing CSP can be updated to match and the
-//!    report-only header removed.
-//! 5. Leave a minimal reporting directive on the enforcing CSP afterward
-//!    so regressions become visible.
-//!
-//! Do not route reports to third-party services (Sentry, report-uri.com,
-//! Datadog, etc.) — the spec is explicit about no third-party resources
-//! and no analytics.
 
 use axum::http::{HeaderName, HeaderValue, Request, header};
 use axum::middleware::Next;
 use axum::response::Response;
 
-/// The CSP string applied to every response.
+/// The CSP string applied to every API response.
+///
+/// `report-uri` is kept on the enforcing policy so regressions in
+/// upstream handlers (a rogue `Content-Type: text/html` response, say)
+/// become visible through the same endpoint SvelteKit's SSR CSP targets.
 const CONTENT_SECURITY_POLICY: &str = "\
-default-src 'self'; \
-script-src 'self' 'unsafe-inline'; \
-style-src 'self' 'unsafe-inline'; \
-img-src 'self' data:; \
-font-src 'self'; \
+default-src 'none'; \
 connect-src 'self'; \
+frame-ancestors 'none'; \
+base-uri 'none'; \
+form-action 'none'; \
 object-src 'none'; \
-base-uri 'self'; \
-form-action 'self'; \
-frame-ancestors 'none'";
+report-uri /api/csp-report; \
+report-to csp-endpoint";
+
+/// `Reporting-Endpoints` value: advertise the `csp-endpoint` name for
+/// Chromium's `report-to` directive to reference. Firefox still uses the
+/// legacy `report-uri` directive in the CSP string above.
+const REPORTING_ENDPOINTS: &str = "csp-endpoint=\"/api/csp-report\"";
 
 /// `Permissions-Policy` value: disable browser features Prismoire does not
 /// use. `interest-cohort=()` blocks the legacy FLoC proposal;
@@ -131,6 +101,11 @@ pub async fn security_headers(
         headers,
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(CONTENT_SECURITY_POLICY),
+    );
+    insert_if_absent(
+        headers,
+        HeaderName::from_static("reporting-endpoints"),
+        HeaderValue::from_static(REPORTING_ENDPOINTS),
     );
     insert_if_absent(
         headers,

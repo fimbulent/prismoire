@@ -122,6 +122,27 @@ just admin-revoke <user-id>
 prismoire --config /path/to/config.toml admin grant <user-id>
 ```
 
+### Inspecting CSP Violation Reports
+
+Browsers post Content Security Policy violation reports to
+`/api/csp-report`. The server filters browser-extension noise, stores
+the rest in the `csp_reports` table, and sweeps rows older than 14
+days automatically. To inspect recent reports from the CLI:
+
+```sh
+# Grouped view (default): aggregate by directive + blocked URI
+prismoire admin csp-reports
+
+# Custom lookback window and row limit
+prismoire admin csp-reports --since 7d --limit 100
+
+# Raw mode: print individual rows newest first
+prismoire admin csp-reports --since 1h --raw
+```
+
+`--since` accepts `<integer><unit>` where unit is `s`, `m`, `h`, or
+`d` (default: `24h`).
+
 ### Offline Query Checking (Nix / CI)
 
 SQLx verifies queries at compile time. For builds without a live database, run `cargo sqlx prepare` in `server/` after changing any query or migration, then commit the generated `.sqlx/` directory. Set `SQLX_OFFLINE=true` (already configured in the Nix flake).

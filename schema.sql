@@ -156,3 +156,20 @@ CREATE TABLE IF NOT EXISTS "trust_edges" (
 );
 CREATE INDEX idx_trust_edges_source ON trust_edges(source_user);
 CREATE INDEX idx_trust_edges_target ON trust_edges(target_user);
+CREATE TABLE csp_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    received_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    document_uri TEXT,
+    referrer TEXT,
+    violated_directive TEXT,
+    effective_directive TEXT,
+    original_policy TEXT,
+    blocked_uri TEXT,
+    source_file TEXT,
+    line_number INTEGER,
+    column_number INTEGER,
+    status_code INTEGER,
+    script_sample TEXT
+);
+CREATE TABLE sqlite_sequence(name,seq);
+CREATE INDEX idx_csp_reports_received_at ON csp_reports(received_at);

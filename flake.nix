@@ -44,12 +44,12 @@
 
         # Filter the repo to only Rust-relevant files so the Nix store hash
         # doesn't change when non-Rust files (web/, docs/, etc.) are modified.
+        # Allow all directories so nested module dirs (e.g. server/src/threads/)
+        # are traversed; prune by file extension at the leaves.
         workspaceSrc = lib.cleanSourceWith {
           src = ./.;
           filter = path: type:
-            let baseName = builtins.baseNameOf path; in
-            # Keep only the Cargo workspace directory structure and Rust/SQL sources
-            (type == "directory" && builtins.elem baseName [ "server" "cli" "config" "bench" "src" "migrations" ]) ||
+            type == "directory" ||
             builtins.match ".*\\.(rs|toml|lock|sql)$" path != null;
         };
 
@@ -62,6 +62,9 @@
           nativeBuildInputs = with pkgs; [ pkg-config ];
           buildInputs = with pkgs; [ openssl ];
           SQLX_OFFLINE = "true";
+          # Tests pull in web/src/lib/themes.ts via include_str! and need a
+          # live-ish workspace; run them via `cargo test` in CI, not here.
+          doCheck = false;
         };
 
         cli = rustPlatform.buildRustPackage {
@@ -72,6 +75,7 @@
           cargoBuildFlags = [ "--package" "prismoire" ];
           nativeBuildInputs = with pkgs; [ pkg-config ];
           buildInputs = with pkgs; [ openssl ];
+          doCheck = false;
         };
 
         web = pkgs.stdenv.mkDerivation (finalAttrs: {

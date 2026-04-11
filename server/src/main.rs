@@ -14,6 +14,7 @@ use webauthn_rs::WebauthnBuilder;
 
 mod admin;
 mod auth;
+mod csp_report;
 mod display_name;
 mod error;
 mod invites;
@@ -146,7 +147,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         trust::RebuildSchedule::default(),
     ));
 
-    let (ip_limiter, auth_limiter, user_limiter) =
+    // Spawn the CSP report retention sweep. Runs once per hour and
+    // deletes reports older than the retention window (see
+    // `csp_report::retention_loop`).
+    tokio::spawn(csp_report::retention_loop(shared_state.db.clone()));
+
+    let (ip_limiter, auth_limiter, user_limiter, csp_report_limiter) =
         rate_limit::build_layers(&config.rate_limit, config.server.trust_proxy_headers);
 
     let authed = Router::new()
@@ -254,7 +260,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(axum::middleware::from_fn(
             middleware::cache_control::cache_control,
         ))
-        .with_state(shared_state);
+        .with_state(shared_state.clone());
 
     // Health check lives outside the rate-limited `api` router so that
     // monitoring probes (Prometheus, k8s liveness, etc.) cannot trip the
@@ -263,12 +269,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // setup_guard anyway.
     let health_router = Router::new().route("/api/health", get(|| async { "ok" }));
 
-    let app = api
-        .merge(health_router)
-        .layer(axum::middleware::from_fn_with_state(
+    // CSP violation reports. Sits outside the main `api` router so it
+    // bypasses:
+    //   - CSRF origin check: browsers submit these as UA-initiated POSTs
+    //     with no Origin header, which the standard check would reject.
+    //   - setup_guard: reports from the SSR'd SvelteKit setup page would
+    //     otherwise be rejected with a 503 `setup_required`, and we do
+    //     want to see those too.
+    //   - The general IP limiter: replaced here with a tighter CSP-specific
+    //     bucket (see `rate_limit::build_layers`) so a report flood can
+    //     be shed without crowding out the rest of the API.
+    // The response is `204 No Content` with no body, so Cache-Control
+    // semantics are moot — no outer cache_control layer is applied.
+    let csp_report_router = Router::new()
+        .route("/api/csp-report", post(csp_report::receive_csp_report))
+        .layer(csp_report_limiter)
+        .with_state(shared_state);
+
+    let app = api.merge(health_router).merge(csp_report_router).layer(
+        axum::middleware::from_fn_with_state(
             https_enabled,
             middleware::security_headers::security_headers,
-        ));
+        ),
+    );
 
     let addr = format!("127.0.0.1:{}", config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
