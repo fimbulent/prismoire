@@ -43,10 +43,8 @@ const ERROR_MESSAGES: Record<ErrorCode, string> = {
 
 	// Rooms
 	room_not_found: 'Room not found.',
-	invalid_room_name: 'Room name is invalid.',
-	room_description_too_long: 'Room description is too long.',
-	room_already_exists: 'A room with that name already exists.',
-	public_room_admin_only: 'Only admins can post in public rooms.',
+	invalid_room_slug: 'Room slug is invalid.',
+	announcements_admin_only: 'Only admins can post in announcements.',
 
 	// Threads
 	thread_not_found: 'Thread not found.',

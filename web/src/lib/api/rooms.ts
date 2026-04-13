@@ -2,10 +2,8 @@ import { throwApiError, type FetchFn } from './auth';
 
 export interface Room {
 	id: string;
-	name: string;
 	slug: string;
-	description: string;
-	public: boolean;
+	is_announcement: boolean;
 	created_by: string;
 	created_by_name: string;
 	created_at: string;
@@ -16,12 +14,6 @@ export interface Room {
 
 export interface RoomListResponse {
 	rooms: Room[];
-}
-
-export interface CreateRoomRequest {
-	name: string;
-	description?: string;
-	public?: boolean;
 }
 
 interface FetchOpts {
@@ -36,17 +28,16 @@ export async function listRooms(opts: FetchOpts = {}): Promise<Room[]> {
 	return data.rooms;
 }
 
-export async function getRoom(idOrName: string, opts: FetchOpts = {}): Promise<Room> {
+export async function getRoom(idOrSlug: string, opts: FetchOpts = {}): Promise<Room> {
 	const f = opts.fetch ?? globalThis.fetch;
-	const res = await f(`/api/rooms/${encodeURIComponent(idOrName)}`);
+	const res = await f(`/api/rooms/${encodeURIComponent(idOrSlug)}`);
 	if (!res.ok) await throwApiError(res);
 	return res.json();
 }
 
 export interface RoomSummary {
 	slug: string;
-	name: string;
-	public: boolean;
+	is_announcement: boolean;
 }
 
 export async function topRooms(opts: FetchOpts = {}): Promise<RoomSummary[]> {
@@ -55,15 +46,4 @@ export async function topRooms(opts: FetchOpts = {}): Promise<RoomSummary[]> {
 	if (!res.ok) await throwApiError(res);
 	const data: { rooms: RoomSummary[] } = await res.json();
 	return data.rooms;
-}
-
-export async function createRoom(req: CreateRoomRequest, opts: FetchOpts = {}): Promise<Room> {
-	const f = opts.fetch ?? globalThis.fetch;
-	const res = await f('/api/rooms', {
-		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify(req)
-	});
-	if (!res.ok) await throwApiError(res);
-	return res.json();
 }

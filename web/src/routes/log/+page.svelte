@@ -75,8 +75,8 @@
 								title={entry.thread_title}
 							>{entry.thread_title}</a>
 						{/if}
-						{#if entry.room_name}
-							<span class="text-text-secondary">in {entry.room_name}</span>
+						{#if entry.room_slug}
+							<span class="text-text-secondary">in {entry.room_slug}</span>
 						{/if}
 					</div>
 					{#if entry.reason}

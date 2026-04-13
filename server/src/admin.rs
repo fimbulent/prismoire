@@ -27,7 +27,7 @@ pub struct AdminLogEntry {
     pub thread_title: Option<String>,
     pub post_id: Option<String>,
     pub room_id: Option<String>,
-    pub room_name: Option<String>,
+    pub room_slug: Option<String>,
     pub reason: Option<String>,
     pub created_at: String,
 }
@@ -263,7 +263,7 @@ pub async fn get_admin_log(
             ),
         >(
             "SELECT al.id, al.admin, u.display_name, al.action, \
-             al.thread_id, t.title, al.post_id, al.room_id, r.name, al.reason, al.created_at \
+             al.thread_id, t.title, al.post_id, al.room_id, r.slug, al.reason, al.created_at \
              FROM admin_log al \
              JOIN users u ON u.id = al.admin \
              LEFT JOIN threads t ON t.id = al.thread_id \
@@ -296,7 +296,7 @@ pub async fn get_admin_log(
             ),
         >(
             "SELECT al.id, al.admin, u.display_name, al.action, \
-             al.thread_id, t.title, al.post_id, al.room_id, r.name, al.reason, al.created_at \
+             al.thread_id, t.title, al.post_id, al.room_id, r.slug, al.reason, al.created_at \
              FROM admin_log al \
              JOIN users u ON u.id = al.admin \
              LEFT JOIN threads t ON t.id = al.thread_id \
@@ -323,7 +323,7 @@ pub async fn get_admin_log(
                 thread_title,
                 post_id,
                 room_id,
-                room_name,
+                room_slug,
                 reason,
                 created_at,
             )| {
@@ -336,7 +336,7 @@ pub async fn get_admin_log(
                     thread_title,
                     post_id,
                     room_id,
-                    room_name,
+                    room_slug,
                     reason,
                     created_at,
                 }

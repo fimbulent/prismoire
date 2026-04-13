@@ -15,6 +15,7 @@
 	import Badge from '$lib/components/ui/Badge.svelte';
 	import UserName from '$lib/components/trust/UserName.svelte';
 	import MoreButton from '$lib/components/ui/MoreButton.svelte';
+	import Notice from '$lib/components/ui/Notice.svelte';
 	import { errorMessage } from '$lib/i18n/errors';
 
 	let { data } = $props();
@@ -101,7 +102,7 @@
 		}
 	}
 
-	let heading = $derived(isAll ? 'All threads' : room?.name ?? '');
+	let heading = $derived(isAll ? 'All threads' : room?.slug ?? '');
 
 	function threadHref(thread: ThreadSummary): string {
 		return `/room/${encodeURIComponent(thread.room_slug)}/${thread.id}`;
@@ -130,15 +131,19 @@
 					<option value="trusted">Trusted + Recent</option>
 				</select>
 			</div>
-			{#if session.isLoggedIn && !isAll && room && (!room.public || session.isAdmin)}
+			{#if session.isLoggedIn && (!room?.is_announcement || session.isAdmin)}
 				<button
-					onclick={() => goto(`/room/${encodeURIComponent(room!.slug)}/new`)}
+					onclick={() => goto(isAll ? '/thread/new' : `/thread/new?room=${encodeURIComponent(room?.slug ?? '')}`)}
 					class="text-sm px-3 py-1.5 rounded-md cursor-pointer border border-accent bg-accent text-bg font-medium hover:opacity-90 shrink-0"
 				>
 					New Thread
 				</button>
 			{/if}
 		</div>
+
+		{#if room?.is_announcement && !session.isAdmin}
+			<Notice>Only admins can create announcement threads.</Notice>
+		{/if}
 
 		{#if threads.length === 0}
 			<div
@@ -154,8 +159,8 @@
 					<div class="flex items-start gap-3">
 						<div class="flex-1 min-w-0">
 							<div class="mb-1 flex items-center gap-2">
-								{#if thread.room_public}
-									<Badge>Public</Badge>
+								{#if thread.is_announcement}
+									<Badge>Announcements</Badge>
 								{/if}
 								{#if thread.locked}
 									<LockIcon />
@@ -180,7 +185,7 @@
 									<a
 										href="/room/{encodeURIComponent(thread.room_slug)}"
 										class="text-accent-muted no-underline hover:underline"
-										>{thread.room_name}</a
+										>{thread.room_slug}</a
 									>
 								{/if}
 							</div>

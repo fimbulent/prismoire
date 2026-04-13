@@ -44,10 +44,8 @@ export type ErrorCode =
 	| 'setup_token_missing'
 	// Rooms
 	| 'room_not_found'
-	| 'invalid_room_name'
-	| 'room_description_too_long'
-	| 'room_already_exists'
-	| 'public_room_admin_only'
+	| 'invalid_room_slug'
+	| 'announcements_admin_only'
 	// Threads
 	| 'thread_not_found'
 	| 'thread_locked'

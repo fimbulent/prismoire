@@ -19,6 +19,7 @@
 	import ReplyTree from '$lib/components/post/ReplyTree.svelte';
 	import LockIcon from '$lib/components/ui/LockIcon.svelte';
 	import Badge from '$lib/components/ui/Badge.svelte';
+	import Notice from '$lib/components/ui/Notice.svelte';
 	import MoreButton from '$lib/components/ui/MoreButton.svelte';
 	import { session } from '$lib/stores/session.svelte';
 	import { errorMessage } from '$lib/i18n/errors';
@@ -367,7 +368,7 @@
 		<div class="bg-bg-surface border border-border rounded-md p-5 mb-6">
 			<h1 class="text-2xl font-bold leading-tight mb-2 flex items-center gap-2">
 				{thread.title}
-				{#if thread.room_public}
+				{#if thread.is_announcement}
 					<Badge>Public</Badge>
 				{/if}
 				{#if thread.locked}
@@ -427,8 +428,8 @@
 			{/if}
 		</div>
 
-		{#if thread.room_public && !thread.locked}
-			<div transition:slide={{ duration: 150 }} class="text-xs text-accent bg-accent/10 border border-accent/20 rounded-md px-4 py-2.5 mb-4">This post is readable to the public, but replies to this post are visible only to trusted users.</div>
+		{#if thread.is_announcement && !thread.locked}
+			<Notice>This post is readable to the public, but replies to this post are visible only to trusted users.</Notice>
 		{/if}
 
 		{#if !session.isLoggedIn}

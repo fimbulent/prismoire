@@ -115,14 +115,10 @@ pub enum ErrorCode {
     // -- Rooms -------------------------------------------------------
     /// No room row matched the provided id / slug.
     RoomNotFound,
-    /// Room name failed validation (length, characters, mixed-script, etc).
-    InvalidRoomName,
-    /// Room description exceeds the maximum length.
-    RoomDescriptionTooLong,
-    /// A room with the same slug already exists.
-    RoomAlreadyExists,
-    /// Public rooms can only be posted in by admins.
-    PublicRoomAdminOnly,
+    /// Room slug failed validation (length, characters, etc).
+    InvalidRoomSlug,
+    /// Only admins can post threads in the announcements room.
+    AnnouncementsAdminOnly,
 
     // -- Threads -----------------------------------------------------
     /// No thread row matched the provided id.
@@ -203,7 +199,7 @@ impl ErrorCode {
             | Self::AdminRequired
             | Self::NotOwnProfile
             | Self::NotPostAuthor
-            | Self::PublicRoomAdminOnly => StatusCode::FORBIDDEN,
+            | Self::AnnouncementsAdminOnly => StatusCode::FORBIDDEN,
 
             Self::UserNotFound
             | Self::NoCredentials
@@ -214,7 +210,6 @@ impl ErrorCode {
             | Self::NoTrustEdge => StatusCode::NOT_FOUND,
 
             Self::DisplayNameTaken
-            | Self::RoomAlreadyExists
             | Self::SetupAlreadyComplete
             | Self::ThreadAlreadyLocked
             | Self::PostAlreadyRetracted => StatusCode::CONFLICT,
@@ -236,8 +231,7 @@ impl ErrorCode {
             | Self::InviteExpiryInvalid
             | Self::SetupTokenInvalid
             | Self::SetupTokenMissing
-            | Self::InvalidRoomName
-            | Self::RoomDescriptionTooLong
+            | Self::InvalidRoomSlug
             | Self::ThreadLocked
             | Self::ThreadNotLocked
             | Self::InvalidCursor
@@ -285,10 +279,8 @@ impl ErrorCode {
             Self::SetupTokenMissing => "no setup token configured",
 
             Self::RoomNotFound => "room not found",
-            Self::InvalidRoomName => "room name is invalid",
-            Self::RoomDescriptionTooLong => "description is too long",
-            Self::RoomAlreadyExists => "a room with that name already exists",
-            Self::PublicRoomAdminOnly => "only admins can post in public rooms",
+            Self::InvalidRoomSlug => "room slug is invalid",
+            Self::AnnouncementsAdminOnly => "only admins can post in announcements",
 
             Self::ThreadNotFound => "thread not found",
             Self::ThreadLocked => "thread is locked",

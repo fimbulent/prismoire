@@ -1,65 +1,49 @@
 const MIN_CHARS = 3;
 const MAX_CHARS = 30;
-const MAX_BYTES = 120;
 
-const RESERVED_SLUGS = ['top', 'all', 'favorites'];
-
-const LETTER_RE = /^\p{L}$/u;
-
-function isLetter(ch: string): boolean {
-	return LETTER_RE.test(ch);
-}
-
-function isAsciiDigit(ch: string): boolean {
-	return ch >= '0' && ch <= '9';
-}
-
-function isAllowedChar(ch: string): boolean {
-	return isLetter(ch) || isAsciiDigit(ch) || ch === ' ' || ch === '-';
-}
+const RESERVED_SLUGS = ['top', 'all', 'favorites', 'new', 'public'];
 
 /**
- * Validate a room name against the same rules enforced server-side.
+ * Validate a room slug against the same rules enforced server-side.
  *
- * Returns `null` if the name is valid, or a human-readable error message.
- * Does not check for mixed scripts — that is enforced only on the server.
+ * Returns `null` if the slug is valid, or a human-readable error message.
  */
-export function validateRoomName(raw: string): string | null {
-	const trimmed = raw.trim();
-	if (trimmed.length === 0) return 'Room name must not be empty';
+export function validateRoomSlug(raw: string): string | null {
+	const slug = raw.trim().toLowerCase();
+	if (slug.length === 0) return 'Room name must not be empty';
 
-	const normalized = trimmed.normalize('NFC');
-
-	let hasAlpha = false;
-
-	for (const ch of normalized) {
-		if (isLetter(ch)) {
-			hasAlpha = true;
-		} else if (!isAllowedChar(ch)) {
-			return 'Room name may only contain letters, numbers, spaces, and hyphens';
+	for (const ch of slug) {
+		if (
+			!(ch >= 'a' && ch <= 'z') &&
+			!(ch >= '0' && ch <= '9') &&
+			ch !== '_'
+		) {
+			return 'Room name may only contain lowercase letters, numbers, and underscores';
 		}
 	}
 
+	let hasAlpha = false;
+	for (const ch of slug) {
+		if (ch >= 'a' && ch <= 'z') {
+			hasAlpha = true;
+			break;
+		}
+	}
 	if (!hasAlpha) return 'Room name must contain at least one letter';
 
-	const charCount = [...normalized].length;
-	if (charCount < MIN_CHARS) return 'Room name must be at least 3 characters';
-	if (charCount > MAX_CHARS) return 'Room name must be at most 30 characters';
-	if (new TextEncoder().encode(normalized).length > MAX_BYTES) return 'Room name is too long';
+	if (slug.length < MIN_CHARS) return `Room name must be at least ${MIN_CHARS} characters`;
+	if (slug.length > MAX_CHARS) return `Room name must be at most ${MAX_CHARS} characters`;
 
-	const first = [...normalized][0];
-	const last = [...normalized].at(-1)!;
-	if (first === ' ' || first === '-' || last === ' ' || last === '-') {
-		return 'Room name must not start or end with a space or hyphen';
+	if (slug.startsWith('_') || slug.endsWith('_')) {
+		return 'Room name must not start or end with an underscore';
 	}
 
-	if (/[ -]{2}/.test(normalized)) {
-		return 'Room name must not contain consecutive spaces or hyphens';
+	if (slug.includes('__')) {
+		return 'Room name must not contain consecutive underscores';
 	}
 
-	const slug = normalized.toLowerCase().replace(/[ -]/g, '_');
 	if (RESERVED_SLUGS.includes(slug)) {
-		return `Room name "${normalized}" is reserved`;
+		return `Room name "${slug}" is reserved`;
 	}
 
 	return null;

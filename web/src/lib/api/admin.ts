@@ -9,7 +9,7 @@ export interface AdminLogEntry {
 	thread_title: string | null;
 	post_id: string | null;
 	room_id: string | null;
-	room_name: string | null;
+	room_slug: string | null;
 	reason: string | null;
 	created_at: string;
 }

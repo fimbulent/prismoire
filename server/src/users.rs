@@ -93,7 +93,6 @@ pub struct ActivityItem {
     pub post_id: String,
     pub thread_id: String,
     pub thread_title: String,
-    pub room_name: String,
     pub room_slug: String,
     pub body: String,
     pub created_at: String,
@@ -568,7 +567,6 @@ pub async fn get_activity(
            p.id AS post_id, \
            t.id AS thread_id, \
            t.title AS thread_title, \
-           r.name AS room_name, \
            r.slug AS room_slug, \
            pr.body AS body, \
            p.created_at \
@@ -582,20 +580,9 @@ pub async fn get_activity(
          LIMIT ?",
     );
 
-    let mut query = sqlx::query_as::<
-        _,
-        (
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-        ),
-    >(&sql)
-    .bind(&target_id);
+    let mut query =
+        sqlx::query_as::<_, (String, String, String, String, String, String, String)>(&sql)
+            .bind(&target_id);
     if !cursor.is_empty() {
         query = query.bind(cursor);
     }
@@ -609,22 +596,12 @@ pub async fn get_activity(
         .into_iter()
         .take(ACTIVITY_PAGE_SIZE as usize)
         .map(
-            |(
-                activity_type,
-                post_id,
-                thread_id,
-                thread_title,
-                room_name,
-                room_slug,
-                body,
-                created_at,
-            )| {
+            |(activity_type, post_id, thread_id, thread_title, room_slug, body, created_at)| {
                 ActivityItem {
                     activity_type,
                     post_id,
                     thread_id,
                     thread_title,
-                    room_name,
                     room_slug,
                     body,
                     created_at: created_at.clone(),

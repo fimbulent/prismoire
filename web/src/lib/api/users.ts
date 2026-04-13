@@ -65,7 +65,6 @@ export interface ActivityItem {
 	post_id: string;
 	thread_id: string;
 	thread_title: string;
-	room_name: string;
 	room_slug: string;
 	body: string;
 	created_at: string;

@@ -29,11 +29,10 @@ pub struct ThreadSummary {
     pub author_id: String,
     pub author_name: String,
     pub room_id: String,
-    pub room_name: String,
     pub room_slug: String,
     pub created_at: String,
     pub locked: bool,
-    pub room_public: bool,
+    pub is_announcement: bool,
     pub reply_count: i64,
     pub last_activity: Option<String>,
     pub trust: TrustInfo,
@@ -118,11 +117,10 @@ pub struct ThreadDetailResponse {
     pub author_id: String,
     pub author_name: String,
     pub room_id: String,
-    pub room_name: String,
     pub room_slug: String,
     pub created_at: String,
     pub locked: bool,
-    pub room_public: bool,
+    pub is_announcement: bool,
     pub post: PostResponse,
     pub reply_count: i64,
     pub total_reply_count: i64,
@@ -148,12 +146,6 @@ pub struct RepliesPageResponse {
 // ---------------------------------------------------------------------------
 // Request types
 // ---------------------------------------------------------------------------
-
-#[derive(Deserialize)]
-pub struct CreateThreadRequest {
-    pub title: String,
-    pub body: String,
-}
 
 #[derive(Deserialize)]
 pub struct CreateReplyRequest {
@@ -288,11 +280,11 @@ pub fn make_cursor_created_at(thread: &ThreadSummary) -> String {
 ///
 /// A thread (represented by its OP) is visible if any of the following hold:
 /// 1. The reader is the thread author.
-/// 2. The thread is in a public room.
+/// 2. The thread is in the announcements room.
 /// 3. The author's trust-in-reader (reverse score) meets `MINIMUM_TRUST_THRESHOLD`.
 pub fn is_thread_visible(
     author_id: &str,
-    room_public: bool,
+    is_announcement: bool,
     reader_id: &str,
     reverse_map: &HashMap<String, f64>,
 ) -> bool {
@@ -301,7 +293,7 @@ pub fn is_thread_visible(
     if author_id == reader_id {
         return true;
     }
-    if room_public {
+    if is_announcement {
         return true;
     }
     if let Some(&score) = reverse_map.get(author_id)

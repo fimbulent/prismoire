@@ -45,32 +45,6 @@ CREATE TABLE invites (
     expires_at TEXT
 );
 CREATE INDEX idx_invites_code ON invites(code);
-CREATE TABLE IF NOT EXISTS "rooms" (
-    id TEXT PRIMARY KEY NOT NULL,
-    name TEXT NOT NULL UNIQUE,
-    description TEXT NOT NULL DEFAULT '',
-    created_by TEXT NOT NULL REFERENCES users(id),
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    merged_into TEXT REFERENCES "rooms"(id)
-, slug TEXT NOT NULL DEFAULT '', public INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE threads (
-    id TEXT PRIMARY KEY NOT NULL,
-    title TEXT NOT NULL,
-    author TEXT NOT NULL REFERENCES users(id),
-    room TEXT NOT NULL REFERENCES "rooms"(id),
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    locked INTEGER NOT NULL DEFAULT 0
-, last_activity TEXT, reply_count INTEGER NOT NULL DEFAULT 0);
-CREATE INDEX idx_threads_author ON threads(author);
-CREATE TABLE IF NOT EXISTS "room_admin_log" (
-    id TEXT PRIMARY KEY NOT NULL,
-    admin TEXT NOT NULL REFERENCES users(id),
-    action TEXT NOT NULL CHECK (action IN ('merge', 'delete')),
-    room_id TEXT NOT NULL REFERENCES "rooms"(id),
-    merged_into TEXT REFERENCES "rooms"(id),
-    reason TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-);
 CREATE UNIQUE INDEX idx_users_display_name_skeleton ON users(display_name_skeleton);
 CREATE TABLE IF NOT EXISTS "auth_challenges" (
     id TEXT PRIMARY KEY NOT NULL,
@@ -90,57 +64,7 @@ CREATE TABLE signing_keys (
 );
 CREATE INDEX idx_signing_keys_user_id ON signing_keys(user_id);
 CREATE UNIQUE INDEX idx_signing_keys_active ON signing_keys(user_id) WHERE active = 1;
-CREATE TABLE posts (
-    id TEXT PRIMARY KEY NOT NULL,
-    author TEXT NOT NULL REFERENCES users(id),
-    thread TEXT NOT NULL REFERENCES threads(id),
-    parent TEXT REFERENCES posts(id),
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    retracted_at TEXT,
-    retraction_signature BLOB,
-    revision_count INTEGER NOT NULL DEFAULT 1
-);
-CREATE INDEX idx_posts_author ON posts(author);
-CREATE INDEX idx_posts_parent ON posts(parent);
-CREATE TABLE post_revisions (
-    post_id TEXT NOT NULL REFERENCES posts(id),
-    revision INTEGER NOT NULL DEFAULT 0,
-    body TEXT NOT NULL,
-    signature BLOB NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    epoch INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (post_id, revision)
-);
-CREATE INDEX idx_threads_room ON threads(room);
-CREATE INDEX idx_room_admin_log_room ON room_admin_log(room_id);
-CREATE UNIQUE INDEX idx_rooms_slug ON rooms(slug);
-CREATE TABLE IF NOT EXISTS "admin_log" (
-    id TEXT PRIMARY KEY NOT NULL,
-    admin TEXT NOT NULL REFERENCES users(id),
-    action TEXT NOT NULL CHECK (action IN (
-        'lock_thread', 'unlock_thread',
-        'remove_post',
-        'merge_room', 'delete_room'
-    )),
-    thread_id TEXT REFERENCES threads(id),
-    post_id TEXT REFERENCES posts(id),
-    room_id TEXT REFERENCES rooms(id),
-    merged_into TEXT REFERENCES rooms(id),
-    reason TEXT,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-);
-CREATE INDEX idx_admin_log_created_at ON admin_log(created_at);
 CREATE INDEX idx_users_invite_id ON users(invite_id);
-CREATE INDEX idx_threads_last_activity ON threads(last_activity);
-CREATE INDEX idx_threads_created_at ON threads(created_at);
-CREATE TABLE thread_recent_repliers (
-    thread_id TEXT NOT NULL REFERENCES threads(id),
-    reply_rank INTEGER NOT NULL,
-    replier_id TEXT NOT NULL REFERENCES users(id),
-    replied_at TEXT NOT NULL,
-    PRIMARY KEY (thread_id, reply_rank)
-);
-CREATE INDEX idx_posts_thread_created ON posts(thread, created_at);
 CREATE TABLE user_settings (
     user_id TEXT PRIMARY KEY NOT NULL REFERENCES users(id),
     theme TEXT NOT NULL DEFAULT 'rose-pine'
@@ -173,3 +97,80 @@ CREATE TABLE csp_reports (
 );
 CREATE TABLE sqlite_sequence(name,seq);
 CREATE INDEX idx_csp_reports_received_at ON csp_reports(received_at);
+CREATE TABLE rooms (
+    id TEXT PRIMARY KEY NOT NULL,
+    slug TEXT NOT NULL UNIQUE,
+    created_by TEXT NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    merged_into TEXT REFERENCES rooms(id)
+);
+CREATE TABLE threads (
+    id TEXT PRIMARY KEY NOT NULL,
+    title TEXT NOT NULL,
+    author TEXT NOT NULL REFERENCES users(id),
+    room TEXT NOT NULL REFERENCES rooms(id),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    locked INTEGER NOT NULL DEFAULT 0,
+    last_activity TEXT,
+    reply_count INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE posts (
+    id TEXT PRIMARY KEY NOT NULL,
+    author TEXT NOT NULL REFERENCES users(id),
+    thread TEXT NOT NULL REFERENCES threads(id),
+    parent TEXT REFERENCES posts(id),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    retracted_at TEXT,
+    retraction_signature BLOB,
+    revision_count INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE post_revisions (
+    post_id TEXT NOT NULL REFERENCES posts(id),
+    revision INTEGER NOT NULL DEFAULT 0,
+    body TEXT NOT NULL,
+    signature BLOB NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    epoch INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (post_id, revision)
+);
+CREATE TABLE thread_recent_repliers (
+    thread_id TEXT NOT NULL REFERENCES threads(id),
+    reply_rank INTEGER NOT NULL,
+    replier_id TEXT NOT NULL REFERENCES users(id),
+    replied_at TEXT NOT NULL,
+    PRIMARY KEY (thread_id, reply_rank)
+);
+CREATE TABLE room_admin_log (
+    id TEXT PRIMARY KEY NOT NULL,
+    admin TEXT NOT NULL REFERENCES users(id),
+    action TEXT NOT NULL CHECK (action IN ('merge', 'delete')),
+    room_id TEXT NOT NULL REFERENCES rooms(id),
+    merged_into TEXT REFERENCES rooms(id),
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE TABLE admin_log (
+    id TEXT PRIMARY KEY NOT NULL,
+    admin TEXT NOT NULL REFERENCES users(id),
+    action TEXT NOT NULL CHECK (action IN (
+        'lock_thread', 'unlock_thread',
+        'remove_post',
+        'merge_room', 'delete_room'
+    )),
+    thread_id TEXT REFERENCES threads(id),
+    post_id TEXT REFERENCES posts(id),
+    room_id TEXT REFERENCES rooms(id),
+    merged_into TEXT REFERENCES rooms(id),
+    reason TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE UNIQUE INDEX idx_rooms_slug ON rooms(slug);
+CREATE INDEX idx_threads_author ON threads(author);
+CREATE INDEX idx_threads_room ON threads(room);
+CREATE INDEX idx_threads_last_activity ON threads(last_activity);
+CREATE INDEX idx_threads_created_at ON threads(created_at);
+CREATE INDEX idx_posts_author ON posts(author);
+CREATE INDEX idx_posts_parent ON posts(parent);
+CREATE INDEX idx_posts_thread_created ON posts(thread, created_at);
+CREATE INDEX idx_room_admin_log_room ON room_admin_log(room_id);
+CREATE INDEX idx_admin_log_created_at ON admin_log(created_at);

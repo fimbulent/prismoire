@@ -157,17 +157,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let authed = Router::new()
         .route("/api/auth/logout", post(auth::logout))
-        .route(
-            "/api/rooms",
-            get(rooms::list_rooms).post(rooms::create_room),
-        )
+        .route("/api/rooms", get(rooms::list_rooms))
         .route("/api/rooms/top", get(rooms::top_rooms))
         .route("/api/rooms/{id}", get(rooms::get_room))
+        .route("/api/rooms/{id}/threads", get(threads::list_threads))
         .route(
-            "/api/rooms/{id}/threads",
-            get(threads::list_threads).post(threads::create_thread),
+            "/api/threads",
+            get(threads::list_all_threads).post(threads::create_thread),
         )
-        .route("/api/threads", get(threads::list_all_threads))
         .route("/api/threads/more", post(threads::load_more_all_threads))
         .route(
             "/api/rooms/{id}/threads/more",
@@ -255,7 +252,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(auth_limiter);
 
     let api = Router::new()
-        .route("/api/threads/public", get(threads::list_public_threads))
+        .route(
+            "/api/threads/public",
+            get(threads::list_public_announcement_threads),
+        )
         .route("/api/setup/status", get(setup::setup_status))
         .route("/api/auth/discover/begin", get(auth::discover_begin))
         .route(

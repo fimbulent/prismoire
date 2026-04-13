@@ -49,7 +49,6 @@ type AllThreadsRow = (
     String,
     String,
     String,
-    String,
     bool,
     bool,
     i64,
@@ -82,10 +81,9 @@ fn all_threads_to_summary(
         author_name,
         created_at,
         room_id,
-        room_name,
         room_slug,
         locked,
-        room_public,
+        is_announcement,
         reply_count,
         last_activity,
     ) = row;
@@ -97,11 +95,10 @@ fn all_threads_to_summary(
         author_id,
         author_name,
         room_id,
-        room_name,
         room_slug,
         created_at,
         locked,
-        room_public,
+        is_announcement,
         reply_count,
         last_activity,
     }
@@ -110,9 +107,8 @@ fn all_threads_to_summary(
 fn room_threads_to_summary(
     row: RoomThreadsRow,
     room_id: &str,
-    room_name: &str,
     room_slug: &str,
-    room_public: bool,
+    is_announcement: bool,
     trust_map: &HashMap<String, f64>,
     distrust_set: &HashSet<String>,
 ) -> ThreadSummary {
@@ -125,11 +121,10 @@ fn room_threads_to_summary(
         author_id,
         author_name,
         room_id: room_id.to_string(),
-        room_name: room_name.to_string(),
         room_slug: room_slug.to_string(),
         created_at,
         locked,
-        room_public,
+        is_announcement,
         reply_count,
         last_activity,
     }
@@ -257,9 +252,9 @@ struct CandidateBatch {
 // GET /api/threads/public — list threads in public rooms (no auth required)
 // ---------------------------------------------------------------------------
 
-/// List threads from public rooms only, ordered by last activity, with cursor pagination.
+/// List threads from the announcement room only, ordered by last activity, with cursor pagination.
 /// This endpoint does not require authentication and is used for the logged-out landing page.
-pub async fn list_public_threads(
+pub async fn list_public_announcement_threads(
     State(state): State<Arc<AppState>>,
     Query(params): Query<PaginationParams>,
 ) -> Result<impl IntoResponse, AppError> {
@@ -267,13 +262,13 @@ pub async fn list_public_threads(
         let (cursor_ts, cursor_id) = parse_cursor(cursor)?;
         sqlx::query_as::<_, AllThreadsRow>(
             "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
-             r.id, r.name, r.slug, t.locked, r.public, \
+             r.id, r.slug, t.locked, (r.slug = 'announcements') AS is_announcement, \
              t.reply_count, t.last_activity \
              FROM threads t \
              JOIN users u ON u.id = t.author \
              JOIN rooms r ON r.id = t.room \
              WHERE r.merged_into IS NULL \
-               AND r.public = 1 \
+               AND r.slug = 'announcements' \
                AND NOT (t.reply_count = 0 \
                     AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
                AND (COALESCE(t.last_activity, t.created_at) < ? \
@@ -290,14 +285,14 @@ pub async fn list_public_threads(
     } else {
         sqlx::query_as::<_, AllThreadsRow>(
             "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
-             r.id, r.name, r.slug, t.locked, r.public, \
+             r.id, r.slug, t.locked, (r.slug = 'announcements') AS is_announcement, \
              t.reply_count, t.last_activity \
              FROM threads t \
              JOIN users u ON u.id = t.author \
              JOIN rooms r ON r.id = t.room \
              WHERE r.merged_into IS NULL \
-               AND r.public = 1 \
-               AND NOT (t.reply_count = 0 \
+               AND r.slug = 'announcements' \
+             AND NOT (t.reply_count = 0 \
                     AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
              ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC, t.id DESC \
              LIMIT ?",
@@ -319,10 +314,9 @@ pub async fn list_public_threads(
                 author_name,
                 created_at,
                 room_id,
-                room_name,
                 room_slug,
                 locked,
-                room_public,
+                is_announcement,
                 reply_count,
                 last_activity,
             ) = row;
@@ -332,11 +326,10 @@ pub async fn list_public_threads(
                 author_id,
                 author_name,
                 room_id,
-                room_name,
                 room_slug,
                 created_at,
                 locked,
-                room_public,
+                is_announcement,
                 reply_count,
                 last_activity,
                 trust: TrustInfo::unknown(),
@@ -429,7 +422,7 @@ pub async fn list_all_threads(
         let (cursor_ts, cursor_id) = parse_cursor(cursor)?;
         let sql = format!(
             "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
-             r.id, r.name, r.slug, t.locked, r.public, \
+             r.id, r.slug, t.locked, (r.slug = 'announcements') AS is_announcement, \
              t.reply_count, t.last_activity \
              FROM threads t \
              JOIN users u ON u.id = t.author \
@@ -451,7 +444,7 @@ pub async fn list_all_threads(
     } else {
         let sql = format!(
             "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
-             r.id, r.name, r.slug, t.locked, r.public, \
+             r.id, r.slug, t.locked, (r.slug = 'announcements') AS is_announcement, \
              t.reply_count, t.last_activity \
              FROM threads t \
              JOIN users u ON u.id = t.author \
@@ -471,8 +464,8 @@ pub async fn list_all_threads(
     let mut threads: Vec<ThreadSummary> = rows
         .into_iter()
         .take(PAGE_SIZE)
-        .filter(|(_, _, author_id, _, _, _, _, _, _, room_public, _, _)| {
-            is_thread_visible(author_id, *room_public, &user.user_id, &reverse_map)
+        .filter(|(_, _, author_id, _, _, _, _, _, is_announcement, _, _)| {
+            is_thread_visible(author_id, *is_announcement, &user.user_id, &reverse_map)
         })
         .map(|row| all_threads_to_summary(row, &trust_map, &distrust_set))
         .collect();
@@ -511,15 +504,15 @@ pub async fn list_threads(
     let trust_map = graph.distance_map(reader_uuid);
     let reverse_map = graph.reverse_score_map(reader_uuid);
     let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
-    let room: Option<(String, String, String, bool)> = sqlx::query_as(
-        "SELECT id, name, slug, public FROM rooms WHERE (id = ? OR slug = ?) AND merged_into IS NULL",
+    let room: Option<(String, String, bool)> = sqlx::query_as(
+        "SELECT id, slug, (slug = 'announcements') AS is_announcement FROM rooms WHERE (id = ? OR slug = ?) AND merged_into IS NULL",
     )
     .bind(&room_id_or_slug)
     .bind(&room_id_or_slug)
     .fetch_optional(&state.db)
     .await?;
 
-    let (room_id, room_name, room_slug, room_public) =
+    let (room_id, room_slug, is_announcement) =
         room.ok_or_else(|| AppError::code(ErrorCode::RoomNotFound))?;
 
     if params.sort == ThreadSort::Warm || params.sort == ThreadSort::Trusted {
@@ -531,9 +524,8 @@ pub async fn list_threads(
             &reverse_map,
             &user.user_id,
             &room_id,
-            &room_name,
             &room_slug,
-            room_public,
+            is_announcement,
             WARM_CANDIDATE_LIMIT,
             None,
         )
@@ -617,15 +609,14 @@ pub async fn list_threads(
         .into_iter()
         .take(PAGE_SIZE)
         .filter(|(_, _, author_id, _, _, _, _, _)| {
-            is_thread_visible(author_id, room_public, &user.user_id, &reverse_map)
+            is_thread_visible(author_id, is_announcement, &user.user_id, &reverse_map)
         })
         .map(|row| {
             room_threads_to_summary(
                 row,
                 &room_id,
-                &room_name,
                 &room_slug,
-                room_public,
+                is_announcement,
                 &trust_map,
                 &distrust_set,
             )
@@ -746,15 +737,15 @@ pub async fn load_more_room_threads(
     let reverse_map = graph.reverse_score_map(reader_uuid);
     let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
 
-    let room: Option<(String, String, String, bool)> = sqlx::query_as(
-        "SELECT id, name, slug, public FROM rooms WHERE (id = ? OR slug = ?) AND merged_into IS NULL",
+    let room: Option<(String, String, bool)> = sqlx::query_as(
+        "SELECT id, slug, (slug = 'announcements') AS is_announcement FROM rooms WHERE (id = ? OR slug = ?) AND merged_into IS NULL",
     )
     .bind(&room_id_or_slug)
     .bind(&room_id_or_slug)
     .fetch_optional(&state.db)
     .await?;
 
-    let (room_id, room_name, room_slug, room_public) =
+    let (room_id, room_slug, is_announcement) =
         room.ok_or_else(|| AppError::code(ErrorCode::RoomNotFound))?;
 
     let seen_ids: HashSet<String> = body.seen_ids.into_iter().collect();
@@ -767,9 +758,8 @@ pub async fn load_more_room_threads(
         &reverse_map,
         &user.user_id,
         &room_id,
-        &room_name,
         &room_slug,
-        room_public,
+        is_announcement,
         fetch_limit,
         Some((&cursor.last_activity, &cursor.thread_id)),
     )
@@ -1070,7 +1060,7 @@ async fn fetch_warm_candidates_all(
         // that must be re-evaluated on this page.
         sqlx::query_as::<_, AllThreadsRow>(
             "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
-             r.id, r.name, r.slug, t.locked, r.public, \
+             r.id, r.slug, t.locked, (r.slug = 'announcements') AS is_announcement, \
              t.reply_count, t.last_activity \
              FROM threads t \
              JOIN users u ON u.id = t.author \
@@ -1093,7 +1083,7 @@ async fn fetch_warm_candidates_all(
         // Page 1: fetch from the top.
         sqlx::query_as::<_, AllThreadsRow>(
             "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
-             r.id, r.name, r.slug, t.locked, r.public, \
+             r.id, r.slug, t.locked, (r.slug = 'announcements') AS is_announcement, \
              t.reply_count, t.last_activity \
              FROM threads t \
              JOIN users u ON u.id = t.author \
@@ -1114,18 +1104,16 @@ async fn fetch_warm_candidates_all(
     // Record the last candidate's activity and ID for cursor construction.
     let (last_candidate_activity, last_candidate_id) = rows
         .last()
-        .map(
-            |(id, _, _, _, created_at, _, _, _, _, _, _, last_activity)| {
-                let activity = last_activity.clone().unwrap_or_else(|| created_at.clone());
-                (Some(activity), Some(id.clone()))
-            },
-        )
+        .map(|(id, _, _, _, created_at, _, _, _, _, _, last_activity)| {
+            let activity = last_activity.clone().unwrap_or_else(|| created_at.clone());
+            (Some(activity), Some(id.clone()))
+        })
         .unwrap_or((None, None));
 
     let visible = rows
         .into_iter()
-        .filter(|(_, _, author_id, _, _, _, _, _, _, room_public, _, _)| {
-            is_thread_visible(author_id, *room_public, reader_id, reverse_map)
+        .filter(|(_, _, author_id, _, _, _, _, _, is_announcement, _, _)| {
+            is_thread_visible(author_id, *is_announcement, reader_id, reverse_map)
         })
         .map(|row| all_threads_to_summary(row, trust_map, distrust_set))
         .collect();
@@ -1147,9 +1135,8 @@ async fn fetch_warm_candidates_room(
     reverse_map: &HashMap<String, f64>,
     reader_id: &str,
     room_id: &str,
-    room_name: &str,
     room_slug: &str,
-    room_public: bool,
+    is_announcement: bool,
     limit: i64,
     cursor: Option<(&str, &str)>,
 ) -> Result<CandidateBatch, AppError> {
@@ -1204,15 +1191,14 @@ async fn fetch_warm_candidates_room(
     let visible = rows
         .into_iter()
         .filter(|(_, _, author_id, _, _, _, _, _)| {
-            is_thread_visible(author_id, room_public, reader_id, reverse_map)
+            is_thread_visible(author_id, is_announcement, reader_id, reverse_map)
         })
         .map(|row| {
             room_threads_to_summary(
                 row,
                 room_id,
-                room_name,
                 room_slug,
-                room_public,
+                is_announcement,
                 trust_map,
                 distrust_set,
             )

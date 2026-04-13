@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { createThread } from '$lib/api/threads';
+	import { validateRoomSlug } from '$lib/validation/room-name';
 	import { errorMessage } from '$lib/i18n/errors';
 	import { goto } from '$app/navigation';
 	import { slide } from 'svelte/transition';
@@ -10,13 +11,15 @@
 	const BODY_COUNTER_THRESHOLD = 40_000;
 
 	let { data } = $props();
-	let room = $derived(data.room);
 
+	// svelte-ignore state_referenced_locally
+	let room = $state(data.prefillRoom);
 	let title = $state('');
 	let body = $state('');
 	let error = $state<string | null>(null);
 	let submitting = $state(false);
 
+	let roomError = $derived(room.trim() ? validateRoomSlug(room) : null);
 	let titleLen = $derived(title.trim().length);
 	let bodyLen = $derived(body.trim().length);
 	let showBodyCounter = $derived(bodyLen >= BODY_COUNTER_THRESHOLD);
@@ -30,6 +33,11 @@
 
 	async function handleSubmit(e: SubmitEvent) {
 		e.preventDefault();
+		const slugError = validateRoomSlug(room);
+		if (slugError) {
+			error = slugError;
+			return;
+		}
 		if (titleLen < MIN_TITLE || titleLen > MAX_TITLE) {
 			error = titleError;
 			return;
@@ -46,13 +54,12 @@
 		submitting = true;
 		error = null;
 		try {
-			const slug = room.slug;
-			const req: import('$lib/api/threads').CreateThreadRequest = {
+			const thread = await createThread({
+				room: room.trim().toLowerCase(),
 				title: title.trim(),
 				body: body.trim()
-			};
-			const thread = await createThread(slug, req);
-			goto(`/room/${encodeURIComponent(slug)}/${thread.id}`);
+			});
+			goto(`/room/${encodeURIComponent(thread.room_slug)}/${thread.id}`);
 		} catch (e) {
 			error = errorMessage(e, 'Failed to create thread');
 		} finally {
@@ -62,7 +69,7 @@
 </script>
 
 <svelte:head>
-	<title>New Thread — {room.name} — Prismoire</title>
+	<title>New Thread — Prismoire</title>
 </svelte:head>
 
 <div class="max-w-4xl mx-auto px-6 pt-6 pb-16">
@@ -77,6 +84,35 @@
 				{error}
 			</div>
 		{/if}
+
+		<div>
+			<label for="thread-room" class="block text-sm font-medium text-text-secondary mb-1"
+				>Room</label
+			>
+			<input
+				id="thread-room"
+				type="text"
+				bind:value={room}
+				maxlength={30}
+				required
+				autocomplete="off"
+				disabled={submitting}
+				placeholder="e.g. technology, general, meta"
+				class="w-full bg-bg-surface border border-border rounded-md text-text-primary text-sm px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted"
+				class:border-danger={!!roomError}
+			/>
+			{#if roomError}
+				<p transition:slide={{ duration: 150 }} class="text-danger text-xs mt-1">
+					{roomError}
+				</p>
+			{:else if room.trim()}
+				<p transition:slide={{ duration: 150 }} class="text-xs text-text-muted mt-1">
+					/room/<span class="text-text-secondary"
+						>{room.trim().toLowerCase().replace(/[^a-z0-9_]/g, '')}</span
+					>
+				</p>
+			{/if}
+		</div>
 
 		<div>
 			<label for="thread-title" class="block text-sm font-medium text-text-secondary mb-1"
@@ -130,15 +166,22 @@
 		<div class="flex items-center gap-3">
 			<button
 				type="submit"
-				disabled={submitting || !title.trim() || !body.trim() || !!titleError || bodyLen > MAX_BODY}
+				disabled={submitting ||
+					!room.trim() ||
+					!title.trim() ||
+					!body.trim() ||
+					!!roomError ||
+					!!titleError ||
+					bodyLen > MAX_BODY}
 				class="text-sm px-4 py-2 rounded-md cursor-pointer border border-accent bg-accent text-bg font-medium hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
 			>
 				{submitting ? 'Creating…' : 'Create Thread'}
 			</button>
-			<a
-				href="/room/{encodeURIComponent(room.slug)}"
-				class="text-sm text-text-muted hover:text-text-secondary">Cancel</a
-			>
+			<button
+				type="button"
+				onclick={() => history.back()}
+				class="text-sm text-text-muted hover:text-text-secondary bg-transparent border-none cursor-pointer font-sans"
+			>Cancel</button>
 		</div>
 	</form>
 </div>

@@ -32,7 +32,7 @@ export const load: PageServerLoad = async ({ parent, fetch, params, url }) => {
 	try {
 		const thread = await getThread(params.thread, sort, focus, { fetch });
 		// Non-public threads require authentication.
-		if (!session && !thread.room_public) {
+		if (!session && !thread.is_announcement) {
 			throw redirect(307, '/login');
 		}
 		return { thread, sort };

@@ -428,7 +428,7 @@
 					<div class="flex items-center gap-2 text-xs text-text-muted mb-1">
 						{#if item.type === 'thread_started'}
 							<span>Started thread in</span>
-								<a href="/room/{item.room_slug}" class="text-link hover:underline">{item.room_name}</a>
+								<a href="/room/{item.room_slug}" class="text-link hover:underline">{item.room_slug}</a>
 							{:else}
 								<span>Replied in</span>
 								<a href="/room/{item.room_slug}/{item.thread_id}?post={item.post_id}" class="text-link hover:underline">{item.thread_title}</a>

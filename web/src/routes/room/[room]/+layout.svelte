@@ -34,7 +34,7 @@
 					? 'text-accent border-accent font-semibold'
 					: 'text-text-secondary border-transparent hover:text-text-primary'}"
 			>
-				{room.name}
+				{room.slug}
 			</a>
 		{/each}
 		<a

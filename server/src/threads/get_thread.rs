@@ -83,10 +83,9 @@ struct ThreadInfo {
     author_name: String,
     created_at: String,
     room_id: String,
-    room_name: String,
     room_slug: String,
     locked: bool,
-    room_public: bool,
+    is_announcement: bool,
 }
 
 /// All the viewer-specific context needed for visibility and sorting.
@@ -160,7 +159,7 @@ fn build_meta_tree(rows: Vec<PostMeta>) -> Result<MetaTree, AppError> {
 struct TreeCtx<'a> {
     tree: &'a MetaTree,
     viewer: &'a ViewerCtx,
-    room_public: bool,
+    is_announcement: bool,
     sort_by_new: bool,
 }
 
@@ -175,7 +174,7 @@ impl TreeCtx<'_> {
         if author == reader {
             return true;
         }
-        if is_root && self.room_public {
+        if is_root && self.is_announcement {
             return true;
         }
         if let Some(&score) = self.viewer.reverse_map.get(author)
@@ -382,13 +381,12 @@ async fn fetch_thread_info(db: &sqlx::SqlitePool, thread_id: &str) -> Result<Thr
             String,
             String,
             String,
-            String,
             bool,
             bool,
         ),
     >(
         "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
-         r.id, r.name, r.slug, t.locked, r.public \
+         r.id, r.slug, t.locked, (r.slug = 'announcements') AS is_announcement \
          FROM threads t \
          JOIN users u ON u.id = t.author \
          JOIN rooms r ON r.id = t.room \
@@ -406,10 +404,9 @@ async fn fetch_thread_info(db: &sqlx::SqlitePool, thread_id: &str) -> Result<Thr
         author_name: row.3,
         created_at: row.4,
         room_id: row.5,
-        room_name: row.6,
-        room_slug: row.7,
-        locked: row.8,
-        room_public: row.9,
+        room_slug: row.6,
+        locked: row.7,
+        is_announcement: row.8,
     })
 }
 
@@ -565,7 +562,7 @@ pub async fn get_thread(
     let ctx = TreeCtx {
         tree: &meta_tree,
         viewer: &viewer,
-        room_public: thread_info.room_public,
+        is_announcement: thread_info.is_announcement,
         sort_by_new: query.sort == PostSort::New,
     };
 
@@ -641,11 +638,10 @@ pub async fn get_thread(
         author_id: thread_info.author_id,
         author_name: thread_info.author_name,
         room_id: thread_info.room_id,
-        room_name: thread_info.room_name,
         room_slug: thread_info.room_slug,
         created_at: thread_info.created_at,
         locked: thread_info.locked,
-        room_public: thread_info.room_public,
+        is_announcement: thread_info.is_announcement,
         post: op,
         reply_count,
         total_reply_count,
@@ -770,11 +766,10 @@ async fn build_focused_response(
         author_id: thread_info.author_id.clone(),
         author_name: thread_info.author_name.clone(),
         room_id: thread_info.room_id.clone(),
-        room_name: thread_info.room_name.clone(),
         room_slug: thread_info.room_slug.clone(),
         created_at: thread_info.created_at.clone(),
         locked: thread_info.locked,
-        room_public: thread_info.room_public,
+        is_announcement: thread_info.is_announcement,
         post: op,
         reply_count,
         total_reply_count,
@@ -806,7 +801,7 @@ pub async fn get_thread_replies(
     let ctx = TreeCtx {
         tree: &meta_tree,
         viewer: &viewer,
-        room_public: thread_info.room_public,
+        is_announcement: thread_info.is_announcement,
         sort_by_new: query.sort == PostSort::New,
     };
 
@@ -865,7 +860,7 @@ pub async fn get_thread_subtree(
     let ctx = TreeCtx {
         tree: &meta_tree,
         viewer: &viewer,
-        room_public: thread_info.room_public,
+        is_announcement: thread_info.is_announcement,
         sort_by_new: query.sort == PostSort::New,
     };
 

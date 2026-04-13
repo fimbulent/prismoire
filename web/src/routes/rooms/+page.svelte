@@ -10,11 +10,7 @@
 
 	let filteredRooms = $derived(
 		searchQuery.trim()
-			? rooms.filter(
-					(r) =>
-						r.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-						r.description.toLowerCase().includes(searchQuery.toLowerCase())
-				)
+			? rooms.filter((r) => r.slug.includes(searchQuery.trim().toLowerCase()))
 			: rooms
 	);
 </script>
@@ -27,10 +23,10 @@
 	<h1 class="text-xl font-bold">All Rooms</h1>
 	{#if session.isLoggedIn}
 		<button
-			onclick={() => goto('/room/new')}
+			onclick={() => goto('/thread/new')}
 			class="text-sm px-3 py-1.5 rounded-md cursor-pointer border border-accent bg-accent text-bg font-medium hover:opacity-90"
 		>
-			New Room
+			New Thread
 		</button>
 	{/if}
 </div>
@@ -50,7 +46,7 @@
 			{#if searchQuery.trim()}
 				No rooms match your search.
 			{:else}
-				No rooms yet. Be the first to create one!
+				No rooms yet.
 			{/if}
 		</div>
 	{:else}
@@ -61,14 +57,11 @@
 					class="block border border-border rounded-md p-5 bg-bg-surface no-underline transition-[background,border-color] duration-150 hover:bg-bg-hover hover:border-accent-muted"
 				>
 					<div class="mb-1.5 flex items-center gap-2">
-						<h3 class="text-base font-bold text-text-primary">{room.name}</h3>
-						{#if room.public}
-							<Badge>Public</Badge>
+						<h3 class="text-base font-bold text-text-primary">{room.slug}</h3>
+						{#if room.is_announcement}
+							<Badge>Announcements</Badge>
 						{/if}
 					</div>
-					{#if room.description}
-						<p class="text-sm text-text-secondary mb-3">{room.description}</p>
-					{/if}
 					<div class="flex items-center gap-4 text-xs text-text-muted">
 						<span
 							>{room.thread_count}

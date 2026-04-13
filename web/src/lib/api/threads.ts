@@ -7,11 +7,10 @@ export interface ThreadSummary {
 	author_id: string;
 	author_name: string;
 	room_id: string;
-	room_name: string;
 	room_slug: string;
 	created_at: string;
 	locked: boolean;
-	room_public: boolean;
+	is_announcement: boolean;
 	reply_count: number;
 	last_activity: string | null;
 	trust: TrustInfo;
@@ -44,11 +43,10 @@ export interface ThreadDetail {
 	author_id: string;
 	author_name: string;
 	room_id: string;
-	room_name: string;
 	room_slug: string;
 	created_at: string;
 	locked: boolean;
-	room_public: boolean;
+	is_announcement: boolean;
 	post: PostResponse;
 	reply_count: number;
 	total_reply_count: number;
@@ -66,6 +64,7 @@ export interface RepliesPageResponse {
 }
 
 export interface CreateThreadRequest {
+	room: string;
 	title: string;
 	body: string;
 }
@@ -272,12 +271,11 @@ export async function replyToThread(
 }
 
 export async function createThread(
-	roomIdOrSlug: string,
 	req: CreateThreadRequest,
 	opts: FetchOpts = {}
 ): Promise<ThreadDetail> {
 	const f = opts.fetch ?? globalThis.fetch;
-	const res = await f(`/api/rooms/${encodeURIComponent(roomIdOrSlug)}/threads`, {
+	const res = await f('/api/threads', {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify(req)
