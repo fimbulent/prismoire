@@ -152,6 +152,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `csp_report::retention_loop`).
     tokio::spawn(csp_report::retention_loop(shared_state.db.clone()));
 
+    // Spawn the expired session and stale auth challenge cleanup sweep.
+    // Runs once per hour (see `session::cleanup_loop`).
+    tokio::spawn(session::cleanup_loop(shared_state.db.clone()));
+
     let (ip_limiter, auth_limiter, user_limiter, csp_report_limiter) =
         rate_limit::build_layers(&config.rate_limit, config.server.trust_proxy_headers);
 

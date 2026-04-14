@@ -12,6 +12,15 @@ use sqlx::SqlitePool;
 use crate::error::{AppError, ErrorCode};
 use crate::state::AppState;
 
+/// Maximum age of an auth challenge before it is considered stale.
+///
+/// WebAuthn ceremonies should complete within seconds. Challenges older
+/// than this are abandoned browser tabs or failed flows and safe to purge.
+const AUTH_CHALLENGE_MAX_AGE_MINUTES: i64 = 10;
+
+/// How often the cleanup job runs.
+const CLEANUP_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
 pub const SESSION_COOKIE_NAME: &str = "prismoire_session";
 const SESSION_DURATION_DAYS: i64 = 30;
 const TOKEN_BYTES: usize = 32;
@@ -228,4 +237,40 @@ pub async fn session_middleware(
     }
 
     response
+}
+
+/// Background task: once per hour, delete expired sessions and stale
+/// auth challenges. Runs for the lifetime of the process.
+///
+/// Sessions are deleted when `expires_at` is in the past. Auth challenges
+/// are deleted when `created_at` is older than [`AUTH_CHALLENGE_MAX_AGE_MINUTES`]
+/// — WebAuthn ceremonies should complete within seconds, so anything older
+/// is an abandoned flow.
+///
+/// Errors are logged but never propagated — a transient DB failure
+/// should not take the server down, and the next sweep will catch up.
+pub async fn cleanup_loop(pool: SqlitePool) {
+    let mut ticker = tokio::time::interval(CLEANUP_SWEEP_INTERVAL);
+    ticker.tick().await;
+
+    let challenge_modifier = format!("-{AUTH_CHALLENGE_MAX_AGE_MINUTES} minutes");
+    loop {
+        ticker.tick().await;
+
+        if let Err(e) = sqlx::query("DELETE FROM sessions WHERE expires_at < datetime('now')")
+            .execute(&pool)
+            .await
+        {
+            eprintln!("session cleanup sweep failed: {e}");
+        }
+
+        if let Err(e) =
+            sqlx::query("DELETE FROM auth_challenges WHERE created_at < datetime('now', ?)")
+                .bind(&challenge_modifier)
+                .execute(&pool)
+                .await
+        {
+            eprintln!("auth challenge cleanup sweep failed: {e}");
+        }
+    }
 }
