@@ -6,6 +6,7 @@
 		type PostResponse,
 		type RevisionHistoryResponse
 	} from '$lib/api/threads';
+	import { reportPost, type ReportReason } from '$lib/api/admin';
 	import { relativeTime } from '$lib/format';
 	import { session } from '$lib/stores/session.svelte';
 	import UserName from '$lib/components/trust/UserName.svelte';
@@ -147,6 +148,38 @@
 		if (revision === total - 1) return 'Latest';
 		if (revision === 0) return 'Original';
 		return `Edit ${revision}`;
+	}
+
+	let showReportForm = $state(false);
+	let reportReason = $state<ReportReason>('spam');
+	let reportDetail = $state('');
+	let reportError = $state<string | null>(null);
+	let reportSaving = $state(false);
+	let reportSuccess = $state(false);
+
+	function canReport(): boolean {
+		return session.isLoggedIn && !isPostAuthor() && !post.retracted_at;
+	}
+
+	async function submitReport() {
+		reportSaving = true;
+		reportError = null;
+		try {
+			await reportPost(post.id, reportReason, reportDetail.trim() || undefined);
+			reportSuccess = true;
+			showReportForm = false;
+			reportDetail = '';
+		} catch (e) {
+			reportError = errorMessage(e, 'Failed to submit report');
+		} finally {
+			reportSaving = false;
+		}
+	}
+
+	function cancelReport() {
+		showReportForm = false;
+		reportError = null;
+		reportDetail = '';
 	}
 
 	function handleClickOutside(event: MouseEvent) {
@@ -294,11 +327,54 @@
 			class="bg-transparent border-none text-text-muted cursor-pointer text-xs font-sans py-1 hover:text-danger"
 		>Remove</button>
 	{/if}
+	{#if canReport() && !reportSuccess}
+		<button
+			onclick={() => { showReportForm = !showReportForm; }}
+			class="bg-transparent border-none text-text-muted cursor-pointer text-xs font-sans py-1 hover:text-text-secondary"
+		>Report</button>
+	{:else if reportSuccess}
+		<span class="text-xs text-text-muted py-1">Reported</span>
+	{/if}
 	{#if extraActions}
 		{@render extraActions()}
 	{/if}
 </div>
 {#if retractError && retractConfirmId === post.id}
 	<div class="text-danger text-xs mt-1">{retractError}</div>
+{/if}
+{#if showReportForm}
+	<div class="mt-3 bg-bg border border-border rounded-md p-4" transition:slide={{ duration: 150 }}>
+		<div class="text-xs font-semibold text-text-secondary mb-2">Report this post</div>
+		<div class="flex flex-wrap gap-2 mb-3">
+			{#each [['spam', 'Spam'], ['rules_violation', 'Rules violation'], ['illegal_content', 'Illegal content'], ['other', 'Other']] as [value, label]}
+				<button
+					onclick={() => { reportReason = value as ReportReason; }}
+					class="text-xs px-2.5 py-1 rounded-md border cursor-pointer font-sans transition-colors
+						{reportReason === value ? 'border-accent text-accent bg-bg-surface' : 'border-border text-text-muted bg-transparent hover:text-text-secondary hover:bg-bg-hover'}"
+				>{label}</button>
+			{/each}
+		</div>
+		<input
+			type="text"
+			bind:value={reportDetail}
+			placeholder="Additional details (optional)"
+			class="w-full bg-bg-surface border border-border rounded-md text-text-primary text-sm px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted mb-3"
+		/>
+		{#if reportError}
+			<div class="text-danger text-xs mb-2">{reportError}</div>
+		{/if}
+		<div class="flex gap-2">
+			<button
+				onclick={submitReport}
+				disabled={reportSaving}
+				class="text-xs px-3 py-1.5 rounded-md border border-danger text-danger hover:bg-bg-hover cursor-pointer font-sans font-medium disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+			>{reportSaving ? 'Submitting…' : 'Submit report'}</button>
+			<button
+				onclick={cancelReport}
+				disabled={reportSaving}
+				class="text-xs px-3 py-1.5 rounded-md border border-border text-text-muted hover:text-text-primary hover:bg-bg-hover cursor-pointer font-sans transition-colors"
+			>Cancel</button>
+		</div>
+	</div>
 {/if}
 {/if}

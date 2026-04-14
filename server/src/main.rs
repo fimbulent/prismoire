@@ -21,6 +21,7 @@ mod invites;
 mod middleware;
 mod posts;
 mod rate_limit;
+mod reports;
 mod room_name;
 mod rooms;
 mod session;
@@ -156,7 +157,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Runs once per hour (see `session::cleanup_loop`).
     tokio::spawn(session::cleanup_loop(shared_state.db.clone()));
 
-    let (ip_limiter, auth_limiter, user_limiter, csp_report_limiter) =
+    let (ip_limiter, auth_limiter, user_limiter, report_limiter, csp_report_limiter) =
         rate_limit::build_layers(&config.rate_limit, config.server.trust_proxy_headers);
 
     let authed = Router::new()
@@ -219,11 +220,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             post(admin::lock_thread).delete(admin::unlock_thread),
         )
         .route("/api/admin/posts/{id}", delete(admin::remove_post))
+        .route("/api/admin/reports", get(reports::list_reports))
+        .route(
+            "/api/admin/reports/{id}/dismiss",
+            post(reports::dismiss_report),
+        )
+        .route(
+            "/api/admin/reports/{id}/action",
+            post(reports::action_report),
+        )
+        .route("/api/admin/dashboard", get(reports::get_dashboard))
         .layer(axum::middleware::from_fn_with_state(
             shared_state.clone(),
             session::session_middleware,
         ))
         .layer(user_limiter);
+
+    // Report creation gets the general session middleware plus a tighter
+    // per-session rate limit so a single user cannot flood the admin
+    // moderation queue. The route still inherits the outer `ip_limiter`
+    // from the `api` router.
+    let report_route = Router::new()
+        .route("/api/posts/{id}/report", post(reports::create_report))
+        .layer(axum::middleware::from_fn_with_state(
+            shared_state.clone(),
+            session::session_middleware,
+        ))
+        .layer(report_limiter);
 
     // `/api/auth/session` is intentionally separated from the rest of
     // the authed routes so it does not carry the per-session
@@ -268,6 +291,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .merge(auth_routes)
         .merge(session_route)
+        .merge(report_route)
         .merge(authed)
         .layer(axum::middleware::from_fn_with_state(
             allowed_origin,

@@ -77,6 +77,12 @@ const ERROR_MESSAGES: Record<ErrorCode, string> = {
 	admin_required: 'Admin access required.',
 	reason_required: 'A reason is required for this action.',
 
+	// Reports
+	report_reason_invalid: 'Invalid report reason.',
+	already_reported: 'You have already reported this post.',
+	report_not_found: 'Report not found.',
+	self_report: 'You cannot report your own post.',
+
 	// Settings
 	invalid_theme: 'Invalid theme.',
 

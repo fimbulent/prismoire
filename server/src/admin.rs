@@ -57,7 +57,10 @@ pub struct RemovePostRequest {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn require_admin(user: &AuthUser) -> Result<(), AppError> {
+/// Verify that the authenticated user has the `admin` role.
+///
+/// Returns `AdminRequired` if the user is not an admin.
+pub fn require_admin(user: &AuthUser) -> Result<(), AppError> {
     if !user.is_admin() {
         return Err(AppError::code(ErrorCode::AdminRequired));
     }

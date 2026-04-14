@@ -106,6 +106,8 @@ type AuthLayer =
     GovernorLayer<ClientIpKeyExtractor, NoOpMiddleware<QuantaInstant>, axum::body::Body>;
 type UserLayer =
     GovernorLayer<SessionKeyExtractor, NoOpMiddleware<QuantaInstant>, axum::body::Body>;
+type ReportLayer =
+    GovernorLayer<SessionKeyExtractor, NoOpMiddleware<QuantaInstant>, axum::body::Body>;
 type CspReportLayer =
     GovernorLayer<ClientIpKeyExtractor, NoOpMiddleware<QuantaInstant>, axum::body::Body>;
 
@@ -153,6 +155,22 @@ fn merge_headers(dst: &mut HeaderMap, src: HeaderMap) {
     }
 }
 
+/// Replenish interval for the `/api/posts/:id/report` per-session bucket,
+/// in seconds.
+///
+/// Reports require admin attention, so a tighter limit than the general
+/// user bucket prevents a single user from flooding the moderation queue.
+/// One token every ten seconds allows legitimate multi-post reports while
+/// capping sustained throughput to ~6 per minute.
+const REPORT_REPLENISH_SECONDS: u64 = 10;
+
+/// Burst size for the `/api/posts/:id/report` per-session bucket.
+///
+/// A user encountering a spam wave may want to report several posts in
+/// quick succession. Three tokens accommodate that without allowing
+/// sustained abuse.
+const REPORT_BURST_SIZE: u32 = 3;
+
 /// Replenish interval for the `/api/csp-report` per-IP bucket, in seconds.
 ///
 /// CSP reports are browser-driven telemetry — a page that triggers one
@@ -171,10 +189,12 @@ const CSP_REPORT_BURST_SIZE: u32 = 5;
 
 /// Build rate limiting layers from configuration.
 ///
-/// Returns four governor layers:
+/// Returns five governor layers:
 /// - General IP rate limit (applied to all API routes)
 /// - Strict auth rate limit (applied to login/signup/setup endpoints)
 /// - Per-user rate limit (applied to authenticated endpoints)
+/// - Per-session report limit for `POST /api/posts/:id/report`, tighter
+///   than the general user bucket since reports require admin attention
 /// - Tight per-IP limit for the `/api/csp-report` endpoint, applied on
 ///   top of the general IP limit so a flood of reports cannot crowd out
 ///   the rest of the API.
@@ -187,7 +207,7 @@ const CSP_REPORT_BURST_SIZE: u32 = 5;
 pub fn build_layers(
     config: &prismoire_config::RateLimitConfig,
     trust_proxy_headers: bool,
-) -> (IpLayer, AuthLayer, UserLayer, CspReportLayer) {
+) -> (IpLayer, AuthLayer, UserLayer, ReportLayer, CspReportLayer) {
     let ip_extractor = ClientIpKeyExtractor::from_config(trust_proxy_headers);
 
     let ip_config = Arc::new(
@@ -219,6 +239,17 @@ pub fn build_layers(
             .expect("invalid user rate limit config"),
     );
 
+    let report_config = Arc::new(
+        GovernorConfigBuilder::default()
+            .key_extractor(SessionKeyExtractor {
+                ip_fallback: ip_extractor,
+            })
+            .per_second(REPORT_REPLENISH_SECONDS)
+            .burst_size(REPORT_BURST_SIZE)
+            .finish()
+            .expect("invalid report rate limit config"),
+    );
+
     let csp_report_config = Arc::new(
         GovernorConfigBuilder::default()
             .key_extractor(ip_extractor)
@@ -232,6 +263,7 @@ pub fn build_layers(
         GovernorLayer::new(ip_config).error_handler(govern_error_handler),
         GovernorLayer::new(auth_config).error_handler(govern_error_handler),
         GovernorLayer::new(user_config).error_handler(govern_error_handler),
+        GovernorLayer::new(report_config).error_handler(govern_error_handler),
         GovernorLayer::new(csp_report_config).error_handler(govern_error_handler),
     )
 }

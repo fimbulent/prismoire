@@ -72,6 +72,11 @@ export type ErrorCode =
 	// Admin
 	| 'admin_required'
 	| 'reason_required'
+	// Reports
+	| 'report_reason_invalid'
+	| 'already_reported'
+	| 'report_not_found'
+	| 'self_report'
 	// Settings
 	| 'invalid_theme'
 	// Catch-all

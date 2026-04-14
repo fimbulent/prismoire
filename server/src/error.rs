@@ -172,6 +172,16 @@ pub enum ErrorCode {
     /// Admin action requires a non-empty `reason`.
     ReasonRequired,
 
+    // -- Reports -----------------------------------------------------
+    /// Report reason is not one of the accepted enum values.
+    ReportReasonInvalid,
+    /// The user has already reported this post.
+    AlreadyReported,
+    /// No report row matched the provided id.
+    ReportNotFound,
+    /// Users cannot report their own posts.
+    SelfReport,
+
     // -- Settings ----------------------------------------------------
     /// Theme identifier is not in the allowed set.
     InvalidTheme,
@@ -207,12 +217,14 @@ impl ErrorCode {
             | Self::RoomNotFound
             | Self::ThreadNotFound
             | Self::PostNotFound
-            | Self::NoTrustEdge => StatusCode::NOT_FOUND,
+            | Self::NoTrustEdge
+            | Self::ReportNotFound => StatusCode::NOT_FOUND,
 
             Self::DisplayNameTaken
             | Self::SetupAlreadyComplete
             | Self::ThreadAlreadyLocked
-            | Self::PostAlreadyRetracted => StatusCode::CONFLICT,
+            | Self::PostAlreadyRetracted
+            | Self::AlreadyReported => StatusCode::CONFLICT,
 
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
 
@@ -246,6 +258,8 @@ impl ErrorCode {
             | Self::InvalidTrustDirection
             | Self::BioTooLong
             | Self::ReasonRequired
+            | Self::ReportReasonInvalid
+            | Self::SelfReport
             | Self::InvalidTheme
             | Self::BadRequest => StatusCode::BAD_REQUEST,
         }
@@ -307,6 +321,11 @@ impl ErrorCode {
 
             Self::AdminRequired => "admin access required",
             Self::ReasonRequired => "reason is required",
+
+            Self::ReportReasonInvalid => "invalid report reason",
+            Self::AlreadyReported => "you have already reported this post",
+            Self::ReportNotFound => "report not found",
+            Self::SelfReport => "you cannot report your own post",
 
             Self::InvalidTheme => "invalid theme",
 

@@ -109,6 +109,14 @@
 						>
 							Settings
 						</button>
+						{#if session.isAdmin}
+							<button
+								onclick={() => navigateTo('/admin')}
+								class="w-full text-left px-3 py-2 text-sm text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-pointer"
+							>
+								Admin
+							</button>
+						{/if}
 						<div class="border-t border-border-subtle my-1"></div>
 						<button
 							onclick={handleLogout}
