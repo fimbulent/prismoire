@@ -412,8 +412,40 @@ fn reverse_bfs(reader: u32, reverse_graph: &CsrGraph) -> Vec<(u32, f64)> {
 }
 
 // ---------------------------------------------------------------------------
-// TrustInfo: shared trust metadata for API responses
+// UserStatus / TrustInfo: shared types for API responses
 // ---------------------------------------------------------------------------
+
+/// Account status for a user.
+///
+/// Stored as a TEXT column in SQLite (`"active"`, `"banned"`, `"suspended"`).
+/// Parsed from DB strings via `TryFrom<&str>`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserStatus {
+    Active,
+    Banned,
+    Suspended,
+}
+
+impl UserStatus {
+    /// Returns `true` if the user is active (not banned or suspended).
+    pub fn is_active(&self) -> bool {
+        *self == Self::Active
+    }
+}
+
+impl TryFrom<&str> for UserStatus {
+    type Error = String;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        match s {
+            "active" => Ok(Self::Active),
+            "banned" => Ok(Self::Banned),
+            "suspended" => Ok(Self::Suspended),
+            other => Err(format!("unknown user status: {other}")),
+        }
+    }
+}
 
 /// Trust metadata attached to any user reference in API responses.
 ///
@@ -424,18 +456,23 @@ fn reverse_bfs(reader: u32, reverse_graph: &CsrGraph) -> Vec<(u32, f64)> {
 pub struct TrustInfo {
     pub distance: Option<f64>,
     pub distrusted: bool,
+    #[serde(skip_serializing_if = "UserStatus::is_active")]
+    pub status: UserStatus,
 }
 
 impl TrustInfo {
-    /// Build TrustInfo for a user from the viewer's distance map and distrust set.
+    /// Build TrustInfo for a user from the viewer's distance map, distrust set,
+    /// and the target user's account status.
     pub fn build(
         user_id: &str,
         distance_map: &HashMap<String, f64>,
         distrust_set: &HashSet<String>,
+        status: UserStatus,
     ) -> Self {
         Self {
             distance: distance_map.get(user_id).copied(),
             distrusted: distrust_set.contains(user_id),
+            status,
         }
     }
 
@@ -444,14 +481,7 @@ impl TrustInfo {
         Self {
             distance: None,
             distrusted: false,
-        }
-    }
-
-    /// Unknown/absent trust (no viewer context available).
-    pub fn unknown() -> Self {
-        Self {
-            distance: None,
-            distrusted: false,
+            status: UserStatus::Active,
         }
     }
 }
@@ -537,8 +567,16 @@ impl TrustGraph {
     /// is the total memory budget (in bytes) for cached BFS results,
     /// split evenly between the forward and reverse caches.
     pub async fn build(db: &SqlitePool, bfs_cache_bytes: u64) -> Result<Self, sqlx::Error> {
+        // Exclude trust edges where either endpoint is a banned user.
+        // Banned users should not propagate trust. Distrust edges pointing
+        // at banned users are kept (loaded separately below) so that
+        // existing distrust relationships remain visible.
         let rows = sqlx::query_as::<_, (String, String)>(
-            "SELECT source_user, target_user FROM trust_edges WHERE trust_type = 'trust'",
+            "SELECT te.source_user, te.target_user FROM trust_edges te \
+             JOIN users u1 ON u1.id = te.source_user \
+             JOIN users u2 ON u2.id = te.target_user \
+             WHERE te.trust_type = 'trust' \
+             AND u1.status != 'banned' AND u2.status != 'banned'",
         )
         .fetch_all(db)
         .await?;

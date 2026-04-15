@@ -38,6 +38,7 @@ export type ErrorCode =
 	| 'invite_required'
 	| 'invite_max_uses_invalid'
 	| 'invite_expiry_invalid'
+	| 'invite_privilege_revoked'
 	// Setup
 	| 'setup_already_complete'
 	| 'setup_token_invalid'
@@ -72,6 +73,13 @@ export type ErrorCode =
 	// Admin
 	| 'admin_required'
 	| 'reason_required'
+	| 'already_banned'
+	| 'not_banned'
+	| 'already_suspended'
+	| 'not_suspended'
+	| 'cannot_moderate_admin'
+	| 'invalid_duration'
+	| 'invite_privilege_unchanged'
 	// Reports
 	| 'report_reason_invalid'
 	| 'already_reported'

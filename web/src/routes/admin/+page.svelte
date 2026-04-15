@@ -4,6 +4,8 @@
 		dismissReport,
 		actionReport,
 		removePost,
+		suspendUser,
+		banUser,
 		type ReportResponse
 	} from '$lib/api/admin';
 	import { relativeTime } from '$lib/format';
@@ -11,6 +13,7 @@
 	import UserName from '$lib/components/trust/UserName.svelte';
 	import Markdown from '$lib/components/ui/Markdown.svelte';
 	import MoreButton from '$lib/components/ui/MoreButton.svelte';
+	import Checkbox from '$lib/components/ui/Checkbox.svelte';
 	import { errorMessage } from '$lib/i18n/errors';
 	import { slide } from 'svelte/transition';
 
@@ -40,6 +43,18 @@
 	let removeReason = $state('');
 	let removeError = $state<string | null>(null);
 	let removeSaving = $state(false);
+
+	let suspendTargetReportId = $state<string | null>(null);
+	let suspendReason = $state('');
+	let suspendDuration = $state('1d');
+	let suspendError = $state<string | null>(null);
+	let suspendSaving = $state(false);
+
+	let banTargetReportId = $state<string | null>(null);
+	let banReason = $state('');
+	let banTree = $state(false);
+	let banError = $state<string | null>(null);
+	let banSaving = $state(false);
 
 	const REASON_LABELS: Record<string, string> = {
 		spam: 'Spam',
@@ -118,6 +133,64 @@
 			removeError = errorMessage(e, 'Action failed');
 		} finally {
 			removeSaving = false;
+		}
+	}
+
+	function startSuspendUser(report: ReportResponse) {
+		suspendTargetReportId = report.id;
+		const label = REASON_LABELS[report.reason] ?? report.reason;
+		suspendReason = report.detail ? `${label}: ${report.detail}` : label;
+		suspendDuration = '1d';
+		suspendError = null;
+	}
+
+	async function confirmSuspendUser(report: ReportResponse) {
+		const reason = suspendReason.trim();
+		if (!reason) {
+			suspendError = 'Reason is required';
+			return;
+		}
+		suspendSaving = true;
+		suspendError = null;
+		try {
+			await suspendUser(report.post_author_id, reason, suspendDuration);
+			await actionReport(report.id);
+			reports = reports.filter((r) => r.post_id !== report.post_id);
+			pendingCount = Math.max(0, pendingCount - report.report_count);
+			suspendTargetReportId = null;
+		} catch (e) {
+			suspendError = errorMessage(e, 'Suspend failed');
+		} finally {
+			suspendSaving = false;
+		}
+	}
+
+	function startBanUser(report: ReportResponse) {
+		banTargetReportId = report.id;
+		const label = REASON_LABELS[report.reason] ?? report.reason;
+		banReason = report.detail ? `${label}: ${report.detail}` : label;
+		banTree = false;
+		banError = null;
+	}
+
+	async function confirmBanUser(report: ReportResponse) {
+		const reason = banReason.trim();
+		if (!reason) {
+			banError = 'Reason is required';
+			return;
+		}
+		banSaving = true;
+		banError = null;
+		try {
+			await banUser(report.post_author_id, reason, banTree);
+			await actionReport(report.id);
+			reports = reports.filter((r) => r.post_id !== report.post_id);
+			pendingCount = Math.max(0, pendingCount - report.report_count);
+			banTargetReportId = null;
+		} catch (e) {
+			banError = errorMessage(e, 'Ban failed');
+		} finally {
+			banSaving = false;
 		}
 	}
 </script>
@@ -240,6 +313,72 @@
 									>Cancel</button>
 								</div>
 							</div>
+						{:else if suspendTargetReportId === report.id}
+							<div class="mt-3 bg-bg border border-border rounded-md p-4" transition:slide={{ duration: 150 }}>
+								<div class="text-xs font-semibold text-text-secondary mb-2">Suspend {report.post_author_name} — reason (public)</div>
+								<input
+									type="text"
+									bind:value={suspendReason}
+									placeholder="Reason for suspension"
+									class="w-full bg-bg-surface border border-border rounded-md text-text-primary text-sm px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted mb-2"
+								/>
+								<div class="flex items-center gap-2 mb-2">
+									<span class="text-xs text-text-muted">Duration:</span>
+									<select
+										bind:value={suspendDuration}
+										class="font-sans text-xs bg-bg-surface text-text-secondary border border-border rounded-md px-2 py-1 cursor-pointer hover:border-accent-muted focus:outline-none focus:border-accent-muted"
+									>
+										<option value="1d">1 day</option>
+										<option value="3d">3 days</option>
+										<option value="1w">1 week</option>
+										<option value="2w">2 weeks</option>
+										<option value="1m">1 month</option>
+									</select>
+								</div>
+								{#if suspendError}
+									<div class="text-danger text-xs mb-2">{suspendError}</div>
+								{/if}
+								<div class="flex gap-2">
+									<button
+										onclick={() => confirmSuspendUser(report)}
+										disabled={suspendSaving || !suspendReason.trim()}
+										class="text-xs px-3 py-1.5 rounded-md border border-danger text-danger hover:bg-bg-hover cursor-pointer font-sans font-medium disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+									>{suspendSaving ? 'Suspending…' : 'Confirm suspension'}</button>
+									<button
+										onclick={() => { suspendTargetReportId = null; suspendError = null; }}
+										disabled={suspendSaving}
+										class="text-xs px-3 py-1.5 rounded-md border border-border text-text-muted hover:text-text-primary hover:bg-bg-hover cursor-pointer font-sans transition-colors"
+									>Cancel</button>
+								</div>
+							</div>
+						{:else if banTargetReportId === report.id}
+							<div class="mt-3 bg-bg border border-border rounded-md p-4" transition:slide={{ duration: 150 }}>
+								<div class="text-xs font-semibold text-text-secondary mb-2">Ban {report.post_author_name} — reason (public)</div>
+								<input
+									type="text"
+									bind:value={banReason}
+									placeholder="Reason for ban"
+									class="w-full bg-bg-surface border border-border rounded-md text-text-primary text-sm px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted mb-2"
+								/>
+								<div class="mb-2">
+									<Checkbox bind:checked={banTree}>Also ban all users their downstream invite tree</Checkbox>
+								</div>
+								{#if banError}
+									<div class="text-danger text-xs mb-2">{banError}</div>
+								{/if}
+								<div class="flex gap-2">
+									<button
+										onclick={() => confirmBanUser(report)}
+										disabled={banSaving || !banReason.trim()}
+										class="text-xs px-3 py-1.5 rounded-md border border-danger text-danger hover:bg-bg-hover cursor-pointer font-sans font-medium disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+									>{banSaving ? 'Banning…' : 'Confirm ban'}</button>
+									<button
+										onclick={() => { banTargetReportId = null; banError = null; }}
+										disabled={banSaving}
+										class="text-xs px-3 py-1.5 rounded-md border border-border text-text-muted hover:text-text-primary hover:bg-bg-hover cursor-pointer font-sans transition-colors"
+									>Cancel</button>
+								</div>
+							</div>
 						{:else}
 							<div class="flex gap-2 flex-wrap">
 								<button
@@ -252,14 +391,12 @@
 									class="font-sans text-xs px-3 py-1.5 rounded-md cursor-pointer border border-danger text-danger font-medium hover:bg-bg-hover bg-danger/8 transition-colors"
 								>Remove Post</button>
 								<button
-									disabled
-									class="font-sans text-xs px-3 py-1.5 rounded-md cursor-not-allowed border border-danger text-danger font-medium opacity-50 bg-danger/8 transition-colors"
-									title="Not yet implemented"
+									onclick={() => startSuspendUser(report)}
+									class="font-sans text-xs px-3 py-1.5 rounded-md cursor-pointer border border-danger text-danger font-medium hover:bg-bg-hover bg-danger/8 transition-colors"
 								>Suspend User</button>
 								<button
-									disabled
-									class="font-sans text-xs px-3 py-1.5 rounded-md cursor-not-allowed border border-danger text-danger font-medium opacity-50 bg-danger/15 transition-colors"
-									title="Not yet implemented"
+									onclick={() => startBanUser(report)}
+									class="font-sans text-xs px-3 py-1.5 rounded-md cursor-pointer border border-danger text-danger font-medium hover:bg-bg-hover bg-danger/15 transition-colors"
 								>Ban User</button>
 							</div>
 						{/if}

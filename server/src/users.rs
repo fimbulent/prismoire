@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::error::{AppError, ErrorCode};
 use crate::session::AuthUser;
 use crate::state::AppState;
-use crate::trust::{MINIMUM_TRUST_THRESHOLD, TrustInfo, TrustPath, load_distrust_set};
+use crate::trust::{MINIMUM_TRUST_THRESHOLD, TrustInfo, TrustPath, UserStatus, load_distrust_set};
 
 const MAX_BIO_LEN: usize = 500;
 const ACTIVITY_PAGE_SIZE: i64 = 10;
@@ -145,21 +145,57 @@ pub enum TrustEdgeType {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Look up a user ID by display name, returning 404 if not found.
+/// Look up a user by display name, returning 404 if not found.
+///
+/// Returns `(id, display_name, created_at, signup_method, bio, role, status)`.
+/// Does not filter by status — callers decide how to handle banned/suspended users.
 async fn resolve_user(
     db: &sqlx::SqlitePool,
     username: &str,
-) -> Result<(String, String, String, String, Option<String>, String), AppError> {
-    // Returns: (id, display_name, created_at, signup_method, bio, role)
-    let row = sqlx::query_as::<_, (String, String, String, String, Option<String>, String)>(
-        "SELECT id, display_name, created_at, signup_method, bio, role \
-         FROM users WHERE display_name = ? AND status = 'active'",
+) -> Result<
+    (
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        String,
+        UserStatus,
+    ),
+    AppError,
+> {
+    let (id, display_name, created_at, signup_method, bio, role, status_str) = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+            String,
+        ),
+    >(
+        "SELECT id, display_name, created_at, signup_method, bio, role, status \
+             FROM users WHERE display_name = ?",
     )
     .bind(username)
     .fetch_optional(db)
     .await?
     .ok_or_else(|| AppError::code(ErrorCode::UserNotFound))?;
-    Ok(row)
+    let status = UserStatus::try_from(status_str.as_str()).map_err(|e| {
+        eprintln!("{e}");
+        AppError::code(ErrorCode::Internal)
+    })?;
+    Ok((
+        id,
+        display_name,
+        created_at,
+        signup_method,
+        bio,
+        role,
+        status,
+    ))
 }
 
 /// Look up the viewer's trust stance toward `target_user`.
@@ -179,21 +215,23 @@ async fn get_trust_stance(
     Ok(row.map(|(t,)| t).unwrap_or_else(|| "neutral".into()))
 }
 
-/// Build a UUID→display_name map for a set of UUIDs.
+/// Build a UUID→(display_name, status) map for a set of UUIDs.
 async fn resolve_display_names(
     db: &sqlx::SqlitePool,
     uuids: &[Uuid],
-) -> Result<std::collections::HashMap<Uuid, String>, AppError> {
+) -> Result<std::collections::HashMap<Uuid, (String, UserStatus)>, AppError> {
     let mut map = std::collections::HashMap::new();
     for uuid in uuids {
         let id_str = uuid.to_string();
-        if let Some((name,)) =
-            sqlx::query_as::<_, (String,)>("SELECT display_name FROM users WHERE id = ?")
-                .bind(&id_str)
-                .fetch_optional(db)
-                .await?
+        if let Some((name, status_str)) = sqlx::query_as::<_, (String, String)>(
+            "SELECT display_name, status FROM users WHERE id = ?",
+        )
+        .bind(&id_str)
+        .fetch_optional(db)
+        .await?
         {
-            map.insert(*uuid, name);
+            let status = UserStatus::try_from(status_str.as_str()).unwrap_or(UserStatus::Active);
+            map.insert(*uuid, (name, status));
         }
     }
     Ok(map)
@@ -209,7 +247,7 @@ pub async fn get_profile(
     user: AuthUser,
     Path(username): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let (target_id, display_name, created_at, signup_method, bio, role) =
+    let (target_id, display_name, created_at, signup_method, bio, role, target_status) =
         resolve_user(&state.db, &username).await?;
 
     let is_self = user.user_id == target_id;
@@ -239,6 +277,7 @@ pub async fn get_profile(
                 TrustInfo {
                     distance,
                     distrusted: you_distrust,
+                    status: target_status,
                 },
             ),
             None => (
@@ -246,6 +285,7 @@ pub async fn get_profile(
                 TrustInfo {
                     distance: None,
                     distrusted: you_distrust,
+                    status: target_status,
                 },
             ),
         }
@@ -274,7 +314,8 @@ pub async fn get_trust_detail(
     user: AuthUser,
     Path(username): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let (target_id, _display_name, ..) = resolve_user(&state.db, &username).await?;
+    let (target_id, _display_name, _, _, _, _, target_status) =
+        resolve_user(&state.db, &username).await?;
 
     let is_self = user.user_id == target_id;
 
@@ -333,6 +374,7 @@ pub async fn get_trust_detail(
             TrustInfo {
                 distance: None,
                 distrusted: true,
+                status: target_status,
             }
         };
         (None, trust, Vec::new(), Vec::new())
@@ -365,14 +407,15 @@ pub async fn get_trust_detail(
                 },
                 TrustPath::TwoHop { via } => {
                     let id = via.to_string();
+                    let (vname, vstatus) = name_map
+                        .get(&via)
+                        .cloned()
+                        .unwrap_or_else(|| ("unknown".into(), UserStatus::Active));
                     TrustPathResponse {
                         path_type: "2hop".into(),
                         via: Some(TrustUserRef {
-                            display_name: name_map
-                                .get(&via)
-                                .cloned()
-                                .unwrap_or_else(|| "unknown".into()),
-                            trust: TrustInfo::build(&id, &distance_map, &distrust_set),
+                            display_name: vname,
+                            trust: TrustInfo::build(&id, &distance_map, &distrust_set, vstatus),
                         }),
                         via2: None,
                     }
@@ -380,21 +423,23 @@ pub async fn get_trust_detail(
                 TrustPath::ThreeHop { via1, via2 } => {
                     let id1 = via1.to_string();
                     let id2 = via2.to_string();
+                    let (v1name, v1status) = name_map
+                        .get(&via1)
+                        .cloned()
+                        .unwrap_or_else(|| ("unknown".into(), UserStatus::Active));
+                    let (v2name, v2status) = name_map
+                        .get(&via2)
+                        .cloned()
+                        .unwrap_or_else(|| ("unknown".into(), UserStatus::Active));
                     TrustPathResponse {
                         path_type: "3hop".into(),
                         via: Some(TrustUserRef {
-                            display_name: name_map
-                                .get(&via1)
-                                .cloned()
-                                .unwrap_or_else(|| "unknown".into()),
-                            trust: TrustInfo::build(&id1, &distance_map, &distrust_set),
+                            display_name: v1name,
+                            trust: TrustInfo::build(&id1, &distance_map, &distrust_set, v1status),
                         }),
                         via2: Some(TrustUserRef {
-                            display_name: name_map
-                                .get(&via2)
-                                .cloned()
-                                .unwrap_or_else(|| "unknown".into()),
-                            trust: TrustInfo::build(&id2, &distance_map, &distrust_set),
+                            display_name: v2name,
+                            trust: TrustInfo::build(&id2, &distance_map, &distrust_set, v2status),
                         }),
                     }
                 }
@@ -423,6 +468,7 @@ pub async fn get_trust_detail(
             TrustInfo {
                 distance,
                 distrusted: false,
+                status: target_status,
             },
             built_paths,
             reductions,
@@ -442,8 +488,8 @@ pub async fn get_trust_detail(
         edges
     };
 
-    let trusts_batch = sqlx::query_as::<_, (String, String)>(
-        "SELECT u.display_name, u.id FROM trust_edges te \
+    let trusts_batch = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT u.display_name, u.id, u.status FROM trust_edges te \
          JOIN users u ON u.id = te.target_user \
          WHERE te.source_user = ? AND te.trust_type = 'trust' \
          ORDER BY te.created_at DESC LIMIT ?",
@@ -463,8 +509,13 @@ pub async fn get_trust_detail(
     let trusts: Vec<TrustEdgeUser> = sort_trust_edges(
         trusts_batch
             .into_iter()
-            .map(|(name, uid)| TrustEdgeUser {
-                trust: TrustInfo::build(&uid, &distance_map, &distrust_set),
+            .map(|(name, uid, status_str)| TrustEdgeUser {
+                trust: TrustInfo::build(
+                    &uid,
+                    &distance_map,
+                    &distrust_set,
+                    UserStatus::try_from(status_str.as_str()).unwrap_or(UserStatus::Active),
+                ),
                 display_name: name,
             })
             .collect(),
@@ -473,8 +524,8 @@ pub async fn get_trust_detail(
     .take(TRUST_LIST_PREVIEW as usize)
     .collect();
 
-    let trusted_by_batch = sqlx::query_as::<_, (String, String)>(
-        "SELECT u.display_name, u.id FROM trust_edges te \
+    let trusted_by_batch = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT u.display_name, u.id, u.status FROM trust_edges te \
          JOIN users u ON u.id = te.source_user \
          WHERE te.target_user = ? AND te.trust_type = 'trust' \
          ORDER BY te.created_at DESC LIMIT ?",
@@ -494,8 +545,13 @@ pub async fn get_trust_detail(
     let trusted_by: Vec<TrustEdgeUser> = sort_trust_edges(
         trusted_by_batch
             .into_iter()
-            .map(|(name, uid)| TrustEdgeUser {
-                trust: TrustInfo::build(&uid, &distance_map, &distrust_set),
+            .map(|(name, uid, status_str)| TrustEdgeUser {
+                trust: TrustInfo::build(
+                    &uid,
+                    &distance_map,
+                    &distrust_set,
+                    UserStatus::try_from(status_str.as_str()).unwrap_or(UserStatus::Active),
+                ),
                 display_name: name,
             })
             .collect(),
@@ -648,8 +704,8 @@ pub async fn get_trust_edges(
 
     let (rows, total) = match query.direction.as_str() {
         "trusts" => {
-            let rows = sqlx::query_as::<_, (String, String)>(
-                "SELECT u.display_name, u.id FROM trust_edges te \
+            let rows = sqlx::query_as::<_, (String, String, String)>(
+                "SELECT u.display_name, u.id, u.status FROM trust_edges te \
                  JOIN users u ON u.id = te.target_user \
                  WHERE te.source_user = ? AND te.trust_type = 'trust'",
             )
@@ -660,8 +716,8 @@ pub async fn get_trust_edges(
             (rows, total)
         }
         "trusted_by" => {
-            let rows = sqlx::query_as::<_, (String, String)>(
-                "SELECT u.display_name, u.id FROM trust_edges te \
+            let rows = sqlx::query_as::<_, (String, String, String)>(
+                "SELECT u.display_name, u.id, u.status FROM trust_edges te \
                  JOIN users u ON u.id = te.source_user \
                  WHERE te.target_user = ? AND te.trust_type = 'trust'",
             )
@@ -680,8 +736,9 @@ pub async fn get_trust_edges(
 
     let mut users: Vec<TrustEdgeUser> = rows
         .into_iter()
-        .map(|(name, uid)| {
-            let trust = TrustInfo::build(&uid, &distance_map, &distrust_set);
+        .map(|(name, uid, status_str)| {
+            let status = UserStatus::try_from(status_str.as_str()).unwrap_or(UserStatus::Active);
+            let trust = TrustInfo::build(&uid, &distance_map, &distrust_set, status);
             TrustEdgeUser {
                 display_name: name,
                 trust,

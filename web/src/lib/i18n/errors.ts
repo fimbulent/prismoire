@@ -35,6 +35,7 @@ const ERROR_MESSAGES: Record<ErrorCode, string> = {
 	invite_required: 'An invite code is required to sign up.',
 	invite_max_uses_invalid: 'Max uses must be at least 1.',
 	invite_expiry_invalid: 'Invite expiry is out of range.',
+	invite_privilege_revoked: 'Your invite privileges have been revoked.',
 
 	// Setup
 	setup_already_complete: 'Instance setup has already been completed.',
@@ -76,6 +77,13 @@ const ERROR_MESSAGES: Record<ErrorCode, string> = {
 	// Admin
 	admin_required: 'Admin access required.',
 	reason_required: 'A reason is required for this action.',
+	already_banned: 'User is already banned.',
+	not_banned: 'User is not banned.',
+	already_suspended: 'User is already suspended.',
+	not_suspended: 'User is not suspended.',
+	cannot_moderate_admin: 'Cannot ban or suspend an admin.',
+	invalid_duration: 'Invalid suspension duration.',
+	invite_privilege_unchanged: 'Invite privileges are already in the requested state.',
 
 	// Reports
 	report_reason_invalid: 'Invalid report reason.',

@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::error::{AppError, ErrorCode};
 use crate::session::OptionalAuthUser;
 use crate::state::AppState;
-use crate::trust::{MINIMUM_TRUST_THRESHOLD, TrustInfo, load_distrust_set};
+use crate::trust::{MINIMUM_TRUST_THRESHOLD, TrustInfo, UserStatus, load_distrust_set};
 
 use super::common::{
     PostResponse, RepliesPageResponse, SubtreeResponse, ThreadDetailResponse, sql_placeholders,
@@ -67,6 +67,7 @@ struct PostMeta {
     parent_id: Option<String>,
     author_id: String,
     author_name: String,
+    author_status: UserStatus,
     created_at: String,
     retracted_at: Option<String>,
 }
@@ -331,6 +332,7 @@ impl TreeCtx<'_> {
                 &meta.author_id,
                 &self.viewer.trust_map,
                 &self.viewer.distrust_set,
+                meta.author_status,
             ),
             id: meta.id.clone(),
             parent_id: meta.parent_id.clone(),
@@ -423,10 +425,11 @@ async fn fetch_post_metadata(
             String,
             String,
             String,
+            String,
             Option<String>,
         ),
     >(
-        "SELECT p.id, p.parent, p.author, u.display_name, p.created_at, p.retracted_at \
+        "SELECT p.id, p.parent, p.author, u.display_name, u.status, p.created_at, p.retracted_at \
          FROM posts p \
          JOIN users u ON u.id = p.author \
          WHERE p.thread = ? \
@@ -439,11 +442,21 @@ async fn fetch_post_metadata(
     Ok(rows
         .into_iter()
         .map(
-            |(id, parent_id, author_id, author_name, created_at, retracted_at)| PostMeta {
+            |(id, parent_id, author_id, author_name, author_status, created_at, retracted_at): (
+                String,
+                Option<String>,
+                String,
+                String,
+                String,
+                String,
+                Option<String>,
+            )| PostMeta {
                 id,
                 parent_id,
                 author_id,
                 author_name,
+                author_status: UserStatus::try_from(author_status.as_str())
+                    .unwrap_or(UserStatus::Active),
                 created_at,
                 retracted_at,
             },
@@ -617,7 +630,12 @@ pub async fn get_thread(
     let reply_count = count_tree_replies(&op_children);
 
     let op = PostResponse {
-        trust: TrustInfo::build(&op_meta.author_id, &viewer.trust_map, &viewer.distrust_set),
+        trust: TrustInfo::build(
+            &op_meta.author_id,
+            &viewer.trust_map,
+            &viewer.distrust_set,
+            op_meta.author_status,
+        ),
         id: op_meta.id.clone(),
         parent_id: None,
         author_id: op_meta.author_id.clone(),
@@ -745,7 +763,12 @@ async fn build_focused_response(
     let reply_count = count_tree_replies(&op_children);
 
     let op = PostResponse {
-        trust: TrustInfo::build(&op_meta.author_id, &viewer.trust_map, &viewer.distrust_set),
+        trust: TrustInfo::build(
+            &op_meta.author_id,
+            &viewer.trust_map,
+            &viewer.distrust_set,
+            op_meta.author_status,
+        ),
         id: op_meta.id.clone(),
         parent_id: None,
         author_id: op_meta.author_id.clone(),

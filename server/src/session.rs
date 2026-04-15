@@ -186,8 +186,8 @@ pub async fn session_middleware(
     let mut renewal_cookie: Option<String> = None;
 
     if let Some(token) = extract_session_token(&request) {
-        let row = sqlx::query_as::<_, (String, String, String, String, String)>(
-            "SELECT s.user_id, u.display_name, s.expires_at, u.status, u.role \
+        let row = sqlx::query_as::<_, (String, String, String, String, String, Option<String>)>(
+            "SELECT s.user_id, u.display_name, s.expires_at, u.status, u.role, u.suspended_until \
              FROM sessions s \
              JOIN users u ON u.id = s.user_id \
              WHERE s.token = ?",
@@ -198,31 +198,55 @@ pub async fn session_middleware(
         .ok()
         .flatten();
 
-        if let Some((user_id, display_name, expires_at, status, role)) = row
-            && status == "active"
+        if let Some((user_id, display_name, expires_at, mut status, role, suspended_until)) = row
             && let Ok(expires) =
                 chrono::NaiveDateTime::parse_from_str(&expires_at, "%Y-%m-%dT%H:%M:%SZ")
         {
-            let now = Utc::now().naive_utc();
-            if expires >= now {
-                request.extensions_mut().insert(AuthSession {
-                    user_id,
-                    display_name,
-                    role,
-                });
+            // Lazy suspension expiry: if the user is suspended and the
+            // suspension period has elapsed, atomically restore to active.
+            if status == "suspended" {
+                let expired = suspended_until
+                    .as_deref()
+                    .and_then(|s| {
+                        chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%SZ").ok()
+                    })
+                    .is_some_and(|until| until < Utc::now().naive_utc());
+                if expired {
+                    let _ = sqlx::query(
+                        "UPDATE users SET status = 'active', suspended_until = NULL WHERE id = ?",
+                    )
+                    .bind(&user_id)
+                    .execute(&state.db)
+                    .await;
+                    status = "active".to_string();
+                }
+            }
 
-                // Sliding session: renew when past the halfway point.
-                let remaining = expires - now;
-                if remaining < Duration::days(RENEWAL_THRESHOLD_DAYS) {
-                    let new_expires = (Utc::now() + Duration::days(SESSION_DURATION_DAYS))
-                        .format("%Y-%m-%dT%H:%M:%SZ")
-                        .to_string();
-                    let _ = sqlx::query("UPDATE sessions SET expires_at = ? WHERE token = ?")
-                        .bind(&new_expires)
-                        .bind(&token)
-                        .execute(&state.db)
-                        .await;
-                    renewal_cookie = Some(session_cookie(&token));
+            if status != "active" {
+                // Banned or still-suspended users pass through
+                // unauthenticated — the AuthUser extractor will return 401.
+            } else {
+                let now = Utc::now().naive_utc();
+                if expires >= now {
+                    request.extensions_mut().insert(AuthSession {
+                        user_id,
+                        display_name,
+                        role,
+                    });
+
+                    // Sliding session: renew when past the halfway point.
+                    let remaining = expires - now;
+                    if remaining < Duration::days(RENEWAL_THRESHOLD_DAYS) {
+                        let new_expires = (Utc::now() + Duration::days(SESSION_DURATION_DAYS))
+                            .format("%Y-%m-%dT%H:%M:%SZ")
+                            .to_string();
+                        let _ = sqlx::query("UPDATE sessions SET expires_at = ? WHERE token = ?")
+                            .bind(&new_expires)
+                            .bind(&token)
+                            .execute(&state.db)
+                            .await;
+                        renewal_cookie = Some(session_cookie(&token));
+                    }
                 }
             }
         }

@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::error::{AppError, ErrorCode};
 use crate::session::AuthUser;
 use crate::state::AppState;
-use crate::trust::{TrustInfo, load_distrust_set};
+use crate::trust::{TrustInfo, UserStatus, load_distrust_set};
 
 use super::common::{
     MAX_SEEN_IDS, PAGE_SIZE, PaginationParams, RecentReplier, ThreadListResponse, ThreadSort,
@@ -49,12 +49,14 @@ type AllThreadsRow = (
     String,
     String,
     String,
+    String,
     bool,
     bool,
     i64,
     Option<String>,
 );
 type RoomThreadsRow = (
+    String,
     String,
     String,
     String,
@@ -79,6 +81,7 @@ fn all_threads_to_summary(
         title,
         author_id,
         author_name,
+        author_status,
         created_at,
         room_id,
         room_slug,
@@ -87,7 +90,8 @@ fn all_threads_to_summary(
         reply_count,
         last_activity,
     ) = row;
-    let trust = TrustInfo::build(&author_id, trust_map, distrust_set);
+    let status = UserStatus::try_from(author_status.as_str()).unwrap_or(UserStatus::Active);
+    let trust = TrustInfo::build(&author_id, trust_map, distrust_set, status);
     ThreadSummary {
         trust,
         id,
@@ -112,8 +116,19 @@ fn room_threads_to_summary(
     trust_map: &HashMap<String, f64>,
     distrust_set: &HashSet<String>,
 ) -> ThreadSummary {
-    let (id, title, author_id, author_name, created_at, locked, reply_count, last_activity) = row;
-    let trust = TrustInfo::build(&author_id, trust_map, distrust_set);
+    let (
+        id,
+        title,
+        author_id,
+        author_name,
+        author_status,
+        created_at,
+        locked,
+        reply_count,
+        last_activity,
+    ) = row;
+    let status = UserStatus::try_from(author_status.as_str()).unwrap_or(UserStatus::Active);
+    let trust = TrustInfo::build(&author_id, trust_map, distrust_set, status);
     ThreadSummary {
         trust,
         id,
@@ -261,7 +276,7 @@ pub async fn list_public_announcement_threads(
     let rows = if let Some(ref cursor) = params.cursor {
         let (cursor_ts, cursor_id) = parse_cursor(cursor)?;
         sqlx::query_as::<_, AllThreadsRow>(
-            "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
+            "SELECT t.id, t.title, t.author, u.display_name, u.status, t.created_at, \
              r.id, r.slug, t.locked, (r.slug = 'announcements') AS is_announcement, \
              t.reply_count, t.last_activity \
              FROM threads t \
@@ -284,7 +299,7 @@ pub async fn list_public_announcement_threads(
         .await?
     } else {
         sqlx::query_as::<_, AllThreadsRow>(
-            "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
+            "SELECT t.id, t.title, t.author, u.display_name, u.status, t.created_at, \
              r.id, r.slug, t.locked, (r.slug = 'announcements') AS is_announcement, \
              t.reply_count, t.last_activity \
              FROM threads t \
@@ -312,6 +327,7 @@ pub async fn list_public_announcement_threads(
                 title,
                 author_id,
                 author_name,
+                author_status,
                 created_at,
                 room_id,
                 room_slug,
@@ -332,7 +348,12 @@ pub async fn list_public_announcement_threads(
                 is_announcement,
                 reply_count,
                 last_activity,
-                trust: TrustInfo::unknown(),
+                trust: TrustInfo {
+                    distance: None,
+                    distrusted: false,
+                    status: UserStatus::try_from(author_status.as_str())
+                        .unwrap_or(UserStatus::Active),
+                },
             }
         })
         .collect();
@@ -421,7 +442,7 @@ pub async fn list_all_threads(
     let rows = if let Some(ref cursor) = params.cursor {
         let (cursor_ts, cursor_id) = parse_cursor(cursor)?;
         let sql = format!(
-            "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
+            "SELECT t.id, t.title, t.author, u.display_name, u.status, t.created_at, \
              r.id, r.slug, t.locked, (r.slug = 'announcements') AS is_announcement, \
              t.reply_count, t.last_activity \
              FROM threads t \
@@ -443,7 +464,7 @@ pub async fn list_all_threads(
             .await?
     } else {
         let sql = format!(
-            "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
+            "SELECT t.id, t.title, t.author, u.display_name, u.status, t.created_at, \
              r.id, r.slug, t.locked, (r.slug = 'announcements') AS is_announcement, \
              t.reply_count, t.last_activity \
              FROM threads t \
@@ -464,9 +485,11 @@ pub async fn list_all_threads(
     let mut threads: Vec<ThreadSummary> = rows
         .into_iter()
         .take(PAGE_SIZE)
-        .filter(|(_, _, author_id, _, _, _, _, _, is_announcement, _, _)| {
-            is_thread_visible(author_id, *is_announcement, &user.user_id, &reverse_map)
-        })
+        .filter(
+            |(_, _, author_id, _, _, _, _, _, _, is_announcement, _, _)| {
+                is_thread_visible(author_id, *is_announcement, &user.user_id, &reverse_map)
+            },
+        )
         .map(|row| all_threads_to_summary(row, &trust_map, &distrust_set))
         .collect();
 
@@ -567,7 +590,7 @@ pub async fn list_threads(
     let rows = if let Some(ref cursor) = params.cursor {
         let (cursor_ts, cursor_id) = parse_cursor(cursor)?;
         let sql = format!(
-            "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
+            "SELECT t.id, t.title, t.author, u.display_name, u.status, t.created_at, \
              t.locked, t.reply_count, t.last_activity \
              FROM threads t \
              JOIN users u ON u.id = t.author \
@@ -588,7 +611,7 @@ pub async fn list_threads(
             .await?
     } else {
         let sql = format!(
-            "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
+            "SELECT t.id, t.title, t.author, u.display_name, u.status, t.created_at, \
              t.locked, t.reply_count, t.last_activity \
              FROM threads t \
              JOIN users u ON u.id = t.author \
@@ -608,7 +631,7 @@ pub async fn list_threads(
     let mut threads: Vec<ThreadSummary> = rows
         .into_iter()
         .take(PAGE_SIZE)
-        .filter(|(_, _, author_id, _, _, _, _, _)| {
+        .filter(|(_, _, author_id, _, _, _, _, _, _)| {
             is_thread_visible(author_id, is_announcement, &user.user_id, &reverse_map)
         })
         .map(|row| {
@@ -1059,7 +1082,7 @@ async fn fetch_warm_candidates_all(
         // Uses <= on ID for inclusivity — the cursor thread is a leftover
         // that must be re-evaluated on this page.
         sqlx::query_as::<_, AllThreadsRow>(
-            "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
+            "SELECT t.id, t.title, t.author, u.display_name, u.status, t.created_at, \
              r.id, r.slug, t.locked, (r.slug = 'announcements') AS is_announcement, \
              t.reply_count, t.last_activity \
              FROM threads t \
@@ -1082,7 +1105,7 @@ async fn fetch_warm_candidates_all(
     } else {
         // Page 1: fetch from the top.
         sqlx::query_as::<_, AllThreadsRow>(
-            "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
+            "SELECT t.id, t.title, t.author, u.display_name, u.status, t.created_at, \
              r.id, r.slug, t.locked, (r.slug = 'announcements') AS is_announcement, \
              t.reply_count, t.last_activity \
              FROM threads t \
@@ -1104,17 +1127,21 @@ async fn fetch_warm_candidates_all(
     // Record the last candidate's activity and ID for cursor construction.
     let (last_candidate_activity, last_candidate_id) = rows
         .last()
-        .map(|(id, _, _, _, created_at, _, _, _, _, _, last_activity)| {
-            let activity = last_activity.clone().unwrap_or_else(|| created_at.clone());
-            (Some(activity), Some(id.clone()))
-        })
+        .map(
+            |(id, _, _, _, _, created_at, _, _, _, _, _, last_activity)| {
+                let activity = last_activity.clone().unwrap_or_else(|| created_at.clone());
+                (Some(activity), Some(id.clone()))
+            },
+        )
         .unwrap_or((None, None));
 
     let visible = rows
         .into_iter()
-        .filter(|(_, _, author_id, _, _, _, _, _, is_announcement, _, _)| {
-            is_thread_visible(author_id, *is_announcement, reader_id, reverse_map)
-        })
+        .filter(
+            |(_, _, author_id, _, _, _, _, _, _, is_announcement, _, _)| {
+                is_thread_visible(author_id, *is_announcement, reader_id, reverse_map)
+            },
+        )
         .map(|row| all_threads_to_summary(row, trust_map, distrust_set))
         .collect();
 
@@ -1142,7 +1169,7 @@ async fn fetch_warm_candidates_room(
 ) -> Result<CandidateBatch, AppError> {
     let rows = if let Some((cursor_ts, cursor_id)) = cursor {
         sqlx::query_as::<_, RoomThreadsRow>(
-            "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
+            "SELECT t.id, t.title, t.author, u.display_name, u.status, t.created_at, \
              t.locked, t.reply_count, t.last_activity \
              FROM threads t \
              JOIN users u ON u.id = t.author \
@@ -1163,7 +1190,7 @@ async fn fetch_warm_candidates_room(
         .await?
     } else {
         sqlx::query_as::<_, RoomThreadsRow>(
-            "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
+            "SELECT t.id, t.title, t.author, u.display_name, u.status, t.created_at, \
              t.locked, t.reply_count, t.last_activity \
              FROM threads t \
              JOIN users u ON u.id = t.author \
@@ -1182,7 +1209,7 @@ async fn fetch_warm_candidates_room(
     let candidates_fetched = rows.len();
     let (last_candidate_activity, last_candidate_id) = rows
         .last()
-        .map(|(id, _, _, _, created_at, _, _, last_activity)| {
+        .map(|(id, _, _, _, _, created_at, _, _, last_activity)| {
             let activity = last_activity.clone().unwrap_or_else(|| created_at.clone());
             (Some(activity), Some(id.clone()))
         })
@@ -1190,7 +1217,7 @@ async fn fetch_warm_candidates_room(
 
     let visible = rows
         .into_iter()
-        .filter(|(_, _, author_id, _, _, _, _, _)| {
+        .filter(|(_, _, author_id, _, _, _, _, _, _)| {
             is_thread_visible(author_id, is_announcement, reader_id, reverse_map)
         })
         .map(|row| {

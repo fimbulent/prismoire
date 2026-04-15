@@ -26,7 +26,13 @@
 		unlock_thread: 'Unlocked thread',
 		remove_post: 'Removed post',
 		merge_room: 'Merged room',
-		delete_room: 'Deleted room'
+		delete_room: 'Deleted room',
+		ban_user: 'Banned',
+		unban_user: 'Unbanned',
+		suspend_user: 'Suspended',
+		unsuspend_user: 'Unsuspended',
+		revoke_invites: 'Revoked invites for',
+		grant_invites: 'Granted invites for'
 	};
 
 	async function loadMore() {
@@ -68,6 +74,9 @@
 					<div class="flex items-start gap-2 text-sm">
 						<span class="font-semibold text-text-primary">{entry.admin_name}</span>
 						<span class="text-text-secondary">{actionLabel(entry.action)}</span>
+						{#if entry.target_user_name}
+							<a href="/user/{entry.target_user_name}" class="font-semibold text-text-primary hover:underline">{entry.target_user_name}</a>
+						{/if}
 						{#if entry.thread_title}
 							<a
 								href="/room/all"

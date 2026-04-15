@@ -101,6 +101,8 @@ pub enum ErrorCode {
     InviteRequired,
     /// `max_uses` field below minimum (< 1).
     InviteMaxUsesInvalid,
+    /// User's invite privileges have been revoked by an admin.
+    InvitePrivilegeRevoked,
     /// `expires_in_seconds` field outside allowed range.
     InviteExpiryInvalid,
 
@@ -171,6 +173,20 @@ pub enum ErrorCode {
     AdminRequired,
     /// Admin action requires a non-empty `reason`.
     ReasonRequired,
+    /// Target user is already banned.
+    AlreadyBanned,
+    /// Target user is not currently banned.
+    NotBanned,
+    /// Target user is already suspended.
+    AlreadySuspended,
+    /// Target user is not currently suspended.
+    NotSuspended,
+    /// Cannot ban or suspend an admin.
+    CannotModerateAdmin,
+    /// Invalid suspension duration.
+    InvalidDuration,
+    /// User's invite privileges are already in the requested state.
+    InvitePrivilegeUnchanged,
 
     // -- Reports -----------------------------------------------------
     /// Report reason is not one of the accepted enum values.
@@ -209,7 +225,9 @@ impl ErrorCode {
             | Self::AdminRequired
             | Self::NotOwnProfile
             | Self::NotPostAuthor
-            | Self::AnnouncementsAdminOnly => StatusCode::FORBIDDEN,
+            | Self::AnnouncementsAdminOnly
+            | Self::CannotModerateAdmin
+            | Self::InvitePrivilegeRevoked => StatusCode::FORBIDDEN,
 
             Self::UserNotFound
             | Self::NoCredentials
@@ -224,7 +242,12 @@ impl ErrorCode {
             | Self::SetupAlreadyComplete
             | Self::ThreadAlreadyLocked
             | Self::PostAlreadyRetracted
-            | Self::AlreadyReported => StatusCode::CONFLICT,
+            | Self::AlreadyReported
+            | Self::AlreadyBanned
+            | Self::AlreadySuspended
+            | Self::NotBanned
+            | Self::NotSuspended
+            | Self::InvitePrivilegeUnchanged => StatusCode::CONFLICT,
 
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
 
@@ -261,6 +284,7 @@ impl ErrorCode {
             | Self::ReportReasonInvalid
             | Self::SelfReport
             | Self::InvalidTheme
+            | Self::InvalidDuration
             | Self::BadRequest => StatusCode::BAD_REQUEST,
         }
     }
@@ -286,6 +310,7 @@ impl ErrorCode {
             Self::InviteExhausted => "invite code has been fully used",
             Self::InviteRequired => "invite code required",
             Self::InviteMaxUsesInvalid => "max_uses must be at least 1",
+            Self::InvitePrivilegeRevoked => "invite privileges have been revoked",
             Self::InviteExpiryInvalid => "invite expiry is out of range",
 
             Self::SetupAlreadyComplete => "setup already completed",
@@ -321,6 +346,13 @@ impl ErrorCode {
 
             Self::AdminRequired => "admin access required",
             Self::ReasonRequired => "reason is required",
+            Self::AlreadyBanned => "user is already banned",
+            Self::NotBanned => "user is not banned",
+            Self::AlreadySuspended => "user is already suspended",
+            Self::NotSuspended => "user is not suspended",
+            Self::CannotModerateAdmin => "cannot ban or suspend an admin",
+            Self::InvalidDuration => "invalid suspension duration",
+            Self::InvitePrivilegeUnchanged => "invite privileges already in requested state",
 
             Self::ReportReasonInvalid => "invalid report reason",
             Self::AlreadyReported => "you have already reported this post",

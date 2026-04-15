@@ -78,6 +78,15 @@ pub async fn create_invite(
     user: AuthUser,
     Json(req): Json<CreateInviteRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    let (can_invite,): (bool,) = sqlx::query_as("SELECT can_invite FROM users WHERE id = ?")
+        .bind(&user.user_id)
+        .fetch_one(&state.db)
+        .await?;
+
+    if !can_invite {
+        return Err(AppError::code(ErrorCode::InvitePrivilegeRevoked));
+    }
+
     let max_uses = req.max_uses;
 
     if let Some(n) = max_uses

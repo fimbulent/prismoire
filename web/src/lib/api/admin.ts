@@ -5,6 +5,8 @@ export interface AdminLogEntry {
 	admin_id: string;
 	admin_name: string;
 	action: string;
+	target_user_id: string | null;
+	target_user_name: string | null;
 	thread_id: string | null;
 	thread_title: string | null;
 	post_id: string | null;
@@ -152,6 +154,42 @@ export async function actionReport(reportId: string, opts: FetchOpts = {}): Prom
 		method: 'POST'
 	});
 	if (!res.ok) await throwApiError(res);
+}
+
+export interface BanResponse {
+	banned_users: { id: string; display_name: string }[];
+	snapshot_edges: number;
+}
+
+export async function suspendUser(
+	userId: string,
+	reason: string,
+	duration: string,
+	opts: FetchOpts = {}
+): Promise<void> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f(`/api/admin/users/${encodeURIComponent(userId)}/suspend`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ reason, duration })
+	});
+	if (!res.ok) await throwApiError(res);
+}
+
+export async function banUser(
+	userId: string,
+	reason: string,
+	banTree: boolean = false,
+	opts: FetchOpts = {}
+): Promise<BanResponse> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f(`/api/admin/users/${encodeURIComponent(userId)}/ban`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ reason, ban_tree: banTree })
+	});
+	if (!res.ok) await throwApiError(res);
+	return res.json();
 }
 
 export async function getAdminDashboard(opts: FetchOpts = {}): Promise<DashboardResponse> {

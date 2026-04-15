@@ -230,6 +230,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             post(reports::action_report),
         )
         .route("/api/admin/dashboard", get(reports::get_dashboard))
+        .route(
+            "/api/admin/users/{id}/ban",
+            post(admin::ban_user).delete(admin::unban_user),
+        )
+        .route(
+            "/api/admin/users/{id}/suspend",
+            post(admin::suspend_user).delete(admin::unsuspend_user),
+        )
+        .route(
+            "/api/admin/users/{id}/invites",
+            post(admin::admin_grant_invites).delete(admin::admin_revoke_invites),
+        )
+        .route(
+            "/api/admin/users/{id}/invite-tree",
+            get(admin::get_invite_tree),
+        )
         .layer(axum::middleware::from_fn_with_state(
             shared_state.clone(),
             session::session_middleware,
