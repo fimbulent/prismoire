@@ -7,12 +7,14 @@ export interface TrustInfo {
 }
 
 export interface UserProfile {
+	id: string;
 	display_name: string;
 	created_at: string;
 	signup_method: string;
 	bio: string | null;
 	role: string;
 	is_self: boolean;
+	can_invite: boolean;
 	trust_stance: 'trust' | 'distrust' | 'neutral';
 	trust: TrustInfo;
 	trust_score: number | null;

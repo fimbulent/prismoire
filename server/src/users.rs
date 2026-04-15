@@ -25,12 +25,14 @@ const TRUST_LIST_MAX: i64 = 500;
 
 #[derive(Serialize)]
 pub struct UserProfileResponse {
+    pub id: String,
     pub display_name: String,
     pub created_at: String,
     pub signup_method: String,
     pub bio: Option<String>,
     pub role: String,
     pub is_self: bool,
+    pub can_invite: bool,
     pub trust_stance: String,
     pub trust: TrustInfo,
     pub trust_score: Option<f64>,
@@ -161,28 +163,31 @@ async fn resolve_user(
         Option<String>,
         String,
         UserStatus,
+        bool,
     ),
     AppError,
 > {
-    let (id, display_name, created_at, signup_method, bio, role, status_str) = sqlx::query_as::<
-        _,
-        (
-            String,
-            String,
-            String,
-            String,
-            Option<String>,
-            String,
-            String,
-        ),
-    >(
-        "SELECT id, display_name, created_at, signup_method, bio, role, status \
-             FROM users WHERE display_name = ?",
-    )
-    .bind(username)
-    .fetch_optional(db)
-    .await?
-    .ok_or_else(|| AppError::code(ErrorCode::UserNotFound))?;
+    let (id, display_name, created_at, signup_method, bio, role, status_str, can_invite) =
+        sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                String,
+                String,
+                Option<String>,
+                String,
+                String,
+                bool,
+            ),
+        >(
+            "SELECT id, display_name, created_at, signup_method, bio, role, status, can_invite \
+                 FROM users WHERE display_name = ?",
+        )
+        .bind(username)
+        .fetch_optional(db)
+        .await?
+        .ok_or_else(|| AppError::code(ErrorCode::UserNotFound))?;
     let status = UserStatus::try_from(status_str.as_str()).map_err(|e| {
         eprintln!("{e}");
         AppError::code(ErrorCode::Internal)
@@ -195,6 +200,7 @@ async fn resolve_user(
         bio,
         role,
         status,
+        can_invite,
     ))
 }
 
@@ -247,7 +253,7 @@ pub async fn get_profile(
     user: AuthUser,
     Path(username): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let (target_id, display_name, created_at, signup_method, bio, role, target_status) =
+    let (target_id, display_name, created_at, signup_method, bio, role, target_status, can_invite) =
         resolve_user(&state.db, &username).await?;
 
     let is_self = user.user_id == target_id;
@@ -292,12 +298,14 @@ pub async fn get_profile(
     };
 
     Ok(Json(UserProfileResponse {
+        id: target_id,
         display_name,
         created_at,
         signup_method,
         bio,
         role,
         is_self,
+        can_invite,
         trust_stance,
         trust,
         trust_score,
@@ -314,7 +322,7 @@ pub async fn get_trust_detail(
     user: AuthUser,
     Path(username): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let (target_id, _display_name, _, _, _, _, target_status) =
+    let (target_id, _display_name, _, _, _, _, target_status, _) =
         resolve_user(&state.db, &username).await?;
 
     let is_self = user.user_id == target_id;

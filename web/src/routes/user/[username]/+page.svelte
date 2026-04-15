@@ -19,6 +19,16 @@
 	import Tooltip from '$lib/components/ui/Tooltip.svelte';
 	import MoreButton from '$lib/components/ui/MoreButton.svelte';
 	import { errorMessage } from '$lib/i18n/errors';
+	import { session } from '$lib/stores/session.svelte';
+	import {
+		suspendUser,
+		banUser,
+		unbanUser,
+		unsuspendUser,
+		adminRevokeInvites,
+		adminGrantInvites
+	} from '$lib/api/admin';
+	import Checkbox from '$lib/components/ui/Checkbox.svelte';
 
 	let { data } = $props();
 
@@ -64,6 +74,9 @@
 		editingBio = false;
 		bioError = null;
 		actionError = null;
+		adminOpen = false;
+		adminAction = null;
+		adminError = null;
 	});
 
 	let activityItems = $derived([...data.activity, ...appendedActivity]);
@@ -189,6 +202,110 @@
 		return '';
 	}
 
+	let isAdmin = $derived(session.isAdmin && !profile.is_self && profile.role !== 'admin');
+	let adminOpen = $state(false);
+	let adminAction = $state<'suspend' | 'ban' | 'invites' | null>(null);
+	let adminReason = $state('');
+	let adminDuration = $state('1d');
+	let adminBanTree = $state(false);
+	let adminRevokeInv = $state(false);
+	let adminSaving = $state(false);
+	let adminError = $state<string | null>(null);
+
+	function resetAdminForm() {
+		adminAction = null;
+		adminReason = '';
+		adminDuration = '1d';
+		adminBanTree = false;
+		adminRevokeInv = false;
+		adminError = null;
+	}
+
+	async function adminRefresh() {
+		profile = await getUserProfile(username);
+		resetAdminForm();
+	}
+
+	async function confirmSuspend() {
+		const reason = adminReason.trim();
+		if (!reason) { adminError = 'Reason is required'; return; }
+		adminSaving = true;
+		adminError = null;
+		try {
+			await suspendUser(profile.id, reason, adminDuration);
+			if (adminRevokeInv) {
+				try { await adminRevokeInvites(profile.id, reason); } catch { /* already revoked */ }
+			}
+			await adminRefresh();
+		} catch (e) {
+			adminError = errorMessage(e, 'Suspend failed');
+		} finally {
+			adminSaving = false;
+		}
+	}
+
+	async function confirmBan() {
+		const reason = adminReason.trim();
+		if (!reason) { adminError = 'Reason is required'; return; }
+		adminSaving = true;
+		adminError = null;
+		try {
+			await banUser(profile.id, reason, adminBanTree);
+			await adminRefresh();
+		} catch (e) {
+			adminError = errorMessage(e, 'Ban failed');
+		} finally {
+			adminSaving = false;
+		}
+	}
+
+	async function handleUnsuspend() {
+		adminSaving = true;
+		adminError = null;
+		try {
+			await unsuspendUser(profile.id);
+			await adminRefresh();
+		} catch (e) {
+			adminError = errorMessage(e, 'Unsuspend failed');
+		} finally {
+			adminSaving = false;
+		}
+	}
+
+	async function handleUnban() {
+		const reason = adminReason.trim();
+		if (!reason) { adminError = 'Reason is required'; return; }
+		adminSaving = true;
+		adminError = null;
+		try {
+			await unbanUser(profile.id, reason);
+			await adminRefresh();
+		} catch (e) {
+			adminError = errorMessage(e, 'Unban failed');
+		} finally {
+			adminSaving = false;
+		}
+	}
+
+	async function handleToggleInvites() {
+		const reason = adminReason.trim();
+		if (!reason) { adminError = 'Reason is required'; return; }
+		adminSaving = true;
+		adminError = null;
+		try {
+			if (profile.can_invite) {
+				await adminRevokeInvites(profile.id, reason);
+			} else {
+				await adminGrantInvites(profile.id, reason);
+			}
+			await adminRefresh();
+		} catch (e) {
+			adminError = errorMessage(e, 'Failed');
+		} finally {
+			adminSaving = false;
+		}
+	}
+
 </script>
 
 <svelte:head>
@@ -206,8 +323,12 @@
 				</div>
 				<div>
 					<div class="flex items-center gap-2">
-						<h1 class="text-2xl font-bold leading-tight">{profile.display_name}</h1>
-						{#if !profile.is_self}
+						<h1 class="text-2xl font-bold leading-tight {profile.trust.status ? 'line-through opacity-60' : ''}">{profile.display_name}</h1>
+						{#if profile.trust.status === 'banned'}
+							<span class="status-badge status-badge-banned text-xs font-semibold px-1.5 py-0.5 rounded">Banned</span>
+						{:else if profile.trust.status === 'suspended'}
+							<span class="status-badge status-badge-suspended text-xs font-semibold px-1.5 py-0.5 rounded">Suspended</span>
+						{:else if !profile.is_self}
 							<TrustBadge trust={profile.trust} />
 						{/if}
 						{#if profile.role === 'admin'}
@@ -293,6 +414,130 @@
 				onclick={startEditBio}
 				class="text-xs text-accent hover:underline cursor-pointer bg-transparent border-none mb-3"
 			>Add a bio</button>
+		{/if}
+
+		<!-- Admin Actions (collapsible) -->
+		{#if isAdmin}
+			<div class="admin-actions-inline" class:open={adminOpen}>
+				<button class="admin-actions-toggle" onclick={() => { adminOpen = !adminOpen; if (!adminOpen) resetAdminForm(); }}>
+					Admin actions
+					<svg class="admin-actions-chevron" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 4 10 8 6 12" /></svg>
+				</button>
+				{#if adminOpen}
+					<div transition:slide={{ duration: 200 }}>
+						<div class="pt-4 space-y-3">
+							{#key adminAction}<div transition:slide={{ duration: 150 }}>
+							{#if !adminAction}
+								<div class="flex gap-2 flex-wrap">
+									{#if profile.trust.status === 'banned'}
+										<button onclick={() => { adminAction = 'ban'; }} class="admin-action-btn admin-action-btn-primary">Unban</button>
+									{:else if profile.trust.status === 'suspended'}
+										<button onclick={handleUnsuspend} disabled={adminSaving} class="admin-action-btn admin-action-btn-primary">{adminSaving ? 'Unsuspending…' : 'Unsuspend'}</button>
+										<button onclick={() => { adminAction = 'ban'; }} class="admin-action-btn admin-action-btn-danger">Ban</button>
+									{:else}
+										<button onclick={() => { adminAction = 'suspend'; }} class="admin-action-btn admin-action-btn-danger">Suspend</button>
+										<button onclick={() => { adminAction = 'ban'; }} class="admin-action-btn admin-action-btn-danger-strong">Ban</button>
+									{/if}
+									<button onclick={() => { adminAction = 'invites'; }} class="admin-action-btn admin-action-btn-muted">
+										{profile.can_invite ? 'Revoke invites' : 'Grant invites'}
+									</button>
+								</div>
+							{:else if adminAction === 'suspend'}
+								<div>
+									<div class="text-xs font-semibold text-text-secondary mb-2">Suspend {profile.display_name} — reason (public)</div>
+									<input
+										type="text"
+										bind:value={adminReason}
+										placeholder="Reason for suspension"
+										class="w-full bg-bg border border-border rounded-md text-text-primary text-sm px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted mb-2"
+									/>
+									<div class="flex items-center gap-2 mb-2">
+										<span class="text-xs text-text-muted">Duration:</span>
+										<select
+											bind:value={adminDuration}
+											class="font-sans text-xs bg-bg text-text-secondary border border-border rounded-md px-2 py-1 cursor-pointer hover:border-accent-muted focus:outline-none focus:border-accent-muted"
+										>
+											<option value="1d">1 day</option>
+											<option value="3d">3 days</option>
+											<option value="1w">1 week</option>
+											<option value="2w">2 weeks</option>
+											<option value="1m">1 month</option>
+										</select>
+									</div>
+									<div class="mb-2">
+										<Checkbox bind:checked={adminRevokeInv}>Also revoke invite privileges</Checkbox>
+									</div>
+									{#if adminError}
+										<div class="text-danger text-xs mb-2">{adminError}</div>
+									{/if}
+									<div class="flex gap-2">
+										<button onclick={confirmSuspend} disabled={adminSaving || !adminReason.trim()} class="admin-action-btn admin-action-btn-danger">{adminSaving ? 'Suspending…' : 'Confirm suspension'}</button>
+										<button onclick={resetAdminForm} disabled={adminSaving} class="admin-action-btn admin-action-btn-cancel">Cancel</button>
+									</div>
+								</div>
+							{:else if adminAction === 'ban'}
+								<div>
+									{#if profile.trust.status === 'banned'}
+										<div class="text-xs font-semibold text-text-secondary mb-2">Unban {profile.display_name} — reason (public)</div>
+										<input
+											type="text"
+											bind:value={adminReason}
+											placeholder="Reason for unban"
+											class="w-full bg-bg border border-border rounded-md text-text-primary text-sm px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted mb-2"
+										/>
+										{#if adminError}
+											<div class="text-danger text-xs mb-2">{adminError}</div>
+										{/if}
+										<div class="flex gap-2">
+											<button onclick={handleUnban} disabled={adminSaving || !adminReason.trim()} class="admin-action-btn admin-action-btn-primary">{adminSaving ? 'Unbanning…' : 'Confirm unban'}</button>
+											<button onclick={resetAdminForm} disabled={adminSaving} class="admin-action-btn admin-action-btn-cancel">Cancel</button>
+										</div>
+									{:else}
+										<div class="text-xs font-semibold text-text-secondary mb-2">Ban {profile.display_name} — reason (public)</div>
+										<input
+											type="text"
+											bind:value={adminReason}
+											placeholder="Reason for ban"
+											class="w-full bg-bg border border-border rounded-md text-text-primary text-sm px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted mb-2"
+										/>
+										<div class="mb-2">
+											<Checkbox bind:checked={adminBanTree}>Also ban all users in their downstream invite tree</Checkbox>
+										</div>
+										{#if adminError}
+											<div class="text-danger text-xs mb-2">{adminError}</div>
+										{/if}
+										<div class="flex gap-2">
+											<button onclick={confirmBan} disabled={adminSaving || !adminReason.trim()} class="admin-action-btn admin-action-btn-danger-strong">{adminSaving ? 'Banning…' : 'Confirm ban'}</button>
+											<button onclick={resetAdminForm} disabled={adminSaving} class="admin-action-btn admin-action-btn-cancel">Cancel</button>
+										</div>
+									{/if}
+								</div>
+							{:else if adminAction === 'invites'}
+								<div>
+									<div class="text-xs font-semibold text-text-secondary mb-2">{profile.can_invite ? 'Revoke' : 'Grant'} invite privileges for {profile.display_name} — reason (public)</div>
+									<input
+										type="text"
+										bind:value={adminReason}
+										placeholder="Reason"
+										class="w-full bg-bg border border-border rounded-md text-text-primary text-sm px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted mb-2"
+									/>
+									{#if adminError}
+										<div class="text-danger text-xs mb-2">{adminError}</div>
+									{/if}
+									<div class="flex gap-2">
+										<button onclick={handleToggleInvites} disabled={adminSaving || !adminReason.trim()} class="admin-action-btn admin-action-btn-muted">{adminSaving ? 'Saving…' : (profile.can_invite ? 'Confirm revoke' : 'Confirm grant')}</button>
+										<button onclick={resetAdminForm} disabled={adminSaving} class="admin-action-btn admin-action-btn-cancel">Cancel</button>
+									</div>
+								</div>
+							{/if}
+							{#if adminError && !adminAction}
+								<div class="text-danger text-xs">{adminError}</div>
+							{/if}
+							</div>{/key}
+						</div>
+					</div>
+				{/if}
+			</div>
 		{/if}
 
 		<!-- Trust Details (collapsible) -->
@@ -537,6 +782,99 @@
 	.distrusted-badge {
 		background: color-mix(in srgb, var(--danger) 12%, transparent);
 	}
+
+	.status-badge-banned { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+	.status-badge-suspended { color: var(--text-muted); background: color-mix(in srgb, var(--text-muted) 12%, transparent); }
+
+	.admin-actions-toggle {
+		cursor: pointer;
+		user-select: none;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 0.25rem;
+		font-size: 0.75rem;
+		color: var(--danger);
+		border: none;
+		background: none;
+		border-top: 1px dashed var(--border-subtle);
+		margin-top: 1rem;
+		padding: 0.625rem 0.75rem 0;
+		width: 100%;
+		transition: color 0.15s;
+		opacity: 0.7;
+	}
+
+	.admin-actions-toggle:hover { opacity: 1; }
+
+	.admin-actions-chevron {
+		transition: transform 0.15s ease;
+		flex-shrink: 0;
+	}
+
+	.admin-actions-inline.open .admin-actions-chevron {
+		transform: rotate(90deg);
+	}
+
+	.admin-actions-inline.open .admin-actions-toggle {
+		opacity: 1;
+	}
+
+	.admin-action-btn {
+		font-family: inherit;
+		font-size: 0.75rem;
+		font-weight: 500;
+		padding: 0.375rem 0.75rem;
+		border-radius: 0.375rem;
+		cursor: pointer;
+		border: 1px solid;
+		transition: background 0.15s, opacity 0.15s;
+	}
+
+	.admin-action-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.admin-action-btn-danger {
+		border-color: var(--danger);
+		color: var(--danger);
+		background: color-mix(in srgb, var(--danger) 8%, transparent);
+	}
+
+	.admin-action-btn-danger:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 16%, transparent); }
+
+	.admin-action-btn-danger-strong {
+		border-color: var(--danger);
+		color: var(--danger);
+		background: color-mix(in srgb, var(--danger) 15%, transparent);
+	}
+
+	.admin-action-btn-danger-strong:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 24%, transparent); }
+
+	.admin-action-btn-primary {
+		border-color: var(--accent);
+		color: var(--accent);
+		background: color-mix(in srgb, var(--accent) 8%, transparent);
+	}
+
+	.admin-action-btn-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+
+	.admin-action-btn-muted {
+		border-color: var(--border);
+		color: var(--text-secondary);
+		background: transparent;
+	}
+
+	.admin-action-btn-muted:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
+
+	.admin-action-btn-cancel {
+		border-color: var(--border);
+		color: var(--text-muted);
+		background: transparent;
+	}
+
+	.admin-action-btn-cancel:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
 
 	.trust-stance-group {
 		display: flex;

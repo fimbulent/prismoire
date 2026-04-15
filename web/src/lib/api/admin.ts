@@ -192,6 +192,59 @@ export async function banUser(
 	return res.json();
 }
 
+export async function adminRevokeInvites(
+	userId: string,
+	reason: string,
+	opts: FetchOpts = {}
+): Promise<void> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f(`/api/admin/users/${encodeURIComponent(userId)}/invites`, {
+		method: 'DELETE',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ reason })
+	});
+	if (!res.ok) await throwApiError(res);
+}
+
+export async function adminGrantInvites(
+	userId: string,
+	reason: string,
+	opts: FetchOpts = {}
+): Promise<void> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f(`/api/admin/users/${encodeURIComponent(userId)}/invites`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ reason })
+	});
+	if (!res.ok) await throwApiError(res);
+}
+
+export async function unbanUser(
+	userId: string,
+	reason: string,
+	opts: FetchOpts = {}
+): Promise<void> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f(`/api/admin/users/${encodeURIComponent(userId)}/ban`, {
+		method: 'DELETE',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ reason })
+	});
+	if (!res.ok) await throwApiError(res);
+}
+
+export async function unsuspendUser(
+	userId: string,
+	opts: FetchOpts = {}
+): Promise<void> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f(`/api/admin/users/${encodeURIComponent(userId)}/suspend`, {
+		method: 'DELETE'
+	});
+	if (!res.ok) await throwApiError(res);
+}
+
 export async function getAdminDashboard(opts: FetchOpts = {}): Promise<DashboardResponse> {
 	const f = opts.fetch ?? globalThis.fetch;
 	const res = await f('/api/admin/dashboard');

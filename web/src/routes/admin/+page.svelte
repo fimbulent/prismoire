@@ -6,6 +6,7 @@
 		removePost,
 		suspendUser,
 		banUser,
+		adminRevokeInvites,
 		type ReportResponse
 	} from '$lib/api/admin';
 	import { relativeTime } from '$lib/format';
@@ -47,6 +48,7 @@
 	let suspendTargetReportId = $state<string | null>(null);
 	let suspendReason = $state('');
 	let suspendDuration = $state('1d');
+	let suspendRevokeInvites = $state(false);
 	let suspendError = $state<string | null>(null);
 	let suspendSaving = $state(false);
 
@@ -141,6 +143,7 @@
 		const label = REASON_LABELS[report.reason] ?? report.reason;
 		suspendReason = report.detail ? `${label}: ${report.detail}` : label;
 		suspendDuration = '1d';
+		suspendRevokeInvites = false;
 		suspendError = null;
 	}
 
@@ -154,6 +157,13 @@
 		suspendError = null;
 		try {
 			await suspendUser(report.post_author_id, reason, suspendDuration);
+			if (suspendRevokeInvites) {
+				try {
+					await adminRevokeInvites(report.post_author_id, reason);
+				} catch {
+					// Ignore if already revoked
+				}
+			}
 			await actionReport(report.id);
 			reports = reports.filter((r) => r.post_id !== report.post_id);
 			pendingCount = Math.max(0, pendingCount - report.report_count);
@@ -334,6 +344,9 @@
 										<option value="2w">2 weeks</option>
 										<option value="1m">1 month</option>
 									</select>
+								</div>
+								<div class="mb-2">
+									<Checkbox bind:checked={suspendRevokeInvites}>Also revoke invite privileges</Checkbox>
 								</div>
 								{#if suspendError}
 									<div class="text-danger text-xs mb-2">{suspendError}</div>
