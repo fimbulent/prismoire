@@ -9,7 +9,10 @@
 //! exist to help an admin find *candidates* for review, not to
 //! re-litigate decisions that have already been made. Suspended users
 //! are kept because suspension is a short-term signal that operators
-//! may want to escalate to a ban.
+//! may want to escalate to a ban. Self-deleted users
+//! (`deleted_at IS NOT NULL`) are also excluded: the anonymised row
+//! has no actionable identity left, so surfacing it to a moderator
+//! serves no purpose.
 //!
 //! Each list is computed live per request against SQLite. The queries
 //! are aggregations over `trust_edges` / `ban_trust_snapshots` and the
@@ -200,7 +203,7 @@ async fn load_most_distrusted(db: &sqlx::SqlitePool) -> Result<Vec<DistrustedUse
             WHERE trust_type = 'trust'
             GROUP BY target_user
         ) t ON t.target_user = d.target_user
-        WHERE u.status != 'banned'
+        WHERE u.status != 'banned' AND u.deleted_at IS NULL
         ORDER BY d.distrusts DESC, u.display_name ASC
         LIMIT ?2
         "#,
@@ -261,6 +264,7 @@ async fn load_distrust_trust_ratio(db: &sqlx::SqlitePool) -> Result<Vec<RatioRow
         WHERE (i.distrusts + i.trusts) >= ?1
           AND i.distrusts > 0
           AND u.status != 'banned'
+          AND u.deleted_at IS NULL
         ORDER BY
             CASE WHEN i.trusts = 0 THEN 1 ELSE 0 END DESC,
             CAST(i.distrusts AS REAL) / NULLIF(i.trusts, 0) DESC,
@@ -334,6 +338,7 @@ async fn load_ban_adjacent_trusters(
         LEFT JOIN totals t ON t.source_user = b.trusting_user
         WHERE COALESCE(t.total_trusts, 0) >= ?1
           AND u.status != 'banned'
+          AND u.deleted_at IS NULL
         ORDER BY
             CAST(b.banned_trusts AS REAL) / NULLIF(COALESCE(t.total_trusts, 0), 0) DESC,
             b.banned_trusts DESC,

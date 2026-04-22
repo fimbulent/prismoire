@@ -187,31 +187,43 @@ async fn resolve_user(
     ),
     AppError,
 > {
-    let (id, display_name, created_at, signup_method, bio, role, status_str, can_invite) =
-        sqlx::query_as::<
-            _,
-            (
-                String,
-                String,
-                String,
-                String,
-                Option<String>,
-                String,
-                String,
-                bool,
-            ),
-        >(
-            "SELECT id, display_name, created_at, signup_method, bio, role, status, can_invite \
-                 FROM users WHERE display_name = ?",
-        )
-        .bind(username)
-        .fetch_optional(db)
-        .await?
-        .ok_or_else(|| AppError::code(ErrorCode::UserNotFound))?;
-    let status = UserStatus::try_from(status_str.as_str()).map_err(|e| {
+    let (
+        id,
+        display_name,
+        created_at,
+        signup_method,
+        bio,
+        role,
+        status_str,
+        can_invite,
+        deleted_at,
+    ) = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+            String,
+            bool,
+            Option<String>,
+        ),
+    >(
+        "SELECT id, display_name, created_at, signup_method, bio, role, status, can_invite, \
+                deleted_at \
+             FROM users WHERE display_name = ?",
+    )
+    .bind(username)
+    .fetch_optional(db)
+    .await?
+    .ok_or_else(|| AppError::code(ErrorCode::UserNotFound))?;
+    let raw_status = UserStatus::try_from(status_str.as_str()).map_err(|e| {
         eprintln!("{e}");
         AppError::code(ErrorCode::Internal)
     })?;
+    let status = UserStatus::effective(raw_status, deleted_at.as_deref());
     Ok((
         id,
         display_name,
@@ -241,7 +253,11 @@ async fn get_trust_stance(
     Ok(row.map(|(t,)| t).unwrap_or_else(|| "neutral".into()))
 }
 
-/// Build a UUID→(display_name, status) map for a set of UUIDs.
+/// Build a UUID→(display_name, effective_status) map for a set of UUIDs.
+///
+/// Effective status is the wire-facing projection: a user whose
+/// `deleted_at` is set surfaces as `UserStatus::Deleted` regardless of
+/// what `users.status` says. See [`UserStatus::effective`].
 async fn resolve_display_names(
     db: &sqlx::SqlitePool,
     uuids: &[Uuid],
@@ -249,14 +265,16 @@ async fn resolve_display_names(
     let mut map = std::collections::HashMap::new();
     for uuid in uuids {
         let id_str = uuid.to_string();
-        if let Some((name, status_str)) = sqlx::query_as::<_, (String, String)>(
-            "SELECT display_name, status FROM users WHERE id = ?",
-        )
-        .bind(&id_str)
-        .fetch_optional(db)
-        .await?
+        if let Some((name, status_str, deleted_at)) =
+            sqlx::query_as::<_, (String, String, Option<String>)>(
+                "SELECT display_name, status, deleted_at FROM users WHERE id = ?",
+            )
+            .bind(&id_str)
+            .fetch_optional(db)
+            .await?
         {
-            let status = UserStatus::try_from(status_str.as_str()).unwrap_or(UserStatus::Active);
+            let raw = UserStatus::try_from(status_str.as_str()).unwrap_or(UserStatus::Active);
+            let status = UserStatus::effective(raw, deleted_at.as_deref());
             map.insert(*uuid, (name, status));
         }
     }
@@ -520,8 +538,8 @@ pub async fn get_trust_detail(
         edges
     };
 
-    let trusts_batch = sqlx::query_as::<_, (String, String, String)>(
-        "SELECT u.display_name, u.id, u.status FROM trust_edges te \
+    let trusts_batch = sqlx::query_as::<_, (String, String, String, Option<String>)>(
+        "SELECT u.display_name, u.id, u.status, u.deleted_at FROM trust_edges te \
          JOIN users u ON u.id = te.target_user \
          WHERE te.source_user = ? AND te.trust_type = 'trust' \
          ORDER BY te.created_at DESC LIMIT ?",
@@ -541,14 +559,17 @@ pub async fn get_trust_detail(
     let trusts: Vec<TrustEdgeUser> = sort_trust_edges(
         trusts_batch
             .into_iter()
-            .map(|(name, uid, status_str)| TrustEdgeUser {
-                trust: TrustInfo::build(
-                    &uid,
-                    &distance_map,
-                    &distrust_set,
-                    UserStatus::try_from(status_str.as_str()).unwrap_or(UserStatus::Active),
-                ),
-                display_name: name,
+            .map(|(name, uid, status_str, deleted_at)| {
+                let raw = UserStatus::try_from(status_str.as_str()).unwrap_or(UserStatus::Active);
+                TrustEdgeUser {
+                    trust: TrustInfo::build(
+                        &uid,
+                        &distance_map,
+                        &distrust_set,
+                        UserStatus::effective(raw, deleted_at.as_deref()),
+                    ),
+                    display_name: name,
+                }
             })
             .collect(),
     )
@@ -556,8 +577,8 @@ pub async fn get_trust_detail(
     .take(TRUST_LIST_PREVIEW as usize)
     .collect();
 
-    let trusted_by_batch = sqlx::query_as::<_, (String, String, String)>(
-        "SELECT u.display_name, u.id, u.status FROM trust_edges te \
+    let trusted_by_batch = sqlx::query_as::<_, (String, String, String, Option<String>)>(
+        "SELECT u.display_name, u.id, u.status, u.deleted_at FROM trust_edges te \
          JOIN users u ON u.id = te.source_user \
          WHERE te.target_user = ? AND te.trust_type = 'trust' \
          ORDER BY te.created_at DESC LIMIT ?",
@@ -577,14 +598,17 @@ pub async fn get_trust_detail(
     let trusted_by: Vec<TrustEdgeUser> = sort_trust_edges(
         trusted_by_batch
             .into_iter()
-            .map(|(name, uid, status_str)| TrustEdgeUser {
-                trust: TrustInfo::build(
-                    &uid,
-                    &distance_map,
-                    &distrust_set,
-                    UserStatus::try_from(status_str.as_str()).unwrap_or(UserStatus::Active),
-                ),
-                display_name: name,
+            .map(|(name, uid, status_str, deleted_at)| {
+                let raw = UserStatus::try_from(status_str.as_str()).unwrap_or(UserStatus::Active);
+                TrustEdgeUser {
+                    trust: TrustInfo::build(
+                        &uid,
+                        &distance_map,
+                        &distrust_set,
+                        UserStatus::effective(raw, deleted_at.as_deref()),
+                    ),
+                    display_name: name,
+                }
             })
             .collect(),
     )
@@ -740,8 +764,8 @@ pub async fn get_trust_edges(
 
     let (rows, total) = match query.direction.as_str() {
         "trusts" => {
-            let rows = sqlx::query_as::<_, (String, String, String)>(
-                "SELECT u.display_name, u.id, u.status FROM trust_edges te \
+            let rows = sqlx::query_as::<_, (String, String, String, Option<String>)>(
+                "SELECT u.display_name, u.id, u.status, u.deleted_at FROM trust_edges te \
                  JOIN users u ON u.id = te.target_user \
                  WHERE te.source_user = ? AND te.trust_type = 'trust'",
             )
@@ -752,8 +776,8 @@ pub async fn get_trust_edges(
             (rows, total)
         }
         "trusted_by" => {
-            let rows = sqlx::query_as::<_, (String, String, String)>(
-                "SELECT u.display_name, u.id, u.status FROM trust_edges te \
+            let rows = sqlx::query_as::<_, (String, String, String, Option<String>)>(
+                "SELECT u.display_name, u.id, u.status, u.deleted_at FROM trust_edges te \
                  JOIN users u ON u.id = te.source_user \
                  WHERE te.target_user = ? AND te.trust_type = 'trust'",
             )
@@ -772,8 +796,9 @@ pub async fn get_trust_edges(
 
     let mut users: Vec<TrustEdgeUser> = rows
         .into_iter()
-        .map(|(name, uid, status_str)| {
-            let status = UserStatus::try_from(status_str.as_str()).unwrap_or(UserStatus::Active);
+        .map(|(name, uid, status_str, deleted_at)| {
+            let raw = UserStatus::try_from(status_str.as_str()).unwrap_or(UserStatus::Active);
+            let status = UserStatus::effective(raw, deleted_at.as_deref());
             let trust = TrustInfo::build(&uid, &distance_map, &distrust_set, status);
             TrustEdgeUser {
                 display_name: name,

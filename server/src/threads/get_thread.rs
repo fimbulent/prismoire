@@ -413,6 +413,7 @@ async fn fetch_thread_info(db: &sqlx::SqlitePool, thread_id: &str) -> Result<Thr
 }
 
 /// Pass 1: fetch post metadata without bodies.
+#[allow(clippy::type_complexity)]
 async fn fetch_post_metadata(
     db: &sqlx::SqlitePool,
     thread_id: &str,
@@ -425,11 +426,13 @@ async fn fetch_post_metadata(
             String,
             String,
             String,
+            Option<String>,
             String,
             Option<String>,
         ),
     >(
-        "SELECT p.id, p.parent, p.author, u.display_name, u.status, p.created_at, p.retracted_at \
+        "SELECT p.id, p.parent, p.author, u.display_name, u.status, u.deleted_at, \
+                p.created_at, p.retracted_at \
          FROM posts p \
          JOIN users u ON u.id = p.author \
          WHERE p.thread = ? \
@@ -442,23 +445,36 @@ async fn fetch_post_metadata(
     Ok(rows
         .into_iter()
         .map(
-            |(id, parent_id, author_id, author_name, author_status, created_at, retracted_at): (
-                String,
-                Option<String>,
-                String,
-                String,
-                String,
-                String,
-                Option<String>,
-            )| PostMeta {
+            |(
                 id,
                 parent_id,
                 author_id,
                 author_name,
-                author_status: UserStatus::try_from(author_status.as_str())
-                    .unwrap_or(UserStatus::Active),
+                author_status,
+                author_deleted_at,
                 created_at,
                 retracted_at,
+            ): (
+                String,
+                Option<String>,
+                String,
+                String,
+                String,
+                Option<String>,
+                String,
+                Option<String>,
+            )| {
+                let raw =
+                    UserStatus::try_from(author_status.as_str()).unwrap_or(UserStatus::Active);
+                PostMeta {
+                    id,
+                    parent_id,
+                    author_id,
+                    author_name,
+                    author_status: UserStatus::effective(raw, author_deleted_at.as_deref()),
+                    created_at,
+                    retracted_at,
+                }
             },
         )
         .collect())

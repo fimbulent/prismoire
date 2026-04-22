@@ -25,8 +25,16 @@
 //! - Anonymises the `users` row: display_name becomes `deleted-<hex>`,
 //!   bio nulled, `deleted_at` set, `can_invite = 0`.
 //! - Drops credentials, sessions, user_settings, auth_challenges, and
-//!   outbound trust_edges. Inbound edges are left intact so other users'
-//!   trust history stays coherent.
+//!   *all* trust_edges touching the user (both outbound and inbound).
+//!   Outbound edges stop flowing the deleted user's trust signal
+//!   through the graph; inbound edges are dropped too because the
+//!   deleted user can no longer author content, so a standing trust
+//!   endorsement of them has nothing to weigh anymore and would only
+//!   serve as latent noise in the trust graph.
+//! - Drops `ban_trust_snapshots` rows referencing the user in either
+//!   capacity (target of a past ban/suspend, or a truster captured at
+//!   the moment someone else was moderated). Same rationale: with the
+//!   account gone, those snapshot rows have nothing to describe.
 //! - Revokes any open invites the user created.
 //! - Deactivates signing keys (`active = 0`) rather than deleting them, so
 //!   past signatures on content still authored by other users remain
@@ -724,10 +732,32 @@ pub async fn delete_my_account(
         .execute(&mut *tx)
         .await?;
 
-    // 6. Drop outbound trust edges so the deleted user's trust signal
-    //    stops flowing to other users. Inbound edges are left alone —
-    //    they are other users' data, not ours to delete.
-    sqlx::query("DELETE FROM trust_edges WHERE source_user = ?")
+    // 6. Drop every trust edge touching the user — both directions.
+    //    Outbound: the deleted user's trust signal stops flowing to
+    //    anyone else. Inbound: other users' standing endorsements of
+    //    this account have nothing left to weigh (the account can't
+    //    authenticate, can't post, and its existing posts are all
+    //    retracted), so keeping them around would just mean latent
+    //    noise in the trust graph with no behaviour to vouch for.
+    sqlx::query("DELETE FROM trust_edges WHERE source_user = ? OR target_user = ?")
+        .bind(user_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // 6b. Drop ban/suspend trust snapshots that reference the deleted
+    //     user in either capacity. As a `target_user`: self-delete
+    //     wipes the moderation-audit history of any past ban/suspend
+    //     on the account — consistent with dropping the credentials
+    //     and sessions that anchored that identity. As a
+    //     `trusting_user`: the snapshot recorded that this user was
+    //     endorsing someone at the moment of their ban, but with the
+    //     account gone the entry has no one to flag and only serves
+    //     to pollute the ban-adjacent watchlist with ghost rows.
+    //     (Watchlist queries already filter deleted users, so this is
+    //     belt-and-suspenders for any future consumer of the table.)
+    sqlx::query("DELETE FROM ban_trust_snapshots WHERE target_user = ? OR trusting_user = ?")
+        .bind(user_id)
         .bind(user_id)
         .execute(&mut *tx)
         .await?;

@@ -25,7 +25,11 @@ function isAllowedChar(ch: string): boolean {
  *
  * Returns `null` if the name is valid, or a human-readable error message.
  * Does not check for mixed scripts or confusable skeletons — those are
- * enforced only on the server.
+ * enforced only on the server. In particular, the server rejects any
+ * name whose confusable skeleton starts with `deleted_` (so it catches
+ * Unicode lookalikes like `dеleted-x` with a Cyrillic `е`); the client
+ * check below only catches the straightforward ASCII case so users get
+ * instant feedback on the common path.
  */
 export function validateDisplayName(raw: string): string | null {
 	const trimmed = raw.trim();
@@ -58,6 +62,15 @@ export function validateDisplayName(raw: string): string | null {
 
 	if (/[-_]{2}/.test(normalized)) {
 		return 'Display name must not contain consecutive hyphens or underscores';
+	}
+
+	// `deleted-<hex>` is the anon name the server stamps on self-deleted
+	// accounts (see `privacy::delete_my_account`). Reject the prefix up
+	// front so the form doesn't round-trip only to hit the server-side
+	// skeleton check.
+	const lower = normalized.toLowerCase();
+	if (lower.startsWith('deleted-') || lower.startsWith('deleted_')) {
+		return 'Display name must not start with "deleted-"';
 	}
 
 	return null;

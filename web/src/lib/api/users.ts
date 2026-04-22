@@ -3,7 +3,7 @@ import { throwApiError, type FetchFn } from './auth';
 export interface TrustInfo {
 	distance: number | null;
 	distrusted: boolean;
-	status?: 'banned' | 'suspended';
+	status?: 'banned' | 'suspended' | 'deleted';
 }
 
 export interface UserProfile {

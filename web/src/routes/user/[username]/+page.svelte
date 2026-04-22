@@ -353,7 +353,9 @@
 				<div>
 					<div class="flex items-center gap-2">
 						<h1 class="text-2xl font-bold leading-tight {profile.trust.status ? 'line-through opacity-60' : ''}">{profile.display_name}</h1>
-						{#if profile.trust.status === 'banned'}
+						{#if profile.trust.status === 'deleted'}
+							<span class="status-badge status-badge-deleted text-xs font-semibold px-1.5 py-0.5 rounded">Deleted</span>
+						{:else if profile.trust.status === 'banned'}
 							<span class="status-badge status-badge-banned text-xs font-semibold px-1.5 py-0.5 rounded">Banned</span>
 						{:else if profile.trust.status === 'suspended'}
 							<span class="status-badge status-badge-suspended text-xs font-semibold px-1.5 py-0.5 rounded">Suspended</span>
@@ -826,6 +828,7 @@
 
 	.status-badge-banned { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
 	.status-badge-suspended { color: var(--text-muted); background: color-mix(in srgb, var(--text-muted) 12%, transparent); }
+	.status-badge-deleted { color: var(--text-muted); background: color-mix(in srgb, var(--text-muted) 12%, transparent); }
 
 	.admin-actions-toggle {
 		cursor: pointer;

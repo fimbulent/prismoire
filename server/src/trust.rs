@@ -417,22 +417,49 @@ fn reverse_bfs(reader: u32, reverse_graph: &CsrGraph) -> Vec<(u32, f64)> {
 // UserStatus / TrustInfo: shared types for API responses
 // ---------------------------------------------------------------------------
 
-/// Account status for a user.
+/// Account status for a user, as exposed on the wire.
 ///
-/// Stored as a TEXT column in SQLite (`"active"`, `"banned"`, `"suspended"`).
-/// Parsed from DB strings via `TryFrom<&str>`.
+/// `Active`, `Banned`, `Suspended` come directly from the `users.status`
+/// TEXT column (`"active"` / `"banned"` / `"suspended"`). `Deleted` is
+/// **never** stored in that column — it is a projection computed at
+/// serialization time from the `users.deleted_at` tombstone via
+/// [`UserStatus::effective`]. Keeping `status` and `deleted_at` as two
+/// separate DB fields avoids a drift hazard (two sources of truth for
+/// "is this user deleted?"); the enum unifies them only at the API
+/// boundary.
+///
+/// `TryFrom<&str>` therefore accepts only the three moderation strings
+/// and rejects `"deleted"` — if it ever appears in the column that's a
+/// data-integrity bug, not a valid state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UserStatus {
     Active,
     Banned,
     Suspended,
+    Deleted,
 }
 
 impl UserStatus {
-    /// Returns `true` if the user is active (not banned or suspended).
+    /// Returns `true` if the user is active (not banned, suspended, or deleted).
     pub fn is_active(&self) -> bool {
         *self == Self::Active
+    }
+
+    /// Project the raw moderation status to the effective wire status.
+    ///
+    /// If `deleted_at` is `Some`, the user has been self-deleted and
+    /// the effective status is `Deleted` regardless of what the
+    /// `users.status` column says. Call this once at each SQL parse
+    /// site that surfaces a status for API output; everything
+    /// downstream can then treat `UserStatus` as the single source of
+    /// truth.
+    pub fn effective(raw: UserStatus, deleted_at: Option<&str>) -> UserStatus {
+        if deleted_at.is_some() {
+            UserStatus::Deleted
+        } else {
+            raw
+        }
     }
 }
 

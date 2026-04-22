@@ -47,6 +47,7 @@ type AllThreadsRow = (
     String,
     String,
     String,
+    Option<String>, // author_deleted_at
     String,
     String,
     String,
@@ -61,6 +62,7 @@ type RoomThreadsRow = (
     String,
     String,
     String,
+    Option<String>, // author_deleted_at
     String,
     bool,
     i64,
@@ -82,6 +84,7 @@ fn all_threads_to_summary(
         author_id,
         author_name,
         author_status,
+        author_deleted_at,
         created_at,
         room_id,
         room_slug,
@@ -90,7 +93,8 @@ fn all_threads_to_summary(
         reply_count,
         last_activity,
     ) = row;
-    let status = UserStatus::try_from(author_status.as_str()).unwrap_or(UserStatus::Active);
+    let raw = UserStatus::try_from(author_status.as_str()).unwrap_or(UserStatus::Active);
+    let status = UserStatus::effective(raw, author_deleted_at.as_deref());
     let trust = TrustInfo::build(&author_id, trust_map, distrust_set, status);
     ThreadSummary {
         trust,
@@ -122,12 +126,14 @@ fn room_threads_to_summary(
         author_id,
         author_name,
         author_status,
+        author_deleted_at,
         created_at,
         locked,
         reply_count,
         last_activity,
     ) = row;
-    let status = UserStatus::try_from(author_status.as_str()).unwrap_or(UserStatus::Active);
+    let raw = UserStatus::try_from(author_status.as_str()).unwrap_or(UserStatus::Active);
+    let status = UserStatus::effective(raw, author_deleted_at.as_deref());
     let trust = TrustInfo::build(&author_id, trust_map, distrust_set, status);
     ThreadSummary {
         trust,
@@ -276,7 +282,7 @@ pub async fn list_public_announcement_threads(
     let rows = if let Some(ref cursor) = params.cursor {
         let (cursor_ts, cursor_id) = parse_cursor(cursor)?;
         sqlx::query_as::<_, AllThreadsRow>(
-            "SELECT t.id, t.title, t.author, u.display_name, u.status, t.created_at, \
+            "SELECT t.id, t.title, t.author, u.display_name, u.status, u.deleted_at, t.created_at, \
              r.id, r.slug, t.locked, (r.slug = 'announcements') AS is_announcement, \
              t.reply_count, t.last_activity \
              FROM threads t \
@@ -299,7 +305,7 @@ pub async fn list_public_announcement_threads(
         .await?
     } else {
         sqlx::query_as::<_, AllThreadsRow>(
-            "SELECT t.id, t.title, t.author, u.display_name, u.status, t.created_at, \
+            "SELECT t.id, t.title, t.author, u.display_name, u.status, u.deleted_at, t.created_at, \
              r.id, r.slug, t.locked, (r.slug = 'announcements') AS is_announcement, \
              t.reply_count, t.last_activity \
              FROM threads t \
@@ -328,6 +334,7 @@ pub async fn list_public_announcement_threads(
                 author_id,
                 author_name,
                 author_status,
+                author_deleted_at,
                 created_at,
                 room_id,
                 room_slug,
@@ -336,6 +343,7 @@ pub async fn list_public_announcement_threads(
                 reply_count,
                 last_activity,
             ) = row;
+            let raw = UserStatus::try_from(author_status.as_str()).unwrap_or(UserStatus::Active);
             ThreadSummary {
                 id,
                 title,
@@ -351,8 +359,7 @@ pub async fn list_public_announcement_threads(
                 trust: TrustInfo {
                     distance: None,
                     distrusted: false,
-                    status: UserStatus::try_from(author_status.as_str())
-                        .unwrap_or(UserStatus::Active),
+                    status: UserStatus::effective(raw, author_deleted_at.as_deref()),
                 },
             }
         })
@@ -442,7 +449,7 @@ pub async fn list_all_threads(
     let rows = if let Some(ref cursor) = params.cursor {
         let (cursor_ts, cursor_id) = parse_cursor(cursor)?;
         let sql = format!(
-            "SELECT t.id, t.title, t.author, u.display_name, u.status, t.created_at, \
+            "SELECT t.id, t.title, t.author, u.display_name, u.status, u.deleted_at, t.created_at, \
              r.id, r.slug, t.locked, (r.slug = 'announcements') AS is_announcement, \
              t.reply_count, t.last_activity \
              FROM threads t \
@@ -464,7 +471,7 @@ pub async fn list_all_threads(
             .await?
     } else {
         let sql = format!(
-            "SELECT t.id, t.title, t.author, u.display_name, u.status, t.created_at, \
+            "SELECT t.id, t.title, t.author, u.display_name, u.status, u.deleted_at, t.created_at, \
              r.id, r.slug, t.locked, (r.slug = 'announcements') AS is_announcement, \
              t.reply_count, t.last_activity \
              FROM threads t \
@@ -486,7 +493,7 @@ pub async fn list_all_threads(
         .into_iter()
         .take(PAGE_SIZE)
         .filter(
-            |(_, _, author_id, _, _, _, _, _, _, is_announcement, _, _)| {
+            |(_, _, author_id, _, _, _, _, _, _, _, is_announcement, _, _)| {
                 is_thread_visible(author_id, *is_announcement, &user.user_id, &reverse_map)
             },
         )
@@ -590,7 +597,7 @@ pub async fn list_threads(
     let rows = if let Some(ref cursor) = params.cursor {
         let (cursor_ts, cursor_id) = parse_cursor(cursor)?;
         let sql = format!(
-            "SELECT t.id, t.title, t.author, u.display_name, u.status, t.created_at, \
+            "SELECT t.id, t.title, t.author, u.display_name, u.status, u.deleted_at, t.created_at, \
              t.locked, t.reply_count, t.last_activity \
              FROM threads t \
              JOIN users u ON u.id = t.author \
@@ -611,7 +618,7 @@ pub async fn list_threads(
             .await?
     } else {
         let sql = format!(
-            "SELECT t.id, t.title, t.author, u.display_name, u.status, t.created_at, \
+            "SELECT t.id, t.title, t.author, u.display_name, u.status, u.deleted_at, t.created_at, \
              t.locked, t.reply_count, t.last_activity \
              FROM threads t \
              JOIN users u ON u.id = t.author \
@@ -631,7 +638,7 @@ pub async fn list_threads(
     let mut threads: Vec<ThreadSummary> = rows
         .into_iter()
         .take(PAGE_SIZE)
-        .filter(|(_, _, author_id, _, _, _, _, _, _)| {
+        .filter(|(_, _, author_id, _, _, _, _, _, _, _)| {
             is_thread_visible(author_id, is_announcement, &user.user_id, &reverse_map)
         })
         .map(|row| {
@@ -1082,7 +1089,7 @@ async fn fetch_warm_candidates_all(
         // Uses <= on ID for inclusivity — the cursor thread is a leftover
         // that must be re-evaluated on this page.
         sqlx::query_as::<_, AllThreadsRow>(
-            "SELECT t.id, t.title, t.author, u.display_name, u.status, t.created_at, \
+            "SELECT t.id, t.title, t.author, u.display_name, u.status, u.deleted_at, t.created_at, \
              r.id, r.slug, t.locked, (r.slug = 'announcements') AS is_announcement, \
              t.reply_count, t.last_activity \
              FROM threads t \
@@ -1105,7 +1112,7 @@ async fn fetch_warm_candidates_all(
     } else {
         // Page 1: fetch from the top.
         sqlx::query_as::<_, AllThreadsRow>(
-            "SELECT t.id, t.title, t.author, u.display_name, u.status, t.created_at, \
+            "SELECT t.id, t.title, t.author, u.display_name, u.status, u.deleted_at, t.created_at, \
              r.id, r.slug, t.locked, (r.slug = 'announcements') AS is_announcement, \
              t.reply_count, t.last_activity \
              FROM threads t \
@@ -1128,7 +1135,7 @@ async fn fetch_warm_candidates_all(
     let (last_candidate_activity, last_candidate_id) = rows
         .last()
         .map(
-            |(id, _, _, _, _, created_at, _, _, _, _, _, last_activity)| {
+            |(id, _, _, _, _, _, created_at, _, _, _, _, _, last_activity)| {
                 let activity = last_activity.clone().unwrap_or_else(|| created_at.clone());
                 (Some(activity), Some(id.clone()))
             },
@@ -1138,7 +1145,7 @@ async fn fetch_warm_candidates_all(
     let visible = rows
         .into_iter()
         .filter(
-            |(_, _, author_id, _, _, _, _, _, _, is_announcement, _, _)| {
+            |(_, _, author_id, _, _, _, _, _, _, _, is_announcement, _, _)| {
                 is_thread_visible(author_id, *is_announcement, reader_id, reverse_map)
             },
         )
@@ -1169,7 +1176,7 @@ async fn fetch_warm_candidates_room(
 ) -> Result<CandidateBatch, AppError> {
     let rows = if let Some((cursor_ts, cursor_id)) = cursor {
         sqlx::query_as::<_, RoomThreadsRow>(
-            "SELECT t.id, t.title, t.author, u.display_name, u.status, t.created_at, \
+            "SELECT t.id, t.title, t.author, u.display_name, u.status, u.deleted_at, t.created_at, \
              t.locked, t.reply_count, t.last_activity \
              FROM threads t \
              JOIN users u ON u.id = t.author \
@@ -1190,7 +1197,7 @@ async fn fetch_warm_candidates_room(
         .await?
     } else {
         sqlx::query_as::<_, RoomThreadsRow>(
-            "SELECT t.id, t.title, t.author, u.display_name, u.status, t.created_at, \
+            "SELECT t.id, t.title, t.author, u.display_name, u.status, u.deleted_at, t.created_at, \
              t.locked, t.reply_count, t.last_activity \
              FROM threads t \
              JOIN users u ON u.id = t.author \
@@ -1209,7 +1216,7 @@ async fn fetch_warm_candidates_room(
     let candidates_fetched = rows.len();
     let (last_candidate_activity, last_candidate_id) = rows
         .last()
-        .map(|(id, _, _, _, _, created_at, _, _, last_activity)| {
+        .map(|(id, _, _, _, _, _, created_at, _, _, last_activity)| {
             let activity = last_activity.clone().unwrap_or_else(|| created_at.clone());
             (Some(activity), Some(id.clone()))
         })
@@ -1217,7 +1224,7 @@ async fn fetch_warm_candidates_room(
 
     let visible = rows
         .into_iter()
-        .filter(|(_, _, author_id, _, _, _, _, _, _)| {
+        .filter(|(_, _, author_id, _, _, _, _, _, _, _)| {
             is_thread_visible(author_id, is_announcement, reader_id, reverse_map)
         })
         .map(|row| {

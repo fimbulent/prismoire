@@ -23,10 +23,16 @@ const RULES: NameRules = NameRules {
 /// - No emoji, symbols, or punctuation
 /// - No private-use or surrogate codepoints
 /// - Non-ASCII names must not mix scripts (prevents homograph attacks)
+/// - Must not impersonate the post-deletion anon prefix (see
+///   `privacy::delete_my_account`, which stamps deleted users with
+///   `deleted-<hex>`). The check runs on the confusable skeleton so
+///   case variants, separator swaps, and Unicode lookalikes are all
+///   blocked — e.g. `Deleted-x`, `deleted_x`, and `dеleted-x` (Cyrillic
+///   `е`) all collapse to the same reserved skeleton prefix.
 ///
 /// Returns the normalized display name on success, or a human-readable error.
 pub fn validate_display_name(raw: &str) -> Result<String, &'static str> {
-    validate_name(raw, &RULES).map_err(|_| match () {
+    let normalized = validate_name(raw, &RULES).map_err(|_| match () {
         _ if raw.trim().is_empty() => "display name must not be empty",
         _ => {
             let normalized: String = {
@@ -35,7 +41,13 @@ pub fn validate_display_name(raw: &str) -> Result<String, &'static str> {
             };
             classify_display_name_error(&normalized)
         }
-    })
+    })?;
+
+    if display_name_skeleton(&normalized).starts_with("deleted_") {
+        return Err("display name must not start with \"deleted-\"");
+    }
+
+    Ok(normalized)
 }
 
 /// Map a failed display name to the most specific static error message.
@@ -263,5 +275,21 @@ mod tests {
     #[test]
     fn skeleton_distinct_for_different_names() {
         assert_ne!(display_name_skeleton("alice"), display_name_skeleton("bob"));
+    }
+
+    #[test]
+    fn rejects_deleted_prefix() {
+        // Exact format used by delete_my_account.
+        assert!(validate_display_name("deleted-abc").is_err());
+        // Case variants.
+        assert!(validate_display_name("Deleted-abc").is_err());
+        assert!(validate_display_name("DELETED-abc").is_err());
+        // Separator swap (skeleton normalizes - and _).
+        assert!(validate_display_name("deleted_abc").is_err());
+        // Confusable (Cyrillic 'е' in place of Latin 'e').
+        assert!(validate_display_name("d\u{0435}leted-abc").is_err());
+        // Names containing "deleted" without the separator are fine.
+        assert!(validate_display_name("deletedog").is_ok());
+        assert!(validate_display_name("undeleted").is_ok());
     }
 }
