@@ -348,7 +348,10 @@ pub async fn login_complete(
     .bind(&req.challenge_id)
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| AppError::code(ErrorCode::InvalidChallenge))?;
+    .ok_or_else(|| {
+        state.metrics.record_failed_auth();
+        AppError::code(ErrorCode::InvalidChallenge)
+    })?;
 
     let (state_bytes, display_name) = challenge;
     let display_name = display_name.ok_or_else(|| {
@@ -365,7 +368,10 @@ pub async fn login_complete(
 
     let auth_result = state
         .webauthn
-        .finish_passkey_authentication(&req.credential, &auth_state)?;
+        .finish_passkey_authentication(&req.credential, &auth_state)
+        .inspect_err(|_| {
+            state.metrics.record_failed_auth();
+        })?;
 
     let user: (String, String) =
         sqlx::query_as("SELECT id, role FROM users WHERE display_name = ? AND status = 'active'")
@@ -445,7 +451,10 @@ pub async fn discover_complete(
     .bind(&req.challenge_id)
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| AppError::code(ErrorCode::InvalidChallenge))?;
+    .ok_or_else(|| {
+        state.metrics.record_failed_auth();
+        AppError::code(ErrorCode::InvalidChallenge)
+    })?;
 
     let (state_bytes,) = challenge;
 
@@ -458,7 +467,10 @@ pub async fn discover_complete(
 
     let (user_uuid, _cred_id) = state
         .webauthn
-        .identify_discoverable_authentication(&req.credential)?;
+        .identify_discoverable_authentication(&req.credential)
+        .inspect_err(|_| {
+            state.metrics.record_failed_auth();
+        })?;
 
     let user = sqlx::query_as::<_, (String, String, String)>(
         "SELECT id, display_name, role FROM users WHERE id = ? AND status = 'active'",
@@ -466,7 +478,10 @@ pub async fn discover_complete(
     .bind(user_uuid.to_string())
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| AppError::code(ErrorCode::UserNotFound))?;
+    .ok_or_else(|| {
+        state.metrics.record_failed_auth();
+        AppError::code(ErrorCode::UserNotFound)
+    })?;
 
     let (user_id, display_name, role) = user;
 

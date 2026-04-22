@@ -6,6 +6,7 @@ use tokio::sync::Notify;
 use webauthn_rs::Webauthn;
 
 use crate::error::{AppError, ErrorCode};
+use crate::metrics::Metrics;
 use crate::trust::TrustGraph;
 
 /// Shared application state available to all request handlers.
@@ -27,6 +28,10 @@ pub struct AppState {
     /// Rebuilt by the background task when mutations are detected. Readers
     /// clone the inner `Arc<TrustGraph>` for zero-contention concurrent access.
     pub trust_graph: Arc<std::sync::RwLock<Arc<TrustGraph>>>,
+    /// Process-wide metrics (BFS cache rates, graph build timings, last
+    /// rebuild timestamp). Recorded at instrumentation points and read
+    /// by the admin overview endpoint.
+    pub metrics: Arc<Metrics>,
 }
 
 impl AppState {

@@ -8,6 +8,8 @@ use sqlx::SqlitePool;
 use tokio::sync::Notify;
 use uuid::Uuid;
 
+use crate::metrics::Metrics;
+
 /// Per-hop decay constant for trust propagation.
 const DECAY: f64 = 0.7;
 
@@ -557,6 +559,9 @@ pub struct TrustGraph {
     forward_cache: BfsCache,
     /// Per-user cache of reverse BFS score maps (reader → {author_uuid_str → score}).
     reverse_cache: BfsCache,
+    /// Metrics sink for BFS hit/miss counters. Optional so that ad-hoc
+    /// graphs (`empty`, test fixtures) don't require a Metrics instance.
+    metrics: Option<Arc<Metrics>>,
 }
 
 impl TrustGraph {
@@ -566,7 +571,15 @@ impl TrustGraph {
     /// and constructs forward and reverse CSR graphs. `bfs_cache_bytes`
     /// is the total memory budget (in bytes) for cached BFS results,
     /// split evenly between the forward and reverse caches.
-    pub async fn build(db: &SqlitePool, bfs_cache_bytes: u64) -> Result<Self, sqlx::Error> {
+    ///
+    /// `metrics` is an optional sink that receives BFS hit/miss counters
+    /// so the admin dashboard can surface cache health. Pass `None` for
+    /// ad-hoc graphs (tests, one-off scripts) that don't need metrics.
+    pub async fn build(
+        db: &SqlitePool,
+        bfs_cache_bytes: u64,
+        metrics: Option<Arc<Metrics>>,
+    ) -> Result<Self, sqlx::Error> {
         // Exclude trust edges where either endpoint is a banned user.
         // Banned users should not propagate trust. Distrust edges pointing
         // at banned users are kept (loaded separately below) so that
@@ -645,6 +658,7 @@ impl TrustGraph {
             distrust_sets,
             forward_cache: Self::make_bfs_cache(bfs_cache_bytes / 2),
             reverse_cache: Self::make_bfs_cache(bfs_cache_bytes / 2),
+            metrics,
         })
     }
 
@@ -660,6 +674,7 @@ impl TrustGraph {
             distrust_sets: HashMap::new(),
             forward_cache: Self::make_bfs_cache(0),
             reverse_cache: Self::make_bfs_cache(0),
+            metrics: None,
         }
     }
 
@@ -710,6 +725,21 @@ impl TrustGraph {
     //  so author IDs are already Uuid instead of String. When we do this, we need to update
     //  BfsWeighter impl (BYTES_PER_MAP_ENTRY would drop from 84 to ~32 bytes)
     pub fn distance_map(&self, reader: Uuid) -> Arc<HashMap<String, f64>> {
+        // Probe the cache first so we can record hit vs. miss. Between
+        // the probe and the `get_or_insert_with` call another thread may
+        // insert, turning a would-be miss into an effective hit. The
+        // metric is ±1 per race, which is acceptable for a hit-rate
+        // gauge — the alternative (splitting insert into explicit steps)
+        // would defeat quick_cache's single-flight guarantee.
+        if let Some(cached) = self.forward_cache.get(&reader) {
+            if let Some(m) = &self.metrics {
+                m.record_bfs_forward_hit();
+            }
+            return cached;
+        }
+        if let Some(m) = &self.metrics {
+            m.record_bfs_forward_miss();
+        }
         self.forward_cache
             .get_or_insert_with(&reader, || {
                 let map = self
@@ -730,6 +760,16 @@ impl TrustGraph {
     /// Results are cached per reader for the lifetime of this `TrustGraph`
     /// instance. Returns a shared `Arc`.
     pub fn reverse_score_map(&self, reader: Uuid) -> Arc<HashMap<String, f64>> {
+        // See `distance_map` for the hit/miss accounting note.
+        if let Some(cached) = self.reverse_cache.get(&reader) {
+            if let Some(m) = &self.metrics {
+                m.record_bfs_reverse_hit();
+            }
+            return cached;
+        }
+        if let Some(m) = &self.metrics {
+            m.record_bfs_reverse_miss();
+        }
         self.reverse_cache
             .get_or_insert_with(&reader, || {
                 let Some(reader_id) = self.index.get_id(&reader) else {
@@ -931,14 +971,30 @@ impl Default for RebuildSchedule {
 /// Builds a new dual CSR graph and replaces the old one atomically; in-flight
 /// queries using the old Arc continue unaffected until they drop their
 /// reference.
+///
+/// If `metrics` is provided, the rebuild's wall-clock duration is
+/// recorded in the graph-load histogram and `set_last_rebuild` is
+/// called on success. The new graph is also given a clone of the same
+/// metrics handle so its BFS hit/miss counters flow into the dashboard.
 pub async fn rebuild_trust_graph(
     db: &SqlitePool,
     graph: &std::sync::RwLock<Arc<TrustGraph>>,
     bfs_cache_bytes: u64,
+    metrics: Option<Arc<Metrics>>,
 ) -> Result<(), sqlx::Error> {
-    let new_graph = TrustGraph::build(db, bfs_cache_bytes).await?;
+    let started = std::time::Instant::now();
+    let new_graph = TrustGraph::build(db, bfs_cache_bytes, metrics.clone()).await?;
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
     let new_arc = Arc::new(new_graph);
     *graph.write().unwrap() = new_arc;
+    if let Some(m) = &metrics {
+        // Record timing and reset per-graph BFS counters so the hit-rate
+        // reflects only the new graph (the old caches are gone with the
+        // previous Arc).
+        m.record_graph_load_ms(elapsed_ms);
+        m.reset_bfs_counters();
+        m.set_last_rebuild(chrono::Utc::now());
+    }
     Ok(())
 }
 
@@ -956,13 +1012,16 @@ pub async fn rebuild_loop(
     graph: Arc<std::sync::RwLock<Arc<TrustGraph>>>,
     notify: Arc<Notify>,
     schedule: RebuildSchedule,
+    metrics: Arc<Metrics>,
 ) {
     use tokio::time::{Instant, sleep_until};
 
     // Run an initial build immediately (graph starts empty).
     // TODO: Retry with backoff if the initial build fails, rather than
     //  silently continuing with an empty graph.
-    if let Err(e) = rebuild_trust_graph(&db, &graph, schedule.bfs_cache_bytes).await {
+    if let Err(e) =
+        rebuild_trust_graph(&db, &graph, schedule.bfs_cache_bytes, Some(metrics.clone())).await
+    {
         eprintln!("trust graph initial build failed: {e}");
     }
 
@@ -994,7 +1053,9 @@ pub async fn rebuild_loop(
             }
         }
 
-        match rebuild_trust_graph(&db, &graph, schedule.bfs_cache_bytes).await {
+        match rebuild_trust_graph(&db, &graph, schedule.bfs_cache_bytes, Some(metrics.clone()))
+            .await
+        {
             Ok(()) => {}
             Err(e) => {
                 eprintln!("trust graph rebuild failed: {e}");
@@ -1060,6 +1121,7 @@ mod tests {
             distrust_sets,
             forward_cache: TrustGraph::make_bfs_cache(1024 * 1024),
             reverse_cache: TrustGraph::make_bfs_cache(1024 * 1024),
+            metrics: None,
         }
     }
 

@@ -8,6 +8,7 @@
 
 	let appended = $state<AdminLogEntry[]>([]);
 	let appendedCursor = $state<string | null>(null);
+	let hasLoadedMore = $state(false);
 	let loadingMore = $state(false);
 	let error = $state<string | null>(null);
 
@@ -15,11 +16,12 @@
 		void data;
 		appended = [];
 		appendedCursor = null;
+		hasLoadedMore = false;
 		error = null;
 	});
 
 	let entries = $derived([...data.entries, ...appended]);
-	let nextCursor = $derived(appendedCursor ?? data.nextCursor);
+	let nextCursor = $derived(hasLoadedMore ? appendedCursor : data.nextCursor);
 
 	const actionLabels: Record<string, string> = {
 		lock_thread: 'Locked thread',
@@ -42,6 +44,7 @@
 			const res = await getAdminLog(nextCursor);
 			appended = [...appended, ...res.entries];
 			appendedCursor = res.next_cursor;
+			hasLoadedMore = true;
 		} catch (e) {
 			error = errorMessage(e, 'Failed to load more');
 		} finally {

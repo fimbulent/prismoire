@@ -13,11 +13,15 @@ use url::Url;
 use webauthn_rs::WebauthnBuilder;
 
 mod admin;
+mod admin_overview;
+mod admin_routes;
+mod admin_watchlists;
 mod auth;
 mod csp_report;
 mod display_name;
 mod error;
 mod invites;
+mod metrics;
 mod middleware;
 mod posts;
 mod rate_limit;
@@ -128,6 +132,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let trust_graph_notify = Arc::new(Notify::new());
     let trust_graph = Arc::new(RwLock::new(Arc::new(trust::TrustGraph::empty())));
+    let app_metrics = Arc::new(metrics::Metrics::new());
 
     let shared_state = Arc::new(AppState {
         db: pool.clone(),
@@ -136,6 +141,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         setup_token: if admin_exists { None } else { setup_token },
         trust_graph_notify: trust_graph_notify.clone(),
         trust_graph: trust_graph.clone(),
+        metrics: app_metrics.clone(),
     });
 
     // Spawn the debounced trust graph rebuild background task.
@@ -146,6 +152,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         trust_graph,
         trust_graph_notify,
         trust::RebuildSchedule::default(),
+        app_metrics,
     ));
 
     // Spawn the CSP report retention sweep. Runs once per hour and
@@ -230,6 +237,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             post(reports::action_report),
         )
         .route("/api/admin/dashboard", get(reports::get_dashboard))
+        .route("/api/admin/overview", get(admin_overview::get_overview))
+        .route("/api/admin/routes", get(admin_routes::list_routes))
+        .route(
+            "/api/admin/watchlists",
+            get(admin_watchlists::get_watchlists),
+        )
         .route(
             "/api/admin/users/{id}/ban",
             post(admin::ban_user).delete(admin::unban_user),
@@ -318,11 +331,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             shared_state.clone(),
             setup::setup_guard_middleware,
         ))
-        // Cache-Control is the outermost API layer so every response
-        // — handler output, rate-limit 429s, CSRF 403s, setup 503s —
-        // gets `no-store` on the way out.
+        // Cache-Control wraps every response (handler output,
+        // rate-limit 429s, CSRF 403s, setup 503s) with `no-store`.
         .layer(axum::middleware::from_fn(
             middleware::cache_control::cache_control,
+        ))
+        // Per-route metrics is the outermost layer on the API router
+        // so the latency it records covers every inner layer
+        // (rate-limiting, CSRF, setup-guard, cache-control). Placed
+        // after `.merge(...)` calls so every merged route template is
+        // measured under its real matched path.
+        .layer(axum::middleware::from_fn_with_state(
+            shared_state.metrics.clone(),
+            middleware::route_metrics::route_metrics,
         ))
         .with_state(shared_state.clone());
 

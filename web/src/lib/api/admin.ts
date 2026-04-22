@@ -251,3 +251,147 @@ export async function getAdminDashboard(opts: FetchOpts = {}): Promise<Dashboard
 	if (!res.ok) await throwApiError(res);
 	return res.json();
 }
+
+// ---------------------------------------------------------------------------
+// Admin overview
+// ---------------------------------------------------------------------------
+
+export interface DayCount {
+	date: string;
+	count: number;
+}
+
+export interface WeekCount {
+	week_start: string;
+	count: number;
+}
+
+export interface TrustGraphStats {
+	trust_edges: number;
+	distrust_edges: number;
+	avg_trusts_per_user: number;
+	avg_distrusts_per_user: number;
+	last_rebuild_at: string | null;
+	bfs_cache_hit_rate: number | null;
+	bfs_total_lookups: number;
+	graph_load_ms_p50: number | null;
+	graph_load_ms_p95: number | null;
+	graph_load_ms_p99: number | null;
+}
+
+export interface SessionStats {
+	active_sessions: number;
+	logins_today: number;
+	failed_auth_24h: number;
+}
+
+export interface AdminOverviewResponse {
+	total_users: number;
+	new_users_7d: number;
+	active_users_7d: number;
+	active_users_prev_7d: number;
+	posts_today: number;
+	posts_7d: number;
+	threads_today: number;
+	threads_7d: number;
+	total_rooms: number;
+	empty_rooms: number;
+	pending_reports: number;
+	oldest_pending_report_at: string | null;
+	trust: TrustGraphStats;
+	sessions: SessionStats;
+	posts_per_day: DayCount[];
+	new_users_per_week: WeekCount[];
+}
+
+export async function getAdminOverview(opts: FetchOpts = {}): Promise<AdminOverviewResponse> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f('/api/admin/overview');
+	if (!res.ok) await throwApiError(res);
+	return res.json();
+}
+
+// ---------------------------------------------------------------------------
+// Per-route request stats
+// ---------------------------------------------------------------------------
+
+export interface RouteStatsResponse {
+	method: string;
+	path: string;
+	total_24h: number;
+	success_24h: number;
+	client_error_24h: number;
+	server_error_24h: number;
+	latency_ms_p50_24h: number | null;
+	latency_ms_p95_24h: number | null;
+	latency_ms_p99_24h: number | null;
+	total_all: number;
+	success_all: number;
+	client_error_all: number;
+	server_error_all: number;
+}
+
+export interface RouteListResponse {
+	routes: RouteStatsResponse[];
+}
+
+export async function getAdminRoutes(opts: FetchOpts = {}): Promise<RouteListResponse> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f('/api/admin/routes');
+	if (!res.ok) await throwApiError(res);
+	return res.json();
+}
+
+// ---------------------------------------------------------------------------
+// Watchlists
+// ---------------------------------------------------------------------------
+
+export interface UserChip {
+	id: string;
+	display_name: string;
+	status: 'active' | 'suspended' | 'banned';
+}
+
+export interface DistrustedUserRow {
+	user: UserChip;
+	inbound_distrusts: number;
+	inbound_trusts: number;
+	ratio: number | null;
+}
+
+export interface RatioRow {
+	user: UserChip;
+	inbound_distrusts: number;
+	inbound_trusts: number;
+	ratio: number | null;
+	post_count: number;
+	joined_at: string;
+}
+
+export interface BanAdjacentRow {
+	user: UserChip;
+	banned_trusts: number;
+	total_trusts: number;
+	hit_rate: number | null;
+}
+
+export interface WatchlistThresholds {
+	min_inbound_distrusts: number;
+	min_inbound_edges_for_ratio: number;
+	min_trusts_issued_for_ban_adjacent: number;
+	limit_per_list: number;
+}
+
+export interface WatchlistsResponse {
+	thresholds: WatchlistThresholds;
+	most_distrusted: DistrustedUserRow[];
+	distrust_trust_ratio: RatioRow[];
+	ban_adjacent_trusters: BanAdjacentRow[];
+}
+
+export async function getAdminWatchlists(opts: FetchOpts = {}): Promise<WatchlistsResponse> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f('/api/admin/watchlists');
+	if (!res.ok) await throwApiError(res);
+	return res.json();
+}

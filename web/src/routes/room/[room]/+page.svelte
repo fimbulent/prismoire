@@ -29,6 +29,7 @@
 	// `data` changes (new room or new sort) because the $derived resets.
 	let appended = $state<ThreadSummary[]>([]);
 	let appendedCursor = $state<string | null>(null);
+	let hasLoadedMore = $state(false);
 	let loadingMore = $state(false);
 	let error = $state<string | null>(null);
 
@@ -38,11 +39,12 @@
 		void data;
 		appended = [];
 		appendedCursor = null;
+		hasLoadedMore = false;
 		error = null;
 	});
 
 	let threads = $derived([...data.threads, ...appended]);
-	let nextCursor = $derived(appendedCursor ?? data.nextCursor);
+	let nextCursor = $derived(hasLoadedMore ? appendedCursor : data.nextCursor);
 
 	// Track rendered thread IDs for warm/trusted deduplication. Send the
 	// most recent 200 as seen_ids to the server on load-more.
@@ -95,6 +97,7 @@
 
 			appended = [...appended, ...newThreads];
 			appendedCursor = res.next_cursor;
+			hasLoadedMore = true;
 		} catch (e) {
 			error = errorMessage(e, 'Failed to load more');
 		} finally {
