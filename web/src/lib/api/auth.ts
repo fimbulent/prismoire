@@ -1,8 +1,16 @@
+export type UserStatus = 'active' | 'banned' | 'suspended';
+
 export interface SessionInfo {
 	user_id: string;
 	display_name: string;
 	role: string;
 	theme: string;
+	/** Account status. `banned`/`suspended` users are locked into a restricted
+	 * UI showing only their own profile and settings. */
+	status: UserStatus;
+	/** ISO-8601 timestamp at which a suspension lifts. Present only when
+	 * `status === 'suspended'`. */
+	suspended_until?: string;
 }
 
 export interface AuthBeginResponse {

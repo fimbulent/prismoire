@@ -97,12 +97,14 @@
 						>
 							Profile
 						</button>
-						<button
-							onclick={() => navigateTo('/invites')}
-							class="w-full text-left px-3 py-2 text-sm text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-pointer"
-						>
-							Invites
-						</button>
+						{#if !session.isRestricted}
+							<button
+								onclick={() => navigateTo('/invites')}
+								class="w-full text-left px-3 py-2 text-sm text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-pointer"
+							>
+								Invites
+							</button>
+						{/if}
 						<button
 							onclick={() => navigateTo('/settings')}
 							class="w-full text-left px-3 py-2 text-sm text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-pointer"
@@ -137,7 +139,7 @@
 {@render children()}
 </div>
 
-{#if session.isLoggedIn}
+{#if session.isLoggedIn && !session.isRestricted}
 	<footer class="text-center py-6 text-xs text-text-muted mt-auto">
 		<a href="/log" class="hover:text-text-secondary transition-colors">Admin Log</a>
 	</footer>

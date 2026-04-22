@@ -1,9 +1,13 @@
 <script lang="ts">
 	import UserName from '$lib/components/trust/UserName.svelte';
+	import { session } from '$lib/stores/session.svelte';
 
 	let { data } = $props();
 
 	let title = $derived(data.direction === 'trusts' ? 'Trusts given' : 'Trusted by');
+	// Restricted (banned/suspended) viewers can't follow links to other
+	// profiles — they're only allowed on their own profile surface.
+	let viewerRestricted = $derived(session.isRestricted);
 </script>
 
 <svelte:head>
@@ -33,7 +37,7 @@
 		<div class="bg-bg-surface border border-border rounded-md divide-y divide-border-subtle">
 			{#each data.users as user}
 				<div class="px-4 py-2.5 flex items-center gap-2 min-w-0">
-					<UserName name={user.display_name} trust={user.trust} compact />
+					<UserName name={user.display_name} trust={user.trust} compact linked={!viewerRestricted} />
 				</div>
 			{/each}
 		</div>

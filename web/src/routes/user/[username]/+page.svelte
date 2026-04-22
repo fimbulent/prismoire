@@ -18,8 +18,10 @@
 	import Markdown from '$lib/components/ui/Markdown.svelte';
 	import Tooltip from '$lib/components/ui/Tooltip.svelte';
 	import MoreButton from '$lib/components/ui/MoreButton.svelte';
+	import Notice from '$lib/components/ui/Notice.svelte';
 	import { errorMessage } from '$lib/i18n/errors';
 	import { session } from '$lib/stores/session.svelte';
+	import { formatDistanceToNowStrict } from 'date-fns';
 	import {
 		suspendUser,
 		banUser,
@@ -202,6 +204,21 @@
 		return '';
 	}
 
+	// When the viewer themselves is banned/suspended, the UI locks down:
+	// other users aren't linkable (they can't reach other profiles), bio
+	// editing is hidden, and recent-activity items don't link out. The
+	// server-side guards mirror all of this, so the UI changes here are
+	// just so a restricted user doesn't see dead buttons that 403.
+	let viewerRestricted = $derived(session.isRestricted);
+	let suspensionNotice = $derived.by(() => {
+		if (!session.isSuspended) return null;
+		const until = session.suspendedUntil;
+		if (!until) return 'for the time being';
+		const when = new Date(until);
+		if (Number.isNaN(when.getTime())) return 'for the time being';
+		return formatDistanceToNowStrict(when, { addSuffix: false });
+	});
+
 	let isAdmin = $derived(session.isAdmin && !profile.is_self && profile.role !== 'admin');
 	let adminOpen = $state(false);
 	let adminAction = $state<'suspend' | 'ban' | 'invites' | null>(null);
@@ -314,6 +331,18 @@
 
 <div class="max-w-4xl mx-auto px-6 py-8">
 
+	{#if viewerRestricted && profile.is_self}
+		<Notice>
+			{#if session.isBanned}
+				Your account has been banned. You can view your own profile and manage your settings, but no other parts of Prismoire are available to you.
+			{:else if suspensionNotice}
+				Your account has been suspended for {suspensionNotice}. While suspended, you can view your own profile and manage your settings, but no other parts of Prismoire are available to you.
+			{:else}
+				Your account has been suspended. You can view your own profile and manage your settings, but no other parts of Prismoire are available to you.
+			{/if}
+		</Notice>
+	{/if}
+
 	<!-- Profile Header -->
 	<div class="bg-bg-surface border border-border rounded-md p-6 mb-6">
 		<div class="flex items-start justify-between gap-4 mb-4">
@@ -374,7 +403,7 @@
 		{/if}
 
 		<!-- Bio -->
-		{#if profile.is_self && editingBio}
+		{#if profile.is_self && editingBio && !viewerRestricted}
 			<div transition:slide={{ duration: 150 }} class="mb-5">
 				<textarea
 					bind:value={bioText}
@@ -403,13 +432,13 @@
 			<div class="text-[0.95rem] leading-7 text-text-secondary mb-5">
 				<Markdown source={profile.bio} profile="bio" />
 			</div>
-			{#if profile.is_self}
+			{#if profile.is_self && !viewerRestricted}
 				<button
 					onclick={startEditBio}
 					class="text-xs text-accent hover:underline cursor-pointer bg-transparent border-none mb-3"
 				>Edit bio</button>
 			{/if}
-		{:else if profile.is_self}
+		{:else if profile.is_self && !viewerRestricted}
 			<button
 				onclick={startEditBio}
 				class="text-xs text-accent hover:underline cursor-pointer bg-transparent border-none mb-3"
@@ -588,13 +617,13 @@
 											<span class="text-text-muted">Direct trust</span>
 										{:else if path.type === '2hop' && path.via}
 											<span class="text-text-muted">via</span>
-											<UserName name={path.via.display_name} trust={path.via.trust} compact />
+											<UserName name={path.via.display_name} trust={path.via.trust} compact linked={!viewerRestricted} />
 											<span class="text-text-muted">→ {profile.display_name}</span>
 										{:else if path.type === '3hop' && path.via && path.via2}
 											<span class="text-text-muted">via</span>
-											<UserName name={path.via.display_name} trust={path.via.trust} compact />
+											<UserName name={path.via.display_name} trust={path.via.trust} compact linked={!viewerRestricted} />
 											<span class="text-text-muted">→</span>
-											<UserName name={path.via2.display_name} trust={path.via2.trust} compact />
+											<UserName name={path.via2.display_name} trust={path.via2.trust} compact linked={!viewerRestricted} />
 											<span class="text-text-muted">→ {profile.display_name}</span>
 										{/if}
 									</div>
@@ -603,7 +632,7 @@
 									<div class="flex items-center gap-2 flex-wrap">
 										<span class="text-text-muted text-xs">▼</span>
 										<span class="text-text-muted">Trusts</span>
-										<UserName name={reduction.display_name} trust={{ distance: null, distrusted: true }} compact />
+										<UserName name={reduction.display_name} trust={{ distance: null, distrusted: true }} compact linked={!viewerRestricted} />
 									</div>
 								{/each}
 							</div>
@@ -618,7 +647,7 @@
 						<div class="space-y-2">
 							{#each trustDetail.trusts as user}
 								<div class="flex items-center gap-2 min-w-0">
-									<UserName name={user.display_name} trust={user.trust} compact />
+									<UserName name={user.display_name} trust={user.trust} compact linked={!viewerRestricted} />
 								</div>
 							{/each}
 							{#if trustDetail.trusts_total > trustDetail.trusts.length}
@@ -632,7 +661,7 @@
 						<div class="space-y-2">
 							{#each trustDetail.trusted_by as user}
 								<div class="flex items-center gap-2 min-w-0">
-									<UserName name={user.display_name} trust={user.trust} compact />
+									<UserName name={user.display_name} trust={user.trust} compact linked={!viewerRestricted} />
 								</div>
 							{/each}
 							{#if trustDetail.trusted_by_total > trustDetail.trusted_by.length}
@@ -673,15 +702,27 @@
 					<div class="flex items-center gap-2 text-xs text-text-muted mb-1">
 						{#if item.type === 'thread_started'}
 							<span>Started thread in</span>
-								<a href="/room/{item.room_slug}" class="text-link hover:underline">{item.room_slug}</a>
+								{#if viewerRestricted}
+									<span class="text-text-secondary">{item.room_slug}</span>
+								{:else}
+									<a href="/room/{item.room_slug}" class="text-link hover:underline">{item.room_slug}</a>
+								{/if}
 							{:else}
 								<span>Replied in</span>
-								<a href="/room/{item.room_slug}/{item.thread_id}?post={item.post_id}" class="text-link hover:underline">{item.thread_title}</a>
+								{#if viewerRestricted}
+									<span class="text-text-secondary">{item.thread_title}</span>
+								{:else}
+									<a href="/room/{item.room_slug}/{item.thread_id}?post={item.post_id}" class="text-link hover:underline">{item.thread_title}</a>
+								{/if}
 							{/if}
 							<span class="ml-auto">{relativeTime(item.created_at)}</span>
 						</div>
 						{#if item.type === 'thread_started'}
-							<a href="/room/{item.room_slug}/{item.thread_id}" class="text-[0.95rem] text-text-primary hover:underline font-medium leading-snug">{item.thread_title}</a>
+							{#if viewerRestricted}
+								<span class="text-[0.95rem] text-text-primary font-medium leading-snug">{item.thread_title}</span>
+							{:else}
+								<a href="/room/{item.room_slug}/{item.thread_id}" class="text-[0.95rem] text-text-primary hover:underline font-medium leading-snug">{item.thread_title}</a>
+							{/if}
 						{/if}
 						<div class="text-[0.95rem] leading-7 text-text-secondary mt-1">
 							<Markdown source={item.body} profile={item.type === 'thread_started' ? 'full' : 'reply'} />

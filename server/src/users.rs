@@ -9,9 +9,29 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::{AppError, ErrorCode};
-use crate::session::AuthUser;
+use crate::session::{AuthUser, RestrictedAuthUser};
 use crate::state::AppState;
 use crate::trust::{MINIMUM_TRUST_THRESHOLD, TrustInfo, TrustPath, UserStatus, load_distrust_set};
+
+/// Restricted (banned/suspended) users may only interact with their own
+/// profile. Endpoints that accept a `:username` path parameter call this
+/// before the main query to reject cross-user access with 403.
+///
+/// The comparison is on `display_name` because that is the identifier in
+/// the URL path. Display names are unique (enforced by both a UNIQUE
+/// constraint and the `display_name_skeleton` index) and not renameable,
+/// so an exact-string match is a sufficient identity check. If display-
+/// name renaming is ever introduced, switch to a user-id comparison
+/// (resolve the URL username to an id and compare against `user.user_id`).
+fn enforce_self_only_for_restricted(
+    user: &RestrictedAuthUser,
+    username: &str,
+) -> Result<(), AppError> {
+    if !user.status.is_active() && user.display_name != username {
+        return Err(AppError::code(ErrorCode::Forbidden));
+    }
+    Ok(())
+}
 
 const MAX_BIO_LEN: usize = 500;
 const ACTIVITY_PAGE_SIZE: i64 = 10;
@@ -250,9 +270,11 @@ async fn resolve_display_names(
 /// Returns basic user profile info, viewer relationship, and trust score.
 pub async fn get_profile(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: RestrictedAuthUser,
     Path(username): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
+    enforce_self_only_for_restricted(&user, &username)?;
+
     let (target_id, display_name, created_at, signup_method, bio, role, target_status, can_invite) =
         resolve_user(&state.db, &username).await?;
 
@@ -319,9 +341,11 @@ pub async fn get_profile(
 /// Returns trust stats, paths, score reductions, and trust edge lists.
 pub async fn get_trust_detail(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: RestrictedAuthUser,
     Path(username): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
+    enforce_self_only_for_restricted(&user, &username)?;
+
     let (target_id, _display_name, _, _, _, _, target_status, _) =
         resolve_user(&state.db, &username).await?;
 
@@ -604,10 +628,12 @@ pub async fn get_trust_detail(
 // DESC`) so the next-page filter excludes exactly the rows already seen.
 pub async fn get_activity(
     State(state): State<Arc<AppState>>,
-    _user: AuthUser,
+    user: RestrictedAuthUser,
     Path(username): Path<String>,
     Query(query): Query<ActivityQuery>,
 ) -> Result<impl IntoResponse, AppError> {
+    enforce_self_only_for_restricted(&user, &username)?;
+
     let (target_id, ..) = resolve_user(&state.db, &username).await?;
 
     let filter = query.filter.as_deref().unwrap_or("all");
@@ -691,10 +717,12 @@ pub async fn get_activity(
 /// sorted by viewer's trust distance (closest first), then alphabetically.
 pub async fn get_trust_edges(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: RestrictedAuthUser,
     Path(username): Path<String>,
     Query(query): Query<TrustEdgesQuery>,
 ) -> Result<impl IntoResponse, AppError> {
+    enforce_self_only_for_restricted(&user, &username)?;
+
     let (target_id, ..) = resolve_user(&state.db, &username).await?;
 
     let graph = state.get_trust_graph()?;

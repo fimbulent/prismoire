@@ -25,6 +25,26 @@ export const session = {
 	get isAdmin(): boolean {
 		return page.data.session?.role === 'admin';
 	},
+	get isBanned(): boolean {
+		return page.data.session?.status === 'banned';
+	},
+	get isSuspended(): boolean {
+		return page.data.session?.status === 'suspended';
+	},
+	/**
+	 * Banned or suspended — the UI must lock down to the restricted
+	 * profile-only view. All non-allowed routes redirect to the user's
+	 * own profile; most action buttons (posting, editing bio, trust
+	 * changes) are hidden.
+	 */
+	get isRestricted(): boolean {
+		const s = page.data.session?.status;
+		return s === 'banned' || s === 'suspended';
+	},
+	/** ISO-8601 timestamp at which a suspension lifts, if applicable. */
+	get suspendedUntil(): string | null {
+		return page.data.session?.suspended_until ?? null;
+	},
 	get needsSetup(): boolean {
 		return page.data.needsSetup === true;
 	},

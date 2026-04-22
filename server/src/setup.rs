@@ -219,12 +219,12 @@ pub async fn setup_complete(
 
     Ok((
         headers,
-        Json(SessionResponse {
+        Json(SessionResponse::active(
             user_id,
             display_name,
-            role: "admin".into(),
-            theme: crate::settings::DEFAULT_THEME.into(),
-        }),
+            "admin".into(),
+            crate::settings::DEFAULT_THEME.into(),
+        )),
     ))
 }
 

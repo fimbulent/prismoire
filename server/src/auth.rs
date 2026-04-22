@@ -13,10 +13,11 @@ use crate::display_name::{display_name_skeleton, validate_display_name};
 use crate::error::{AppError, ErrorCode};
 use crate::invites;
 use crate::session::{
-    AuthUser, clear_session_cookie, create_session, delete_session, session_cookie,
+    RestrictedAuthUser, clear_session_cookie, create_session, delete_session, session_cookie,
 };
 use crate::signing;
 use crate::state::AppState;
+use crate::trust::UserStatus;
 
 // ---------------------------------------------------------------------------
 // Request / response types
@@ -58,6 +59,75 @@ pub struct SessionResponse {
     pub display_name: String,
     pub role: String,
     pub theme: String,
+    /// Account status (`active`, `suspended`, or `banned`). The frontend
+    /// branches on this to lock the UI into a restricted profile-only view
+    /// for suspended/banned users.
+    pub status: UserStatus,
+    /// ISO-8601 timestamp at which a suspension lifts. Present only for
+    /// suspended users so the UI can render remaining time in the restriction
+    /// notice.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suspended_until: Option<String>,
+}
+
+impl SessionResponse {
+    /// Build a [`SessionResponse`] for a user newly authenticated or signing up.
+    /// Freshly created accounts are always active; callers that may be handling
+    /// a restricted login should use [`SessionResponse::new`] instead.
+    pub fn active(user_id: String, display_name: String, role: String, theme: String) -> Self {
+        Self {
+            user_id,
+            display_name,
+            role,
+            theme,
+            status: UserStatus::Active,
+            suspended_until: None,
+        }
+    }
+
+    /// Build a [`SessionResponse`] for any status. Drops `suspended_until`
+    /// for non-suspended users so the wire payload never carries a stale
+    /// timestamp after a suspension has lifted or a ban has been applied.
+    pub fn new(
+        user_id: String,
+        display_name: String,
+        role: String,
+        theme: String,
+        status: UserStatus,
+        suspended_until: Option<String>,
+    ) -> Self {
+        Self {
+            user_id,
+            display_name,
+            role,
+            theme,
+            status,
+            suspended_until: if status == UserStatus::Suspended {
+                suspended_until
+            } else {
+                None
+            },
+        }
+    }
+}
+
+/// Parse a user status string from the DB, logging and falling back to
+/// `Active` on malformed data.
+///
+/// Malformed statuses mean the `users.status` CHECK constraint has been
+/// violated (a migration bug, or manual DB mutation). Falling back to
+/// `Active` keeps the site reachable for the affected user; the log line
+/// surfaces the corruption so an operator can fix it.
+fn parse_status_or_log(raw: &str, user_id: &str) -> UserStatus {
+    match UserStatus::try_from(raw) {
+        Ok(s) => s,
+        Err(msg) => {
+            eprintln!(
+                "auth: unrecognised users.status for user {user_id}: {msg}; defaulting to active"
+            );
+            UserStatus::Active
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -261,12 +331,12 @@ pub async fn signup_complete(
 
     Ok((
         headers,
-        Json(SessionResponse {
+        Json(SessionResponse::active(
             user_id,
             display_name,
-            role: "user".into(),
-            theme: crate::settings::DEFAULT_THEME.into(),
-        }),
+            "user".into(),
+            crate::settings::DEFAULT_THEME.into(),
+        )),
     ))
 }
 
@@ -284,8 +354,14 @@ pub async fn login_begin(
 ) -> Result<impl IntoResponse, AppError> {
     let display_name = req.display_name.trim();
 
+    // Suspended and banned users are still allowed to begin a login — they
+    // need a valid session to reach their own profile + settings after they
+    // authenticate. The restriction is enforced downstream by the `AuthUser`
+    // extractor rejecting non-active sessions with 403. Self-deleted users
+    // (`deleted_at IS NOT NULL`) are filtered out here — their credentials
+    // have already been purged, so this is belt-and-suspenders.
     let user: Option<(String,)> =
-        sqlx::query_as("SELECT id FROM users WHERE display_name = ? AND status = 'active'")
+        sqlx::query_as("SELECT id FROM users WHERE display_name = ? AND deleted_at IS NULL")
             .bind(display_name)
             .fetch_optional(&state.db)
             .await?;
@@ -373,12 +449,24 @@ pub async fn login_complete(
             state.metrics.record_failed_auth();
         })?;
 
-    let user: (String, String) =
-        sqlx::query_as("SELECT id, role FROM users WHERE display_name = ? AND status = 'active'")
-            .bind(&display_name)
-            .fetch_one(&state.db)
-            .await?;
-    let (user_id, role) = user;
+    // Banned and suspended users may complete login — their session lets
+    // them reach a restricted UI surface (profile + settings). The `status`
+    // and `suspended_until` fields travel back to the client in the session
+    // payload so the frontend knows to lock the UI down. Self-deleted users
+    // are filtered out: their credentials are purged, but this closes the
+    // path defensively if one somehow survived.
+    let user: Option<(String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT id, role, status, suspended_until FROM users \
+         WHERE display_name = ? AND deleted_at IS NULL",
+    )
+    .bind(&display_name)
+    .fetch_optional(&state.db)
+    .await?;
+    let (user_id, role, status_str, suspended_until) = user.ok_or_else(|| {
+        state.metrics.record_failed_auth();
+        AppError::code(ErrorCode::UserNotFound)
+    })?;
+    let status = parse_status_or_log(&status_str, &user_id);
 
     update_credential_counter(&state.db, &user_id, &auth_result).await?;
 
@@ -390,12 +478,14 @@ pub async fn login_complete(
 
     Ok((
         headers,
-        Json(SessionResponse {
+        Json(SessionResponse::new(
             user_id,
             display_name,
             role,
             theme,
-        }),
+            status,
+            suspended_until,
+        )),
     ))
 }
 
@@ -472,8 +562,13 @@ pub async fn discover_complete(
             state.metrics.record_failed_auth();
         })?;
 
-    let user = sqlx::query_as::<_, (String, String, String)>(
-        "SELECT id, display_name, role FROM users WHERE id = ? AND status = 'active'",
+    // Banned and suspended users may still complete discoverable login; the
+    // `status` / `suspended_until` fields flow to the client so the frontend
+    // renders the restricted UI surface. Self-deleted users are filtered
+    // defensively (their credentials have been purged).
+    let user = sqlx::query_as::<_, (String, String, String, String, Option<String>)>(
+        "SELECT id, display_name, role, status, suspended_until FROM users \
+         WHERE id = ? AND deleted_at IS NULL",
     )
     .bind(user_uuid.to_string())
     .fetch_optional(&state.db)
@@ -483,7 +578,8 @@ pub async fn discover_complete(
         AppError::code(ErrorCode::UserNotFound)
     })?;
 
-    let (user_id, display_name, role) = user;
+    let (user_id, display_name, role, status_str, suspended_until) = user;
+    let status = parse_status_or_log(&status_str, &user_id);
 
     let cred_rows: Vec<(Vec<u8>,)> =
         sqlx::query_as("SELECT public_key FROM credentials WHERE user_id = ?")
@@ -515,12 +611,14 @@ pub async fn discover_complete(
 
     Ok((
         headers,
-        Json(SessionResponse {
+        Json(SessionResponse::new(
             user_id,
             display_name,
             role,
             theme,
-        }),
+            status,
+            suspended_until,
+        )),
     ))
 }
 
@@ -561,17 +659,23 @@ async fn update_credential_counter(
 // ---------------------------------------------------------------------------
 
 /// Return the current authenticated user's info, or 401 if not logged in.
+///
+/// Uses [`RestrictedAuthUser`] so banned and suspended users can still query
+/// their own session state — the `status` / `suspended_until` fields are what
+/// drives the frontend's restricted UI.
 pub async fn session_info(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
-) -> Result<Json<SessionResponse>, crate::error::AppError> {
+    user: RestrictedAuthUser,
+) -> Result<Json<SessionResponse>, AppError> {
     let theme = crate::settings::get_user_theme(&state.db, &user.user_id).await?;
-    Ok(Json(SessionResponse {
-        user_id: user.user_id,
-        display_name: user.display_name,
-        role: user.role,
+    Ok(Json(SessionResponse::new(
+        user.user_id,
+        user.display_name,
+        user.role,
         theme,
-    }))
+        user.status,
+        user.suspended_until,
+    )))
 }
 
 // ---------------------------------------------------------------------------

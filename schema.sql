@@ -14,7 +14,7 @@ CREATE TABLE users (
     steam_verified INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended', 'banned')),
     bio TEXT
-, display_name_skeleton TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'admin')), invite_id TEXT REFERENCES invites(id), suspended_until TEXT, can_invite INTEGER NOT NULL DEFAULT 1);
+, display_name_skeleton TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'admin')), invite_id TEXT REFERENCES invites(id), suspended_until TEXT, can_invite INTEGER NOT NULL DEFAULT 1, deleted_at TEXT);
 CREATE TABLE credentials (
     id TEXT PRIMARY KEY NOT NULL,
     user_id TEXT NOT NULL REFERENCES users(id),
@@ -207,3 +207,4 @@ CREATE TABLE ban_trust_snapshots (
 CREATE INDEX idx_ban_trust_snapshots_target ON ban_trust_snapshots(target_user);
 CREATE INDEX idx_ban_trust_snapshots_trusting ON ban_trust_snapshots(trusting_user);
 CREATE INDEX idx_ban_trust_snapshots_admin_log ON ban_trust_snapshots(admin_log_id);
+CREATE INDEX idx_users_deleted_at ON users(deleted_at);

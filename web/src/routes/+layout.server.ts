@@ -7,11 +7,25 @@
 // URL and forwards the session cookie, so the same call works on the server
 // as it does in the browser.
 
+import { redirect } from '@sveltejs/kit';
 import type { LayoutServerLoad } from './$types';
-import { ApiRequestError, getSession, getSetupStatus } from '$lib/api/auth';
+import { ApiRequestError, getSession, getSetupStatus, type SessionInfo } from '$lib/api/auth';
 import type { ThemeId } from '$lib/themes';
 
-export const load: LayoutServerLoad = async ({ fetch, cookies, locals }) => {
+/**
+ * Banned/suspended users may visit only their own profile (and its
+ * sub-routes such as trust edge lists) and `/settings`. Everything else
+ * is redirected back to their profile so the UI stays locked in the
+ * restricted state the moderation action intended.
+ */
+function isAllowedForRestricted(pathname: string, session: SessionInfo): boolean {
+	const ownProfile = `/user/${encodeURIComponent(session.display_name)}`;
+	if (pathname === ownProfile || pathname.startsWith(`${ownProfile}/`)) return true;
+	if (pathname === '/settings' || pathname.startsWith('/settings/')) return true;
+	return false;
+}
+
+export const load: LayoutServerLoad = async ({ fetch, cookies, locals, url }) => {
 	const setupStatus = await getSetupStatus({ fetch }).catch(() => ({ needs_setup: false }));
 
 	// Only hit /api/auth/session when a session cookie is actually present.
@@ -46,6 +60,15 @@ export const load: LayoutServerLoad = async ({ fetch, cookies, locals }) => {
 				// Network / unexpected error — treat as transient too.
 				sessionError = true;
 			}
+		}
+	}
+
+	// Gate restricted (banned/suspended) users to their own profile and
+	// settings. Done here rather than in each page's load so a new route
+	// can't accidentally be reachable to restricted users.
+	if (session && (session.status === 'banned' || session.status === 'suspended')) {
+		if (!isAllowedForRestricted(url.pathname, session)) {
+			throw redirect(307, `/user/${encodeURIComponent(session.display_name)}`);
 		}
 	}
 

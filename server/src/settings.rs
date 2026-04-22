@@ -6,7 +6,7 @@ use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, ErrorCode};
-use crate::session::AuthUser;
+use crate::session::RestrictedAuthUser;
 use crate::state::AppState;
 
 const VALID_THEMES: &[&str] = &[
@@ -44,7 +44,7 @@ pub struct UpdateSettingsRequest {
 /// Return the current user's settings.
 pub async fn get_settings(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: RestrictedAuthUser,
 ) -> Result<impl IntoResponse, AppError> {
     let theme = get_user_theme(&state.db, &user.user_id).await?;
     Ok(Json(SettingsResponse { theme }))
@@ -57,7 +57,7 @@ pub async fn get_settings(
 /// Update the current user's settings.
 pub async fn update_settings(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: RestrictedAuthUser,
     Json(req): Json<UpdateSettingsRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     if let Some(ref theme) = req.theme {

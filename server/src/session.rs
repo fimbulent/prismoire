@@ -11,6 +11,7 @@ use sqlx::SqlitePool;
 
 use crate::error::{AppError, ErrorCode};
 use crate::state::AppState;
+use crate::trust::UserStatus;
 
 /// Maximum age of an auth challenge before it is considered stale.
 ///
@@ -29,19 +30,28 @@ const TOKEN_BYTES: usize = 32;
 const RENEWAL_THRESHOLD_DAYS: i64 = SESSION_DURATION_DAYS / 2;
 
 /// Authenticated user info, populated by [`session_middleware`] and read by handlers
-/// via the [`AuthUser`] extractor.
+/// via the [`AuthUser`] / [`RestrictedAuthUser`] extractors.
+///
+/// `status` is carried alongside the user so extractors can decide whether to
+/// accept the session. Banned and suspended users get a populated [`AuthSession`]
+/// so they can still reach a restricted subset of endpoints (profile, settings,
+/// logout); the standard [`AuthUser`] extractor rejects them with 403.
 #[derive(Clone)]
 struct AuthSession {
     user_id: String,
     display_name: String,
     role: String,
+    status: UserStatus,
+    suspended_until: Option<String>,
 }
 
 /// Authenticated user extracted from request extensions.
 ///
 /// The [`session_middleware`] validates the session cookie and stores the
 /// authenticated user in request extensions. This extractor reads it back,
-/// returning 401 if no valid session was found.
+/// returning 401 if no valid session was found, or 403 if the user is banned
+/// or suspended — most endpoints are off-limits to restricted users, who
+/// should use [`RestrictedAuthUser`] instead.
 pub struct AuthUser {
     pub user_id: String,
     pub display_name: String,
@@ -65,6 +75,9 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             .extensions
             .get::<AuthSession>()
             .ok_or_else(|| AppError::code(ErrorCode::Unauthenticated).into_response())?;
+        if !session.status.is_active() {
+            return Err(AppError::code(ErrorCode::Forbidden).into_response());
+        }
         Ok(AuthUser {
             user_id: session.user_id.clone(),
             display_name: session.display_name.clone(),
@@ -73,10 +86,47 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
     }
 }
 
+/// Authenticated user that can be banned or suspended.
+///
+/// Used by the small set of endpoints a restricted user must still reach:
+/// `/api/auth/session`, their own profile + activity + trust + settings.
+/// Handlers read [`status`](Self::status) to decide whether to surface
+/// reduced functionality or deny requests targeting other users.
+pub struct RestrictedAuthUser {
+    pub user_id: String,
+    pub display_name: String,
+    pub role: String,
+    pub status: UserStatus,
+    pub suspended_until: Option<String>,
+}
+
+impl FromRequestParts<Arc<AppState>> for RestrictedAuthUser {
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        _state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let session = parts
+            .extensions
+            .get::<AuthSession>()
+            .ok_or_else(|| AppError::code(ErrorCode::Unauthenticated).into_response())?;
+        Ok(RestrictedAuthUser {
+            user_id: session.user_id.clone(),
+            display_name: session.display_name.clone(),
+            role: session.role.clone(),
+            status: session.status,
+            suspended_until: session.suspended_until.clone(),
+        })
+    }
+}
+
 /// Optional authenticated user — succeeds with `None` if no valid session.
 ///
 /// Use this for endpoints that behave differently for logged-in vs. anonymous
-/// users (e.g. public thread view with optional trust badges).
+/// users (e.g. public thread view with optional trust badges). Banned and
+/// suspended users are treated as anonymous here: they should not get a
+/// trust-gated view of content reserved for active users.
 pub struct OptionalAuthUser(pub Option<AuthUser>);
 
 impl FromRequestParts<Arc<AppState>> for OptionalAuthUser {
@@ -89,6 +139,7 @@ impl FromRequestParts<Arc<AppState>> for OptionalAuthUser {
         let user = parts
             .extensions
             .get::<AuthSession>()
+            .filter(|session| session.status.is_active())
             .map(|session| AuthUser {
                 user_id: session.user_id.clone(),
                 display_name: session.display_name.clone(),
@@ -186,11 +237,15 @@ pub async fn session_middleware(
     let mut renewal_cookie: Option<String> = None;
 
     if let Some(token) = extract_session_token(&request) {
+        // Deleted users (`deleted_at IS NOT NULL`) are filtered here so a
+        // stale session cookie for a self-deleted account can't hydrate an
+        // AuthSession. Sessions are dropped as part of the delete
+        // transaction, so this is belt-and-suspenders.
         let row = sqlx::query_as::<_, (String, String, String, String, String, Option<String>)>(
             "SELECT s.user_id, u.display_name, s.expires_at, u.status, u.role, u.suspended_until \
              FROM sessions s \
              JOIN users u ON u.id = s.user_id \
-             WHERE s.token = ?",
+             WHERE s.token = ? AND u.deleted_at IS NULL",
         )
         .bind(&token)
         .fetch_optional(&state.db)
@@ -198,13 +253,27 @@ pub async fn session_middleware(
         .ok()
         .flatten();
 
-        if let Some((user_id, display_name, expires_at, mut status, role, suspended_until)) = row
+        if let Some((user_id, display_name, expires_at, status_str, role, mut suspended_until)) =
+            row
             && let Ok(expires) =
                 chrono::NaiveDateTime::parse_from_str(&expires_at, "%Y-%m-%dT%H:%M:%SZ")
         {
+            let mut status = match UserStatus::try_from(status_str.as_str()) {
+                Ok(s) => s,
+                Err(msg) => {
+                    // `users.status` has a CHECK constraint, so seeing
+                    // this would mean DB corruption or a migration bug.
+                    // Log and fall back to Active so the user's session
+                    // is still usable; operator can sort it out.
+                    eprintln!(
+                        "session_middleware: unrecognised users.status for {user_id}: {msg}; defaulting to active"
+                    );
+                    UserStatus::Active
+                }
+            };
             // Lazy suspension expiry: if the user is suspended and the
             // suspension period has elapsed, atomically restore to active.
-            if status == "suspended" {
+            if status == UserStatus::Suspended {
                 let expired = suspended_until
                     .as_deref()
                     .and_then(|s| {
@@ -218,35 +287,37 @@ pub async fn session_middleware(
                     .bind(&user_id)
                     .execute(&state.db)
                     .await;
-                    status = "active".to_string();
+                    status = UserStatus::Active;
+                    suspended_until = None;
                 }
             }
 
-            if status != "active" {
-                // Banned or still-suspended users pass through
-                // unauthenticated — the AuthUser extractor will return 401.
-            } else {
-                let now = Utc::now().naive_utc();
-                if expires >= now {
-                    request.extensions_mut().insert(AuthSession {
-                        user_id,
-                        display_name,
-                        role,
-                    });
+            let now = Utc::now().naive_utc();
+            if expires >= now {
+                // Banned and suspended users still get an AuthSession so that
+                // restricted endpoints (session info, own profile, settings)
+                // work. The `AuthUser` extractor rejects them with 403; only
+                // `RestrictedAuthUser` accepts non-active statuses.
+                request.extensions_mut().insert(AuthSession {
+                    user_id,
+                    display_name,
+                    role,
+                    status,
+                    suspended_until,
+                });
 
-                    // Sliding session: renew when past the halfway point.
-                    let remaining = expires - now;
-                    if remaining < Duration::days(RENEWAL_THRESHOLD_DAYS) {
-                        let new_expires = (Utc::now() + Duration::days(SESSION_DURATION_DAYS))
-                            .format("%Y-%m-%dT%H:%M:%SZ")
-                            .to_string();
-                        let _ = sqlx::query("UPDATE sessions SET expires_at = ? WHERE token = ?")
-                            .bind(&new_expires)
-                            .bind(&token)
-                            .execute(&state.db)
-                            .await;
-                        renewal_cookie = Some(session_cookie(&token));
-                    }
+                // Sliding session: renew when past the halfway point.
+                let remaining = expires - now;
+                if remaining < Duration::days(RENEWAL_THRESHOLD_DAYS) {
+                    let new_expires = (Utc::now() + Duration::days(SESSION_DURATION_DAYS))
+                        .format("%Y-%m-%dT%H:%M:%SZ")
+                        .to_string();
+                    let _ = sqlx::query("UPDATE sessions SET expires_at = ? WHERE token = ?")
+                        .bind(&new_expires)
+                        .bind(&token)
+                        .execute(&state.db)
+                        .await;
+                    renewal_cookie = Some(session_cookie(&token));
                 }
             }
         }

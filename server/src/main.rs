@@ -24,6 +24,7 @@ mod invites;
 mod metrics;
 mod middleware;
 mod posts;
+mod privacy;
 mod rate_limit;
 mod reports;
 mod room_name;
@@ -221,6 +222,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/settings",
             get(settings::get_settings).patch(settings::update_settings),
         )
+        .route("/api/me/export", get(privacy::export_my_data))
+        .route("/api/me", delete(privacy::delete_my_account))
         .route("/api/admin/log", get(admin::get_admin_log))
         .route(
             "/api/admin/threads/{id}/lock",
