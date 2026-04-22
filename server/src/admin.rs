@@ -335,14 +335,21 @@ pub async fn get_admin_log(
         String,
     );
 
+    // Some actions (lock_thread, unlock_thread, remove_post) record a thread
+    // but not a room, so join rooms via the thread as a fallback and coalesce
+    // the two. This means historical entries surface a room_slug without
+    // needing a backfill migration.
     let base_select = "SELECT al.id, al.admin, u.display_name, al.action, \
              al.target_user, tu.display_name, \
-             al.thread_id, t.title, al.post_id, al.room_id, r.slug, al.reason, al.created_at \
+             al.thread_id, t.title, al.post_id, \
+             COALESCE(al.room_id, t.room), COALESCE(r.slug, rt.slug), \
+             al.reason, al.created_at \
              FROM admin_log al \
              JOIN users u ON u.id = al.admin \
              LEFT JOIN users tu ON tu.id = al.target_user \
              LEFT JOIN threads t ON t.id = al.thread_id \
-             LEFT JOIN rooms r ON r.id = al.room_id";
+             LEFT JOIN rooms r ON r.id = al.room_id \
+             LEFT JOIN rooms rt ON rt.id = t.room";
 
     let rows: Vec<LogRow> = if let Some(ref cursor) = params.cursor {
         let (cursor_ts, cursor_id) = parse_cursor(cursor)?;

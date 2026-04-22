@@ -114,6 +114,7 @@ pub async fn create_thread(
             total_reply_count: 0,
             has_more_replies: false,
             focused_post_id: None,
+            top_level_loaded: None,
         }),
     ))
 }

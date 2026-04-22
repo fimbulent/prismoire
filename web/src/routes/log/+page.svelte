@@ -24,17 +24,17 @@
 	let nextCursor = $derived(hasLoadedMore ? appendedCursor : data.nextCursor);
 
 	const actionLabels: Record<string, string> = {
-		lock_thread: 'Locked thread',
-		unlock_thread: 'Unlocked thread',
-		remove_post: 'Removed post',
-		merge_room: 'Merged room',
-		delete_room: 'Deleted room',
-		ban_user: 'Banned',
-		unban_user: 'Unbanned',
-		suspend_user: 'Suspended',
-		unsuspend_user: 'Unsuspended',
-		revoke_invites: 'Revoked invites for',
-		grant_invites: 'Granted invites for'
+		lock_thread: 'locked thread',
+		unlock_thread: 'unlocked thread',
+		remove_post: 'removed a post in',
+		merge_room: 'merged room',
+		delete_room: 'deleted room',
+		ban_user: 'banned',
+		unban_user: 'unbanned',
+		suspend_user: 'suspended',
+		unsuspend_user: 'unsuspended',
+		revoke_invites: 'revoked invites for',
+		grant_invites: 'granted invites for'
 	};
 
 	async function loadMore() {
@@ -82,12 +82,16 @@
 						{/if}
 						{#if entry.thread_title}
 							<a
-								href="/room/all"
+								href={entry.room_slug && entry.thread_id
+									? `/room/${entry.room_slug}/${entry.thread_id}`
+									: entry.room_slug
+										? `/room/${entry.room_slug}`
+										: '/room/all'}
 								class="text-link hover:text-link-hover font-medium truncate max-w-xs"
 								title={entry.thread_title}
 							>{entry.thread_title}</a>
 						{/if}
-						{#if entry.room_slug}
+						{#if entry.room_slug && entry.action !== 'remove_post'}
 							<span class="text-text-secondary">in {entry.room_slug}</span>
 						{/if}
 					</div>

@@ -52,6 +52,10 @@ export interface ThreadDetail {
 	total_reply_count: number;
 	has_more_replies?: boolean;
 	focused_post_id?: string;
+	/** Number of sort-ordered top-level replies already rendered. Present only
+	 * when focused-view pagination appended an extra out-of-order reply; use
+	 * this (not `post.children.length`) as the offset for load-more. */
+	top_level_loaded?: number;
 }
 
 export interface SubtreeResponse {

@@ -681,6 +681,7 @@ pub async fn get_thread(
         total_reply_count,
         has_more_replies,
         focused_post_id: None,
+        top_level_loaded: None,
     })
     .into_response())
 }
@@ -715,10 +716,13 @@ async fn build_focused_response(
         return Err(AppError::code(ErrorCode::PostNotFound));
     }
 
-    // Build focus path: set of indices from root to focused post (exclusive of
-    // the focused post itself, since the focused post's subtree uses normal
-    // depth counting).
+    // Build focus path: set of indices from the focused post up to the root.
+    // Including the focused post itself ensures (a) the top-level lookup below
+    // matches even when the focused post *is* a direct top-level reply, and
+    // (b) the focused post's own subtree bypasses depth truncation so a bit
+    // of context below it is visible.
     let mut focus_path: HashSet<usize> = HashSet::new();
+    focus_path.insert(focus_idx);
     let mut current = focus_idx;
     while let Some(ref pid) = meta_tree.metas[current].parent_id {
         if let Some(&parent_idx) = meta_tree.id_to_index.get(pid) {
@@ -740,13 +744,22 @@ async fn build_focused_response(
         .copied();
     let has_more_replies = all_top_level.len() > TOP_LEVEL_LIMIT;
     let mut top_level: Vec<usize> = all_top_level.into_iter().take(TOP_LEVEL_LIMIT).collect();
+    let sort_ordered_count = top_level.len();
 
     // If the focus-path top-level child was beyond the limit, append it.
+    // This appended entry is out of sort order, so the frontend must not
+    // count it toward the offset used for load-more pagination — see
+    // `top_level_loaded` below.
     if let Some(ftl) = focus_top_level_idx
         && !top_level.contains(&ftl)
     {
         top_level.push(ftl);
     }
+    let top_level_loaded = if top_level.len() > sort_ordered_count {
+        Some(sort_ordered_count)
+    } else {
+        None
+    };
 
     let mut post_ids = vec![meta_tree.metas[meta_tree.root_idx].id.clone()];
     let mut truncated: HashSet<usize> = HashSet::new();
@@ -814,6 +827,7 @@ async fn build_focused_response(
         total_reply_count,
         has_more_replies,
         focused_post_id: Some(focus_id.to_string()),
+        top_level_loaded,
     })
     .into_response())
 }

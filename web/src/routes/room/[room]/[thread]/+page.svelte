@@ -160,13 +160,23 @@
 		if (loadingMoreReplies) return;
 		loadingMoreReplies = true;
 		try {
-			const offset = thread.post.children.length;
+			// In focused-view responses, an extra top-level reply on the focus
+			// path may be appended out of sort order; `top_level_loaded` tells
+			// us how many sort-ordered children are rendered so load-more picks
+			// up at the right offset without skipping the next reply.
+			const offset = thread.top_level_loaded ?? thread.post.children.length;
 			const res = await getThreadReplies(thread.id, offset, sortMode);
 			const newReplies = res.replies.filter((r) => !renderedTopLevelIds.has(r.id));
 			for (const r of newReplies) {
 				renderedTopLevelIds.add(r.id);
 			}
 			thread.post.children = [...thread.post.children, ...newReplies];
+			// Advance the sort-ordered cursor so subsequent load-more calls
+			// paginate from the right position instead of reusing the stale
+			// offset set in the initial focused response.
+			if (thread.top_level_loaded !== undefined) {
+				thread.top_level_loaded += res.replies.length;
+			}
 			thread.has_more_replies = res.has_more;
 			thread.reply_count += newReplies.reduce(
 				(n, r) => n + 1 + countDescendants(r),

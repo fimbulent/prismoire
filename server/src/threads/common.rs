@@ -128,6 +128,13 @@ pub struct ThreadDetailResponse {
     pub has_more_replies: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub focused_post_id: Option<String>,
+    /// Number of sort-ordered top-level replies included in `post.children`.
+    /// In focused-view responses, an extra top-level reply on the focus path
+    /// may be appended out of sort order; this field lets the frontend use
+    /// the correct offset for load-more pagination. Only emitted when it
+    /// differs from `post.children.len()`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_level_loaded: Option<usize>,
 }
 
 /// Response for the subtree expansion endpoint.
