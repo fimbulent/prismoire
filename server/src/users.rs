@@ -198,52 +198,29 @@ async fn resolve_user(
     ),
     AppError,
 > {
-    let (
-        id,
-        display_name,
-        created_at,
-        signup_method,
-        bio,
-        role,
-        status_str,
-        can_invite,
-        deleted_at,
-    ) = sqlx::query_as::<
-        _,
-        (
-            String,
-            String,
-            String,
-            String,
-            Option<String>,
-            String,
-            String,
-            bool,
-            Option<String>,
-        ),
-    >(
-        "SELECT id, display_name, created_at, signup_method, bio, role, status, can_invite, \
-                deleted_at \
-             FROM users WHERE display_name = ?",
+    let row = sqlx::query!(
+        r#"SELECT id, display_name, created_at, signup_method, bio, role, status,
+                  can_invite AS "can_invite!: bool", deleted_at
+             FROM users WHERE display_name = ?"#,
+        username,
     )
-    .bind(username)
     .fetch_optional(db)
     .await?
     .ok_or_else(|| AppError::code(ErrorCode::UserNotFound))?;
-    let raw_status = UserStatus::try_from(status_str.as_str()).map_err(|e| {
+    let raw_status = UserStatus::try_from(row.status.as_str()).map_err(|e| {
         eprintln!("{e}");
         AppError::code(ErrorCode::Internal)
     })?;
-    let status = UserStatus::effective(raw_status, deleted_at.as_deref());
+    let status = UserStatus::effective(raw_status, row.deleted_at.as_deref());
     Ok((
-        id,
-        display_name,
-        created_at,
-        signup_method,
-        bio,
-        role,
+        row.id,
+        row.display_name,
+        row.created_at,
+        row.signup_method,
+        row.bio,
+        row.role,
         status,
-        can_invite,
+        row.can_invite,
     ))
 }
 
@@ -254,14 +231,16 @@ async fn get_trust_stance(
     source_user: &str,
     target_user: &str,
 ) -> Result<String, AppError> {
-    let row: Option<(String,)> = sqlx::query_as(
+    let row = sqlx::query!(
         "SELECT trust_type FROM trust_edges WHERE source_user = ? AND target_user = ?",
+        source_user,
+        target_user,
     )
-    .bind(source_user)
-    .bind(target_user)
     .fetch_optional(db)
     .await?;
-    Ok(row.map(|(t,)| t).unwrap_or_else(|| "neutral".into()))
+    Ok(row
+        .map(|r| r.trust_type)
+        .unwrap_or_else(|| "neutral".into()))
 }
 
 /// Build a UUID→(display_name, effective_status) map for a set of UUIDs.
@@ -276,17 +255,16 @@ async fn resolve_display_names(
     let mut map = std::collections::HashMap::new();
     for uuid in uuids {
         let id_str = uuid.to_string();
-        if let Some((name, status_str, deleted_at)) =
-            sqlx::query_as::<_, (String, String, Option<String>)>(
-                "SELECT display_name, status, deleted_at FROM users WHERE id = ?",
-            )
-            .bind(&id_str)
-            .fetch_optional(db)
-            .await?
+        if let Some(row) = sqlx::query!(
+            "SELECT display_name, status, deleted_at FROM users WHERE id = ?",
+            id_str,
+        )
+        .fetch_optional(db)
+        .await?
         {
-            let raw = UserStatus::try_from(status_str.as_str()).unwrap_or(UserStatus::Active);
-            let status = UserStatus::effective(raw, deleted_at.as_deref());
-            map.insert(*uuid, (name, status));
+            let raw = UserStatus::try_from(row.status.as_str()).unwrap_or(UserStatus::Active);
+            let status = UserStatus::effective(raw, row.deleted_at.as_deref());
+            map.insert(*uuid, (row.display_name, status));
         }
     }
     Ok(map)
@@ -381,26 +359,29 @@ pub async fn get_trust_detail(
     let is_self = user.user_id == target_id;
 
     // Trust stats
-    let (trusts_given,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM trust_edges WHERE source_user = ? AND trust_type = 'trust'",
+    let trusts_given = sqlx::query!(
+        r#"SELECT COUNT(*) AS "n!: i64" FROM trust_edges WHERE source_user = ? AND trust_type = 'trust'"#,
+        target_id,
     )
-    .bind(&target_id)
     .fetch_one(&state.db)
-    .await?;
+    .await?
+    .n;
 
-    let (trusts_received,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM trust_edges WHERE target_user = ? AND trust_type = 'trust'",
+    let trusts_received = sqlx::query!(
+        r#"SELECT COUNT(*) AS "n!: i64" FROM trust_edges WHERE target_user = ? AND trust_type = 'trust'"#,
+        target_id,
     )
-    .bind(&target_id)
     .fetch_one(&state.db)
-    .await?;
+    .await?
+    .n;
 
-    let (distrusts_issued,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM trust_edges WHERE source_user = ? AND trust_type = 'distrust'",
+    let distrusts_issued = sqlx::query!(
+        r#"SELECT COUNT(*) AS "n!: i64" FROM trust_edges WHERE source_user = ? AND trust_type = 'distrust'"#,
+        target_id,
     )
-    .bind(&target_id)
     .fetch_one(&state.db)
-    .await?;
+    .await?
+    .n;
 
     let graph = state.get_trust_graph()?;
     let viewer_uuid = Uuid::parse_str(&user.user_id).map_err(|_| {
@@ -507,19 +488,19 @@ pub async fn get_trust_detail(
             })
             .collect();
 
-        let reductions = sqlx::query_as::<_, (String,)>(
+        let reductions = sqlx::query!(
             "SELECT u.display_name FROM trust_edges te \
              JOIN users u ON u.id = te.target_user \
              WHERE te.source_user = ? AND te.trust_type = 'trust' \
              AND te.target_user IN (SELECT target_user FROM trust_edges WHERE source_user = ? AND trust_type = 'distrust')",
+            target_id,
+            user.user_id,
         )
-        .bind(&target_id)
-        .bind(&user.user_id)
         .fetch_all(&state.db)
         .await?
         .into_iter()
-        .map(|(name,)| ScoreReduction {
-            display_name: name,
+        .map(|r| ScoreReduction {
+            display_name: r.display_name,
             reason: "distrusted by you".into(),
         })
         .collect();
@@ -549,37 +530,38 @@ pub async fn get_trust_detail(
         edges
     };
 
-    let trusts_batch = sqlx::query_as::<_, (String, String, String, Option<String>)>(
+    let trusts_batch = sqlx::query!(
         "SELECT u.display_name, u.id, u.status, u.deleted_at FROM trust_edges te \
          JOIN users u ON u.id = te.target_user \
          WHERE te.source_user = ? AND te.trust_type = 'trust' \
          ORDER BY te.created_at DESC LIMIT ?",
+        target_id,
+        TRUST_LIST_FETCH,
     )
-    .bind(&target_id)
-    .bind(TRUST_LIST_FETCH)
     .fetch_all(&state.db)
     .await?;
 
-    let (trusts_total,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM trust_edges WHERE source_user = ? AND trust_type = 'trust'",
+    let trusts_total = sqlx::query!(
+        r#"SELECT COUNT(*) AS "n!: i64" FROM trust_edges WHERE source_user = ? AND trust_type = 'trust'"#,
+        target_id,
     )
-    .bind(&target_id)
     .fetch_one(&state.db)
-    .await?;
+    .await?
+    .n;
 
     let trusts: Vec<TrustEdgeUser> = sort_trust_edges(
         trusts_batch
             .into_iter()
-            .map(|(name, uid, status_str, deleted_at)| {
-                let raw = UserStatus::try_from(status_str.as_str()).unwrap_or(UserStatus::Active);
+            .map(|r| {
+                let raw = UserStatus::try_from(r.status.as_str()).unwrap_or(UserStatus::Active);
                 TrustEdgeUser {
                     trust: TrustInfo::build(
-                        &uid,
+                        &r.id,
                         &distance_map,
                         &distrust_set,
-                        UserStatus::effective(raw, deleted_at.as_deref()),
+                        UserStatus::effective(raw, r.deleted_at.as_deref()),
                     ),
-                    display_name: name,
+                    display_name: r.display_name,
                 }
             })
             .collect(),
@@ -588,37 +570,38 @@ pub async fn get_trust_detail(
     .take(TRUST_LIST_PREVIEW as usize)
     .collect();
 
-    let trusted_by_batch = sqlx::query_as::<_, (String, String, String, Option<String>)>(
+    let trusted_by_batch = sqlx::query!(
         "SELECT u.display_name, u.id, u.status, u.deleted_at FROM trust_edges te \
          JOIN users u ON u.id = te.source_user \
          WHERE te.target_user = ? AND te.trust_type = 'trust' \
          ORDER BY te.created_at DESC LIMIT ?",
+        target_id,
+        TRUST_LIST_FETCH,
     )
-    .bind(&target_id)
-    .bind(TRUST_LIST_FETCH)
     .fetch_all(&state.db)
     .await?;
 
-    let (trusted_by_total,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM trust_edges WHERE target_user = ? AND trust_type = 'trust'",
+    let trusted_by_total = sqlx::query!(
+        r#"SELECT COUNT(*) AS "n!: i64" FROM trust_edges WHERE target_user = ? AND trust_type = 'trust'"#,
+        target_id,
     )
-    .bind(&target_id)
     .fetch_one(&state.db)
-    .await?;
+    .await?
+    .n;
 
     let trusted_by: Vec<TrustEdgeUser> = sort_trust_edges(
         trusted_by_batch
             .into_iter()
-            .map(|(name, uid, status_str, deleted_at)| {
-                let raw = UserStatus::try_from(status_str.as_str()).unwrap_or(UserStatus::Active);
+            .map(|r| {
+                let raw = UserStatus::try_from(r.status.as_str()).unwrap_or(UserStatus::Active);
                 TrustEdgeUser {
                     trust: TrustInfo::build(
-                        &uid,
+                        &r.id,
                         &distance_map,
                         &distrust_set,
-                        UserStatus::effective(raw, deleted_at.as_deref()),
+                        UserStatus::effective(raw, r.deleted_at.as_deref()),
                     ),
-                    display_name: name,
+                    display_name: r.display_name,
                 }
             })
             .collect(),
@@ -770,6 +753,11 @@ pub async fn get_activity(
          LIMIT ?",
     );
 
+    // Runtime-checked rather than `sqlx::query_as!`: the SQL is assembled
+    // from `format!` across filter / cursor / grant_join variants (12
+    // combinations), and the macro requires a static SQL literal. A
+    // `QueryBuilder` refactor would tighten the parameter-binding safety
+    // here but still wouldn't unlock compile-time schema checking.
     let mut query =
         sqlx::query_as::<_, (String, String, String, String, String, String, String)>(&sql)
             .bind(&target_id);
@@ -845,46 +833,62 @@ pub async fn get_trust_edges(
     let mut distance_map = HashMap::clone(&cached_dm);
     distance_map.insert(user.user_id.clone(), 0.0);
 
-    let (rows, total) = match query.direction.as_str() {
-        "trusts" => {
-            let rows = sqlx::query_as::<_, (String, String, String, Option<String>)>(
-                "SELECT u.display_name, u.id, u.status, u.deleted_at FROM trust_edges te \
-                 JOIN users u ON u.id = te.target_user \
-                 WHERE te.source_user = ? AND te.trust_type = 'trust'",
-            )
-            .bind(&target_id)
-            .fetch_all(&state.db)
-            .await?;
-            let total = rows.len() as i64;
-            (rows, total)
-        }
-        "trusted_by" => {
-            let rows = sqlx::query_as::<_, (String, String, String, Option<String>)>(
-                "SELECT u.display_name, u.id, u.status, u.deleted_at FROM trust_edges te \
-                 JOIN users u ON u.id = te.source_user \
-                 WHERE te.target_user = ? AND te.trust_type = 'trust'",
-            )
-            .bind(&target_id)
-            .fetch_all(&state.db)
-            .await?;
-            let total = rows.len() as i64;
-            (rows, total)
-        }
+    struct EdgeRow {
+        display_name: String,
+        id: String,
+        status: String,
+        deleted_at: Option<String>,
+    }
+
+    let rows: Vec<EdgeRow> = match query.direction.as_str() {
+        "trusts" => sqlx::query!(
+            "SELECT u.display_name, u.id, u.status, u.deleted_at FROM trust_edges te \
+             JOIN users u ON u.id = te.target_user \
+             WHERE te.source_user = ? AND te.trust_type = 'trust'",
+            target_id,
+        )
+        .fetch_all(&state.db)
+        .await?
+        .into_iter()
+        .map(|r| EdgeRow {
+            display_name: r.display_name,
+            id: r.id,
+            status: r.status,
+            deleted_at: r.deleted_at,
+        })
+        .collect(),
+        "trusted_by" => sqlx::query!(
+            "SELECT u.display_name, u.id, u.status, u.deleted_at FROM trust_edges te \
+             JOIN users u ON u.id = te.source_user \
+             WHERE te.target_user = ? AND te.trust_type = 'trust'",
+            target_id,
+        )
+        .fetch_all(&state.db)
+        .await?
+        .into_iter()
+        .map(|r| EdgeRow {
+            display_name: r.display_name,
+            id: r.id,
+            status: r.status,
+            deleted_at: r.deleted_at,
+        })
+        .collect(),
         _ => {
             return Err(AppError::code(ErrorCode::InvalidTrustDirection));
         }
     };
+    let total = rows.len() as i64;
 
     let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
 
     let mut users: Vec<TrustEdgeUser> = rows
         .into_iter()
-        .map(|(name, uid, status_str, deleted_at)| {
-            let raw = UserStatus::try_from(status_str.as_str()).unwrap_or(UserStatus::Active);
-            let status = UserStatus::effective(raw, deleted_at.as_deref());
-            let trust = TrustInfo::build(&uid, &distance_map, &distrust_set, status);
+        .map(|r| {
+            let raw = UserStatus::try_from(r.status.as_str()).unwrap_or(UserStatus::Active);
+            let status = UserStatus::effective(raw, r.deleted_at.as_deref());
+            let trust = TrustInfo::build(&r.id, &distance_map, &distrust_set, status);
             TrustEdgeUser {
-                display_name: name,
+                display_name: r.display_name,
                 trust,
             }
         })
@@ -935,11 +939,13 @@ pub async fn update_bio(
 
     let bio_value = bio.filter(|b| !b.is_empty());
 
-    sqlx::query("UPDATE users SET bio = ? WHERE id = ?")
-        .bind(bio_value)
-        .bind(&user.user_id)
-        .execute(&state.db)
-        .await?;
+    sqlx::query!(
+        "UPDATE users SET bio = ? WHERE id = ?",
+        bio_value,
+        user.user_id,
+    )
+    .execute(&state.db)
+    .await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -968,20 +974,22 @@ pub async fn set_trust_edge(
 
     let mut tx = state.db.begin().await?;
 
-    sqlx::query("DELETE FROM trust_edges WHERE source_user = ? AND target_user = ?")
-        .bind(&user.user_id)
-        .bind(&target_id)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query!(
+        "DELETE FROM trust_edges WHERE source_user = ? AND target_user = ?",
+        user.user_id,
+        target_id,
+    )
+    .execute(&mut *tx)
+    .await?;
 
     let id = Uuid::new_v4().to_string();
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO trust_edges (id, source_user, target_user, trust_type) VALUES (?, ?, ?, ?)",
+        id,
+        user.user_id,
+        target_id,
+        trust_type,
     )
-    .bind(&id)
-    .bind(&user.user_id)
-    .bind(&target_id)
-    .bind(trust_type)
     .execute(&mut *tx)
     .await?;
 
@@ -1004,11 +1012,13 @@ pub async fn delete_trust_edge(
 ) -> Result<impl IntoResponse, AppError> {
     let (target_id, ..) = resolve_user(&state.db, &username).await?;
 
-    let result = sqlx::query("DELETE FROM trust_edges WHERE source_user = ? AND target_user = ?")
-        .bind(&user.user_id)
-        .bind(&target_id)
-        .execute(&state.db)
-        .await?;
+    let result = sqlx::query!(
+        "DELETE FROM trust_edges WHERE source_user = ? AND target_user = ?",
+        user.user_id,
+        target_id,
+    )
+    .execute(&state.db)
+    .await?;
 
     if result.rows_affected() == 0 {
         return Err(AppError::code(ErrorCode::NoTrustEdge));
@@ -1096,31 +1106,31 @@ pub async fn search_users(
             .replace('_', "\\_")
     );
 
-    let rows: Vec<(String, String, String, String)> = sqlx::query_as(
-        "SELECT id, display_name, status, role \
-         FROM users \
-         WHERE deleted_at IS NULL \
-           AND display_name_skeleton LIKE ? ESCAPE '\\' \
-         ORDER BY \
-           (display_name_skeleton = ?) DESC, \
-           LENGTH(display_name), \
-           display_name \
-         LIMIT ?",
+    let rows = sqlx::query!(
+        r#"SELECT id, display_name, status, role
+         FROM users
+         WHERE deleted_at IS NULL
+           AND display_name_skeleton LIKE ? ESCAPE '\'
+         ORDER BY
+           (display_name_skeleton = ?) DESC,
+           LENGTH(display_name),
+           display_name
+         LIMIT ?"#,
+        pattern,
+        skeleton,
+        limit,
     )
-    .bind(&pattern)
-    .bind(&skeleton)
-    .bind(limit)
     .fetch_all(&state.db)
     .await?;
 
     let users = rows
         .into_iter()
-        .map(|(id, display_name, status_str, role)| {
+        .map(|r| {
             // `deleted_at IS NULL` is enforced by the WHERE clause, so
             // the effective status here is the raw column value. Fall
             // back to "active" on any unexpected value rather than
             // surfacing a 500.
-            let status = UserStatus::try_from(status_str.as_str()).unwrap_or(UserStatus::Active);
+            let status = UserStatus::try_from(r.status.as_str()).unwrap_or(UserStatus::Active);
             let status_wire = match status {
                 UserStatus::Active => "active",
                 UserStatus::Banned => "banned",
@@ -1128,10 +1138,10 @@ pub async fn search_users(
                 UserStatus::Deleted => "deleted",
             };
             UserChip {
-                id,
-                display_name,
+                id: r.id,
+                display_name: r.display_name,
                 status: status_wire.to_string(),
-                role,
+                role: r.role,
             }
         })
         .collect();

@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT display_name, status, deleted_at FROM users WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "display_name",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "status",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "deleted_at",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "9bce67cef766a503405a59021ab038409790b2f79b59e42a82625a89acfbde90"
+}

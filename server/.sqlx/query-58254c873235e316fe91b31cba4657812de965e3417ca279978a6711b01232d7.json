@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM trust_edges WHERE source_user = ? AND target_user = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "58254c873235e316fe91b31cba4657812de965e3417ca279978a6711b01232d7"
+}

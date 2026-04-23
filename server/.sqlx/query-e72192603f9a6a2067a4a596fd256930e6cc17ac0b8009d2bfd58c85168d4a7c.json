@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT u.display_name, u.id, u.status, u.deleted_at FROM trust_edges te JOIN users u ON u.id = te.source_user WHERE te.target_user = ? AND te.trust_type = 'trust' ORDER BY te.created_at DESC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "display_name",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "id",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "status",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "deleted_at",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "e72192603f9a6a2067a4a596fd256930e6cc17ac0b8009d2bfd58c85168d4a7c"
+}

@@ -1,0 +1,68 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, display_name, created_at, signup_method, bio, role, status,\n                  can_invite AS \"can_invite!: bool\", deleted_at\n             FROM users WHERE display_name = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "display_name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "signup_method",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "bio",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "role",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "status",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "can_invite!: bool",
+        "ordinal": 7,
+        "type_info": "Integer"
+      },
+      {
+        "name": "deleted_at",
+        "ordinal": 8,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "b69187902cb0c1f9d7272020166a1fa4bd83746e13412fd44ff68cf3e8fa7245"
+}

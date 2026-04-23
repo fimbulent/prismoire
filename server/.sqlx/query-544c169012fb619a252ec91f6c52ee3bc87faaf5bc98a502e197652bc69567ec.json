@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT trust_type FROM trust_edges WHERE source_user = ? AND target_user = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "trust_type",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "544c169012fb619a252ec91f6c52ee3bc87faaf5bc98a502e197652bc69567ec"
+}
