@@ -681,6 +681,12 @@
 	<!-- Recent Activity -->
 	<h2 class="text-sm font-semibold uppercase tracking-wider text-text-muted mb-3">Recent activity</h2>
 
+	{#if data.activityAdminOverride}
+		<Notice>
+			You're seeing this activity as an admin. {profile.display_name} doesn't trust you enough to normally see these posts.
+		</Notice>
+	{/if}
+
 	<!-- Filter tabs -->
 	<div class="flex gap-1 mb-4">
 		{#each [['all', 'All'], ['threads', 'Threads'], ['comments', 'Comments']] as [value, label]}

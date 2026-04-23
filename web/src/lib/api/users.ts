@@ -76,6 +76,10 @@ export interface ActivityItem {
 export interface ActivityResponse {
 	items: ActivityItem[];
 	next_cursor: string | null;
+	/** True when the viewer is an admin who only sees these posts via the
+	 * admin carve-out (the target's trust in them doesn't meet threshold).
+	 * The profile page shows a notice to make this visible. */
+	admin_override: boolean;
 }
 
 interface FetchOpts {

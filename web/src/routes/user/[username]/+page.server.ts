@@ -40,6 +40,7 @@ export const load: PageServerLoad = async ({ parent, fetch, params, url }) => {
 			profile,
 			activity: activity.items,
 			activityCursor: activity.next_cursor,
+			activityAdminOverride: activity.admin_override,
 			filter
 		};
 	} catch (e) {

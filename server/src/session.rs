@@ -100,6 +100,12 @@ pub struct RestrictedAuthUser {
     pub suspended_until: Option<String>,
 }
 
+impl RestrictedAuthUser {
+    pub fn is_admin(&self) -> bool {
+        self.role == "admin"
+    }
+}
+
 impl FromRequestParts<Arc<AppState>> for RestrictedAuthUser {
     type Rejection = Response;
 

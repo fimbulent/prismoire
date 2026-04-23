@@ -124,6 +124,12 @@ pub struct ActivityItem {
 pub struct ActivityResponse {
     pub items: Vec<ActivityItem>,
     pub next_cursor: Option<String>,
+    /// True when the viewer is an admin and the non-admin codepath would have
+    /// returned fewer rows (i.e. the admin's own trust graph doesn't grant
+    /// them full visibility of this profile). Drives the "you're viewing as
+    /// an admin" notice on the frontend. Never set for self-views or when
+    /// the admin has regular reverse-trust access.
+    pub admin_override: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -660,6 +666,39 @@ pub async fn get_activity(
 
     let (target_id, ..) = resolve_user(&state.db, &username).await?;
 
+    // Trust-gated visibility: the activity feed exposes post bodies, so it must
+    // respect the author-trust-in-reader rule. Because every row shares the
+    // same author, the per-post check collapses to one question asked once:
+    //
+    //   - Self-view → show everything.
+    //   - Reverse trust from the target meets threshold → show everything.
+    //   - Admin whose own trust graph wouldn't grant access → show everything
+    //     via the admin carve-out, and flag `admin_override` so the frontend
+    //     can surface a notice that the viewer is seeing content a normal
+    //     user wouldn't. Admins need the bypass for investigating users whose
+    //     trust network excludes them (e.g. an isolated sybil clique).
+    //   - Otherwise → fall back to the reply-visibility grant: only show
+    //     replies whose direct parent was authored by the viewer. The grant
+    //     is a per-content exception to the author-trust rule (spec §
+    //     "Reply visibility grant"), so the viewer can see replies to their
+    //     own posts even from a low-trust author.
+    let is_self = user.user_id == target_id;
+    let reverse_trust_ok = if is_self {
+        true
+    } else {
+        let viewer_uuid = Uuid::parse_str(&user.user_id).map_err(|_| {
+            eprintln!("invalid user id in session: {}", user.user_id);
+            AppError::code(ErrorCode::Internal)
+        })?;
+        let graph = state.get_trust_graph()?;
+        let reverse_map = graph.reverse_score_map(viewer_uuid);
+        reverse_map
+            .get(&target_id)
+            .is_some_and(|s| *s >= MINIMUM_TRUST_THRESHOLD)
+    };
+    let admin_override = !reverse_trust_ok && !is_self && user.is_admin();
+    let full_visibility = reverse_trust_ok || admin_override;
+
     let filter = query.filter.as_deref().unwrap_or("all");
     let cursor = query.cursor.as_deref().unwrap_or("");
 
@@ -675,6 +714,19 @@ pub async fn get_activity(
         "AND p.created_at < ?"
     };
 
+    // Reply-grant fallback: inner-join the parent post and constrain it to
+    // the viewer. The inner join drops thread-start rows (parent IS NULL)
+    // automatically, which matches the grant's scope — top-level threads
+    // don't have a parent author to ground the exception on.
+    let (grant_join, grant_filter) = if full_visibility {
+        ("", "")
+    } else {
+        (
+            "JOIN posts parent_post ON parent_post.id = p.parent",
+            "AND parent_post.author = ?",
+        )
+    };
+
     let sql = format!(
         "SELECT \
            CASE WHEN p.parent IS NULL THEN 'thread_started' ELSE 'replied' END AS activity_type, \
@@ -688,8 +740,9 @@ pub async fn get_activity(
          JOIN threads t ON t.id = p.thread \
          JOIN rooms r ON r.id = t.room \
          JOIN post_revisions pr ON pr.post_id = p.id AND pr.revision = p.revision_count - 1 \
+         {grant_join} \
          WHERE p.author = ? AND p.retracted_at IS NULL \
-           {type_filter} {cursor_filter} \
+           {type_filter} {cursor_filter} {grant_filter} \
          ORDER BY p.created_at DESC \
          LIMIT ?",
     );
@@ -699,6 +752,9 @@ pub async fn get_activity(
             .bind(&target_id);
     if !cursor.is_empty() {
         query = query.bind(cursor);
+    }
+    if !full_visibility {
+        query = query.bind(&user.user_id);
     }
     let rows = query
         .bind(ACTIVITY_PAGE_SIZE + 1)
@@ -730,7 +786,11 @@ pub async fn get_activity(
         None
     };
 
-    Ok(Json(ActivityResponse { items, next_cursor }))
+    Ok(Json(ActivityResponse {
+        items,
+        next_cursor,
+        admin_override,
+    }))
 }
 
 // ---------------------------------------------------------------------------
