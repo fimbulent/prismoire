@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT p.thread AS \"thread!\", p.author AS \"author!\",\n                  COALESCE(parent_post.author, '') AS \"parent_author!: String\"\n           FROM posts p\n           LEFT JOIN posts parent_post ON parent_post.id = p.parent\n           WHERE p.thread IN (SELECT value FROM json_each(?))\n             AND p.parent IS NOT NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "thread!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "author!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "parent_author!: String",
+        "ordinal": 2,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "9c72a3f0ef56771bc97a080f99fa7314534c470ae9e1507772405bc4d98c6644"
+}

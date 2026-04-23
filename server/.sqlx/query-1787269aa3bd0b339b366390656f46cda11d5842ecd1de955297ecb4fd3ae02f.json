@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, slug,\n                  (slug = 'announcements') AS \"is_announcement!: bool\"\n           FROM rooms\n           WHERE (id = ? OR slug = ?) AND merged_into IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "slug",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "is_announcement!: bool",
+        "ordinal": 2,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "1787269aa3bd0b339b366390656f46cda11d5842ecd1de955297ecb4fd3ae02f"
+}

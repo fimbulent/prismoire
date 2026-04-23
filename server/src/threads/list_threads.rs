@@ -15,7 +15,6 @@ use super::common::{
     MAX_SEEN_IDS, PAGE_SIZE, PaginationParams, RecentReplier, ThreadListResponse, ThreadSort,
     ThreadSummary, WarmPaginationRequest, is_thread_visible, make_cursor, make_cursor_created_at,
     make_warm_cursor, parse_cursor, parse_warm_cursor, score_trusted_recent, score_warm,
-    sql_placeholders,
 };
 
 /// Maximum number of candidate threads to fetch for warm sort scoring (page 1).
@@ -30,44 +29,49 @@ const WARM_CANDIDATE_LIMIT: i64 = 500;
 const WARM_CANDIDATE_MAX: i64 = 5000;
 
 // ---------------------------------------------------------------------------
-// Shared SQL fragments
-// ---------------------------------------------------------------------------
-
-/// WHERE clause that hides retracted OPs with no replies.
-const RETRACTED_OP_FILTER: &str = "NOT (t.reply_count = 0 \
-     AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL)";
-
-// ---------------------------------------------------------------------------
 // Row types for query results
+//
+// These are named structs (not tuples) so they can be used with
+// `sqlx::query_as!` for compile-time query checking. The SELECTs that
+// populate them must alias columns to the field names below and cast
+// bool/expression columns (see CLAUDE.md column-override cheat-sheet).
 // ---------------------------------------------------------------------------
 
-type AllThreadsRow = (
-    String,
-    String,
-    String,
-    String,
-    String,
-    Option<String>, // author_deleted_at
-    String,
-    String,
-    String,
-    bool,
-    bool,
-    i64,
-    Option<String>,
-);
-type RoomThreadsRow = (
-    String,
-    String,
-    String,
-    String,
-    String,
-    Option<String>, // author_deleted_at
-    String,
-    bool,
-    i64,
-    Option<String>,
-);
+/// Row type for "list threads across all rooms" SELECTs, carrying the
+/// joined room info because listings span multiple rooms.
+#[derive(Debug)]
+struct AllThreadsRow {
+    id: String,
+    title: String,
+    author_id: String,
+    author_name: String,
+    author_status: String,
+    author_deleted_at: Option<String>,
+    created_at: String,
+    room_id: String,
+    room_slug: String,
+    locked: bool,
+    is_announcement: bool,
+    reply_count: i64,
+    last_activity: Option<String>,
+}
+
+/// Row type for "list threads in a single room" SELECTs. The caller
+/// already knows room_id / room_slug / is_announcement, so those are
+/// stitched in during conversion instead of selected per-row.
+#[derive(Debug)]
+struct RoomThreadsRow {
+    id: String,
+    title: String,
+    author_id: String,
+    author_name: String,
+    author_status: String,
+    author_deleted_at: Option<String>,
+    created_at: String,
+    locked: bool,
+    reply_count: i64,
+    last_activity: Option<String>,
+}
 
 // ---------------------------------------------------------------------------
 // Row-to-summary converters
@@ -78,37 +82,22 @@ fn all_threads_to_summary(
     trust_map: &HashMap<String, f64>,
     distrust_set: &HashSet<String>,
 ) -> ThreadSummary {
-    let (
-        id,
-        title,
-        author_id,
-        author_name,
-        author_status,
-        author_deleted_at,
-        created_at,
-        room_id,
-        room_slug,
-        locked,
-        is_announcement,
-        reply_count,
-        last_activity,
-    ) = row;
-    let raw = UserStatus::try_from(author_status.as_str()).unwrap_or(UserStatus::Active);
-    let status = UserStatus::effective(raw, author_deleted_at.as_deref());
-    let trust = TrustInfo::build(&author_id, trust_map, distrust_set, status);
+    let raw = UserStatus::try_from(row.author_status.as_str()).unwrap_or(UserStatus::Active);
+    let status = UserStatus::effective(raw, row.author_deleted_at.as_deref());
+    let trust = TrustInfo::build(&row.author_id, trust_map, distrust_set, status);
     ThreadSummary {
         trust,
-        id,
-        title,
-        author_id,
-        author_name,
-        room_id,
-        room_slug,
-        created_at,
-        locked,
-        is_announcement,
-        reply_count,
-        last_activity,
+        id: row.id,
+        title: row.title,
+        author_id: row.author_id,
+        author_name: row.author_name,
+        room_id: row.room_id,
+        room_slug: row.room_slug,
+        created_at: row.created_at,
+        locked: row.locked,
+        is_announcement: row.is_announcement,
+        reply_count: row.reply_count,
+        last_activity: row.last_activity,
     }
 }
 
@@ -120,34 +109,22 @@ fn room_threads_to_summary(
     trust_map: &HashMap<String, f64>,
     distrust_set: &HashSet<String>,
 ) -> ThreadSummary {
-    let (
-        id,
-        title,
-        author_id,
-        author_name,
-        author_status,
-        author_deleted_at,
-        created_at,
-        locked,
-        reply_count,
-        last_activity,
-    ) = row;
-    let raw = UserStatus::try_from(author_status.as_str()).unwrap_or(UserStatus::Active);
-    let status = UserStatus::effective(raw, author_deleted_at.as_deref());
-    let trust = TrustInfo::build(&author_id, trust_map, distrust_set, status);
+    let raw = UserStatus::try_from(row.author_status.as_str()).unwrap_or(UserStatus::Active);
+    let status = UserStatus::effective(raw, row.author_deleted_at.as_deref());
+    let trust = TrustInfo::build(&row.author_id, trust_map, distrust_set, status);
     ThreadSummary {
         trust,
-        id,
-        title,
-        author_id,
-        author_name,
+        id: row.id,
+        title: row.title,
+        author_id: row.author_id,
+        author_name: row.author_name,
         room_id: room_id.to_string(),
         room_slug: room_slug.to_string(),
-        created_at,
-        locked,
+        created_at: row.created_at,
+        locked: row.locked,
         is_announcement,
-        reply_count,
-        last_activity,
+        reply_count: row.reply_count,
+        last_activity: row.last_activity,
     }
 }
 
@@ -157,6 +134,10 @@ fn room_threads_to_summary(
 
 /// Fetch recent repliers for a set of candidate thread IDs from the
 /// denormalized `thread_recent_repliers` table.
+///
+/// The variable-length `IN` list is expressed via SQLite's `json_each`
+/// so the whole query is one statement with a single bound parameter,
+/// which is what `sqlx::query!` needs to validate at compile time.
 async fn fetch_repliers(
     db: &sqlx::SqlitePool,
     thread_ids: &[String],
@@ -165,26 +146,25 @@ async fn fetch_repliers(
         return Ok(Vec::new());
     }
 
-    let placeholders = sql_placeholders(thread_ids.len());
-    let sql = format!(
-        "SELECT thread_id, replier_id, replied_at \
-         FROM thread_recent_repliers \
-         WHERE thread_id IN {placeholders} \
-         ORDER BY thread_id, reply_rank ASC"
-    );
+    let ids_json =
+        serde_json::to_string(thread_ids).map_err(|_| AppError::code(ErrorCode::Internal))?;
 
-    let mut query = sqlx::query_as::<_, (String, String, String)>(&sql);
-    for id in thread_ids {
-        query = query.bind(id);
-    }
+    let rows = sqlx::query!(
+        r#"SELECT thread_id, replier_id, replied_at
+           FROM thread_recent_repliers
+           WHERE thread_id IN (SELECT value FROM json_each(?))
+           ORDER BY thread_id, reply_rank ASC"#,
+        ids_json,
+    )
+    .fetch_all(db)
+    .await?;
 
-    let rows = query.fetch_all(db).await?;
     Ok(rows
         .into_iter()
-        .map(|(thread_id, replier_id, replied_at)| RecentReplier {
-            thread_id,
-            replier_id,
-            replied_at,
+        .map(|r| RecentReplier {
+            thread_id: r.thread_id,
+            replier_id: r.replier_id,
+            replied_at: r.replied_at,
         })
         .collect())
 }
@@ -202,7 +182,9 @@ async fn fetch_repliers(
 /// 3. Reply visibility grant: the reader authored the reply's direct parent.
 ///
 /// Batch-fetches `(thread, author, parent_author)` for the given threads,
-/// then filters in Rust using `reverse_map` point lookups.
+/// then filters in Rust using `reverse_map` point lookups. Uses
+/// `json_each` for the variable-length thread-ID list (see
+/// `fetch_repliers` for the rationale).
 async fn apply_visible_reply_counts(
     db: &sqlx::SqlitePool,
     threads: &mut [ThreadSummary],
@@ -215,43 +197,42 @@ async fn apply_visible_reply_counts(
     }
 
     let thread_ids: Vec<&str> = threads.iter().map(|t| t.id.as_str()).collect();
-    let placeholders = sql_placeholders(thread_ids.len());
-    let sql = format!(
-        "SELECT p.thread, p.author, COALESCE(parent_post.author, '') \
-         FROM posts p \
-         LEFT JOIN posts parent_post ON parent_post.id = p.parent \
-         WHERE p.thread IN {placeholders} \
-           AND p.parent IS NOT NULL"
-    );
+    let ids_json =
+        serde_json::to_string(&thread_ids).map_err(|_| AppError::code(ErrorCode::Internal))?;
 
-    let mut query = sqlx::query_as::<_, (String, String, String)>(&sql);
-    for id in &thread_ids {
-        query = query.bind(*id);
-    }
-
-    let rows = query.fetch_all(db).await?;
+    let rows = sqlx::query!(
+        r#"SELECT p.thread AS "thread!", p.author AS "author!",
+                  COALESCE(parent_post.author, '') AS "parent_author!: String"
+           FROM posts p
+           LEFT JOIN posts parent_post ON parent_post.id = p.parent
+           WHERE p.thread IN (SELECT value FROM json_each(?))
+             AND p.parent IS NOT NULL"#,
+        ids_json,
+    )
+    .fetch_all(db)
+    .await?;
 
     use crate::trust::MINIMUM_TRUST_THRESHOLD;
-    let mut counts: HashMap<&str, i64> = HashMap::new();
-    for (thread_id, author_id, parent_author_id) in &rows {
+    let mut counts: HashMap<String, i64> = HashMap::new();
+    for row in &rows {
         // Distrusted authors' replies are pruned from the reader's view
         // (spec §"Distrust action UX"), so they must not contribute to the
         // viewer-specific reply count either.
-        if author_id != reader_id && distrust_set.contains(author_id) {
+        if row.author != reader_id && distrust_set.contains(&row.author) {
             continue;
         }
-        let visible = author_id == reader_id
+        let visible = row.author == reader_id
             || reverse_map
-                .get(author_id)
+                .get(&row.author)
                 .is_some_and(|&s| s >= MINIMUM_TRUST_THRESHOLD)
-            || parent_author_id == reader_id;
+            || row.parent_author == reader_id;
         if visible {
-            *counts.entry(thread_id.as_str()).or_default() += 1;
+            *counts.entry(row.thread.clone()).or_default() += 1;
         }
     }
 
     for thread in threads.iter_mut() {
-        thread.reply_count = counts.get(thread.id.as_str()).copied().unwrap_or(0);
+        thread.reply_count = counts.get(&thread.id).copied().unwrap_or(0);
     }
 
     Ok(())
@@ -286,46 +267,67 @@ pub async fn list_public_announcement_threads(
     State(state): State<Arc<AppState>>,
     Query(params): Query<PaginationParams>,
 ) -> Result<impl IntoResponse, AppError> {
+    let limit = PAGE_SIZE as i64 + 1;
     let rows = if let Some(ref cursor) = params.cursor {
         let (cursor_ts, cursor_id) = parse_cursor(cursor)?;
-        sqlx::query_as::<_, AllThreadsRow>(
-            "SELECT t.id, t.title, t.author, u.display_name, u.status, u.deleted_at, t.created_at, \
-             r.id, r.slug, t.locked, (r.slug = 'announcements') AS is_announcement, \
-             t.reply_count, t.last_activity \
-             FROM threads t \
-             JOIN users u ON u.id = t.author \
-             JOIN rooms r ON r.id = t.room \
-             WHERE r.merged_into IS NULL \
-               AND r.slug = 'announcements' \
-               AND NOT (t.reply_count = 0 \
-                    AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
-               AND (COALESCE(t.last_activity, t.created_at) < ? \
-                    OR (COALESCE(t.last_activity, t.created_at) = ? AND t.id < ?)) \
-             ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC, t.id DESC \
-             LIMIT ?",
+        sqlx::query_as!(
+            AllThreadsRow,
+            r#"SELECT t.id, t.title,
+                      t.author AS author_id,
+                      u.display_name AS author_name,
+                      u.status AS author_status,
+                      u.deleted_at AS author_deleted_at,
+                      t.created_at,
+                      r.id AS room_id,
+                      r.slug AS room_slug,
+                      t.locked AS "locked: bool",
+                      (r.slug = 'announcements') AS "is_announcement!: bool",
+                      t.reply_count,
+                      t.last_activity
+               FROM threads t
+               JOIN users u ON u.id = t.author
+               JOIN rooms r ON r.id = t.room
+               WHERE r.merged_into IS NULL
+                 AND r.slug = 'announcements'
+                 AND NOT (t.reply_count = 0
+                      AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL)
+                 AND (COALESCE(t.last_activity, t.created_at) < ?
+                      OR (COALESCE(t.last_activity, t.created_at) = ? AND t.id < ?))
+               ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC, t.id DESC
+               LIMIT ?"#,
+            cursor_ts,
+            cursor_ts,
+            cursor_id,
+            limit,
         )
-        .bind(&cursor_ts)
-        .bind(&cursor_ts)
-        .bind(&cursor_id)
-        .bind(PAGE_SIZE as i64 + 1)
         .fetch_all(&state.db)
         .await?
     } else {
-        sqlx::query_as::<_, AllThreadsRow>(
-            "SELECT t.id, t.title, t.author, u.display_name, u.status, u.deleted_at, t.created_at, \
-             r.id, r.slug, t.locked, (r.slug = 'announcements') AS is_announcement, \
-             t.reply_count, t.last_activity \
-             FROM threads t \
-             JOIN users u ON u.id = t.author \
-             JOIN rooms r ON r.id = t.room \
-             WHERE r.merged_into IS NULL \
-               AND r.slug = 'announcements' \
-             AND NOT (t.reply_count = 0 \
-                    AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
-             ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC, t.id DESC \
-             LIMIT ?",
+        sqlx::query_as!(
+            AllThreadsRow,
+            r#"SELECT t.id, t.title,
+                      t.author AS author_id,
+                      u.display_name AS author_name,
+                      u.status AS author_status,
+                      u.deleted_at AS author_deleted_at,
+                      t.created_at,
+                      r.id AS room_id,
+                      r.slug AS room_slug,
+                      t.locked AS "locked: bool",
+                      (r.slug = 'announcements') AS "is_announcement!: bool",
+                      t.reply_count,
+                      t.last_activity
+               FROM threads t
+               JOIN users u ON u.id = t.author
+               JOIN rooms r ON r.id = t.room
+               WHERE r.merged_into IS NULL
+                 AND r.slug = 'announcements'
+                 AND NOT (t.reply_count = 0
+                      AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL)
+               ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC, t.id DESC
+               LIMIT ?"#,
+            limit,
         )
-        .bind(PAGE_SIZE as i64 + 1)
         .fetch_all(&state.db)
         .await?
     };
@@ -335,38 +337,24 @@ pub async fn list_public_announcement_threads(
         .into_iter()
         .take(PAGE_SIZE)
         .map(|row| {
-            let (
-                id,
-                title,
-                author_id,
-                author_name,
-                author_status,
-                author_deleted_at,
-                created_at,
-                room_id,
-                room_slug,
-                locked,
-                is_announcement,
-                reply_count,
-                last_activity,
-            ) = row;
-            let raw = UserStatus::try_from(author_status.as_str()).unwrap_or(UserStatus::Active);
+            let raw =
+                UserStatus::try_from(row.author_status.as_str()).unwrap_or(UserStatus::Active);
             ThreadSummary {
-                id,
-                title,
-                author_id,
-                author_name,
-                room_id,
-                room_slug,
-                created_at,
-                locked,
-                is_announcement,
-                reply_count,
-                last_activity,
+                id: row.id,
+                title: row.title,
+                author_id: row.author_id,
+                author_name: row.author_name,
+                room_id: row.room_id,
+                room_slug: row.room_slug,
+                created_at: row.created_at,
+                locked: row.locked,
+                is_announcement: row.is_announcement,
+                reply_count: row.reply_count,
+                last_activity: row.last_activity,
                 trust: TrustInfo {
                     distance: None,
                     distrusted: false,
-                    status: UserStatus::effective(raw, author_deleted_at.as_deref()),
+                    status: UserStatus::effective(raw, row.author_deleted_at.as_deref()),
                 },
             }
         })
@@ -446,71 +434,153 @@ pub async fn list_all_threads(
         .await;
     }
 
-    // sort=new (creation time) or sort=active (last reply time)
+    // sort=new (creation time) or sort=active (last reply time). The
+    // column choice has to be baked into the SQL at compile time for
+    // `query_as!`, so the two sorts are expanded into four literal
+    // queries (cursor × sort). The shared SELECT is intentionally
+    // duplicated in exchange for compile-time checking.
     let use_created_at = params.sort == ThreadSort::New;
-    let (order_col, order_col_coalesce) = if use_created_at {
-        ("t.created_at", "t.created_at")
-    } else {
-        ("t.last_activity", "COALESCE(t.last_activity, t.created_at)")
-    };
+    let limit = PAGE_SIZE as i64 + 1;
 
-    let rows = if let Some(ref cursor) = params.cursor {
-        let (cursor_ts, cursor_id) = parse_cursor(cursor)?;
-        let sql = format!(
-            "SELECT t.id, t.title, t.author, u.display_name, u.status, u.deleted_at, t.created_at, \
-             r.id, r.slug, t.locked, (r.slug = 'announcements') AS is_announcement, \
-             t.reply_count, t.last_activity \
-             FROM threads t \
-             JOIN users u ON u.id = t.author \
-             JOIN rooms r ON r.id = t.room \
-             WHERE r.merged_into IS NULL \
-               AND {RETRACTED_OP_FILTER} \
-               AND ({order_col_coalesce} < ? \
-                    OR ({order_col_coalesce} = ? AND t.id < ?)) \
-             ORDER BY {order_col} DESC NULLS LAST, t.created_at DESC, t.id DESC \
-             LIMIT ?"
-        );
-        sqlx::query_as::<_, AllThreadsRow>(&sql)
-            .bind(&cursor_ts)
-            .bind(&cursor_ts)
-            .bind(&cursor_id)
-            .bind(PAGE_SIZE as i64 + 1)
+    let rows = match (&params.cursor, use_created_at) {
+        (Some(cursor), true) => {
+            let (cursor_ts, cursor_id) = parse_cursor(cursor)?;
+            sqlx::query_as!(
+                AllThreadsRow,
+                r#"SELECT t.id, t.title,
+                          t.author AS author_id,
+                          u.display_name AS author_name,
+                          u.status AS author_status,
+                          u.deleted_at AS author_deleted_at,
+                          t.created_at,
+                          r.id AS room_id,
+                          r.slug AS room_slug,
+                          t.locked AS "locked: bool",
+                          (r.slug = 'announcements') AS "is_announcement!: bool",
+                          t.reply_count,
+                          t.last_activity
+                   FROM threads t
+                   JOIN users u ON u.id = t.author
+                   JOIN rooms r ON r.id = t.room
+                   WHERE r.merged_into IS NULL
+                     AND NOT (t.reply_count = 0
+                          AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL)
+                     AND (t.created_at < ? OR (t.created_at = ? AND t.id < ?))
+                   ORDER BY t.created_at DESC NULLS LAST, t.created_at DESC, t.id DESC
+                   LIMIT ?"#,
+                cursor_ts,
+                cursor_ts,
+                cursor_id,
+                limit,
+            )
             .fetch_all(&state.db)
             .await?
-    } else {
-        let sql = format!(
-            "SELECT t.id, t.title, t.author, u.display_name, u.status, u.deleted_at, t.created_at, \
-             r.id, r.slug, t.locked, (r.slug = 'announcements') AS is_announcement, \
-             t.reply_count, t.last_activity \
-             FROM threads t \
-             JOIN users u ON u.id = t.author \
-             JOIN rooms r ON r.id = t.room \
-             WHERE r.merged_into IS NULL \
-               AND {RETRACTED_OP_FILTER} \
-             ORDER BY {order_col} DESC NULLS LAST, t.created_at DESC, t.id DESC \
-             LIMIT ?"
-        );
-        sqlx::query_as::<_, AllThreadsRow>(&sql)
-            .bind(PAGE_SIZE as i64 + 1)
+        }
+        (Some(cursor), false) => {
+            let (cursor_ts, cursor_id) = parse_cursor(cursor)?;
+            sqlx::query_as!(
+                AllThreadsRow,
+                r#"SELECT t.id, t.title,
+                          t.author AS author_id,
+                          u.display_name AS author_name,
+                          u.status AS author_status,
+                          u.deleted_at AS author_deleted_at,
+                          t.created_at,
+                          r.id AS room_id,
+                          r.slug AS room_slug,
+                          t.locked AS "locked: bool",
+                          (r.slug = 'announcements') AS "is_announcement!: bool",
+                          t.reply_count,
+                          t.last_activity
+                   FROM threads t
+                   JOIN users u ON u.id = t.author
+                   JOIN rooms r ON r.id = t.room
+                   WHERE r.merged_into IS NULL
+                     AND NOT (t.reply_count = 0
+                          AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL)
+                     AND (COALESCE(t.last_activity, t.created_at) < ?
+                          OR (COALESCE(t.last_activity, t.created_at) = ? AND t.id < ?))
+                   ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC, t.id DESC
+                   LIMIT ?"#,
+                cursor_ts,
+                cursor_ts,
+                cursor_id,
+                limit,
+            )
             .fetch_all(&state.db)
             .await?
+        }
+        (None, true) => {
+            sqlx::query_as!(
+                AllThreadsRow,
+                r#"SELECT t.id, t.title,
+                          t.author AS author_id,
+                          u.display_name AS author_name,
+                          u.status AS author_status,
+                          u.deleted_at AS author_deleted_at,
+                          t.created_at,
+                          r.id AS room_id,
+                          r.slug AS room_slug,
+                          t.locked AS "locked: bool",
+                          (r.slug = 'announcements') AS "is_announcement!: bool",
+                          t.reply_count,
+                          t.last_activity
+                   FROM threads t
+                   JOIN users u ON u.id = t.author
+                   JOIN rooms r ON r.id = t.room
+                   WHERE r.merged_into IS NULL
+                     AND NOT (t.reply_count = 0
+                          AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL)
+                   ORDER BY t.created_at DESC NULLS LAST, t.created_at DESC, t.id DESC
+                   LIMIT ?"#,
+                limit,
+            )
+            .fetch_all(&state.db)
+            .await?
+        }
+        (None, false) => {
+            sqlx::query_as!(
+                AllThreadsRow,
+                r#"SELECT t.id, t.title,
+                          t.author AS author_id,
+                          u.display_name AS author_name,
+                          u.status AS author_status,
+                          u.deleted_at AS author_deleted_at,
+                          t.created_at,
+                          r.id AS room_id,
+                          r.slug AS room_slug,
+                          t.locked AS "locked: bool",
+                          (r.slug = 'announcements') AS "is_announcement!: bool",
+                          t.reply_count,
+                          t.last_activity
+                   FROM threads t
+                   JOIN users u ON u.id = t.author
+                   JOIN rooms r ON r.id = t.room
+                   WHERE r.merged_into IS NULL
+                     AND NOT (t.reply_count = 0
+                          AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL)
+                   ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC, t.id DESC
+                   LIMIT ?"#,
+                limit,
+            )
+            .fetch_all(&state.db)
+            .await?
+        }
     };
 
     let has_more = rows.len() > PAGE_SIZE;
     let mut threads: Vec<ThreadSummary> = rows
         .into_iter()
         .take(PAGE_SIZE)
-        .filter(
-            |(_, _, author_id, _, _, _, _, _, _, _, is_announcement, _, _)| {
-                is_thread_visible(
-                    author_id,
-                    *is_announcement,
-                    &user.user_id,
-                    &reverse_map,
-                    &distrust_set,
-                )
-            },
-        )
+        .filter(|row| {
+            is_thread_visible(
+                &row.author_id,
+                row.is_announcement,
+                &user.user_id,
+                &reverse_map,
+                &distrust_set,
+            )
+        })
         .map(|row| all_threads_to_summary(row, &trust_map, &distrust_set))
         .collect();
 
@@ -540,6 +610,31 @@ pub async fn list_all_threads(
 }
 
 // ---------------------------------------------------------------------------
+// Shared: resolve a room id-or-slug and return (id, slug, is_announcement)
+// ---------------------------------------------------------------------------
+
+/// Look up a room by id or slug, skipping merged-away rooms. Used by
+/// both the GET and POST "load more" handlers for a single room.
+async fn resolve_room(
+    db: &sqlx::SqlitePool,
+    room_id_or_slug: &str,
+) -> Result<(String, String, bool), AppError> {
+    let row = sqlx::query!(
+        r#"SELECT id, slug,
+                  (slug = 'announcements') AS "is_announcement!: bool"
+           FROM rooms
+           WHERE (id = ? OR slug = ?) AND merged_into IS NULL"#,
+        room_id_or_slug,
+        room_id_or_slug,
+    )
+    .fetch_optional(db)
+    .await?
+    .ok_or_else(|| AppError::code(ErrorCode::RoomNotFound))?;
+
+    Ok((row.id, row.slug, row.is_announcement))
+}
+
+// ---------------------------------------------------------------------------
 // GET /api/rooms/:id/threads — list threads in a room (page 1)
 // ---------------------------------------------------------------------------
 
@@ -555,16 +650,8 @@ pub async fn list_threads(
     let trust_map = graph.distance_map(reader_uuid);
     let reverse_map = graph.reverse_score_map(reader_uuid);
     let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
-    let room: Option<(String, String, bool)> = sqlx::query_as(
-        "SELECT id, slug, (slug = 'announcements') AS is_announcement FROM rooms WHERE (id = ? OR slug = ?) AND merged_into IS NULL",
-    )
-    .bind(&room_id_or_slug)
-    .bind(&room_id_or_slug)
-    .fetch_optional(&state.db)
-    .await?;
 
-    let (room_id, room_slug, is_announcement) =
-        room.ok_or_else(|| AppError::code(ErrorCode::RoomNotFound))?;
+    let (room_id, room_slug, is_announcement) = resolve_room(&state.db, &room_id_or_slug).await?;
 
     if params.sort == ThreadSort::Warm || params.sort == ThreadSort::Trusted {
         let sort = params.sort;
@@ -608,61 +695,132 @@ pub async fn list_threads(
         .await;
     }
 
-    // sort=new (creation time) or sort=active (last reply time)
+    // sort=new (creation time) or sort=active (last reply time). Same
+    // 4-way expansion pattern as `list_all_threads`.
     let use_created_at = params.sort == ThreadSort::New;
-    let (order_col, order_col_coalesce) = if use_created_at {
-        ("t.created_at", "t.created_at")
-    } else {
-        ("t.last_activity", "COALESCE(t.last_activity, t.created_at)")
-    };
+    let limit = PAGE_SIZE as i64 + 1;
 
-    let rows = if let Some(ref cursor) = params.cursor {
-        let (cursor_ts, cursor_id) = parse_cursor(cursor)?;
-        let sql = format!(
-            "SELECT t.id, t.title, t.author, u.display_name, u.status, u.deleted_at, t.created_at, \
-             t.locked, t.reply_count, t.last_activity \
-             FROM threads t \
-             JOIN users u ON u.id = t.author \
-             WHERE t.room = ? \
-               AND {RETRACTED_OP_FILTER} \
-               AND ({order_col_coalesce} < ? \
-                    OR ({order_col_coalesce} = ? AND t.id < ?)) \
-             ORDER BY {order_col} DESC NULLS LAST, t.created_at DESC, t.id DESC \
-             LIMIT ?"
-        );
-        sqlx::query_as::<_, RoomThreadsRow>(&sql)
-            .bind(&room_id)
-            .bind(&cursor_ts)
-            .bind(&cursor_ts)
-            .bind(&cursor_id)
-            .bind(PAGE_SIZE as i64 + 1)
+    let rows = match (&params.cursor, use_created_at) {
+        (Some(cursor), true) => {
+            let (cursor_ts, cursor_id) = parse_cursor(cursor)?;
+            sqlx::query_as!(
+                RoomThreadsRow,
+                r#"SELECT t.id, t.title,
+                          t.author AS author_id,
+                          u.display_name AS author_name,
+                          u.status AS author_status,
+                          u.deleted_at AS author_deleted_at,
+                          t.created_at,
+                          t.locked AS "locked: bool",
+                          t.reply_count,
+                          t.last_activity
+                   FROM threads t
+                   JOIN users u ON u.id = t.author
+                   WHERE t.room = ?
+                     AND NOT (t.reply_count = 0
+                          AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL)
+                     AND (t.created_at < ? OR (t.created_at = ? AND t.id < ?))
+                   ORDER BY t.created_at DESC NULLS LAST, t.created_at DESC, t.id DESC
+                   LIMIT ?"#,
+                room_id,
+                cursor_ts,
+                cursor_ts,
+                cursor_id,
+                limit,
+            )
             .fetch_all(&state.db)
             .await?
-    } else {
-        let sql = format!(
-            "SELECT t.id, t.title, t.author, u.display_name, u.status, u.deleted_at, t.created_at, \
-             t.locked, t.reply_count, t.last_activity \
-             FROM threads t \
-             JOIN users u ON u.id = t.author \
-             WHERE t.room = ? \
-               AND {RETRACTED_OP_FILTER} \
-             ORDER BY {order_col} DESC NULLS LAST, t.created_at DESC, t.id DESC \
-             LIMIT ?"
-        );
-        sqlx::query_as::<_, RoomThreadsRow>(&sql)
-            .bind(&room_id)
-            .bind(PAGE_SIZE as i64 + 1)
+        }
+        (Some(cursor), false) => {
+            let (cursor_ts, cursor_id) = parse_cursor(cursor)?;
+            sqlx::query_as!(
+                RoomThreadsRow,
+                r#"SELECT t.id, t.title,
+                          t.author AS author_id,
+                          u.display_name AS author_name,
+                          u.status AS author_status,
+                          u.deleted_at AS author_deleted_at,
+                          t.created_at,
+                          t.locked AS "locked: bool",
+                          t.reply_count,
+                          t.last_activity
+                   FROM threads t
+                   JOIN users u ON u.id = t.author
+                   WHERE t.room = ?
+                     AND NOT (t.reply_count = 0
+                          AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL)
+                     AND (COALESCE(t.last_activity, t.created_at) < ?
+                          OR (COALESCE(t.last_activity, t.created_at) = ? AND t.id < ?))
+                   ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC, t.id DESC
+                   LIMIT ?"#,
+                room_id,
+                cursor_ts,
+                cursor_ts,
+                cursor_id,
+                limit,
+            )
             .fetch_all(&state.db)
             .await?
+        }
+        (None, true) => {
+            sqlx::query_as!(
+                RoomThreadsRow,
+                r#"SELECT t.id, t.title,
+                          t.author AS author_id,
+                          u.display_name AS author_name,
+                          u.status AS author_status,
+                          u.deleted_at AS author_deleted_at,
+                          t.created_at,
+                          t.locked AS "locked: bool",
+                          t.reply_count,
+                          t.last_activity
+                   FROM threads t
+                   JOIN users u ON u.id = t.author
+                   WHERE t.room = ?
+                     AND NOT (t.reply_count = 0
+                          AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL)
+                   ORDER BY t.created_at DESC NULLS LAST, t.created_at DESC, t.id DESC
+                   LIMIT ?"#,
+                room_id,
+                limit,
+            )
+            .fetch_all(&state.db)
+            .await?
+        }
+        (None, false) => {
+            sqlx::query_as!(
+                RoomThreadsRow,
+                r#"SELECT t.id, t.title,
+                          t.author AS author_id,
+                          u.display_name AS author_name,
+                          u.status AS author_status,
+                          u.deleted_at AS author_deleted_at,
+                          t.created_at,
+                          t.locked AS "locked: bool",
+                          t.reply_count,
+                          t.last_activity
+                   FROM threads t
+                   JOIN users u ON u.id = t.author
+                   WHERE t.room = ?
+                     AND NOT (t.reply_count = 0
+                          AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL)
+                   ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC, t.id DESC
+                   LIMIT ?"#,
+                room_id,
+                limit,
+            )
+            .fetch_all(&state.db)
+            .await?
+        }
     };
 
     let has_more = rows.len() > PAGE_SIZE;
     let mut threads: Vec<ThreadSummary> = rows
         .into_iter()
         .take(PAGE_SIZE)
-        .filter(|(_, _, author_id, _, _, _, _, _, _, _)| {
+        .filter(|row| {
             is_thread_visible(
-                author_id,
+                &row.author_id,
                 is_announcement,
                 &user.user_id,
                 &reverse_map,
@@ -803,16 +961,7 @@ pub async fn load_more_room_threads(
     let reverse_map = graph.reverse_score_map(reader_uuid);
     let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
 
-    let room: Option<(String, String, bool)> = sqlx::query_as(
-        "SELECT id, slug, (slug = 'announcements') AS is_announcement FROM rooms WHERE (id = ? OR slug = ?) AND merged_into IS NULL",
-    )
-    .bind(&room_id_or_slug)
-    .bind(&room_id_or_slug)
-    .fetch_optional(&state.db)
-    .await?;
-
-    let (room_id, room_slug, is_announcement) =
-        room.ok_or_else(|| AppError::code(ErrorCode::RoomNotFound))?;
+    let (room_id, room_slug, is_announcement) = resolve_room(&state.db, &room_id_or_slug).await?;
 
     let seen_ids: HashSet<String> = body.seen_ids.into_iter().collect();
     let fetch_limit = compute_fetch_limit(cursor.visibility_rate, seen_ids.len());
@@ -1126,43 +1275,63 @@ async fn fetch_warm_candidates_all(
         // Page 2+: fetch from cursor position (inclusive).
         // Uses <= on ID for inclusivity — the cursor thread is a leftover
         // that must be re-evaluated on this page.
-        sqlx::query_as::<_, AllThreadsRow>(
-            "SELECT t.id, t.title, t.author, u.display_name, u.status, u.deleted_at, t.created_at, \
-             r.id, r.slug, t.locked, (r.slug = 'announcements') AS is_announcement, \
-             t.reply_count, t.last_activity \
-             FROM threads t \
-             JOIN users u ON u.id = t.author \
-             JOIN rooms r ON r.id = t.room \
-             WHERE r.merged_into IS NULL \
-               AND NOT (t.reply_count = 0 \
-                    AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
-               AND (COALESCE(t.last_activity, t.created_at) < ? \
-                    OR (COALESCE(t.last_activity, t.created_at) = ? AND t.id <= ?)) \
-             ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC \
-             LIMIT ?",
+        sqlx::query_as!(
+            AllThreadsRow,
+            r#"SELECT t.id, t.title,
+                      t.author AS author_id,
+                      u.display_name AS author_name,
+                      u.status AS author_status,
+                      u.deleted_at AS author_deleted_at,
+                      t.created_at,
+                      r.id AS room_id,
+                      r.slug AS room_slug,
+                      t.locked AS "locked: bool",
+                      (r.slug = 'announcements') AS "is_announcement!: bool",
+                      t.reply_count,
+                      t.last_activity
+               FROM threads t
+               JOIN users u ON u.id = t.author
+               JOIN rooms r ON r.id = t.room
+               WHERE r.merged_into IS NULL
+                 AND NOT (t.reply_count = 0
+                      AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL)
+                 AND (COALESCE(t.last_activity, t.created_at) < ?
+                      OR (COALESCE(t.last_activity, t.created_at) = ? AND t.id <= ?))
+               ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC
+               LIMIT ?"#,
+            cursor_ts,
+            cursor_ts,
+            cursor_id,
+            limit,
         )
-        .bind(cursor_ts)
-        .bind(cursor_ts)
-        .bind(cursor_id)
-        .bind(limit)
         .fetch_all(db)
         .await?
     } else {
         // Page 1: fetch from the top.
-        sqlx::query_as::<_, AllThreadsRow>(
-            "SELECT t.id, t.title, t.author, u.display_name, u.status, u.deleted_at, t.created_at, \
-             r.id, r.slug, t.locked, (r.slug = 'announcements') AS is_announcement, \
-             t.reply_count, t.last_activity \
-             FROM threads t \
-             JOIN users u ON u.id = t.author \
-             JOIN rooms r ON r.id = t.room \
-             WHERE r.merged_into IS NULL \
-               AND NOT (t.reply_count = 0 \
-                    AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
-             ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC \
-             LIMIT ?",
+        sqlx::query_as!(
+            AllThreadsRow,
+            r#"SELECT t.id, t.title,
+                      t.author AS author_id,
+                      u.display_name AS author_name,
+                      u.status AS author_status,
+                      u.deleted_at AS author_deleted_at,
+                      t.created_at,
+                      r.id AS room_id,
+                      r.slug AS room_slug,
+                      t.locked AS "locked: bool",
+                      (r.slug = 'announcements') AS "is_announcement!: bool",
+                      t.reply_count,
+                      t.last_activity
+               FROM threads t
+               JOIN users u ON u.id = t.author
+               JOIN rooms r ON r.id = t.room
+               WHERE r.merged_into IS NULL
+                 AND NOT (t.reply_count = 0
+                      AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL)
+               ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC
+               LIMIT ?"#,
+            limit,
         )
-        .bind(limit)
         .fetch_all(db)
         .await?
     };
@@ -1172,27 +1341,26 @@ async fn fetch_warm_candidates_all(
     // Record the last candidate's activity and ID for cursor construction.
     let (last_candidate_activity, last_candidate_id) = rows
         .last()
-        .map(
-            |(id, _, _, _, _, _, created_at, _, _, _, _, _, last_activity)| {
-                let activity = last_activity.clone().unwrap_or_else(|| created_at.clone());
-                (Some(activity), Some(id.clone()))
-            },
-        )
+        .map(|row| {
+            let activity = row
+                .last_activity
+                .clone()
+                .unwrap_or_else(|| row.created_at.clone());
+            (Some(activity), Some(row.id.clone()))
+        })
         .unwrap_or((None, None));
 
     let visible = rows
         .into_iter()
-        .filter(
-            |(_, _, author_id, _, _, _, _, _, _, _, is_announcement, _, _)| {
-                is_thread_visible(
-                    author_id,
-                    *is_announcement,
-                    reader_id,
-                    reverse_map,
-                    distrust_set,
-                )
-            },
-        )
+        .filter(|row| {
+            is_thread_visible(
+                &row.author_id,
+                row.is_announcement,
+                reader_id,
+                reverse_map,
+                distrust_set,
+            )
+        })
         .map(|row| all_threads_to_summary(row, trust_map, distrust_set))
         .collect();
 
@@ -1219,40 +1387,56 @@ async fn fetch_warm_candidates_room(
     cursor: Option<(&str, &str)>,
 ) -> Result<CandidateBatch, AppError> {
     let rows = if let Some((cursor_ts, cursor_id)) = cursor {
-        sqlx::query_as::<_, RoomThreadsRow>(
-            "SELECT t.id, t.title, t.author, u.display_name, u.status, u.deleted_at, t.created_at, \
-             t.locked, t.reply_count, t.last_activity \
-             FROM threads t \
-             JOIN users u ON u.id = t.author \
-             WHERE t.room = ? \
-               AND NOT (t.reply_count = 0 \
-                    AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
-               AND (COALESCE(t.last_activity, t.created_at) < ? \
-                    OR (COALESCE(t.last_activity, t.created_at) = ? AND t.id <= ?)) \
-             ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC \
-             LIMIT ?",
+        sqlx::query_as!(
+            RoomThreadsRow,
+            r#"SELECT t.id, t.title,
+                      t.author AS author_id,
+                      u.display_name AS author_name,
+                      u.status AS author_status,
+                      u.deleted_at AS author_deleted_at,
+                      t.created_at,
+                      t.locked AS "locked: bool",
+                      t.reply_count,
+                      t.last_activity
+               FROM threads t
+               JOIN users u ON u.id = t.author
+               WHERE t.room = ?
+                 AND NOT (t.reply_count = 0
+                      AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL)
+                 AND (COALESCE(t.last_activity, t.created_at) < ?
+                      OR (COALESCE(t.last_activity, t.created_at) = ? AND t.id <= ?))
+               ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC
+               LIMIT ?"#,
+            room_id,
+            cursor_ts,
+            cursor_ts,
+            cursor_id,
+            limit,
         )
-        .bind(room_id)
-        .bind(cursor_ts)
-        .bind(cursor_ts)
-        .bind(cursor_id)
-        .bind(limit)
         .fetch_all(db)
         .await?
     } else {
-        sqlx::query_as::<_, RoomThreadsRow>(
-            "SELECT t.id, t.title, t.author, u.display_name, u.status, u.deleted_at, t.created_at, \
-             t.locked, t.reply_count, t.last_activity \
-             FROM threads t \
-             JOIN users u ON u.id = t.author \
-             WHERE t.room = ? \
-               AND NOT (t.reply_count = 0 \
-                    AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL) \
-             ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC \
-             LIMIT ?",
+        sqlx::query_as!(
+            RoomThreadsRow,
+            r#"SELECT t.id, t.title,
+                      t.author AS author_id,
+                      u.display_name AS author_name,
+                      u.status AS author_status,
+                      u.deleted_at AS author_deleted_at,
+                      t.created_at,
+                      t.locked AS "locked: bool",
+                      t.reply_count,
+                      t.last_activity
+               FROM threads t
+               JOIN users u ON u.id = t.author
+               WHERE t.room = ?
+                 AND NOT (t.reply_count = 0
+                      AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL)
+               ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC
+               LIMIT ?"#,
+            room_id,
+            limit,
         )
-        .bind(room_id)
-        .bind(limit)
         .fetch_all(db)
         .await?
     };
@@ -1260,17 +1444,20 @@ async fn fetch_warm_candidates_room(
     let candidates_fetched = rows.len();
     let (last_candidate_activity, last_candidate_id) = rows
         .last()
-        .map(|(id, _, _, _, _, _, created_at, _, _, last_activity)| {
-            let activity = last_activity.clone().unwrap_or_else(|| created_at.clone());
-            (Some(activity), Some(id.clone()))
+        .map(|row| {
+            let activity = row
+                .last_activity
+                .clone()
+                .unwrap_or_else(|| row.created_at.clone());
+            (Some(activity), Some(row.id.clone()))
         })
         .unwrap_or((None, None));
 
     let visible = rows
         .into_iter()
-        .filter(|(_, _, author_id, _, _, _, _, _, _, _)| {
+        .filter(|row| {
             is_thread_visible(
-                author_id,
+                &row.author_id,
                 is_announcement,
                 reader_id,
                 reverse_map,

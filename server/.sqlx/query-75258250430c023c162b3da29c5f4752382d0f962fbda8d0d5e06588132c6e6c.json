@@ -1,0 +1,92 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT t.id, t.title,\n                          t.author AS author_id,\n                          u.display_name AS author_name,\n                          u.status AS author_status,\n                          u.deleted_at AS author_deleted_at,\n                          t.created_at,\n                          r.id AS room_id,\n                          r.slug AS room_slug,\n                          t.locked AS \"locked: bool\",\n                          (r.slug = 'announcements') AS \"is_announcement!: bool\",\n                          t.reply_count,\n                          t.last_activity\n                   FROM threads t\n                   JOIN users u ON u.id = t.author\n                   JOIN rooms r ON r.id = t.room\n                   WHERE r.merged_into IS NULL\n                     AND NOT (t.reply_count = 0\n                          AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL)\n                   ORDER BY t.created_at DESC NULLS LAST, t.created_at DESC, t.id DESC\n                   LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "title",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "author_id",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "author_name",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "author_status",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "author_deleted_at",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "room_id",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "room_slug",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "locked: bool",
+        "ordinal": 9,
+        "type_info": "Integer"
+      },
+      {
+        "name": "is_announcement!: bool",
+        "ordinal": 10,
+        "type_info": "Integer"
+      },
+      {
+        "name": "reply_count",
+        "ordinal": 11,
+        "type_info": "Integer"
+      },
+      {
+        "name": "last_activity",
+        "ordinal": 12,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "75258250430c023c162b3da29c5f4752382d0f962fbda8d0d5e06588132c6e6c"
+}

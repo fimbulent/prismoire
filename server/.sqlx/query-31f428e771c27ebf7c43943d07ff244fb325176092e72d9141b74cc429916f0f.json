@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT thread_id, replier_id, replied_at\n           FROM thread_recent_repliers\n           WHERE thread_id IN (SELECT value FROM json_each(?))\n           ORDER BY thread_id, reply_rank ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "thread_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "replier_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "replied_at",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "31f428e771c27ebf7c43943d07ff244fb325176092e72d9141b74cc429916f0f"
+}

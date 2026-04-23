@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT t.id, t.title,\n                      t.author AS author_id,\n                      u.display_name AS author_name,\n                      u.status AS author_status,\n                      u.deleted_at AS author_deleted_at,\n                      t.created_at,\n                      t.locked AS \"locked: bool\",\n                      t.reply_count,\n                      t.last_activity\n               FROM threads t\n               JOIN users u ON u.id = t.author\n               WHERE t.room = ?\n                 AND NOT (t.reply_count = 0\n                      AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL)\n               ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC\n               LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "title",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "author_id",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "author_name",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "author_status",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "author_deleted_at",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "locked: bool",
+        "ordinal": 7,
+        "type_info": "Integer"
+      },
+      {
+        "name": "reply_count",
+        "ordinal": 8,
+        "type_info": "Integer"
+      },
+      {
+        "name": "last_activity",
+        "ordinal": 9,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "0b845d8ef8db15e74bed56406fae68da97b63fc3ef4879c6fefcbb5687e9e16a"
+}
