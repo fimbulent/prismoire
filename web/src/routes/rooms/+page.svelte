@@ -53,7 +53,7 @@
 		<div class="space-y-3">
 			{#each filteredRooms as room (room.id)}
 				<a
-					href="/room/{encodeURIComponent(room.slug)}"
+					href="/r/{encodeURIComponent(room.slug)}"
 					class="block border border-border rounded-md p-5 bg-bg-surface no-underline transition-[background,border-color] duration-150 hover:bg-bg-hover hover:border-accent-muted"
 				>
 					<div class="mb-1.5 flex items-center gap-2">

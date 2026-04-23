@@ -244,7 +244,7 @@
 					>
 					<span>by</span>
 					<a
-						href="/user/{report.reporter_name}"
+						href="/@{encodeURIComponent(report.reporter_name)}"
 						class="text-link no-underline hover:underline font-semibold">{report.reporter_name}</a
 					>
 					{#if report.report_count > 1}
@@ -268,18 +268,18 @@
 				<div class="bg-bg border border-border-subtle rounded-md p-4 mb-3">
 					<div class="flex items-center gap-2 mb-2 text-sm">
 						<a
-							href="/user/{report.post_author_name}"
+							href="/@{encodeURIComponent(report.post_author_name)}"
 							class="font-semibold text-text-primary no-underline hover:underline"
 							>{report.post_author_name}</a
 						>
 						<span class="text-text-muted text-xs">{relativeTime(report.post_created_at)}</span>
 						<span class="text-text-muted text-xs ml-auto">
-							in <a href="/room/{report.room_slug}" class="text-link no-underline hover:underline"
+							in <a href="/r/{report.room_slug}" class="text-link no-underline hover:underline"
 								>{report.room_slug}</a
 							>
 							·
 							<a
-								href="/room/{report.room_slug}/{report.thread_id}?post={report.post_id}"
+								href="/r/{report.room_slug}/{report.thread_id}?post={report.post_id}"
 								class="text-link no-underline hover:underline">thread</a
 							>
 						</span>

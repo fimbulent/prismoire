@@ -60,7 +60,7 @@
 		if (sort === 'warm') params.delete('sort');
 		else params.set('sort', sort);
 		const qs = params.toString();
-		return `/room/${encodeURIComponent(page.params.room ?? '')}${qs ? '?' + qs : ''}`;
+		return `/r/${encodeURIComponent(page.params.room ?? '')}${qs ? '?' + qs : ''}`;
 	}
 
 	function handleSortChange(e: Event) {
@@ -108,7 +108,7 @@
 	let heading = $derived(isAll ? 'All threads' : room?.slug ?? '');
 
 	function threadHref(thread: ThreadSummary): string {
-		return `/room/${encodeURIComponent(thread.room_slug)}/${thread.id}`;
+		return `/r/${encodeURIComponent(thread.room_slug)}/${thread.id}`;
 	}
 </script>
 
@@ -186,7 +186,7 @@
 								{#if isAll}
 									<span>&middot;</span>
 									<a
-										href="/room/{encodeURIComponent(thread.room_slug)}"
+										href="/r/{encodeURIComponent(thread.room_slug)}"
 										class="text-accent-muted no-underline hover:underline"
 										>{thread.room_slug}</a
 									>

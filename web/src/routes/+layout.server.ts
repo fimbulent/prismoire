@@ -19,7 +19,7 @@ import type { ThemeId } from '$lib/themes';
  * restricted state the moderation action intended.
  */
 function isAllowedForRestricted(pathname: string, session: SessionInfo): boolean {
-	const ownProfile = `/user/${encodeURIComponent(session.display_name)}`;
+	const ownProfile = `/@${encodeURIComponent(session.display_name)}`;
 	if (pathname === ownProfile || pathname.startsWith(`${ownProfile}/`)) return true;
 	if (pathname === '/settings' || pathname.startsWith('/settings/')) return true;
 	return false;
@@ -68,7 +68,7 @@ export const load: LayoutServerLoad = async ({ fetch, cookies, locals, url }) =>
 	// can't accidentally be reachable to restricted users.
 	if (session && (session.status === 'banned' || session.status === 'suspended')) {
 		if (!isAllowedForRestricted(url.pathname, session)) {
-			throw redirect(307, `/user/${encodeURIComponent(session.display_name)}`);
+			throw redirect(307, `/@${encodeURIComponent(session.display_name)}`);
 		}
 	}
 

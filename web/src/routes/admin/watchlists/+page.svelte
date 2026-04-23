@@ -38,7 +38,7 @@
 
 {#snippet userChip(user: UserChip)}
 	<a
-		href="/user/{user.display_name}"
+		href="/@{encodeURIComponent(user.display_name)}"
 		class="text-text-primary no-underline hover:underline font-medium"
 	>
 		{user.display_name}

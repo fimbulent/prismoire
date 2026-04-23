@@ -42,7 +42,7 @@
 	}
 
 	function threadHref(thread: ThreadSummary): string {
-		return `/room/${encodeURIComponent(thread.room_slug)}/${thread.id}`;
+		return `/r/${encodeURIComponent(thread.room_slug)}/${thread.id}`;
 	}
 </script>
 

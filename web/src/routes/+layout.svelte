@@ -92,7 +92,7 @@
 				{#if dropdownOpen}
 					<div class="absolute right-0 top-full mt-1 w-44 bg-bg-surface border border-border rounded-md shadow-lg py-1 z-50">
 						<button
-							onclick={() => navigateTo(`/user/${session.user?.display_name}`)}
+							onclick={() => navigateTo(`/@${encodeURIComponent(session.user?.display_name ?? '')}`)}
 							class="w-full text-left px-3 py-2 text-sm text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-pointer"
 						>
 							Profile

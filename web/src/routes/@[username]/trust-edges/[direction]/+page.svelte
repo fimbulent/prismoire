@@ -16,7 +16,7 @@
 
 <div class="max-w-4xl mx-auto px-6 py-8">
 	<div class="mb-4">
-		<a href="/user/{data.username}" class="text-xs text-accent hover:underline">← Back to profile</a>
+		<a href="/@{encodeURIComponent(data.username)}" class="text-xs text-accent hover:underline">← Back to profile</a>
 	</div>
 
 	<h1 class="text-xl font-bold mb-1">{title}</h1>

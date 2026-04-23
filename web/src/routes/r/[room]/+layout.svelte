@@ -18,7 +18,7 @@
 <div class="bg-bg-surface-dim border-b border-border-subtle">
 	<div class="max-w-4xl mx-auto px-6 flex items-center gap-0 overflow-x-auto">
 		<a
-			href="/room/all"
+			href="/r/all"
 			class="text-sm px-4 py-2.5 border-b-2 whitespace-nowrap transition-colors duration-150
 				{currentSlug === 'all'
 				? 'text-accent border-accent font-semibold'
@@ -28,7 +28,7 @@
 		</a>
 		{#each rooms as room (room.slug)}
 			<a
-				href="/room/{encodeURIComponent(room.slug)}"
+				href="/r/{encodeURIComponent(room.slug)}"
 				class="text-sm px-4 py-2.5 border-b-2 whitespace-nowrap transition-colors duration-150
 					{currentSlug === room.slug
 					? 'text-accent border-accent font-semibold'

@@ -61,7 +61,7 @@
 				title: title.trim(),
 				body: body.trim()
 			});
-			goto(`/room/${encodeURIComponent(thread.room_slug)}/${thread.id}`);
+			goto(`/r/${encodeURIComponent(thread.room_slug)}/${thread.id}`);
 		} catch (e) {
 			error = errorMessage(e, 'Failed to create thread');
 		} finally {
@@ -126,7 +126,7 @@
 				</p>
 			{:else if room.trim()}
 				<p transition:slide={{ duration: 150 }} class="text-xs text-text-muted mt-1">
-					/room/<span class="text-text-secondary"
+					/r/<span class="text-text-secondary"
 						>{room.trim().toLowerCase().replace(/[^a-z0-9_]/g, '')}</span
 					>
 				</p>

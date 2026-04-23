@@ -112,7 +112,7 @@
 		if (filter === 'all') params.delete('filter');
 		else params.set('filter', filter);
 		const qs = params.toString();
-		return `/user/${encodeURIComponent(username)}${qs ? '?' + qs : ''}`;
+		return `/@${encodeURIComponent(username)}${qs ? '?' + qs : ''}`;
 	}
 
 	async function refreshAfterAction() {
@@ -653,7 +653,7 @@
 								</div>
 							{/each}
 							{#if trustDetail.trusts_total > trustDetail.trusts.length}
-								<MoreButton href="/user/{username}/trust-edges/trusts">Show all {trustDetail.trusts_total}</MoreButton>
+								<MoreButton href="/@{username}/trust-edges/trusts">Show all {trustDetail.trusts_total}</MoreButton>
 							{/if}
 						</div>
 					</div>
@@ -667,7 +667,7 @@
 								</div>
 							{/each}
 							{#if trustDetail.trusted_by_total > trustDetail.trusted_by.length}
-								<MoreButton href="/user/{username}/trust-edges/trusted-by">Show all {trustDetail.trusted_by_total}</MoreButton>
+								<MoreButton href="/@{username}/trust-edges/trusted-by">Show all {trustDetail.trusted_by_total}</MoreButton>
 							{/if}
 						</div>
 					</div>
@@ -713,14 +713,14 @@
 								{#if viewerRestricted}
 									<span class="text-text-secondary">{item.room_slug}</span>
 								{:else}
-									<a href="/room/{item.room_slug}" class="text-link hover:underline">{item.room_slug}</a>
+									<a href="/r/{item.room_slug}" class="text-link hover:underline">{item.room_slug}</a>
 								{/if}
 							{:else}
 								<span>Replied in</span>
 								{#if viewerRestricted}
 									<span class="text-text-secondary">{item.thread_title}</span>
 								{:else}
-									<a href="/room/{item.room_slug}/{item.thread_id}?post={item.post_id}" class="text-link hover:underline">{item.thread_title}</a>
+									<a href="/r/{item.room_slug}/{item.thread_id}?post={item.post_id}" class="text-link hover:underline">{item.thread_title}</a>
 								{/if}
 							{/if}
 							<span class="ml-auto">{relativeTime(item.created_at)}</span>
@@ -729,7 +729,7 @@
 							{#if viewerRestricted}
 								<span class="text-[0.95rem] text-text-primary font-medium leading-snug">{item.thread_title}</span>
 							{:else}
-								<a href="/room/{item.room_slug}/{item.thread_id}" class="text-[0.95rem] text-text-primary hover:underline font-medium leading-snug">{item.thread_title}</a>
+								<a href="/r/{item.room_slug}/{item.thread_id}" class="text-[0.95rem] text-text-primary hover:underline font-medium leading-snug">{item.thread_title}</a>
 							{/if}
 						{/if}
 						<div class="text-[0.95rem] leading-7 text-text-secondary mt-1">

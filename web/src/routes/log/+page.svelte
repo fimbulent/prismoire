@@ -79,15 +79,15 @@
 						<span class="font-semibold text-text-primary">{entry.admin_name}</span>
 						<span class="text-text-secondary">{actionLabel(entry.action)}</span>
 						{#if entry.target_user_name}
-							<a href="/user/{entry.target_user_name}" class="font-semibold text-text-primary hover:underline">{entry.target_user_name}</a>
+							<a href="/@{encodeURIComponent(entry.target_user_name)}" class="font-semibold text-text-primary hover:underline">{entry.target_user_name}</a>
 						{/if}
 						{#if entry.thread_title}
 							<a
 								href={entry.room_slug && entry.thread_id
-									? `/room/${entry.room_slug}/${entry.thread_id}`
+									? `/r/${entry.room_slug}/${entry.thread_id}`
 									: entry.room_slug
-										? `/room/${entry.room_slug}`
-										: '/room/all'}
+										? `/r/${entry.room_slug}`
+										: '/r/all'}
 								class="text-link hover:text-link-hover font-medium truncate max-w-xs"
 								title={entry.thread_title}
 							>{entry.thread_title}</a>

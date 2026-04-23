@@ -368,7 +368,7 @@
 	{#if focusedPostId}
 			<div class="mb-4">
 				<a
-					href="/room/{thread.room_slug}/{thread.id}"
+					href="/r/{thread.room_slug}/{thread.id}"
 					class="text-xs text-accent hover:text-text-primary"
 				>&larr; View full thread</a>
 			</div>
