@@ -71,7 +71,10 @@ pub struct RoomSearchQuery {
 }
 
 /// GET /api/rooms/top — return the most active rooms (lightweight, for tab bar).
-pub async fn top_rooms(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
+pub async fn top_rooms(
+    State(state): State<Arc<AppState>>,
+    _user: AuthUser,
+) -> Result<impl IntoResponse, AppError> {
     let rows = sqlx::query_as::<_, (String,)>(
         "SELECT r.slug \
          FROM rooms r \
@@ -99,7 +102,10 @@ pub async fn top_rooms(State(state): State<Arc<AppState>>) -> Result<impl IntoRe
 }
 
 /// GET /api/rooms — list all non-merged rooms with thread/post counts.
-pub async fn list_rooms(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
+pub async fn list_rooms(
+    State(state): State<Arc<AppState>>,
+    _user: AuthUser,
+) -> Result<impl IntoResponse, AppError> {
     let rows = sqlx::query_as::<_, (String, String, String, String, String, i64, i64, Option<String>)>(
         "SELECT t.id, t.slug, t.created_by, u.display_name, t.created_at, \
          (SELECT COUNT(*) FROM threads th WHERE th.room = t.id) AS thread_count, \
@@ -232,6 +238,7 @@ pub async fn search_rooms(
 /// GET /api/rooms/:id — get room detail by ID or slug.
 pub async fn get_room(
     State(state): State<Arc<AppState>>,
+    _user: AuthUser,
     Path(id_or_slug): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     let row = sqlx::query_as::<_, (String, String, String, String, String, i64, i64, Option<String>)>(

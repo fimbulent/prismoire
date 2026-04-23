@@ -202,6 +202,7 @@ pub async fn retract_post(
 /// (they were already nulled on retraction).
 pub async fn list_revisions(
     State(state): State<Arc<AppState>>,
+    _user: AuthUser,
     Path(post_id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     let post = sqlx::query_as::<_, (String, String, Option<String>)>(

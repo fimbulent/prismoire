@@ -483,6 +483,22 @@ async fn fetch_thread_info(db: &sqlx::SqlitePool, thread_id: &str) -> Result<Thr
     })
 }
 
+/// Gate anonymous thread access to announcement rooms only.
+///
+/// Anonymous users (the `/public` landing page and the announcement
+/// permalinks it links to) are allowed to read announcement threads but
+/// nothing else. Any other room requires an authenticated session so the
+/// trust-based visibility model applies.
+fn require_auth_for_non_announcement(
+    user: &Option<crate::session::AuthUser>,
+    thread_info: &ThreadInfo,
+) -> Result<(), AppError> {
+    if user.is_none() && !thread_info.is_announcement {
+        return Err(AppError::code(ErrorCode::Unauthenticated));
+    }
+    Ok(())
+}
+
 /// Pass 1: fetch post metadata without bodies.
 #[allow(clippy::type_complexity)]
 async fn fetch_post_metadata(
@@ -655,6 +671,7 @@ pub async fn get_thread(
     OptionalAuthUser(user): OptionalAuthUser,
 ) -> Result<Response, AppError> {
     let thread_info = fetch_thread_info(&state.db, &thread_id).await?;
+    require_auth_for_non_announcement(&user, &thread_info)?;
     let viewer = load_viewer_ctx_full(&state, &user).await?;
     let meta_rows = fetch_post_metadata(&state.db, &thread_id).await?;
     let meta_tree = build_meta_tree(meta_rows)?;
@@ -944,6 +961,7 @@ pub async fn get_thread_replies(
     OptionalAuthUser(user): OptionalAuthUser,
 ) -> Result<impl IntoResponse, AppError> {
     let thread_info = fetch_thread_info(&state.db, &thread_id).await?;
+    require_auth_for_non_announcement(&user, &thread_info)?;
     let viewer = load_viewer_ctx_full(&state, &user).await?;
     let meta_rows = fetch_post_metadata(&state.db, &thread_id).await?;
     let meta_tree = build_meta_tree(meta_rows)?;
@@ -1009,6 +1027,7 @@ pub async fn get_thread_subtree(
     OptionalAuthUser(user): OptionalAuthUser,
 ) -> Result<impl IntoResponse, AppError> {
     let thread_info = fetch_thread_info(&state.db, &thread_id).await?;
+    require_auth_for_non_announcement(&user, &thread_info)?;
     let viewer = load_viewer_ctx_full(&state, &user).await?;
     let meta_rows = fetch_post_metadata(&state.db, &thread_id).await?;
     let meta_tree = build_meta_tree(meta_rows)?;

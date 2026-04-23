@@ -86,6 +86,36 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
     }
 }
 
+/// Optional authenticated user — succeeds with `None` if no valid session.
+///
+/// Use this for endpoints that behave differently for logged-in vs. anonymous
+/// users (e.g. announcement thread view: anonymous access is allowed for
+/// announcement content, but only authenticated users get trust-gated
+/// visibility). Banned and suspended users are treated as anonymous here:
+/// they should not get a trust-gated view of content reserved for active
+/// users.
+pub struct OptionalAuthUser(pub Option<AuthUser>);
+
+impl FromRequestParts<Arc<AppState>> for OptionalAuthUser {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        _state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let user = parts
+            .extensions
+            .get::<AuthSession>()
+            .filter(|session| session.status.is_active())
+            .map(|session| AuthUser {
+                user_id: session.user_id.clone(),
+                display_name: session.display_name.clone(),
+                role: session.role.clone(),
+            });
+        Ok(OptionalAuthUser(user))
+    }
+}
+
 /// Authenticated user that can be banned or suspended.
 ///
 /// Used by the small set of endpoints a restricted user must still reach:
@@ -124,34 +154,6 @@ impl FromRequestParts<Arc<AppState>> for RestrictedAuthUser {
             status: session.status,
             suspended_until: session.suspended_until.clone(),
         })
-    }
-}
-
-/// Optional authenticated user — succeeds with `None` if no valid session.
-///
-/// Use this for endpoints that behave differently for logged-in vs. anonymous
-/// users (e.g. public thread view with optional trust badges). Banned and
-/// suspended users are treated as anonymous here: they should not get a
-/// trust-gated view of content reserved for active users.
-pub struct OptionalAuthUser(pub Option<AuthUser>);
-
-impl FromRequestParts<Arc<AppState>> for OptionalAuthUser {
-    type Rejection = std::convert::Infallible;
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        _state: &Arc<AppState>,
-    ) -> Result<Self, Self::Rejection> {
-        let user = parts
-            .extensions
-            .get::<AuthSession>()
-            .filter(|session| session.status.is_active())
-            .map(|session| AuthUser {
-                user_id: session.user_id.clone(),
-                display_name: session.display_name.clone(),
-                role: session.role.clone(),
-            });
-        Ok(OptionalAuthUser(user))
     }
 }
 
