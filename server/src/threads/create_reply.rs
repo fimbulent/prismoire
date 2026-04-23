@@ -163,6 +163,7 @@ pub async fn create_reply(
             children: vec![],
             trust: TrustInfo::self_trust(),
             has_more_children: false,
+            distrust_scaffold: false,
         }),
     ))
 }

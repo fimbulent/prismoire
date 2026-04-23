@@ -35,6 +35,11 @@ export interface PostResponse {
 	children: PostResponse[];
 	trust: TrustInfo;
 	has_more_children?: boolean;
+	/** True when the post's author is in the viewer's distrust set but the
+	 * post is shown anyway because the viewer has a descendant reply in this
+	 * subtree. Render a small hint next to the author explaining why a
+	 * distrusted user's post is visible. */
+	distrust_scaffold?: boolean;
 }
 
 export interface ThreadDetail {

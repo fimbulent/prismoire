@@ -207,6 +207,7 @@ async fn apply_visible_reply_counts(
     db: &sqlx::SqlitePool,
     threads: &mut [ThreadSummary],
     reverse_map: &HashMap<String, f64>,
+    distrust_set: &HashSet<String>,
     reader_id: &str,
 ) -> Result<(), AppError> {
     if threads.is_empty() {
@@ -233,6 +234,12 @@ async fn apply_visible_reply_counts(
     use crate::trust::MINIMUM_TRUST_THRESHOLD;
     let mut counts: HashMap<&str, i64> = HashMap::new();
     for (thread_id, author_id, parent_author_id) in &rows {
+        // Distrusted authors' replies are pruned from the reader's view
+        // (spec §"Distrust action UX"), so they must not contribute to the
+        // viewer-specific reply count either.
+        if author_id != reader_id && distrust_set.contains(author_id) {
+            continue;
+        }
         let visible = author_id == reader_id
             || reverse_map
                 .get(author_id)
@@ -427,6 +434,7 @@ pub async fn list_all_threads(
             &state.db,
             batch,
             reverse_map.clone(),
+            distrust_set,
             user.user_id.clone(),
             None,
             None,
@@ -494,13 +502,26 @@ pub async fn list_all_threads(
         .take(PAGE_SIZE)
         .filter(
             |(_, _, author_id, _, _, _, _, _, _, _, is_announcement, _, _)| {
-                is_thread_visible(author_id, *is_announcement, &user.user_id, &reverse_map)
+                is_thread_visible(
+                    author_id,
+                    *is_announcement,
+                    &user.user_id,
+                    &reverse_map,
+                    &distrust_set,
+                )
             },
         )
         .map(|row| all_threads_to_summary(row, &trust_map, &distrust_set))
         .collect();
 
-    apply_visible_reply_counts(&state.db, &mut threads, &reverse_map, &user.user_id).await?;
+    apply_visible_reply_counts(
+        &state.db,
+        &mut threads,
+        &reverse_map,
+        &distrust_set,
+        &user.user_id,
+    )
+    .await?;
 
     let next_cursor = if has_more {
         threads.last().map(if use_created_at {
@@ -575,6 +596,7 @@ pub async fn list_threads(
             &state.db,
             batch,
             reverse_map.clone(),
+            distrust_set,
             user.user_id.clone(),
             None,
             None,
@@ -639,7 +661,13 @@ pub async fn list_threads(
         .into_iter()
         .take(PAGE_SIZE)
         .filter(|(_, _, author_id, _, _, _, _, _, _, _)| {
-            is_thread_visible(author_id, is_announcement, &user.user_id, &reverse_map)
+            is_thread_visible(
+                author_id,
+                is_announcement,
+                &user.user_id,
+                &reverse_map,
+                &distrust_set,
+            )
         })
         .map(|row| {
             room_threads_to_summary(
@@ -653,7 +681,14 @@ pub async fn list_threads(
         })
         .collect();
 
-    apply_visible_reply_counts(&state.db, &mut threads, &reverse_map, &user.user_id).await?;
+    apply_visible_reply_counts(
+        &state.db,
+        &mut threads,
+        &reverse_map,
+        &distrust_set,
+        &user.user_id,
+    )
+    .await?;
 
     let next_cursor = if has_more {
         threads.last().map(if use_created_at {
@@ -731,6 +766,7 @@ pub async fn load_more_all_threads(
         &state.db,
         batch,
         reverse_map,
+        distrust_set,
         user.user_id,
         Some(&seen_ids),
         Some(cursor.visibility_rate),
@@ -811,6 +847,7 @@ pub async fn load_more_room_threads(
         &state.db,
         batch,
         reverse_map,
+        distrust_set,
         user.user_id,
         Some(&seen_ids),
         Some(cursor.visibility_rate),
@@ -885,6 +922,7 @@ async fn score_and_paginate(
     db: &sqlx::SqlitePool,
     batch: CandidateBatch,
     reverse_map: Arc<HashMap<String, f64>>,
+    distrust_set: HashSet<String>,
     reader_id: String,
     seen_ids: Option<&HashSet<String>>,
     visibility_rate_override: Option<f64>,
@@ -950,7 +988,7 @@ async fn score_and_paginate(
         .map(|id| id.as_str())
         .collect();
 
-    apply_visible_reply_counts(db, &mut threads, &reverse_map, &reader_id).await?;
+    apply_visible_reply_counts(db, &mut threads, &reverse_map, &distrust_set, &reader_id).await?;
 
     let next_cursor = build_warm_cursor(
         sort,
@@ -1146,7 +1184,13 @@ async fn fetch_warm_candidates_all(
         .into_iter()
         .filter(
             |(_, _, author_id, _, _, _, _, _, _, _, is_announcement, _, _)| {
-                is_thread_visible(author_id, *is_announcement, reader_id, reverse_map)
+                is_thread_visible(
+                    author_id,
+                    *is_announcement,
+                    reader_id,
+                    reverse_map,
+                    distrust_set,
+                )
             },
         )
         .map(|row| all_threads_to_summary(row, trust_map, distrust_set))
@@ -1225,7 +1269,13 @@ async fn fetch_warm_candidates_room(
     let visible = rows
         .into_iter()
         .filter(|(_, _, author_id, _, _, _, _, _, _, _)| {
-            is_thread_visible(author_id, is_announcement, reader_id, reverse_map)
+            is_thread_visible(
+                author_id,
+                is_announcement,
+                reader_id,
+                reverse_map,
+                distrust_set,
+            )
         })
         .map(|row| {
             room_threads_to_summary(

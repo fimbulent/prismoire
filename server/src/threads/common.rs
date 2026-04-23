@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -108,6 +108,14 @@ pub struct PostResponse {
     pub trust: TrustInfo,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub has_more_children: bool,
+    /// True when the post's author is in the viewer's distrust set but the
+    /// post is shown anyway because the viewer has a descendant reply in this
+    /// subtree — without this exception the viewer would lose their own
+    /// nested post. The body is still served; the client surfaces a small
+    /// informational hint next to the author so the viewer understands why a
+    /// distrusted user's post is visible. See spec §"Distrust action UX".
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub distrust_scaffold: bool,
 }
 
 #[derive(Serialize)]
@@ -285,20 +293,28 @@ pub fn make_cursor_created_at(thread: &ThreadSummary) -> String {
 
 /// Check whether a thread is visible to the reader in a listing.
 ///
-/// A thread (represented by its OP) is visible if any of the following hold:
-/// 1. The reader is the thread author.
-/// 2. The thread is in the announcements room.
-/// 3. The author's trust-in-reader (reverse score) meets `MINIMUM_TRUST_THRESHOLD`.
+/// A thread (represented by its OP) is visible if:
+/// 1. The reader is the thread author (self-view always wins), OR
+/// 2. The author is not in the reader's distrust set AND one of:
+///    a. The thread is in the announcements room, OR
+///    b. The author's trust-in-reader (reverse score) meets `MINIMUM_TRUST_THRESHOLD`.
+///
+/// Distrust prunes content from the viewer's listings — it overrides
+/// both the announcement carve-out and reverse-trust.
 pub fn is_thread_visible(
     author_id: &str,
     is_announcement: bool,
     reader_id: &str,
     reverse_map: &HashMap<String, f64>,
+    distrust_set: &HashSet<String>,
 ) -> bool {
     use crate::trust::MINIMUM_TRUST_THRESHOLD;
 
     if author_id == reader_id {
         return true;
+    }
+    if distrust_set.contains(author_id) {
+        return false;
     }
     if is_announcement {
         return true;

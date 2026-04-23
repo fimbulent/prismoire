@@ -683,6 +683,24 @@ pub async fn get_activity(
     //     "Reply visibility grant"), so the viewer can see replies to their
     //     own posts even from a low-trust author.
     let is_self = user.user_id == target_id;
+
+    // Distrust short-circuit: if the viewer distrusts the target, the target's
+    // content (and any subtrees rooted there) is pruned from the viewer's
+    // world per spec §"Distrust action UX". The profile endpoint already
+    // surfaces `trust_stance = "distrust"` so the frontend can show the
+    // "You have distrusted this user" banner; here we just return an empty
+    // activity feed so no items leak through.
+    if !is_self {
+        let stance = get_trust_stance(&state.db, &user.user_id, &target_id).await?;
+        if stance == "distrust" {
+            return Ok(Json(ActivityResponse {
+                items: Vec::new(),
+                next_cursor: None,
+                admin_override: false,
+            }));
+        }
+    }
+
     let reverse_trust_ok = if is_self {
         true
     } else {

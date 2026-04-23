@@ -135,6 +135,7 @@ pub async fn edit_post(
         children: vec![],
         trust: TrustInfo::self_trust(),
         has_more_children: false,
+        distrust_scaffold: false,
     }))
 }
 

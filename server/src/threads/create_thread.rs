@@ -109,6 +109,7 @@ pub async fn create_thread(
                 children: vec![],
                 trust: TrustInfo::self_trust(),
                 has_more_children: false,
+                distrust_scaffold: false,
             },
             reply_count: 0,
             total_reply_count: 0,

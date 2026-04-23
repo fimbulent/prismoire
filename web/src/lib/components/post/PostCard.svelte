@@ -195,6 +195,13 @@
 <!-- Header -->
 <div class="flex items-center gap-2 mb-2 text-sm">
 	<UserName name={post.author_name} trust={post.trust} linked={session.isLoggedIn} />
+	{#if post.distrust_scaffold}
+		<span
+			class="inline-flex items-center justify-center w-4 h-4 rounded-full border border-border text-text-muted text-[0.625rem] font-semibold leading-none cursor-help select-none"
+			title="You have distrusted this user. This post is shown because you have a reply nested below it."
+			aria-label="You have distrusted this user. This post is shown because you have a reply nested below it."
+		>?</span>
+	{/if}
 	{#if post.is_op}
 		<span class="text-xs font-bold px-1.5 py-0.5 rounded border border-accent-muted text-accent uppercase tracking-wider">op</span>
 	{/if}

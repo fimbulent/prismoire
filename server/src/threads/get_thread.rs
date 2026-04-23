@@ -162,6 +162,55 @@ struct TreeCtx<'a> {
     viewer: &'a ViewerCtx,
     is_announcement: bool,
     sort_by_new: bool,
+    /// For each post index, true iff that post or any descendant is authored
+    /// by the reader. Used to preserve distrust-filtered posts as scaffolding
+    /// when the reader has a reply nested below them — otherwise the reader
+    /// would lose their own post whenever they distrust an intervening author.
+    has_reader_descendant: Vec<bool>,
+}
+
+/// Compute `has_reader_descendant` for every post in the tree.
+///
+/// Post-order traversal from the OP: a node is "load-bearing" if it was
+/// authored by the reader, or if any of its descendants was. Returns an
+/// all-false vector (cheap short-circuit) when there is no authenticated
+/// reader, when the reader has not distrusted anyone, or when no author in
+/// the tree is actually in the reader's distrust set — in all those cases
+/// `is_visible` never consults this vector, so there's nothing to compute.
+fn compute_reader_descendants(
+    tree: &MetaTree,
+    reader_id: Option<&str>,
+    distrust_set: &HashSet<String>,
+) -> Vec<bool> {
+    let n = tree.metas.len();
+    let mut result = vec![false; n];
+    if distrust_set.is_empty() {
+        return result;
+    }
+    let Some(reader) = reader_id else {
+        return result;
+    };
+    if !tree.author_of.iter().any(|a| distrust_set.contains(a)) {
+        return result;
+    }
+
+    fn visit(idx: usize, tree: &MetaTree, reader: &str, result: &mut [bool]) -> bool {
+        let mut has = tree.author_of[idx] == reader;
+        if let Some(children) = tree.children_map.get(&idx) {
+            // Clone indices to avoid aliasing borrow with `result`.
+            let child_indices: Vec<usize> = children.clone();
+            for ci in child_indices {
+                if visit(ci, tree, reader, result) {
+                    has = true;
+                }
+            }
+        }
+        result[idx] = has;
+        has
+    }
+
+    visit(tree.root_idx, tree, reader, &mut result);
+    result
 }
 
 impl TreeCtx<'_> {
@@ -174,6 +223,19 @@ impl TreeCtx<'_> {
         let author = &self.tree.author_of[idx];
         if author == reader {
             return true;
+        }
+        // Distrust: prune posts (and thus entire subtrees, since
+        // `visible_sorted_children` feeds `build_tree` / `collect_truncated` /
+        // `count_visible_replies` recursively) authored by distrusted users.
+        // Overrides the announcement carve-out and reply-visibility grant per
+        // spec §"Distrust action UX".
+        //
+        // Exception: if the reader has a post nested below a distrusted
+        // author's post, keep the distrusted post in the tree as scaffolding
+        // so the reader's own reply remains reachable via permalinks / the
+        // activity feed. The body is redacted in `build_tree`.
+        if self.viewer.distrust_set.contains(author) {
+            return self.has_reader_descendant[idx];
         }
         if is_root && self.is_announcement {
             return true;
@@ -327,6 +389,14 @@ impl TreeCtx<'_> {
             None => (String::new(), None, 0),
         };
 
+        // Distrust scaffold marker: if the author is distrusted but we're
+        // rendering the post anyway (because the reader has a descendant
+        // reply), flag it so the client can show a hint explaining why a
+        // distrusted user's post is visible.
+        let is_distrusted_scaffold = self.viewer.reader_id.as_deref()
+            != Some(meta.author_id.as_str())
+            && self.viewer.distrust_set.contains(&meta.author_id);
+
         PostResponse {
             trust: TrustInfo::build(
                 &meta.author_id,
@@ -346,6 +416,7 @@ impl TreeCtx<'_> {
             retracted_at: meta.retracted_at.clone(),
             children: child_posts,
             has_more_children,
+            distrust_scaffold: is_distrusted_scaffold,
         }
     }
 
@@ -588,12 +659,26 @@ pub async fn get_thread(
     let meta_rows = fetch_post_metadata(&state.db, &thread_id).await?;
     let meta_tree = build_meta_tree(meta_rows)?;
 
+    let has_reader_descendant = compute_reader_descendants(
+        &meta_tree,
+        viewer.reader_id.as_deref(),
+        &viewer.distrust_set,
+    );
     let ctx = TreeCtx {
         tree: &meta_tree,
         viewer: &viewer,
         is_announcement: thread_info.is_announcement,
         sort_by_new: query.sort == PostSort::New,
+        has_reader_descendant,
     };
+
+    // If the OP author is distrusted by the reader, the thread disappears
+    // entirely. The focus/subtree branches below 404 automatically via
+    // `ctx.is_visible`, but the non-focused path unconditionally emits
+    // the OP, so guard it here.
+    if !ctx.is_visible(meta_tree.root_idx, true) {
+        return Err(AppError::code(ErrorCode::ThreadNotFound));
+    }
 
     if let Some(focus_id) = &query.focus {
         return build_focused_response(
@@ -637,6 +722,11 @@ pub async fn get_thread(
         Some(bi) => (bi.body.clone(), bi.edited_at.clone(), bi.revision),
         None => (String::new(), None, 0),
     };
+    // If the OP author is distrusted (but the thread is still rendering
+    // because the reader has a reply below), flag the scaffold marker so
+    // the client can show a hint.
+    let op_distrust_scaffold = viewer.reader_id.as_deref() != Some(op_meta.author_id.as_str())
+        && viewer.distrust_set.contains(&op_meta.author_id);
 
     let op_children: Vec<PostResponse> = top_level
         .into_iter()
@@ -664,6 +754,7 @@ pub async fn get_thread(
         retracted_at: op_meta.retracted_at.clone(),
         children: op_children,
         has_more_children: false,
+        distrust_scaffold: op_distrust_scaffold,
     };
 
     Ok(Json(ThreadDetailResponse {
@@ -783,6 +874,11 @@ async fn build_focused_response(
         Some(bi) => (bi.body.clone(), bi.edited_at.clone(), bi.revision),
         None => (String::new(), None, 0),
     };
+    // If the OP author is distrusted (but the thread is still rendering
+    // because the reader has a reply below), flag the scaffold marker so
+    // the client can show a hint.
+    let op_distrust_scaffold = viewer.reader_id.as_deref() != Some(op_meta.author_id.as_str())
+        && viewer.distrust_set.contains(&op_meta.author_id);
 
     let op_children: Vec<PostResponse> = top_level
         .into_iter()
@@ -810,6 +906,7 @@ async fn build_focused_response(
         retracted_at: op_meta.retracted_at.clone(),
         children: op_children,
         has_more_children: false,
+        distrust_scaffold: op_distrust_scaffold,
     };
 
     Ok(Json(ThreadDetailResponse {
@@ -851,11 +948,17 @@ pub async fn get_thread_replies(
     let meta_rows = fetch_post_metadata(&state.db, &thread_id).await?;
     let meta_tree = build_meta_tree(meta_rows)?;
 
+    let has_reader_descendant = compute_reader_descendants(
+        &meta_tree,
+        viewer.reader_id.as_deref(),
+        &viewer.distrust_set,
+    );
     let ctx = TreeCtx {
         tree: &meta_tree,
         viewer: &viewer,
         is_announcement: thread_info.is_announcement,
         sort_by_new: query.sort == PostSort::New,
+        has_reader_descendant,
     };
 
     let all_top_level = ctx.visible_sorted_children(meta_tree.root_idx);
@@ -910,11 +1013,17 @@ pub async fn get_thread_subtree(
     let meta_rows = fetch_post_metadata(&state.db, &thread_id).await?;
     let meta_tree = build_meta_tree(meta_rows)?;
 
+    let has_reader_descendant = compute_reader_descendants(
+        &meta_tree,
+        viewer.reader_id.as_deref(),
+        &viewer.distrust_set,
+    );
     let ctx = TreeCtx {
         tree: &meta_tree,
         viewer: &viewer,
         is_announcement: thread_info.is_announcement,
         sort_by_new: query.sort == PostSort::New,
+        has_reader_descendant,
     };
 
     let subtree_root = meta_tree
