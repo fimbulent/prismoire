@@ -669,12 +669,18 @@ pub async fn unban_user(
         return Err(AppError::code(ErrorCode::NotBanned));
     }
 
+    // Atomic status-flip + audit log: both rows commit together so a
+    // log-insert failure can't leave the user unbanned without a record.
+    let mut tx = state.db.begin().await?;
+
     sqlx::query("UPDATE users SET status = 'active' WHERE id = ?")
         .bind(&target_id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
 
-    insert_user_action_log(&state.db, &user.user_id, "unban_user", &target_id, &reason).await?;
+    insert_user_action_log(&mut *tx, &user.user_id, "unban_user", &target_id, &reason).await?;
+
+    tx.commit().await?;
 
     state.trust_graph_notify.notify_one();
 
@@ -759,19 +765,25 @@ pub async fn unsuspend_user(
         return Err(AppError::code(ErrorCode::NotSuspended));
     }
 
+    // Atomic status-flip + audit log: both rows commit together so a
+    // log-insert failure can't leave the user unsuspended without a record.
+    let mut tx = state.db.begin().await?;
+
     sqlx::query("UPDATE users SET status = 'active', suspended_until = NULL WHERE id = ?")
         .bind(&target_id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
 
     insert_user_action_log(
-        &state.db,
+        &mut *tx,
         &user.user_id,
         "unsuspend_user",
         &target_id,
         "manual unsuspend",
     )
     .await?;
+
+    tx.commit().await?;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -796,9 +808,14 @@ pub async fn admin_revoke_invites(
 
     let (target_id, _, _, _) = fetch_target_user(&state.db, &user_id).await?;
 
+    // Atomic read-check-update-log: the can_invite read, the UPDATE, and the
+    // audit log commit together so the privilege change and its record can't
+    // diverge.
+    let mut tx = state.db.begin().await?;
+
     let (can_invite,): (bool,) = sqlx::query_as("SELECT can_invite FROM users WHERE id = ?")
         .bind(&target_id)
-        .fetch_one(&state.db)
+        .fetch_one(&mut *tx)
         .await?;
 
     if !can_invite {
@@ -807,17 +824,19 @@ pub async fn admin_revoke_invites(
 
     sqlx::query("UPDATE users SET can_invite = 0 WHERE id = ?")
         .bind(&target_id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
 
     insert_user_action_log(
-        &state.db,
+        &mut *tx,
         &user.user_id,
         "revoke_invites",
         &target_id,
         &reason,
     )
     .await?;
+
+    tx.commit().await?;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -842,9 +861,14 @@ pub async fn admin_grant_invites(
 
     let (target_id, _, _, _) = fetch_target_user(&state.db, &user_id).await?;
 
+    // Atomic read-check-update-log: the can_invite read, the UPDATE, and the
+    // audit log commit together so the privilege change and its record can't
+    // diverge.
+    let mut tx = state.db.begin().await?;
+
     let (can_invite,): (bool,) = sqlx::query_as("SELECT can_invite FROM users WHERE id = ?")
         .bind(&target_id)
-        .fetch_one(&state.db)
+        .fetch_one(&mut *tx)
         .await?;
 
     if can_invite {
@@ -853,17 +877,19 @@ pub async fn admin_grant_invites(
 
     sqlx::query("UPDATE users SET can_invite = 1 WHERE id = ?")
         .bind(&target_id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
 
     insert_user_action_log(
-        &state.db,
+        &mut *tx,
         &user.user_id,
         "grant_invites",
         &target_id,
         &reason,
     )
     .await?;
+
+    tx.commit().await?;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
