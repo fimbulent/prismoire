@@ -39,6 +39,16 @@ On first boot, the server requires a setup token to create the initial admin acc
 
 A [justfile](https://github.com/casey/just) provides all common development commands. Run `just -l` to see available recipes.
 
+### Git Hooks
+
+A pre-commit hook in `scripts/git-hooks/pre-commit` runs `cargo fmt`, regenerates `schema.sql` and the `.sqlx/` offline query cache when relevant files are staged, and enforces `cargo clippy -D warnings` and `cargo test`. Opt in once per clone:
+
+```sh
+just install-hooks
+```
+
+This points `core.hooksPath` at the versioned hooks directory, so future updates to the hook are picked up automatically on `git pull`.
+
 ### HTTPS for Local Development
 
 WebAuthn (passkeys) requires a secure context. Generate locally-trusted TLS certs with `mkcert` (included in the Nix devShell):

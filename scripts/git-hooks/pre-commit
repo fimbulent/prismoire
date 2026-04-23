@@ -1,0 +1,41 @@
+#!/bin/sh
+
+set -e
+
+echo "Running pre-commit checks..."
+
+# Format code
+echo "  → Running cargo fmt..."
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep '\.rs$' || true)
+if [ -n "$STAGED_FILES" ]; then
+    cargo fmt --manifest-path server/Cargo.toml --all --quiet
+    echo "$STAGED_FILES" | xargs git add
+fi
+
+# Regenerate schema.sql from migrations
+STAGED_MIGRATIONS=$(git diff --cached --name-only --diff-filter=ACM | grep '^server/migrations/.*\.sql$' || true)
+if [ -n "$STAGED_MIGRATIONS" ]; then
+    echo "  → Regenerating schema.sql..."
+    just db-schema
+    git add schema.sql
+fi
+
+# Regenerate the sqlx offline query cache when server Rust or migrations
+# change. The cache is consulted by SQLX_OFFLINE=true builds (Nix / CI),
+# so letting it drift from the actual queries breaks offline builds.
+STAGED_SERVER_RS=$(git diff --cached --name-only --diff-filter=ACM | grep '^server/.*\.rs$' || true)
+if [ -n "$STAGED_SERVER_RS" ] || [ -n "$STAGED_MIGRATIONS" ]; then
+    echo "  → Regenerating .sqlx/ offline cache..."
+    (cd server && cargo sqlx prepare)
+    git add server/.sqlx
+fi
+
+# Check for clippy warnings
+echo "  → Running cargo clippy..."
+cargo clippy --manifest-path server/Cargo.toml --quiet -- -D warnings
+
+# Run tests
+echo "  → Running cargo test..."
+cargo test --manifest-path server/Cargo.toml --quiet
+
+echo "✓ All pre-commit checks passed"

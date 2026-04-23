@@ -73,6 +73,11 @@ db-reset:
     rm -f server/prismoire.db server/prismoire.db-wal server/prismoire.db-shm
     cd server && cargo sqlx database create && cargo sqlx migrate run
 
+# Point git at the versioned pre-commit hook (one-time, per clone)
+install-hooks:
+    git config core.hooksPath scripts/git-hooks
+    @echo "Hooks installed: git now runs scripts/git-hooks/*"
+
 # Generate a random setup token for initial admin bootstrap
 setup-token:
     @openssl rand -hex 32
