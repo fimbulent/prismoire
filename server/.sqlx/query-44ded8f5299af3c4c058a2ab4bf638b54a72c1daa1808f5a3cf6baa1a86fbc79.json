@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE reports SET status = 'actioned', resolved_by = ?, resolved_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE post_id = ? AND status = 'pending'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "44ded8f5299af3c4c058a2ab4bf638b54a72c1daa1808f5a3cf6baa1a86fbc79"
+}

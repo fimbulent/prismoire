@@ -78,10 +78,13 @@ pub async fn create_invite(
     user: AuthUser,
     Json(req): Json<CreateInviteRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let (can_invite,): (bool,) = sqlx::query_as("SELECT can_invite FROM users WHERE id = ?")
-        .bind(&user.user_id)
-        .fetch_one(&state.db)
-        .await?;
+    let can_invite = sqlx::query!(
+        r#"SELECT can_invite AS "can_invite!: bool" FROM users WHERE id = ?"#,
+        user.user_id,
+    )
+    .fetch_one(&state.db)
+    .await?
+    .can_invite;
 
     if !can_invite {
         return Err(AppError::code(ErrorCode::InvitePrivilegeRevoked));
@@ -124,17 +127,18 @@ pub async fn create_invite(
     let code = generate_invite_code();
     let id = Uuid::new_v4().to_string();
 
-    let (created_at,): (String,) = sqlx::query_as(
+    let created_at = sqlx::query!(
         "INSERT INTO invites (id, code, created_by, max_uses, expires_at) \
          VALUES (?, ?, ?, ?, ?) RETURNING created_at",
+        id,
+        code,
+        user.user_id,
+        max_uses,
+        expires_at,
     )
-    .bind(&id)
-    .bind(&code)
-    .bind(&user.user_id)
-    .bind(max_uses)
-    .bind(&expires_at)
     .fetch_one(&state.db)
-    .await?;
+    .await?
+    .created_at;
 
     Ok((
         axum::http::StatusCode::CREATED,
@@ -165,47 +169,36 @@ pub async fn list_invites(
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
 
-    let rows = sqlx::query_as::<
-        _,
-        (
-            String,
-            String,
-            Option<i64>,
-            i64,
-            Option<String>,
-            Option<String>,
-            String,
-        ),
-    >(
-        "SELECT i.id, i.code, i.max_uses, \
-         (SELECT COUNT(*) FROM users u WHERE u.invite_id = i.id) AS use_count, \
-         i.expires_at, i.revoked_at, i.created_at \
-         FROM invites i WHERE i.created_by = ? \
-         AND (i.revoked_at IS NULL OR i.revoked_at > ?) \
-         AND (i.expires_at IS NULL OR i.expires_at > ?) \
-         AND (i.max_uses IS NULL \
-              OR (SELECT COUNT(*) FROM users u WHERE u.invite_id = i.id) < i.max_uses \
-              OR (SELECT MAX(u.created_at) FROM users u WHERE u.invite_id = i.id) > ?) \
-         ORDER BY i.created_at DESC",
+    let rows = sqlx::query!(
+        r#"SELECT i.id, i.code, i.max_uses,
+         (SELECT COUNT(*) FROM users u WHERE u.invite_id = i.id) AS "use_count!: i64",
+         i.expires_at, i.revoked_at, i.created_at
+         FROM invites i WHERE i.created_by = ?
+         AND (i.revoked_at IS NULL OR i.revoked_at > ?)
+         AND (i.expires_at IS NULL OR i.expires_at > ?)
+         AND (i.max_uses IS NULL
+              OR (SELECT COUNT(*) FROM users u WHERE u.invite_id = i.id) < i.max_uses
+              OR (SELECT MAX(u.created_at) FROM users u WHERE u.invite_id = i.id) > ?)
+         ORDER BY i.created_at DESC"#,
+        user.user_id,
+        cutoff,
+        cutoff,
+        cutoff,
     )
-    .bind(&user.user_id)
-    .bind(&cutoff)
-    .bind(&cutoff)
-    .bind(&cutoff)
     .fetch_all(&state.db)
     .await?;
 
     let mut invites = Vec::with_capacity(rows.len());
-    for (id, code, max_uses, use_count, expires_at, revoked_at, created_at) in rows {
-        let users = fetch_invite_users(&state.db, &id).await?;
+    for r in rows {
+        let users = fetch_invite_users(&state.db, &r.id).await?;
         invites.push(InviteResponse {
-            id,
-            code,
-            max_uses,
-            use_count,
-            expires_at,
-            revoked: revoked_at.is_some(),
-            created_at,
+            id: r.id,
+            code: r.code,
+            max_uses: r.max_uses,
+            use_count: r.use_count,
+            expires_at: r.expires_at,
+            revoked: r.revoked_at.is_some(),
+            created_at: r.created_at,
             users,
         });
     }
@@ -225,31 +218,32 @@ pub async fn validate_invite(
     State(state): State<Arc<AppState>>,
     Path(code): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let row = sqlx::query_as::<_, (Option<i64>, i64, Option<String>, Option<String>, String)>(
-        "SELECT i.max_uses, \
-         (SELECT COUNT(*) FROM users u2 WHERE u2.invite_id = i.id) AS use_count, \
-         i.expires_at, i.revoked_at, u.display_name \
-         FROM invites i \
-         JOIN users u ON u.id = i.created_by \
-         WHERE i.code = ?",
+    let row = sqlx::query!(
+        r#"SELECT i.max_uses,
+         (SELECT COUNT(*) FROM users u2 WHERE u2.invite_id = i.id) AS "use_count!: i64",
+         i.expires_at, i.revoked_at, u.display_name
+         FROM invites i
+         JOIN users u ON u.id = i.created_by
+         WHERE i.code = ?"#,
+        code,
     )
-    .bind(&code)
     .fetch_optional(&state.db)
     .await?;
 
-    let Some((max_uses, use_count, expires_at, revoked_at, inviter_name)) = row else {
+    let Some(row) = row else {
         return Ok(Json(InviteValidationResponse {
             valid: false,
             inviter_display_name: None,
         }));
     };
 
-    let valid =
-        revoked_at.is_none() && !is_exhausted(max_uses, use_count) && !is_expired(&expires_at);
+    let valid = row.revoked_at.is_none()
+        && !is_exhausted(row.max_uses, row.use_count)
+        && !is_expired(&row.expires_at);
 
     Ok(Json(InviteValidationResponse {
         valid,
-        inviter_display_name: if valid { Some(inviter_name) } else { None },
+        inviter_display_name: if valid { Some(row.display_name) } else { None },
     }))
 }
 
@@ -262,20 +256,20 @@ pub async fn list_invited_users(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
 ) -> Result<impl IntoResponse, AppError> {
-    let rows = sqlx::query_as::<_, (String, String)>(
+    let rows = sqlx::query!(
         "SELECT u.display_name, u.created_at FROM users u \
          JOIN invites i ON i.id = u.invite_id \
          WHERE i.created_by = ? ORDER BY u.created_at DESC",
+        user.user_id,
     )
-    .bind(&user.user_id)
     .fetch_all(&state.db)
     .await?;
 
     let users = rows
         .into_iter()
-        .map(|(display_name, created_at)| InvitedUserResponse {
-            display_name,
-            created_at,
+        .map(|r| InvitedUserResponse {
+            display_name: r.display_name,
+            created_at: r.created_at,
         })
         .collect();
 
@@ -292,21 +286,18 @@ pub async fn revoke_invite(
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let row: Option<(String,)> = sqlx::query_as("SELECT created_by FROM invites WHERE id = ?")
-        .bind(&id)
+    let row = sqlx::query!("SELECT created_by FROM invites WHERE id = ?", id)
         .fetch_optional(&state.db)
         .await?;
 
-    let (created_by,) = row.ok_or_else(|| AppError::code(ErrorCode::InviteNotFound))?;
+    let row = row.ok_or_else(|| AppError::code(ErrorCode::InviteNotFound))?;
 
-    if created_by != user.user_id {
+    if row.created_by != user.user_id {
         return Err(AppError::code(ErrorCode::Forbidden));
     }
 
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    sqlx::query("UPDATE invites SET revoked_at = ? WHERE id = ?")
-        .bind(&now)
-        .bind(&id)
+    sqlx::query!("UPDATE invites SET revoked_at = ? WHERE id = ?", now, id,)
         .execute(&state.db)
         .await?;
 
@@ -347,29 +338,29 @@ pub async fn validate_invite_for_signup(
     db: &sqlx::SqlitePool,
     code: &str,
 ) -> Result<(String, String), AppError> {
-    let row = sqlx::query_as::<_, (String, String, Option<i64>, i64, Option<String>)>(
-        "SELECT i.id, i.created_by, i.max_uses, \
-         (SELECT COUNT(*) FROM users u WHERE u.invite_id = i.id) AS use_count, \
-         i.expires_at \
-         FROM invites i WHERE i.code = ? AND i.revoked_at IS NULL",
+    let row = sqlx::query!(
+        r#"SELECT i.id, i.created_by, i.max_uses,
+         (SELECT COUNT(*) FROM users u WHERE u.invite_id = i.id) AS "use_count!: i64",
+         i.expires_at
+         FROM invites i WHERE i.code = ? AND i.revoked_at IS NULL"#,
+        code,
     )
-    .bind(code)
     .fetch_optional(db)
     .await?;
 
-    let Some((invite_id, inviter_id, max_uses, use_count, expires_at)) = row else {
+    let Some(row) = row else {
         return Err(AppError::code(ErrorCode::InviteInvalid));
     };
 
-    if is_exhausted(max_uses, use_count) {
+    if is_exhausted(row.max_uses, row.use_count) {
         return Err(AppError::code(ErrorCode::InviteExhausted));
     }
 
-    if is_expired(&expires_at) {
+    if is_expired(&row.expires_at) {
         return Err(AppError::code(ErrorCode::InviteExpired));
     }
 
-    Ok((invite_id, inviter_id))
+    Ok((row.id, row.created_by))
 }
 
 /// Fetch the list of users who signed up with a given invite.
@@ -377,19 +368,19 @@ async fn fetch_invite_users(
     db: &sqlx::SqlitePool,
     invite_id: &str,
 ) -> Result<Vec<InviteUserResponse>, AppError> {
-    let rows = sqlx::query_as::<_, (String, String)>(
+    let rows = sqlx::query!(
         "SELECT display_name, created_at FROM users \
          WHERE invite_id = ? ORDER BY created_at ASC",
+        invite_id,
     )
-    .bind(invite_id)
     .fetch_all(db)
     .await?;
 
     Ok(rows
         .into_iter()
-        .map(|(display_name, created_at)| InviteUserResponse {
-            display_name,
-            created_at,
+        .map(|r| InviteUserResponse {
+            display_name: r.display_name,
+            created_at: r.created_at,
         })
         .collect())
 }

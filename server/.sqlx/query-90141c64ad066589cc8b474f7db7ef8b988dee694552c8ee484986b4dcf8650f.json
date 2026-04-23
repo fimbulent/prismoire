@@ -1,0 +1,122 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT r.id AS report_id, r.post_id,\n                    COALESCE(pr.body, '') AS \"post_body!: String\",\n                    p.author AS post_author_id,\n                    pu.display_name AS post_author_name,\n                    p.created_at AS post_created_at,\n                    p.thread AS thread_id,\n                    t.title AS thread_title,\n                    rm.slug AS room_slug,\n                    r.reporter,\n                    ru.display_name AS reporter_name,\n                    r.reason, r.detail, r.status, r.created_at AS report_created_at,\n                    res.display_name AS \"resolved_by_name?: String\",\n                    r.resolved_at,\n                    (SELECT COUNT(*) FROM reports r2 WHERE r2.post_id = r.post_id AND r2.status = ?) AS \"report_count!: i64\"\n             FROM reports r\n             JOIN posts p ON p.id = r.post_id\n             LEFT JOIN post_revisions pr ON pr.post_id = p.id\n                  AND pr.revision = (SELECT MAX(revision) FROM post_revisions WHERE post_id = p.id)\n             JOIN threads t ON t.id = p.thread\n             JOIN rooms rm ON rm.id = t.room\n             JOIN users pu ON pu.id = p.author\n             JOIN users ru ON ru.id = r.reporter\n             LEFT JOIN users res ON res.id = r.resolved_by\n             WHERE r.status = ?\n               AND r.id = (\n                   SELECT r3.id FROM reports r3\n                   WHERE r3.post_id = r.post_id AND r3.status = ?\n                   ORDER BY r3.created_at DESC LIMIT 1\n               )\n               AND (r.created_at < ? OR (r.created_at = ? AND r.id < ?))\n             ORDER BY r.created_at DESC, r.id DESC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "report_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "post_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "post_body!: String",
+        "ordinal": 2,
+        "type_info": "Null"
+      },
+      {
+        "name": "post_author_id",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "post_author_name",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "post_created_at",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "thread_id",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "thread_title",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "room_slug",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "reporter",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "reporter_name",
+        "ordinal": 10,
+        "type_info": "Text"
+      },
+      {
+        "name": "reason",
+        "ordinal": 11,
+        "type_info": "Text"
+      },
+      {
+        "name": "detail",
+        "ordinal": 12,
+        "type_info": "Text"
+      },
+      {
+        "name": "status",
+        "ordinal": 13,
+        "type_info": "Text"
+      },
+      {
+        "name": "report_created_at",
+        "ordinal": 14,
+        "type_info": "Text"
+      },
+      {
+        "name": "resolved_by_name?: String",
+        "ordinal": 15,
+        "type_info": "Text"
+      },
+      {
+        "name": "resolved_at",
+        "ordinal": 16,
+        "type_info": "Text"
+      },
+      {
+        "name": "report_count!: i64",
+        "ordinal": 17,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "90141c64ad066589cc8b474f7db7ef8b988dee694552c8ee484986b4dcf8650f"
+}

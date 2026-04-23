@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO invites (id, code, created_by, max_uses, expires_at) VALUES (?, ?, ?, ?, ?) RETURNING created_at",
+  "describe": {
+    "columns": [
+      {
+        "name": "created_at",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e240e6ce0f47ad259d7c43059150ef5e4dae70d89b82fae0bd4a218adff6256f"
+}

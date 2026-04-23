@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT i.max_uses,\n         (SELECT COUNT(*) FROM users u2 WHERE u2.invite_id = i.id) AS \"use_count!: i64\",\n         i.expires_at, i.revoked_at, u.display_name\n         FROM invites i\n         JOIN users u ON u.id = i.created_by\n         WHERE i.code = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "max_uses",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "use_count!: i64",
+        "ordinal": 1,
+        "type_info": "Null"
+      },
+      {
+        "name": "expires_at",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "revoked_at",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "display_name",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      null,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "2d120f0af1d6fa4a88338b61497b83d7a26f0f9e8155942f0bc292cba39f16d2"
+}

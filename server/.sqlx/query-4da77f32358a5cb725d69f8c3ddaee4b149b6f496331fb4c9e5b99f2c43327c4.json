@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, author, retracted_at FROM posts WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "author",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "retracted_at",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "4da77f32358a5cb725d69f8c3ddaee4b149b6f496331fb4c9e5b99f2c43327c4"
+}

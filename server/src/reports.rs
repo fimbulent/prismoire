@@ -4,7 +4,6 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
 use uuid::Uuid;
 
 use crate::admin::require_admin;
@@ -89,45 +88,44 @@ pub async fn create_report(
         .map(|d| d.trim())
         .filter(|d| !d.is_empty());
 
-    let post = sqlx::query_as::<_, (String, String, Option<String>)>(
+    let post = sqlx::query!(
         "SELECT id, author, retracted_at FROM posts WHERE id = ?",
+        post_id,
     )
-    .bind(&post_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| AppError::code(ErrorCode::PostNotFound))?;
 
-    let (pid, post_author, retracted_at) = post;
-
-    if retracted_at.is_some() {
+    if post.retracted_at.is_some() {
         return Err(AppError::code(ErrorCode::PostAlreadyRetracted));
     }
 
-    if post_author == user.user_id {
+    if post.author == user.user_id {
         return Err(AppError::code(ErrorCode::SelfReport));
     }
 
-    let already_reported =
-        sqlx::query_as::<_, (String,)>("SELECT id FROM reports WHERE post_id = ? AND reporter = ?")
-            .bind(&pid)
-            .bind(&user.user_id)
-            .fetch_optional(&state.db)
-            .await?
-            .is_some();
+    let already_reported = sqlx::query!(
+        "SELECT id FROM reports WHERE post_id = ? AND reporter = ?",
+        post.id,
+        user.user_id,
+    )
+    .fetch_optional(&state.db)
+    .await?
+    .is_some();
 
     if already_reported {
         return Err(AppError::code(ErrorCode::AlreadyReported));
     }
 
     let id = Uuid::new_v4().to_string();
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO reports (id, post_id, reporter, reason, detail) VALUES (?, ?, ?, ?, ?)",
+        id,
+        post.id,
+        user.user_id,
+        reason,
+        detail,
     )
-    .bind(&id)
-    .bind(&pid)
-    .bind(&user.user_id)
-    .bind(&reason)
-    .bind(detail)
     .execute(&state.db)
     .await?;
 
@@ -157,116 +155,138 @@ pub async fn list_reports(
     //
     // Two literal query strings instead of format!() so no dynamic SQL
     // construction is involved — all variable parts go through bind params.
-    let rows = if let Some(ref cursor) = params.cursor {
+    let page_limit = REPORTS_PAGE_SIZE as i64 + 1;
+    let reports: Vec<ReportResponse> = if let Some(ref cursor) = params.cursor {
         let (cursor_ts, cursor_id) = crate::threads::parse_cursor(cursor)?;
-        sqlx::query(
-            "SELECT r.id AS report_id, r.post_id, \
-                    COALESCE(pr.body, '') AS post_body, \
-                    p.author AS post_author_id, \
-                    pu.display_name AS post_author_name, \
-                    p.created_at AS post_created_at, \
-                    p.thread AS thread_id, \
-                    t.title AS thread_title, \
-                    rm.slug AS room_slug, \
-                    r.reporter, \
-                    ru.display_name AS reporter_name, \
-                    r.reason, r.detail, r.status, r.created_at AS report_created_at, \
-                    res.display_name AS resolved_by_name, \
-                    r.resolved_at, \
-                    (SELECT COUNT(*) FROM reports r2 WHERE r2.post_id = r.post_id AND r2.status = ?) AS report_count \
-             FROM reports r \
-             JOIN posts p ON p.id = r.post_id \
-             LEFT JOIN post_revisions pr ON pr.post_id = p.id \
-                  AND pr.revision = (SELECT MAX(revision) FROM post_revisions WHERE post_id = p.id) \
-             JOIN threads t ON t.id = p.thread \
-             JOIN rooms rm ON rm.id = t.room \
-             JOIN users pu ON pu.id = p.author \
-             JOIN users ru ON ru.id = r.reporter \
-             LEFT JOIN users res ON res.id = r.resolved_by \
-             WHERE r.status = ? \
-               AND r.id = ( \
-                   SELECT r3.id FROM reports r3 \
-                   WHERE r3.post_id = r.post_id AND r3.status = ? \
-                   ORDER BY r3.created_at DESC LIMIT 1 \
-               ) \
-               AND (r.created_at < ? OR (r.created_at = ? AND r.id < ?)) \
-             ORDER BY r.created_at DESC, r.id DESC LIMIT ?",
+        sqlx::query!(
+            r#"SELECT r.id AS report_id, r.post_id,
+                    COALESCE(pr.body, '') AS "post_body!: String",
+                    p.author AS post_author_id,
+                    pu.display_name AS post_author_name,
+                    p.created_at AS post_created_at,
+                    p.thread AS thread_id,
+                    t.title AS thread_title,
+                    rm.slug AS room_slug,
+                    r.reporter,
+                    ru.display_name AS reporter_name,
+                    r.reason, r.detail, r.status, r.created_at AS report_created_at,
+                    res.display_name AS "resolved_by_name?: String",
+                    r.resolved_at,
+                    (SELECT COUNT(*) FROM reports r2 WHERE r2.post_id = r.post_id AND r2.status = ?) AS "report_count!: i64"
+             FROM reports r
+             JOIN posts p ON p.id = r.post_id
+             LEFT JOIN post_revisions pr ON pr.post_id = p.id
+                  AND pr.revision = (SELECT MAX(revision) FROM post_revisions WHERE post_id = p.id)
+             JOIN threads t ON t.id = p.thread
+             JOIN rooms rm ON rm.id = t.room
+             JOIN users pu ON pu.id = p.author
+             JOIN users ru ON ru.id = r.reporter
+             LEFT JOIN users res ON res.id = r.resolved_by
+             WHERE r.status = ?
+               AND r.id = (
+                   SELECT r3.id FROM reports r3
+                   WHERE r3.post_id = r.post_id AND r3.status = ?
+                   ORDER BY r3.created_at DESC LIMIT 1
+               )
+               AND (r.created_at < ? OR (r.created_at = ? AND r.id < ?))
+             ORDER BY r.created_at DESC, r.id DESC LIMIT ?"#,
+            status_filter,
+            status_filter,
+            status_filter,
+            cursor_ts,
+            cursor_ts,
+            cursor_id,
+            page_limit,
         )
-        .bind(&status_filter)
-        .bind(&status_filter)
-        .bind(&status_filter)
-        .bind(&cursor_ts)
-        .bind(&cursor_ts)
-        .bind(&cursor_id)
-        .bind(REPORTS_PAGE_SIZE as i64 + 1)
         .fetch_all(&state.db)
         .await?
+        .into_iter()
+        .map(|r| ReportResponse {
+            id: r.report_id,
+            post_id: r.post_id,
+            post_body: r.post_body,
+            post_author_id: r.post_author_id,
+            post_author_name: r.post_author_name,
+            post_created_at: r.post_created_at,
+            thread_id: r.thread_id,
+            thread_title: r.thread_title,
+            room_slug: r.room_slug,
+            reporter_id: r.reporter,
+            reporter_name: r.reporter_name,
+            reason: r.reason,
+            detail: r.detail,
+            status: r.status,
+            created_at: r.report_created_at,
+            resolved_by_name: r.resolved_by_name,
+            resolved_at: r.resolved_at,
+            report_count: r.report_count,
+        })
+        .collect()
     } else {
-        sqlx::query(
-            "SELECT r.id AS report_id, r.post_id, \
-                    COALESCE(pr.body, '') AS post_body, \
-                    p.author AS post_author_id, \
-                    pu.display_name AS post_author_name, \
-                    p.created_at AS post_created_at, \
-                    p.thread AS thread_id, \
-                    t.title AS thread_title, \
-                    rm.slug AS room_slug, \
-                    r.reporter, \
-                    ru.display_name AS reporter_name, \
-                    r.reason, r.detail, r.status, r.created_at AS report_created_at, \
-                    res.display_name AS resolved_by_name, \
-                    r.resolved_at, \
-                    (SELECT COUNT(*) FROM reports r2 WHERE r2.post_id = r.post_id AND r2.status = ?) AS report_count \
-             FROM reports r \
-             JOIN posts p ON p.id = r.post_id \
-             LEFT JOIN post_revisions pr ON pr.post_id = p.id \
-                  AND pr.revision = (SELECT MAX(revision) FROM post_revisions WHERE post_id = p.id) \
-             JOIN threads t ON t.id = p.thread \
-             JOIN rooms rm ON rm.id = t.room \
-             JOIN users pu ON pu.id = p.author \
-             JOIN users ru ON ru.id = r.reporter \
-             LEFT JOIN users res ON res.id = r.resolved_by \
-             WHERE r.status = ? \
-               AND r.id = ( \
-                   SELECT r3.id FROM reports r3 \
-                   WHERE r3.post_id = r.post_id AND r3.status = ? \
-                   ORDER BY r3.created_at DESC LIMIT 1 \
-               ) \
-             ORDER BY r.created_at DESC, r.id DESC LIMIT ?",
+        sqlx::query!(
+            r#"SELECT r.id AS report_id, r.post_id,
+                    COALESCE(pr.body, '') AS "post_body!: String",
+                    p.author AS post_author_id,
+                    pu.display_name AS post_author_name,
+                    p.created_at AS post_created_at,
+                    p.thread AS thread_id,
+                    t.title AS thread_title,
+                    rm.slug AS room_slug,
+                    r.reporter,
+                    ru.display_name AS reporter_name,
+                    r.reason, r.detail, r.status, r.created_at AS report_created_at,
+                    res.display_name AS "resolved_by_name?: String",
+                    r.resolved_at,
+                    (SELECT COUNT(*) FROM reports r2 WHERE r2.post_id = r.post_id AND r2.status = ?) AS "report_count!: i64"
+             FROM reports r
+             JOIN posts p ON p.id = r.post_id
+             LEFT JOIN post_revisions pr ON pr.post_id = p.id
+                  AND pr.revision = (SELECT MAX(revision) FROM post_revisions WHERE post_id = p.id)
+             JOIN threads t ON t.id = p.thread
+             JOIN rooms rm ON rm.id = t.room
+             JOIN users pu ON pu.id = p.author
+             JOIN users ru ON ru.id = r.reporter
+             LEFT JOIN users res ON res.id = r.resolved_by
+             WHERE r.status = ?
+               AND r.id = (
+                   SELECT r3.id FROM reports r3
+                   WHERE r3.post_id = r.post_id AND r3.status = ?
+                   ORDER BY r3.created_at DESC LIMIT 1
+               )
+             ORDER BY r.created_at DESC, r.id DESC LIMIT ?"#,
+            status_filter,
+            status_filter,
+            status_filter,
+            page_limit,
         )
-        .bind(&status_filter)
-        .bind(&status_filter)
-        .bind(&status_filter)
-        .bind(REPORTS_PAGE_SIZE as i64 + 1)
         .fetch_all(&state.db)
         .await?
+        .into_iter()
+        .map(|r| ReportResponse {
+            id: r.report_id,
+            post_id: r.post_id,
+            post_body: r.post_body,
+            post_author_id: r.post_author_id,
+            post_author_name: r.post_author_name,
+            post_created_at: r.post_created_at,
+            thread_id: r.thread_id,
+            thread_title: r.thread_title,
+            room_slug: r.room_slug,
+            reporter_id: r.reporter,
+            reporter_name: r.reporter_name,
+            reason: r.reason,
+            detail: r.detail,
+            status: r.status,
+            created_at: r.report_created_at,
+            resolved_by_name: r.resolved_by_name,
+            resolved_at: r.resolved_at,
+            report_count: r.report_count,
+        })
+        .collect()
     };
 
-    let has_more = rows.len() > REPORTS_PAGE_SIZE;
-    let reports: Vec<ReportResponse> = rows
-        .into_iter()
-        .take(REPORTS_PAGE_SIZE)
-        .map(|row| ReportResponse {
-            id: row.get("report_id"),
-            post_id: row.get("post_id"),
-            post_body: row.get("post_body"),
-            post_author_id: row.get("post_author_id"),
-            post_author_name: row.get("post_author_name"),
-            post_created_at: row.get("post_created_at"),
-            thread_id: row.get("thread_id"),
-            thread_title: row.get("thread_title"),
-            room_slug: row.get("room_slug"),
-            reporter_id: row.get("reporter"),
-            reporter_name: row.get("reporter_name"),
-            reason: row.get("reason"),
-            detail: row.get("detail"),
-            status: row.get("status"),
-            created_at: row.get("report_created_at"),
-            resolved_by_name: row.get("resolved_by_name"),
-            resolved_at: row.get("resolved_at"),
-            report_count: row.get("report_count"),
-        })
-        .collect();
+    let has_more = reports.len() > REPORTS_PAGE_SIZE;
+    let reports: Vec<ReportResponse> = reports.into_iter().take(REPORTS_PAGE_SIZE).collect();
 
     let next_cursor = if has_more {
         reports.last().map(|r| format!("{}|{}", r.created_at, r.id))
@@ -295,21 +315,20 @@ pub async fn dismiss_report(
 ) -> Result<impl IntoResponse, AppError> {
     require_admin(&user)?;
 
-    let (_, post_id) =
-        sqlx::query_as::<_, (String, String)>("SELECT id, post_id FROM reports WHERE id = ?")
-            .bind(&report_id)
-            .fetch_optional(&state.db)
-            .await?
-            .ok_or_else(|| AppError::code(ErrorCode::ReportNotFound))?;
+    let post_id = sqlx::query!("SELECT post_id FROM reports WHERE id = ?", report_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| AppError::code(ErrorCode::ReportNotFound))?
+        .post_id;
 
     // Dismiss all reports for the same post, not just this one.
-    sqlx::query(
+    sqlx::query!(
         "UPDATE reports SET status = 'dismissed', resolved_by = ?, \
          resolved_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
          WHERE post_id = ? AND status = 'pending'",
+        user.user_id,
+        post_id,
     )
-    .bind(&user.user_id)
-    .bind(&post_id)
     .execute(&state.db)
     .await?;
 
@@ -331,20 +350,19 @@ pub async fn action_report(
 ) -> Result<impl IntoResponse, AppError> {
     require_admin(&user)?;
 
-    let (_, post_id) =
-        sqlx::query_as::<_, (String, String)>("SELECT id, post_id FROM reports WHERE id = ?")
-            .bind(&report_id)
-            .fetch_optional(&state.db)
-            .await?
-            .ok_or_else(|| AppError::code(ErrorCode::ReportNotFound))?;
+    let post_id = sqlx::query!("SELECT post_id FROM reports WHERE id = ?", report_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| AppError::code(ErrorCode::ReportNotFound))?
+        .post_id;
 
-    sqlx::query(
+    sqlx::query!(
         "UPDATE reports SET status = 'actioned', resolved_by = ?, \
          resolved_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
          WHERE post_id = ? AND status = 'pending'",
+        user.user_id,
+        post_id,
     )
-    .bind(&user.user_id)
-    .bind(&post_id)
     .execute(&state.db)
     .await?;
 
@@ -364,10 +382,11 @@ pub async fn get_dashboard(
 ) -> Result<impl IntoResponse, AppError> {
     require_admin(&user)?;
 
-    let (pending_reports,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM reports WHERE status = 'pending'")
+    let pending_reports =
+        sqlx::query!(r#"SELECT COUNT(*) AS "n!: i64" FROM reports WHERE status = 'pending'"#,)
             .fetch_one(&state.db)
-            .await?;
+            .await?
+            .n;
 
     Ok(Json(DashboardResponse { pending_reports }))
 }

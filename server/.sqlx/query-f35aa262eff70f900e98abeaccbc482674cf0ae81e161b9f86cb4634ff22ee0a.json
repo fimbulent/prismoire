@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO reports (id, post_id, reporter, reason, detail) VALUES (?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "f35aa262eff70f900e98abeaccbc482674cf0ae81e161b9f86cb4634ff22ee0a"
+}

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT post_id FROM reports WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "post_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d3b489c8453a0c8c1e52cff26a86d4e9424df43aa05c7001364e12bd8888317c"
+}

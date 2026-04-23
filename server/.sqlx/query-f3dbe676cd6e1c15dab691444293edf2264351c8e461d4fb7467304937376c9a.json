@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT display_name, created_at FROM users WHERE invite_id = ? ORDER BY created_at ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "display_name",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "f3dbe676cd6e1c15dab691444293edf2264351c8e461d4fb7467304937376c9a"
+}

@@ -171,20 +171,21 @@ pub async fn create_session(db: &SqlitePool, user_id: &str) -> Result<String, sq
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
 
-    sqlx::query("INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)")
-        .bind(&token)
-        .bind(user_id)
-        .bind(&expires_at)
-        .execute(db)
-        .await?;
+    sqlx::query!(
+        "INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)",
+        token,
+        user_id,
+        expires_at,
+    )
+    .execute(db)
+    .await?;
 
     Ok(token)
 }
 
 /// Delete a session from the database.
 pub async fn delete_session(db: &SqlitePool, token: &str) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM sessions WHERE token = ?")
-        .bind(token)
+    sqlx::query!("DELETE FROM sessions WHERE token = ?", token)
         .execute(db)
         .await?;
     Ok(())
@@ -249,24 +250,27 @@ pub async fn session_middleware(
         // stale session cookie for a self-deleted account can't hydrate an
         // AuthSession. Sessions are dropped as part of the delete
         // transaction, so this is belt-and-suspenders.
-        let row = sqlx::query_as::<_, (String, String, String, String, String, Option<String>)>(
+        let row = sqlx::query!(
             "SELECT s.user_id, u.display_name, s.expires_at, u.status, u.role, u.suspended_until \
              FROM sessions s \
              JOIN users u ON u.id = s.user_id \
              WHERE s.token = ? AND u.deleted_at IS NULL",
+            token,
         )
-        .bind(&token)
         .fetch_optional(&state.db)
         .await
         .ok()
         .flatten();
 
-        if let Some((user_id, display_name, expires_at, status_str, role, mut suspended_until)) =
-            row
+        if let Some(row) = row
             && let Ok(expires) =
-                chrono::NaiveDateTime::parse_from_str(&expires_at, "%Y-%m-%dT%H:%M:%SZ")
+                chrono::NaiveDateTime::parse_from_str(&row.expires_at, "%Y-%m-%dT%H:%M:%SZ")
         {
-            let mut status = match UserStatus::try_from(status_str.as_str()) {
+            let user_id = row.user_id;
+            let display_name = row.display_name;
+            let role = row.role;
+            let mut suspended_until = row.suspended_until;
+            let mut status = match UserStatus::try_from(row.status.as_str()) {
                 Ok(s) => s,
                 Err(msg) => {
                     // `users.status` has a CHECK constraint, so seeing
@@ -289,10 +293,10 @@ pub async fn session_middleware(
                     })
                     .is_some_and(|until| until < Utc::now().naive_utc());
                 if expired {
-                    let _ = sqlx::query(
+                    let _ = sqlx::query!(
                         "UPDATE users SET status = 'active', suspended_until = NULL WHERE id = ?",
+                        user_id,
                     )
-                    .bind(&user_id)
                     .execute(&state.db)
                     .await;
                     status = UserStatus::Active;
@@ -320,11 +324,13 @@ pub async fn session_middleware(
                     let new_expires = (Utc::now() + Duration::days(SESSION_DURATION_DAYS))
                         .format("%Y-%m-%dT%H:%M:%SZ")
                         .to_string();
-                    let _ = sqlx::query("UPDATE sessions SET expires_at = ? WHERE token = ?")
-                        .bind(&new_expires)
-                        .bind(&token)
-                        .execute(&state.db)
-                        .await;
+                    let _ = sqlx::query!(
+                        "UPDATE sessions SET expires_at = ? WHERE token = ?",
+                        new_expires,
+                        token,
+                    )
+                    .execute(&state.db)
+                    .await;
                     renewal_cookie = Some(session_cookie(&token));
                 }
             }
@@ -360,18 +366,19 @@ pub async fn cleanup_loop(pool: SqlitePool) {
     loop {
         ticker.tick().await;
 
-        if let Err(e) = sqlx::query("DELETE FROM sessions WHERE expires_at < datetime('now')")
+        if let Err(e) = sqlx::query!("DELETE FROM sessions WHERE expires_at < datetime('now')")
             .execute(&pool)
             .await
         {
             eprintln!("session cleanup sweep failed: {e}");
         }
 
-        if let Err(e) =
-            sqlx::query("DELETE FROM auth_challenges WHERE created_at < datetime('now', ?)")
-                .bind(&challenge_modifier)
-                .execute(&pool)
-                .await
+        if let Err(e) = sqlx::query!(
+            "DELETE FROM auth_challenges WHERE created_at < datetime('now', ?)",
+            challenge_modifier,
+        )
+        .execute(&pool)
+        .await
         {
             eprintln!("auth challenge cleanup sweep failed: {e}");
         }

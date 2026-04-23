@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT created_by FROM invites WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "created_by",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e5c054a7a310a84634b79e072bf3ee0f2941e61c50508d80db424d76169f968f"
+}
