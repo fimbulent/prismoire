@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            u.id,\n            u.display_name,\n            u.status,\n            d.distrusts AS \"inbound_distrusts!: i64\",\n            COALESCE(t.trusts, 0) AS \"inbound_trusts!: i64\"\n        FROM (\n            SELECT target_user, COUNT(*) AS distrusts\n            FROM trust_edges\n            WHERE trust_type = 'distrust'\n            GROUP BY target_user\n            HAVING COUNT(*) >= ?1\n        ) d\n        JOIN users u ON u.id = d.target_user\n        LEFT JOIN (\n            SELECT target_user, COUNT(*) AS trusts\n            FROM trust_edges\n            WHERE trust_type = 'trust'\n            GROUP BY target_user\n        ) t ON t.target_user = d.target_user\n        WHERE u.status != 'banned' AND u.deleted_at IS NULL\n        ORDER BY d.distrusts DESC, u.display_name ASC\n        LIMIT ?2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "display_name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "status",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "inbound_distrusts!: i64",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "inbound_trusts!: i64",
+        "ordinal": 4,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "ef0dadf0f603d320a41cab9ac6d42ade9035e5a71877a1f9ee829820c2a83a58"
+}

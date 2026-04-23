@@ -520,13 +520,13 @@ pub async fn load_distrust_set(
     db: &sqlx::SqlitePool,
     viewer_id: &str,
 ) -> Result<HashSet<String>, sqlx::Error> {
-    let rows = sqlx::query_as::<_, (String,)>(
+    let rows = sqlx::query!(
         "SELECT target_user FROM trust_edges WHERE source_user = ? AND trust_type = 'distrust'",
+        viewer_id,
     )
-    .bind(viewer_id)
     .fetch_all(db)
     .await?;
-    Ok(rows.into_iter().map(|(id,)| id).collect())
+    Ok(rows.into_iter().map(|r| r.target_user).collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -611,7 +611,7 @@ impl TrustGraph {
         // Banned users should not propagate trust. Distrust edges pointing
         // at banned users are kept (loaded separately below) so that
         // existing distrust relationships remain visible.
-        let rows = sqlx::query_as::<_, (String, String)>(
+        let rows = sqlx::query!(
             "SELECT te.source_user, te.target_user FROM trust_edges te \
              JOIN users u1 ON u1.id = te.source_user \
              JOIN users u2 ON u2.id = te.target_user \
@@ -627,11 +627,11 @@ impl TrustGraph {
         // than silently dropping edges.
         let uuid_edges: Vec<(Uuid, Uuid)> = rows
             .into_iter()
-            .map(|(src, tgt)| {
-                let src_uuid =
-                    Uuid::parse_str(&src).expect("invalid UUID in trust_edges.source_user");
-                let tgt_uuid =
-                    Uuid::parse_str(&tgt).expect("invalid UUID in trust_edges.target_user");
+            .map(|r| {
+                let src_uuid = Uuid::parse_str(&r.source_user)
+                    .expect("invalid UUID in trust_edges.source_user");
+                let tgt_uuid = Uuid::parse_str(&r.target_user)
+                    .expect("invalid UUID in trust_edges.target_user");
                 (src_uuid, tgt_uuid)
             })
             .collect();
@@ -653,18 +653,18 @@ impl TrustGraph {
         let reverse = forward.transpose();
 
         // Load distrust edges into per-user distrust sets (not into the CSR graph).
-        let distrust_rows = sqlx::query_as::<_, (String, String)>(
+        let distrust_rows = sqlx::query!(
             "SELECT source_user, target_user FROM trust_edges WHERE trust_type = 'distrust'",
         )
         .fetch_all(db)
         .await?;
 
         let mut distrust_sets: DistrustSets = HashMap::new();
-        for (src_str, tgt_str) in &distrust_rows {
+        for r in &distrust_rows {
             let src_uuid =
-                Uuid::parse_str(src_str).expect("invalid UUID in trust_edges.source_user");
+                Uuid::parse_str(&r.source_user).expect("invalid UUID in trust_edges.source_user");
             let tgt_uuid =
-                Uuid::parse_str(tgt_str).expect("invalid UUID in trust_edges.target_user");
+                Uuid::parse_str(&r.target_user).expect("invalid UUID in trust_edges.target_user");
             if let (Some(src_id), Some(tgt_id)) = (index.get_id(&src_uuid), index.get_id(&tgt_uuid))
             {
                 distrust_sets.entry(src_id).or_default().insert(tgt_id);

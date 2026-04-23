@@ -12,14 +12,17 @@ pub async fn create_signing_key(db: &SqlitePool, user_id: &str) -> Result<String
     let verifying_key = signing_key.verifying_key();
 
     let id = Uuid::new_v4().to_string();
+    let public_key = verifying_key.as_bytes().as_slice();
+    let private_key = signing_key.to_bytes();
+    let private_key = private_key.as_slice();
 
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO signing_keys (id, user_id, public_key, private_key) VALUES (?, ?, ?, ?)",
+        id,
+        user_id,
+        public_key,
+        private_key,
     )
-    .bind(&id)
-    .bind(user_id)
-    .bind(verifying_key.as_bytes().as_slice())
-    .bind(signing_key.to_bytes().as_slice())
     .execute(db)
     .await?;
 
@@ -34,14 +37,15 @@ pub async fn sign_message(
     user_id: &str,
     message: &[u8],
 ) -> Result<Vec<u8>, SignError> {
-    let row: Option<(Vec<u8>,)> =
-        sqlx::query_as("SELECT private_key FROM signing_keys WHERE user_id = ? AND active = 1")
-            .bind(user_id)
-            .fetch_optional(db)
-            .await
-            .map_err(SignError::Db)?;
+    let row = sqlx::query!(
+        "SELECT private_key FROM signing_keys WHERE user_id = ? AND active = 1",
+        user_id,
+    )
+    .fetch_optional(db)
+    .await
+    .map_err(SignError::Db)?;
 
-    let (private_key_bytes,) = row.ok_or(SignError::NoKey)?;
+    let private_key_bytes = row.ok_or(SignError::NoKey)?.private_key;
 
     let key_bytes: [u8; 32] = private_key_bytes.try_into().map_err(|v: Vec<u8>| {
         eprintln!(

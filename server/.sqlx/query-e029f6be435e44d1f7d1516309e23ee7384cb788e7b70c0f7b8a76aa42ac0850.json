@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        WITH bans AS (\n            SELECT trusting_user, COUNT(DISTINCT target_user) AS banned_trusts\n            FROM ban_trust_snapshots\n            GROUP BY trusting_user\n        ),\n        totals AS (\n            SELECT source_user, COUNT(*) AS total_trusts\n            FROM trust_edges\n            WHERE trust_type = 'trust'\n            GROUP BY source_user\n        )\n        SELECT\n            u.id,\n            u.display_name,\n            u.status,\n            b.banned_trusts AS \"banned_trusts!: i64\",\n            COALESCE(t.total_trusts, 0) AS \"total_trusts!: i64\"\n        FROM bans b\n        JOIN users u ON u.id = b.trusting_user\n        LEFT JOIN totals t ON t.source_user = b.trusting_user\n        WHERE COALESCE(t.total_trusts, 0) >= ?1\n          AND u.status != 'banned'\n          AND u.deleted_at IS NULL\n        ORDER BY\n            CAST(b.banned_trusts AS REAL) / NULLIF(COALESCE(t.total_trusts, 0), 0) DESC,\n            b.banned_trusts DESC,\n            u.display_name ASC\n        LIMIT ?2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "display_name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "status",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "banned_trusts!: i64",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "total_trusts!: i64",
+        "ordinal": 4,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "e029f6be435e44d1f7d1516309e23ee7384cb788e7b70c0f7b8a76aa42ac0850"
+}

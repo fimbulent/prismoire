@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT r.id, r.slug,\n               (SELECT COUNT(*) FROM threads th WHERE th.room = r.id) AS \"thread_count!: i64\",\n               (SELECT COUNT(*) FROM posts p JOIN threads th2 ON p.thread = th2.id WHERE th2.room = r.id) AS \"post_count!: i64\"\n               FROM rooms r\n               WHERE r.merged_into IS NULL AND r.deleted_at IS NULL\n                 AND r.slug LIKE ? ESCAPE '\\'\n               ORDER BY LENGTH(r.slug), r.slug\n               LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "slug",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "thread_count!: i64",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "post_count!: i64",
+        "ordinal": 3,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "fe18fa77fa2b163ac6ffcdea792ace4559321676de82a98499073415f7d6e537"
+}

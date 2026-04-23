@@ -37,7 +37,6 @@ use axum::Json;
 use axum::extract::State;
 use axum::response::IntoResponse;
 use serde::Serialize;
-use sqlx::Row;
 
 use crate::admin::require_admin;
 use crate::error::AppError;
@@ -181,14 +180,14 @@ async fn load_most_distrusted(db: &sqlx::SqlitePool) -> Result<Vec<DistrustedUse
     // also count their inbound trusts. Left-joining the trust subquery
     // keeps users whose trust count is zero; COALESCE turns the NULL
     // into a 0 so the serialized row is clean.
-    let rows = sqlx::query(
+    let rows = sqlx::query!(
         r#"
         SELECT
             u.id,
             u.display_name,
             u.status,
-            d.distrusts AS inbound_distrusts,
-            COALESCE(t.trusts, 0) AS inbound_trusts
+            d.distrusts AS "inbound_distrusts!: i64",
+            COALESCE(t.trusts, 0) AS "inbound_trusts!: i64"
         FROM (
             SELECT target_user, COUNT(*) AS distrusts
             FROM trust_edges
@@ -207,27 +206,23 @@ async fn load_most_distrusted(db: &sqlx::SqlitePool) -> Result<Vec<DistrustedUse
         ORDER BY d.distrusts DESC, u.display_name ASC
         LIMIT ?2
         "#,
+        MIN_INBOUND_DISTRUSTS,
+        LIMIT_PER_LIST,
     )
-    .bind(MIN_INBOUND_DISTRUSTS)
-    .bind(LIMIT_PER_LIST)
     .fetch_all(db)
     .await?;
 
     Ok(rows
         .into_iter()
-        .map(|r| {
-            let distrusts: i64 = r.get("inbound_distrusts");
-            let trusts: i64 = r.get("inbound_trusts");
-            DistrustedUserRow {
-                user: UserChip {
-                    id: r.get("id"),
-                    display_name: r.get("display_name"),
-                    status: r.get("status"),
-                },
-                inbound_distrusts: distrusts,
-                inbound_trusts: trusts,
-                ratio: compute_ratio(distrusts, trusts),
-            }
+        .map(|r| DistrustedUserRow {
+            user: UserChip {
+                id: r.id,
+                display_name: r.display_name,
+                status: r.status,
+            },
+            inbound_distrusts: r.inbound_distrusts,
+            inbound_trusts: r.inbound_trusts,
+            ratio: compute_ratio(r.inbound_distrusts, r.inbound_trusts),
         })
         .collect())
 }
@@ -241,7 +236,7 @@ async fn load_distrust_trust_ratio(db: &sqlx::SqlitePool) -> Result<Vec<RatioRow
     //
     // Post count uses a correlated subquery that only counts
     // non-retracted posts, matching what we show on profile pages.
-    let rows = sqlx::query(
+    let rows = sqlx::query!(
         r#"
         WITH inbound AS (
             SELECT
@@ -256,9 +251,9 @@ async fn load_distrust_trust_ratio(db: &sqlx::SqlitePool) -> Result<Vec<RatioRow
             u.display_name,
             u.status,
             u.created_at,
-            i.distrusts AS inbound_distrusts,
-            i.trusts AS inbound_trusts,
-            (SELECT COUNT(*) FROM posts p WHERE p.author = u.id AND p.retracted_at IS NULL) AS post_count
+            i.distrusts AS "inbound_distrusts!: i64",
+            i.trusts AS "inbound_trusts!: i64",
+            (SELECT COUNT(*) FROM posts p WHERE p.author = u.id AND p.retracted_at IS NULL) AS "post_count!: i64"
         FROM inbound i
         JOIN users u ON u.id = i.target_user
         WHERE (i.distrusts + i.trusts) >= ?1
@@ -271,29 +266,25 @@ async fn load_distrust_trust_ratio(db: &sqlx::SqlitePool) -> Result<Vec<RatioRow
             i.distrusts DESC
         LIMIT ?2
         "#,
+        MIN_INBOUND_EDGES_FOR_RATIO,
+        LIMIT_PER_LIST,
     )
-    .bind(MIN_INBOUND_EDGES_FOR_RATIO)
-    .bind(LIMIT_PER_LIST)
     .fetch_all(db)
     .await?;
 
     Ok(rows
         .into_iter()
-        .map(|r| {
-            let distrusts: i64 = r.get("inbound_distrusts");
-            let trusts: i64 = r.get("inbound_trusts");
-            RatioRow {
-                user: UserChip {
-                    id: r.get("id"),
-                    display_name: r.get("display_name"),
-                    status: r.get("status"),
-                },
-                inbound_distrusts: distrusts,
-                inbound_trusts: trusts,
-                ratio: compute_ratio(distrusts, trusts),
-                post_count: r.get("post_count"),
-                joined_at: r.get("created_at"),
-            }
+        .map(|r| RatioRow {
+            user: UserChip {
+                id: r.id,
+                display_name: r.display_name,
+                status: r.status,
+            },
+            inbound_distrusts: r.inbound_distrusts,
+            inbound_trusts: r.inbound_trusts,
+            ratio: compute_ratio(r.inbound_distrusts, r.inbound_trusts),
+            post_count: r.post_count,
+            joined_at: r.created_at,
         })
         .collect())
 }
@@ -314,7 +305,7 @@ async fn load_ban_adjacent_trusters(
     // MIN_TRUSTS_ISSUED_FOR_BAN_ADJACENT on total_trusts keeps the
     // list away from users who trusted one person who later got
     // banned — technically a 100% hit rate, but not meaningful.
-    let rows = sqlx::query(
+    let rows = sqlx::query!(
         r#"
         WITH bans AS (
             SELECT trusting_user, COUNT(DISTINCT target_user) AS banned_trusts
@@ -331,8 +322,8 @@ async fn load_ban_adjacent_trusters(
             u.id,
             u.display_name,
             u.status,
-            b.banned_trusts,
-            COALESCE(t.total_trusts, 0) AS total_trusts
+            b.banned_trusts AS "banned_trusts!: i64",
+            COALESCE(t.total_trusts, 0) AS "total_trusts!: i64"
         FROM bans b
         JOIN users u ON u.id = b.trusting_user
         LEFT JOIN totals t ON t.source_user = b.trusting_user
@@ -345,31 +336,27 @@ async fn load_ban_adjacent_trusters(
             u.display_name ASC
         LIMIT ?2
         "#,
+        MIN_TRUSTS_ISSUED_FOR_BAN_ADJACENT,
+        LIMIT_PER_LIST,
     )
-    .bind(MIN_TRUSTS_ISSUED_FOR_BAN_ADJACENT)
-    .bind(LIMIT_PER_LIST)
     .fetch_all(db)
     .await?;
 
     Ok(rows
         .into_iter()
-        .map(|r| {
-            let banned: i64 = r.get("banned_trusts");
-            let total: i64 = r.get("total_trusts");
-            BanAdjacentRow {
-                user: UserChip {
-                    id: r.get("id"),
-                    display_name: r.get("display_name"),
-                    status: r.get("status"),
-                },
-                banned_trusts: banned,
-                total_trusts: total,
-                hit_rate: if total == 0 {
-                    None
-                } else {
-                    Some(banned as f64 / total as f64)
-                },
-            }
+        .map(|r| BanAdjacentRow {
+            user: UserChip {
+                id: r.id,
+                display_name: r.display_name,
+                status: r.status,
+            },
+            banned_trusts: r.banned_trusts,
+            total_trusts: r.total_trusts,
+            hit_rate: if r.total_trusts == 0 {
+                None
+            } else {
+                Some(r.banned_trusts as f64 / r.total_trusts as f64)
+            },
         })
         .collect())
 }

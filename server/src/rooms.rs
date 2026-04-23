@@ -75,7 +75,7 @@ pub async fn top_rooms(
     State(state): State<Arc<AppState>>,
     _user: AuthUser,
 ) -> Result<impl IntoResponse, AppError> {
-    let rows = sqlx::query_as::<_, (String,)>(
+    let rows = sqlx::query!(
         "SELECT r.slug \
          FROM rooms r \
          WHERE r.merged_into IS NULL AND r.deleted_at IS NULL \
@@ -89,10 +89,10 @@ pub async fn top_rooms(
 
     let rooms = rows
         .into_iter()
-        .map(|(slug,)| {
-            let is_announcement = is_announcements(&slug);
+        .map(|r| {
+            let is_announcement = is_announcements(&r.slug);
             RoomSummary {
-                slug,
+                slug: r.slug,
                 is_announcement,
             }
         })
@@ -106,46 +106,36 @@ pub async fn list_rooms(
     State(state): State<Arc<AppState>>,
     _user: AuthUser,
 ) -> Result<impl IntoResponse, AppError> {
-    let rows = sqlx::query_as::<_, (String, String, String, String, String, i64, i64, Option<String>)>(
-        "SELECT t.id, t.slug, t.created_by, u.display_name, t.created_at, \
-         (SELECT COUNT(*) FROM threads th WHERE th.room = t.id) AS thread_count, \
-         (SELECT COUNT(*) FROM posts p JOIN threads th2 ON p.thread = th2.id WHERE th2.room = t.id) AS post_count, \
-         (SELECT MAX(p2.created_at) FROM posts p2 JOIN threads th3 ON p2.thread = th3.id WHERE th3.room = t.id) AS last_activity \
-         FROM rooms t \
-         JOIN users u ON u.id = t.created_by \
-         WHERE t.merged_into IS NULL AND t.deleted_at IS NULL \
-         ORDER BY last_activity DESC NULLS LAST, t.created_at DESC",
+    let rows = sqlx::query!(
+        r#"SELECT t.id, t.slug, t.created_by, u.display_name, t.created_at,
+           (SELECT COUNT(*) FROM threads th WHERE th.room = t.id) AS "thread_count!: i64",
+           (SELECT COUNT(*) FROM posts p JOIN threads th2 ON p.thread = th2.id WHERE th2.room = t.id) AS "post_count!: i64",
+           (SELECT MAX(p2.created_at) FROM posts p2 JOIN threads th3 ON p2.thread = th3.id WHERE th3.room = t.id) AS "last_activity?: String"
+           FROM rooms t
+           JOIN users u ON u.id = t.created_by
+           WHERE t.merged_into IS NULL AND t.deleted_at IS NULL
+           ORDER BY (SELECT MAX(p2.created_at) FROM posts p2 JOIN threads th3 ON p2.thread = th3.id WHERE th3.room = t.id) DESC NULLS LAST,
+                    t.created_at DESC"#,
     )
     .fetch_all(&state.db)
     .await?;
 
     let rooms = rows
         .into_iter()
-        .map(
-            |(
-                id,
-                slug,
-                created_by,
-                created_by_name,
-                created_at,
-                thread_count,
-                post_count,
-                last_activity,
-            )| {
-                let is_announcement = is_announcements(&slug);
-                RoomResponse {
-                    id,
-                    slug,
-                    is_announcement,
-                    created_by,
-                    created_by_name,
-                    created_at,
-                    thread_count,
-                    post_count,
-                    last_activity,
-                }
-            },
-        )
+        .map(|r| {
+            let is_announcement = is_announcements(&r.slug);
+            RoomResponse {
+                id: r.id,
+                slug: r.slug,
+                is_announcement,
+                created_by: r.created_by,
+                created_by_name: r.display_name,
+                created_at: r.created_at,
+                thread_count: r.thread_count,
+                post_count: r.post_count,
+                last_activity: r.last_activity,
+            }
+        })
         .collect();
 
     Ok(Json(RoomListResponse { rooms }))
@@ -176,21 +166,33 @@ pub async fn search_rooms(
         .clamp(1, ROOM_SEARCH_MAX);
     let query = q.q.unwrap_or_default().trim().to_lowercase();
 
-    let rows: Vec<(String, String, i64, i64)> = if query.is_empty() {
-        sqlx::query_as(
-            "SELECT r.id, r.slug, \
-             (SELECT COUNT(*) FROM threads th WHERE th.room = r.id) AS thread_count, \
-             (SELECT COUNT(*) FROM posts p JOIN threads th2 ON p.thread = th2.id WHERE th2.room = r.id) AS post_count \
-             FROM rooms r \
-             WHERE r.merged_into IS NULL AND r.deleted_at IS NULL \
-             ORDER BY \
-               (SELECT MAX(p.created_at) FROM posts p JOIN threads t ON p.thread = t.id WHERE t.room = r.id) DESC NULLS LAST, \
-               r.created_at DESC \
-             LIMIT ?",
+    let rooms: Vec<RoomChip> = if query.is_empty() {
+        sqlx::query!(
+            r#"SELECT r.id, r.slug,
+               (SELECT COUNT(*) FROM threads th WHERE th.room = r.id) AS "thread_count!: i64",
+               (SELECT COUNT(*) FROM posts p JOIN threads th2 ON p.thread = th2.id WHERE th2.room = r.id) AS "post_count!: i64"
+               FROM rooms r
+               WHERE r.merged_into IS NULL AND r.deleted_at IS NULL
+               ORDER BY
+                 (SELECT MAX(p.created_at) FROM posts p JOIN threads t ON p.thread = t.id WHERE t.room = r.id) DESC NULLS LAST,
+                 r.created_at DESC
+               LIMIT ?"#,
+            limit,
         )
-        .bind(limit)
         .fetch_all(&state.db)
         .await?
+        .into_iter()
+        .map(|r| {
+            let is_announcement = is_announcements(&r.slug);
+            RoomChip {
+                id: r.id,
+                slug: r.slug,
+                is_announcement,
+                thread_count: r.thread_count,
+                post_count: r.post_count,
+            }
+        })
+        .collect()
     } else {
         // Escape SQL LIKE wildcards so a query containing `%` or `_` is
         // still treated as a literal prefix match. The backslash escape
@@ -202,35 +204,33 @@ pub async fn search_rooms(
                 .replace('%', "\\%")
                 .replace('_', "\\_")
         );
-        sqlx::query_as(
-            "SELECT r.id, r.slug, \
-             (SELECT COUNT(*) FROM threads th WHERE th.room = r.id) AS thread_count, \
-             (SELECT COUNT(*) FROM posts p JOIN threads th2 ON p.thread = th2.id WHERE th2.room = r.id) AS post_count \
-             FROM rooms r \
-             WHERE r.merged_into IS NULL AND r.deleted_at IS NULL \
-               AND r.slug LIKE ? ESCAPE '\\' \
-             ORDER BY LENGTH(r.slug), r.slug \
-             LIMIT ?",
+        sqlx::query!(
+            r#"SELECT r.id, r.slug,
+               (SELECT COUNT(*) FROM threads th WHERE th.room = r.id) AS "thread_count!: i64",
+               (SELECT COUNT(*) FROM posts p JOIN threads th2 ON p.thread = th2.id WHERE th2.room = r.id) AS "post_count!: i64"
+               FROM rooms r
+               WHERE r.merged_into IS NULL AND r.deleted_at IS NULL
+                 AND r.slug LIKE ? ESCAPE '\'
+               ORDER BY LENGTH(r.slug), r.slug
+               LIMIT ?"#,
+            pattern,
+            limit,
         )
-        .bind(&pattern)
-        .bind(limit)
         .fetch_all(&state.db)
         .await?
-    };
-
-    let rooms = rows
         .into_iter()
-        .map(|(id, slug, thread_count, post_count)| {
-            let is_announcement = is_announcements(&slug);
+        .map(|r| {
+            let is_announcement = is_announcements(&r.slug);
             RoomChip {
-                id,
-                slug,
+                id: r.id,
+                slug: r.slug,
                 is_announcement,
-                thread_count,
-                post_count,
+                thread_count: r.thread_count,
+                post_count: r.post_count,
             }
         })
-        .collect();
+        .collect()
+    };
 
     Ok(Json(RoomSearchResponse { rooms }))
 }
@@ -241,42 +241,32 @@ pub async fn get_room(
     _user: AuthUser,
     Path(id_or_slug): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let row = sqlx::query_as::<_, (String, String, String, String, String, i64, i64, Option<String>)>(
-        "SELECT t.id, t.slug, t.created_by, u.display_name, t.created_at, \
-         (SELECT COUNT(*) FROM threads th WHERE th.room = t.id) AS thread_count, \
-         (SELECT COUNT(*) FROM posts p JOIN threads th2 ON p.thread = th2.id WHERE th2.room = t.id) AS post_count, \
-         (SELECT MAX(p2.created_at) FROM posts p2 JOIN threads th3 ON p2.thread = th3.id WHERE th3.room = t.id) AS last_activity \
-         FROM rooms t \
-         JOIN users u ON u.id = t.created_by \
-         WHERE (t.id = ? OR t.slug = ?) AND t.merged_into IS NULL AND t.deleted_at IS NULL",
+    let row = sqlx::query!(
+        r#"SELECT t.id, t.slug, t.created_by, u.display_name, t.created_at,
+           (SELECT COUNT(*) FROM threads th WHERE th.room = t.id) AS "thread_count!: i64",
+           (SELECT COUNT(*) FROM posts p JOIN threads th2 ON p.thread = th2.id WHERE th2.room = t.id) AS "post_count!: i64",
+           (SELECT MAX(p2.created_at) FROM posts p2 JOIN threads th3 ON p2.thread = th3.id WHERE th3.room = t.id) AS "last_activity?: String"
+           FROM rooms t
+           JOIN users u ON u.id = t.created_by
+           WHERE (t.id = ? OR t.slug = ?) AND t.merged_into IS NULL AND t.deleted_at IS NULL"#,
+        id_or_slug,
+        id_or_slug,
     )
-    .bind(&id_or_slug)
-    .bind(&id_or_slug)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| AppError::code(ErrorCode::RoomNotFound))?;
 
-    let (
-        id,
-        slug,
-        created_by,
-        created_by_name,
-        created_at,
-        thread_count,
-        post_count,
-        last_activity,
-    ) = row;
-    let is_announcement = is_announcements(&slug);
+    let is_announcement = is_announcements(&row.slug);
 
     Ok(Json(RoomResponse {
-        id,
-        slug,
+        id: row.id,
+        slug: row.slug,
         is_announcement,
-        created_by,
-        created_by_name,
-        created_at,
-        thread_count,
-        post_count,
-        last_activity,
+        created_by: row.created_by,
+        created_by_name: row.display_name,
+        created_at: row.created_at,
+        thread_count: row.thread_count,
+        post_count: row.post_count,
+        last_activity: row.last_activity,
     }))
 }

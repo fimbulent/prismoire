@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT private_key FROM signing_keys WHERE user_id = ? AND active = 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "private_key",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8b15a81c26019497992a16d9c5304c5d603127e04fbfe49b778c4f59c5a42250"
+}

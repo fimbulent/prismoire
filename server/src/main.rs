@@ -76,7 +76,7 @@ fn build_webauthn(config: &Config) -> Arc<webauthn_rs::Webauthn> {
 
 /// Check whether an admin account exists in the database.
 async fn has_admin(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
-    let row: Option<(i64,)> = sqlx::query_as("SELECT 1 FROM users WHERE role = 'admin' LIMIT 1")
+    let row = sqlx::query!("SELECT 1 AS n FROM users WHERE role = 'admin' LIMIT 1")
         .fetch_optional(pool)
         .await?;
     Ok(row.is_some())

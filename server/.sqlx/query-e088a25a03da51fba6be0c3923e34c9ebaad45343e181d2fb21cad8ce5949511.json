@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT revision, body, created_at FROM post_revisions WHERE post_id = ? ORDER BY revision ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "revision",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "body",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "e088a25a03da51fba6be0c3923e34c9ebaad45343e181d2fb21cad8ce5949511"
+}

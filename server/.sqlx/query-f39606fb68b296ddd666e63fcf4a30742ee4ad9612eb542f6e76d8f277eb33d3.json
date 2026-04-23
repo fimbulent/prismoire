@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        WITH inbound AS (\n            SELECT\n                target_user,\n                SUM(CASE WHEN trust_type = 'distrust' THEN 1 ELSE 0 END) AS distrusts,\n                SUM(CASE WHEN trust_type = 'trust' THEN 1 ELSE 0 END) AS trusts\n            FROM trust_edges\n            GROUP BY target_user\n        )\n        SELECT\n            u.id,\n            u.display_name,\n            u.status,\n            u.created_at,\n            i.distrusts AS \"inbound_distrusts!: i64\",\n            i.trusts AS \"inbound_trusts!: i64\",\n            (SELECT COUNT(*) FROM posts p WHERE p.author = u.id AND p.retracted_at IS NULL) AS \"post_count!: i64\"\n        FROM inbound i\n        JOIN users u ON u.id = i.target_user\n        WHERE (i.distrusts + i.trusts) >= ?1\n          AND i.distrusts > 0\n          AND u.status != 'banned'\n          AND u.deleted_at IS NULL\n        ORDER BY\n            CASE WHEN i.trusts = 0 THEN 1 ELSE 0 END DESC,\n            CAST(i.distrusts AS REAL) / NULLIF(i.trusts, 0) DESC,\n            i.distrusts DESC\n        LIMIT ?2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "display_name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "status",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "inbound_distrusts!: i64",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "inbound_trusts!: i64",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "post_count!: i64",
+        "ordinal": 6,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "f39606fb68b296ddd666e63fcf4a30742ee4ad9612eb542f6e76d8f277eb33d3"
+}

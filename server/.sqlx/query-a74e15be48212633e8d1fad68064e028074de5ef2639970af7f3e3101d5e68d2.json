@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT revision_count AS \"revision_count!: i64\" FROM posts WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "revision_count!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a74e15be48212633e8d1fad68064e028074de5ef2639970af7f3e3101d5e68d2"
+}

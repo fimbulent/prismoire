@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO csp_reports (document_uri, referrer, violated_directive, effective_directive, original_policy, blocked_uri, source_file, line_number, column_number, status_code, script_sample) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 11
+    },
+    "nullable": []
+  },
+  "hash": "b95cc604f0a37d649386f5858dad8ea864bf4388ec792cfb206f24e77c1cb273"
+}

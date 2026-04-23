@@ -77,12 +77,13 @@ pub async fn setup_begin(
         .map_err(|msg| AppError::with_message(ErrorCode::InvalidDisplayName, msg))?;
     let skeleton = display_name_skeleton(&display_name);
 
-    let existing: Option<(String,)> =
-        sqlx::query_as("SELECT id FROM users WHERE display_name = ? OR display_name_skeleton = ?")
-            .bind(&display_name)
-            .bind(&skeleton)
-            .fetch_optional(&state.db)
-            .await?;
+    let existing = sqlx::query!(
+        "SELECT id FROM users WHERE display_name = ? OR display_name_skeleton = ?",
+        display_name,
+        skeleton,
+    )
+    .fetch_optional(&state.db)
+    .await?;
 
     if existing.is_some() {
         return Err(AppError::code(ErrorCode::DisplayNameTaken));
@@ -97,15 +98,16 @@ pub async fn setup_begin(
 
     let challenge_id = Uuid::new_v4().to_string();
     let state_bytes = serde_json::to_vec(&reg_state)?;
+    let user_uuid_str = user_uuid.to_string();
 
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO auth_challenges (id, challenge_type, state, display_name, user_id) \
          VALUES (?, 'registration', ?, ?, ?)",
+        challenge_id,
+        state_bytes,
+        display_name,
+        user_uuid_str,
     )
-    .bind(&challenge_id)
-    .bind(&state_bytes)
-    .bind(&display_name)
-    .bind(user_uuid.to_string())
     .execute(&state.db)
     .await?;
 
@@ -138,27 +140,26 @@ pub async fn setup_complete(
         return Err(AppError::code(ErrorCode::SetupAlreadyComplete));
     }
 
-    let challenge = sqlx::query_as::<_, (Vec<u8>, Option<String>, Option<String>)>(
+    let challenge = sqlx::query!(
         "SELECT state, display_name, user_id FROM auth_challenges \
          WHERE id = ? AND challenge_type = 'registration'",
+        req.challenge_id,
     )
-    .bind(&req.challenge_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| AppError::code(ErrorCode::InvalidChallenge))?;
 
-    let (state_bytes, display_name, user_id) = challenge;
-    let display_name = display_name.ok_or_else(|| {
+    let state_bytes = challenge.state;
+    let display_name = challenge.display_name.ok_or_else(|| {
         eprintln!("setup_complete: missing display_name in challenge");
         AppError::code(ErrorCode::Internal)
     })?;
-    let user_id = user_id.ok_or_else(|| {
+    let user_id = challenge.user_id.ok_or_else(|| {
         eprintln!("setup_complete: missing user_id in challenge");
         AppError::code(ErrorCode::Internal)
     })?;
 
-    sqlx::query("DELETE FROM auth_challenges WHERE id = ?")
-        .bind(&req.challenge_id)
+    sqlx::query!("DELETE FROM auth_challenges WHERE id = ?", req.challenge_id,)
         .execute(&state.db)
         .await?;
 
@@ -176,36 +177,36 @@ pub async fn setup_complete(
     // display_name uniqueness constraint and the challenge consumption above
     // already prevent duplicates. As a belt-and-suspenders measure, we check
     // whether an admin was created between our guard check and now.
-    let admin_exists: Option<(i64,)> =
-        sqlx::query_as("SELECT 1 FROM users WHERE role = 'admin' LIMIT 1")
-            .fetch_optional(&state.db)
-            .await?;
+    let admin_exists = sqlx::query!("SELECT 1 AS n FROM users WHERE role = 'admin' LIMIT 1")
+        .fetch_optional(&state.db)
+        .await?;
     if admin_exists.is_some() {
         state.needs_setup.store(false, Ordering::Relaxed);
         return Err(AppError::code(ErrorCode::SetupAlreadyComplete));
     }
 
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO users (id, display_name, display_name_skeleton, signup_method, role) \
          VALUES (?, ?, ?, 'admin', 'admin')",
+        user_id,
+        display_name,
+        skeleton,
     )
-    .bind(&user_id)
-    .bind(&display_name)
-    .bind(&skeleton)
     .execute(&state.db)
     .await?;
 
     let cred_id = Uuid::new_v4().to_string();
     let passkey_bytes = serde_json::to_vec(&passkey)?;
+    let cred_id_bytes = passkey.cred_id().as_ref() as &[u8];
 
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO credentials (id, user_id, credential_id, public_key, sign_count) \
          VALUES (?, ?, ?, ?, 0)",
+        cred_id,
+        user_id,
+        cred_id_bytes,
+        passkey_bytes,
     )
-    .bind(&cred_id)
-    .bind(&user_id)
-    .bind(passkey.cred_id().as_ref() as &[u8])
-    .bind(&passkey_bytes)
     .execute(&state.db)
     .await?;
 

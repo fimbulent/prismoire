@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT r.slug FROM rooms r WHERE r.merged_into IS NULL AND r.deleted_at IS NULL ORDER BY (SELECT MAX(p.created_at) FROM posts p JOIN threads t ON p.thread = t.id WHERE t.room = r.id) DESC NULLS LAST, r.created_at DESC LIMIT 6",
+  "describe": {
+    "columns": [
+      {
+        "name": "slug",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "26e8b1454e82ba7d197419d1a60f1cddadc1288b0076c0d51bbe1ede7124084b"
+}

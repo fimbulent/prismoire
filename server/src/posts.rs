@@ -54,25 +54,27 @@ pub async fn edit_post(
     user: AuthUser,
     Json(req): Json<EditPostRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let post = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+    let post = sqlx::query!(
         "SELECT author, retracted_at, parent FROM posts WHERE id = ?",
+        post_id,
     )
-    .bind(&post_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| AppError::code(ErrorCode::PostNotFound))?;
 
-    let (author, retracted_at, parent) = post;
-
-    let max_len = if parent.is_some() { 10_000 } else { 50_000 };
+    let max_len = if post.parent.is_some() {
+        10_000
+    } else {
+        50_000
+    };
     let body = validate_body(&req.body, max_len)
         .map_err(|msg| AppError::with_message(ErrorCode::InvalidPostBody, msg))?;
 
-    if author != user.user_id {
+    if post.author != user.user_id {
         return Err(AppError::code(ErrorCode::NotPostAuthor));
     }
 
-    if retracted_at.is_some() {
+    if post.retracted_at.is_some() {
         return Err(AppError::code(ErrorCode::PostRetracted));
     }
 
@@ -80,57 +82,61 @@ pub async fn edit_post(
 
     let mut tx = state.db.begin().await?;
 
-    let (revision_count,): (i64,) = sqlx::query_as("SELECT revision_count FROM posts WHERE id = ?")
-        .bind(&post_id)
-        .fetch_one(&mut *tx)
-        .await?;
-
-    let new_revision = revision_count;
-
-    sqlx::query(
-        "INSERT INTO post_revisions (post_id, revision, body, signature) VALUES (?, ?, ?, ?)",
+    let rc_row = sqlx::query!(
+        r#"SELECT revision_count AS "revision_count!: i64" FROM posts WHERE id = ?"#,
+        post_id,
     )
-    .bind(&post_id)
-    .bind(new_revision)
-    .bind(&body)
-    .bind(&signature)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    let new_revision = rc_row.revision_count;
+
+    sqlx::query!(
+        "INSERT INTO post_revisions (post_id, revision, body, signature) VALUES (?, ?, ?, ?)",
+        post_id,
+        new_revision,
+        body,
+        signature,
+    )
     .execute(&mut *tx)
     .await?;
 
-    sqlx::query("UPDATE posts SET revision_count = ? WHERE id = ?")
-        .bind(new_revision + 1)
-        .bind(&post_id)
-        .execute(&mut *tx)
-        .await?;
+    let new_count = new_revision + 1;
+    sqlx::query!(
+        "UPDATE posts SET revision_count = ? WHERE id = ?",
+        new_count,
+        post_id,
+    )
+    .execute(&mut *tx)
+    .await?;
 
-    let (original_at, edited_at, is_op, parent_id): (String, String, bool, Option<String>) =
-        sqlx::query_as(
-            "SELECT \
-             (SELECT pr0.created_at FROM post_revisions pr0 WHERE pr0.post_id = ? AND pr0.revision = 0), \
-             (SELECT pr1.created_at FROM post_revisions pr1 WHERE pr1.post_id = ? AND pr1.revision = ?), \
-             (p.parent IS NULL), \
-             p.parent \
-             FROM posts p WHERE p.id = ?",
-        )
-        .bind(&post_id)
-        .bind(&post_id)
-        .bind(new_revision)
-        .bind(&post_id)
-        .fetch_one(&mut *tx)
-        .await?;
+    let meta = sqlx::query!(
+        r#"SELECT
+           (SELECT pr0.created_at FROM post_revisions pr0 WHERE pr0.post_id = ? AND pr0.revision = 0) AS "original_at!: String",
+           (SELECT pr1.created_at FROM post_revisions pr1 WHERE pr1.post_id = ? AND pr1.revision = ?) AS "edited_at!: String",
+           (p.parent IS NULL) AS "is_op!: bool",
+           p.parent AS "parent_id?: String"
+           FROM posts p WHERE p.id = ?"#,
+        post_id,
+        post_id,
+        new_revision,
+        post_id,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
 
     tx.commit().await?;
 
     Ok(Json(PostResponse {
         id: post_id,
-        parent_id,
+        parent_id: meta.parent_id,
         author_id: user.user_id,
         author_name: user.display_name,
         body,
-        created_at: original_at,
-        edited_at: Some(edited_at),
+        created_at: meta.original_at,
+        edited_at: Some(meta.edited_at),
         revision: new_revision,
-        is_op,
+        is_op: meta.is_op,
         retracted_at: None,
         children: vec![],
         trust: TrustInfo::self_trust(),
@@ -153,21 +159,19 @@ pub async fn retract_post(
     Path(post_id): Path<String>,
     user: AuthUser,
 ) -> Result<impl IntoResponse, AppError> {
-    let post = sqlx::query_as::<_, (String, Option<String>)>(
+    let post = sqlx::query!(
         "SELECT author, retracted_at FROM posts WHERE id = ?",
+        post_id,
     )
-    .bind(&post_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| AppError::code(ErrorCode::PostNotFound))?;
 
-    let (author, retracted_at) = post;
-
-    if author != user.user_id {
+    if post.author != user.user_id {
         return Err(AppError::code(ErrorCode::NotPostAuthor));
     }
 
-    if retracted_at.is_some() {
+    if post.retracted_at.is_some() {
         return Err(AppError::code(ErrorCode::PostAlreadyRetracted));
     }
 
@@ -175,19 +179,21 @@ pub async fn retract_post(
     let retraction_signature =
         signing::sign_message(&state.db, &user.user_id, retraction_message.as_bytes()).await?;
 
-    sqlx::query(
+    sqlx::query!(
         "UPDATE posts SET retracted_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), \
          retraction_signature = ? WHERE id = ?",
+        retraction_signature,
+        post_id,
     )
-    .bind(&retraction_signature)
-    .bind(&post_id)
     .execute(&state.db)
     .await?;
 
-    sqlx::query("UPDATE post_revisions SET body = '' WHERE post_id = ?")
-        .bind(&post_id)
-        .execute(&state.db)
-        .await?;
+    sqlx::query!(
+        "UPDATE post_revisions SET body = '' WHERE post_id = ?",
+        post_id,
+    )
+    .execute(&state.db)
+    .await?;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -205,43 +211,41 @@ pub async fn list_revisions(
     _user: AuthUser,
     Path(post_id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let post = sqlx::query_as::<_, (String, String, Option<String>)>(
+    let post = sqlx::query!(
         "SELECT p.author, u.display_name, p.retracted_at \
          FROM posts p \
          JOIN users u ON u.id = p.author \
          WHERE p.id = ?",
+        post_id,
     )
-    .bind(&post_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| AppError::code(ErrorCode::PostNotFound))?;
 
-    let (author_id, author_name, retracted_at) = post;
-
-    let rows = sqlx::query_as::<_, (i64, String, String)>(
+    let rows = sqlx::query!(
         "SELECT revision, body, created_at \
          FROM post_revisions \
          WHERE post_id = ? \
          ORDER BY revision ASC",
+        post_id,
     )
-    .bind(&post_id)
     .fetch_all(&state.db)
     .await?;
 
     let revisions = rows
         .into_iter()
-        .map(|(revision, body, created_at)| RevisionResponse {
-            revision,
-            body,
-            created_at,
+        .map(|r| RevisionResponse {
+            revision: r.revision,
+            body: r.body,
+            created_at: r.created_at,
         })
         .collect();
 
     Ok(Json(RevisionHistoryResponse {
         post_id,
-        author_id,
-        author_name,
-        retracted_at,
+        author_id: post.author,
+        author_name: post.display_name,
+        retracted_at: post.retracted_at,
         revisions,
     }))
 }

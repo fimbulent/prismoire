@@ -321,24 +321,24 @@ pub async fn receive_csp_report(State(state): State<Arc<AppState>>, body: Bytes)
 
 /// Insert a normalised CSP report into the `csp_reports` table.
 async fn insert_report(pool: &SqlitePool, report: &CspReport) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO csp_reports (\
             document_uri, referrer, violated_directive, effective_directive, \
             original_policy, blocked_uri, source_file, line_number, \
             column_number, status_code, script_sample\
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        report.document_uri,
+        report.referrer,
+        report.violated_directive,
+        report.effective_directive,
+        report.original_policy,
+        report.blocked_uri,
+        report.source_file,
+        report.line_number,
+        report.column_number,
+        report.status_code,
+        report.script_sample,
     )
-    .bind(&report.document_uri)
-    .bind(&report.referrer)
-    .bind(&report.violated_directive)
-    .bind(&report.effective_directive)
-    .bind(&report.original_policy)
-    .bind(&report.blocked_uri)
-    .bind(&report.source_file)
-    .bind(report.line_number)
-    .bind(report.column_number)
-    .bind(report.status_code)
-    .bind(&report.script_sample)
     .execute(pool)
     .await?;
     Ok(())
@@ -374,11 +374,12 @@ pub async fn retention_loop(pool: SqlitePool) {
     let modifier = format!("-{RETENTION_DAYS} days");
     loop {
         ticker.tick().await;
-        if let Err(e) =
-            sqlx::query("DELETE FROM csp_reports WHERE received_at < datetime('now', ?)")
-                .bind(&modifier)
-                .execute(&pool)
-                .await
+        if let Err(e) = sqlx::query!(
+            "DELETE FROM csp_reports WHERE received_at < datetime('now', ?)",
+            modifier,
+        )
+        .execute(&pool)
+        .await
         {
             eprintln!("csp_reports retention sweep failed: {e}");
         }

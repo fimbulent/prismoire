@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT te.source_user, te.target_user FROM trust_edges te JOIN users u1 ON u1.id = te.source_user JOIN users u2 ON u2.id = te.target_user WHERE te.trust_type = 'trust' AND u1.status != 'banned' AND u2.status != 'banned'",
+  "describe": {
+    "columns": [
+      {
+        "name": "source_user",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "target_user",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "93e41674be5c038c3cbb3e78a270ca5e4ab6cb4a3aae50880d90d4e1b29208da"
+}

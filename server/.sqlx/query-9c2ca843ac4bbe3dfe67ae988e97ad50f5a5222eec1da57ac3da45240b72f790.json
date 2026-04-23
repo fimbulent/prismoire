@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT state, display_name, user_id FROM auth_challenges WHERE id = ? AND challenge_type = 'registration'",
+  "describe": {
+    "columns": [
+      {
+        "name": "state",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "display_name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "user_id",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "9c2ca843ac4bbe3dfe67ae988e97ad50f5a5222eec1da57ac3da45240b72f790"
+}

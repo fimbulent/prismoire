@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE post_revisions SET body = '' WHERE post_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "df8638ec2412d72bc05a275241a948733d833d50ec31b657ebec9084c5989a2f"
+}

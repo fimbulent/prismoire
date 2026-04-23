@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n           (SELECT pr0.created_at FROM post_revisions pr0 WHERE pr0.post_id = ? AND pr0.revision = 0) AS \"original_at!: String\",\n           (SELECT pr1.created_at FROM post_revisions pr1 WHERE pr1.post_id = ? AND pr1.revision = ?) AS \"edited_at!: String\",\n           (p.parent IS NULL) AS \"is_op!: bool\",\n           p.parent AS \"parent_id?: String\"\n           FROM posts p WHERE p.id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "original_at!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "edited_at!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "is_op!: bool",
+        "ordinal": 2,
+        "type_info": "Null"
+      },
+      {
+        "name": "parent_id?: String",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      true
+    ]
+  },
+  "hash": "0ae00a97bedffacec550b33496b8951706809fdb18e27aab1b099303b9cafe7a"
+}

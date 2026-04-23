@@ -65,12 +65,12 @@ pub async fn update_settings(
             return Err(AppError::code(ErrorCode::InvalidTheme));
         }
 
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO user_settings (user_id, theme) VALUES (?, ?) \
              ON CONFLICT(user_id) DO UPDATE SET theme = excluded.theme",
+            user.user_id,
+            theme,
         )
-        .bind(&user.user_id)
-        .bind(theme)
         .execute(&state.db)
         .await?;
     }
@@ -81,13 +81,11 @@ pub async fn update_settings(
 
 /// Load the user's theme, falling back to the default.
 pub async fn get_user_theme(db: &sqlx::SqlitePool, user_id: &str) -> Result<String, AppError> {
-    let row: Option<(String,)> =
-        sqlx::query_as("SELECT theme FROM user_settings WHERE user_id = ?")
-            .bind(user_id)
-            .fetch_optional(db)
-            .await?;
+    let row = sqlx::query!("SELECT theme FROM user_settings WHERE user_id = ?", user_id,)
+        .fetch_optional(db)
+        .await?;
     Ok(row
-        .map(|(t,)| t)
+        .map(|r| r.theme)
         .unwrap_or_else(|| DEFAULT_THEME.to_string()))
 }
 
