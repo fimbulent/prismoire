@@ -88,6 +88,9 @@ export type ErrorCode =
 	| 'cannot_moderate_admin'
 	| 'invalid_duration'
 	| 'invite_privilege_unchanged'
+	| 'user_already_deleted'
+	| 'room_already_deleted'
+	| 'confirmation_mismatch'
 	// Reports
 	| 'report_reason_invalid'
 	| 'already_reported'

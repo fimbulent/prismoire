@@ -601,26 +601,62 @@ pub async fn delete_my_account(
     State(state): State<Arc<AppState>>,
     user: RestrictedAuthUser,
 ) -> Result<impl IntoResponse, AppError> {
-    let db = &state.db;
-    let user_id = user.user_id.as_str();
+    let mut tx = state.db.begin().await?;
+    soft_delete_user(&mut tx, &user.user_id).await?;
+    tx.commit().await?;
 
-    // Load the active signing key once, up front, so we can sign every
-    // post retraction before opening the destructive transaction. This
-    // keeps retraction signatures faithful to the spec ("retraction does
-    // not destroy accountability — the original signature remains
-    // cryptographically valid") while letting us run the rest of the
-    // cleanup atomically.
+    // Trust graph drops the deleted user's outbound edges on the next
+    // rebuild.
+    state.trust_graph_notify.notify_one();
+
+    let mut headers = HeaderMap::new();
+    headers.insert(SET_COOKIE, clear_session_cookie().parse().unwrap());
+
+    Ok((StatusCode::NO_CONTENT, headers))
+}
+
+/// Shared soft-delete implementation used by both the self-deletion
+/// endpoint (`DELETE /api/me`) and the admin-initiated delete action
+/// (`DELETE /api/admin/users/{id}`).
+///
+/// Performs every step described in the module docstring: retracts all
+/// still-visible posts with signed retractions, anonymises the `users`
+/// row, and drops credentials, sessions, user_settings, trust_edges,
+/// ban_trust_snapshots, auth_challenges; revokes open invites; and
+/// deactivates signing keys. Idempotent against re-entry after a crash
+/// via the `deleted_at IS NULL` guard on the anonymise UPDATE.
+///
+/// Caller owns the transaction: this helper runs every statement on the
+/// supplied transaction but does not commit. That lets the
+/// admin-initiated caller emit its `admin_log` entry in the same
+/// transaction as the deletion, so there is no "user deleted but no
+/// audit entry written" window on a mid-flight crash.
+///
+/// Does **not** notify the trust graph or touch any session cookie —
+/// those concerns are handled by the calling endpoint, which has the
+/// request context (`AppState`, `HeaderMap`) that this helper doesn't
+/// want to depend on.
+pub(crate) async fn soft_delete_user(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    user_id: &str,
+) -> Result<(), AppError> {
+    // Load the active signing key first so we can sign every post
+    // retraction before touching the destructive statements. This keeps
+    // retraction signatures faithful to the spec ("retraction does not
+    // destroy accountability — the original signature remains
+    // cryptographically valid"). The SELECT runs on the caller's
+    // transaction so it sees the same snapshot as the later UPDATEs.
     let key_row: Option<(Vec<u8>,)> =
         sqlx::query_as("SELECT private_key FROM signing_keys WHERE user_id = ? AND active = 1")
             .bind(user_id)
-            .fetch_optional(db)
+            .fetch_optional(&mut **tx)
             .await?;
 
     let signing_key = match key_row {
         Some((bytes,)) => {
             let key_bytes: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
                 eprintln!(
-                    "privacy::delete_my_account: signing key for user {user_id} has invalid length {} (expected 32)",
+                    "privacy::soft_delete_user: signing key for user {user_id} has invalid length {} (expected 32)",
                     v.len()
                 );
                 AppError::code(ErrorCode::Internal)
@@ -638,15 +674,13 @@ pub async fn delete_my_account(
     let anon_name = format!("deleted-{anon_suffix}");
     let anon_skeleton = display_name_skeleton(&anon_name);
 
-    let mut tx = db.begin().await?;
-
-    // Find every post that still needs retracting. Done inside the
-    // transaction so a concurrent post creation between SELECT and
-    // UPDATE can't leave a fresh post un-retracted.
+    // Find every post that still needs retracting. Runs inside the
+    // caller-owned transaction so a concurrent post creation between
+    // SELECT and UPDATE can't leave a fresh post un-retracted.
     let posts_to_retract: Vec<(String,)> =
         sqlx::query_as("SELECT id FROM posts WHERE author = ? AND retracted_at IS NULL")
             .bind(user_id)
-            .fetch_all(&mut *tx)
+            .fetch_all(&mut **tx)
             .await?;
 
     // Pre-compute retraction signatures in memory so the subsequent
@@ -683,12 +717,12 @@ pub async fn delete_my_account(
         )
         .bind(sig)
         .bind(post_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
         sqlx::query("UPDATE post_revisions SET body = '' WHERE post_id = ?")
             .bind(post_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
     }
 
@@ -711,25 +745,25 @@ pub async fn delete_my_account(
     .bind(&anon_name)
     .bind(&anon_skeleton)
     .bind(user_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
     // 3. Drop credentials so passkey login is no longer possible.
     sqlx::query("DELETE FROM credentials WHERE user_id = ?")
         .bind(user_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
     // 4. Drop all sessions (including the caller's current session).
     sqlx::query("DELETE FROM sessions WHERE user_id = ?")
         .bind(user_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
     // 5. Drop per-user settings.
     sqlx::query("DELETE FROM user_settings WHERE user_id = ?")
         .bind(user_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
     // 6. Drop every trust edge touching the user — both directions.
@@ -742,7 +776,7 @@ pub async fn delete_my_account(
     sqlx::query("DELETE FROM trust_edges WHERE source_user = ? OR target_user = ?")
         .bind(user_id)
         .bind(user_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
     // 6b. Drop ban/suspend trust snapshots that reference the deleted
@@ -759,13 +793,13 @@ pub async fn delete_my_account(
     sqlx::query("DELETE FROM ban_trust_snapshots WHERE target_user = ? OR trusting_user = ?")
         .bind(user_id)
         .bind(user_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
     // 7. Drop any in-flight WebAuthn challenges tied to the user.
     sqlx::query("DELETE FROM auth_challenges WHERE user_id = ?")
         .bind(user_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
     // 8. Revoke any open invites the user created so nobody else can
@@ -775,7 +809,7 @@ pub async fn delete_my_account(
          WHERE created_by = ? AND revoked_at IS NULL",
     )
     .bind(user_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
     // 9. Deactivate signing keys rather than deleting them. Existing
@@ -783,19 +817,10 @@ pub async fn delete_my_account(
     //    half, so content accountability is preserved.
     sqlx::query("UPDATE signing_keys SET active = 0 WHERE user_id = ?")
         .bind(user_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
-    tx.commit().await?;
-
-    // Trust graph drops the deleted user's outbound edges on the next
-    // rebuild.
-    state.trust_graph_notify.notify_one();
-
-    let mut headers = HeaderMap::new();
-    headers.insert(SET_COOKIE, clear_session_cookie().parse().unwrap());
-
-    Ok((StatusCode::NO_CONTENT, headers))
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

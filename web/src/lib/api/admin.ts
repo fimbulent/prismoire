@@ -245,6 +245,36 @@ export async function unsuspendUser(
 	if (!res.ok) await throwApiError(res);
 }
 
+export async function deleteRoom(
+	roomId: string,
+	reason: string,
+	confirmSlug: string,
+	opts: FetchOpts = {}
+): Promise<void> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f(`/api/admin/rooms/${encodeURIComponent(roomId)}`, {
+		method: 'DELETE',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ reason, confirm_slug: confirmSlug })
+	});
+	if (!res.ok) await throwApiError(res);
+}
+
+export async function deleteUser(
+	userId: string,
+	reason: string,
+	confirmDisplayName: string,
+	opts: FetchOpts = {}
+): Promise<void> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f(`/api/admin/users/${encodeURIComponent(userId)}`, {
+		method: 'DELETE',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ reason, confirm_display_name: confirmDisplayName })
+	});
+	if (!res.ok) await throwApiError(res);
+}
+
 export async function getAdminDashboard(opts: FetchOpts = {}): Promise<DashboardResponse> {
 	const f = opts.fetch ?? globalThis.fetch;
 	const res = await f('/api/admin/dashboard');

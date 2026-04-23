@@ -96,6 +96,44 @@ export async function getUserProfile(
 	return res.json();
 }
 
+/**
+ * Lightweight user row returned by the autocomplete search endpoint.
+ * Intentionally stripped down compared to {@link UserProfile} — just
+ * enough to render a dropdown row and drive a preview card. Callers
+ * that need the full profile should fetch {@link getUserProfile} after
+ * the row is selected.
+ */
+export interface UserChip {
+	id: string;
+	display_name: string;
+	status: 'active' | 'banned' | 'suspended' | 'deleted';
+	role: string;
+}
+
+/**
+ * Prefix-search active users by display name for an autocomplete
+ * dropdown. Matching uses the confusable-safe skeleton on the server so
+ * case + homoglyph variants collapse into the same result set.
+ *
+ * An empty `query` returns an empty array — the server treats this as
+ * "no search requested" rather than "list all users", since unbounded
+ * user listings are not exposed.
+ */
+export async function searchUsers(
+	query: string,
+	limit = 10,
+	opts: FetchOpts = {}
+): Promise<UserChip[]> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const params = new URLSearchParams();
+	if (query) params.set('q', query);
+	params.set('limit', String(limit));
+	const res = await f(`/api/users/search?${params.toString()}`);
+	if (!res.ok) await throwApiError(res);
+	const data: { users: UserChip[] } = await res.json();
+	return data.users;
+}
+
 export async function getTrustDetail(
 	username: string,
 	opts: FetchOpts = {}

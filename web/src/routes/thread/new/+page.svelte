@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { createThread } from '$lib/api/threads';
+	import { searchRooms, type RoomChip } from '$lib/api/rooms';
+	import Autocomplete from '$lib/components/ui/Autocomplete.svelte';
 	import { validateRoomSlug } from '$lib/validation/room-name';
 	import { errorMessage } from '$lib/i18n/errors';
 	import { goto } from '$app/navigation';
@@ -89,18 +91,35 @@
 			<label for="thread-room" class="block text-sm font-medium text-text-secondary mb-1"
 				>Room</label
 			>
-			<input
+			<Autocomplete
 				id="thread-room"
-				type="text"
 				bind:value={room}
-				maxlength={30}
+				fetcher={(q) => searchRooms(q)}
+				formatLabel={(r: RoomChip) => r.slug}
+				itemKey={(r: RoomChip) => r.id}
+				onCreate={() => {
+					/* closing the dropdown is the only action needed;
+					   the backend auto-creates a room on thread submit
+					   if no room with that slug exists. */
+				}}
+				createLabel={(q) => `Create room: "${q}"`}
+				openOnFocus={false}
 				required
-				autocomplete="off"
+				maxlength={30}
 				disabled={submitting}
 				placeholder="e.g. technology, general, meta"
-				class="w-full bg-bg-surface border border-border rounded-md text-text-primary text-sm px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted"
-				class:border-danger={!!roomError}
-			/>
+				inputBgClass="bg-bg-surface"
+				inputClass={roomError ? 'border-danger' : ''}
+			>
+				{#snippet renderItem(r: RoomChip)}
+					<div class="flex items-baseline justify-between gap-3">
+						<span class="text-text-primary font-medium">{r.slug}</span>
+						<span class="text-xs text-text-muted">
+							{r.thread_count} {r.thread_count === 1 ? 'thread' : 'threads'}
+						</span>
+					</div>
+				{/snippet}
+			</Autocomplete>
 			{#if roomError}
 				<p transition:slide={{ duration: 150 }} class="text-danger text-xs mt-1">
 					{roomError}

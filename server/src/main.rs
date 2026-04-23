@@ -172,6 +172,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/rooms", get(rooms::list_rooms))
         .route("/api/rooms/top", get(rooms::top_rooms))
+        .route("/api/rooms/search", get(rooms::search_rooms))
         .route("/api/rooms/{id}", get(rooms::get_room))
         .route("/api/rooms/{id}/threads", get(threads::list_threads))
         .route(
@@ -204,6 +205,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/api/invites/users", get(invites::list_invited_users))
         .route("/api/invites/{id}", delete(invites::revoke_invite))
+        .route("/api/users/search", get(users::search_users))
         .route(
             "/api/users/{username}",
             get(users::get_profile).patch(users::update_bio),
@@ -262,6 +264,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/admin/users/{id}/invite-tree",
             get(admin::get_invite_tree),
         )
+        .route("/api/admin/users/{id}", delete(admin::delete_user_by_admin))
+        .route("/api/admin/rooms/{id}", delete(admin::delete_room))
         .layer(axum::middleware::from_fn_with_state(
             shared_state.clone(),
             session::session_middleware,

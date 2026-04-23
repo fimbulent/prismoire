@@ -187,6 +187,14 @@ pub enum ErrorCode {
     InvalidDuration,
     /// User's invite privileges are already in the requested state.
     InvitePrivilegeUnchanged,
+    /// Admin delete: target user has already been deleted.
+    UserAlreadyDeleted,
+    /// Admin delete: target room has already been deleted.
+    RoomAlreadyDeleted,
+    /// Admin delete: the confirmation value submitted with the form
+    /// (display name for users, slug for rooms) did not match the
+    /// target's current value. Guards against mis-click deletions.
+    ConfirmationMismatch,
 
     // -- Reports -----------------------------------------------------
     /// Report reason is not one of the accepted enum values.
@@ -247,7 +255,9 @@ impl ErrorCode {
             | Self::AlreadySuspended
             | Self::NotBanned
             | Self::NotSuspended
-            | Self::InvitePrivilegeUnchanged => StatusCode::CONFLICT,
+            | Self::InvitePrivilegeUnchanged
+            | Self::UserAlreadyDeleted
+            | Self::RoomAlreadyDeleted => StatusCode::CONFLICT,
 
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
 
@@ -285,6 +295,7 @@ impl ErrorCode {
             | Self::SelfReport
             | Self::InvalidTheme
             | Self::InvalidDuration
+            | Self::ConfirmationMismatch
             | Self::BadRequest => StatusCode::BAD_REQUEST,
         }
     }
@@ -353,6 +364,9 @@ impl ErrorCode {
             Self::CannotModerateAdmin => "cannot ban or suspend an admin",
             Self::InvalidDuration => "invalid suspension duration",
             Self::InvitePrivilegeUnchanged => "invite privileges already in requested state",
+            Self::UserAlreadyDeleted => "user is already deleted",
+            Self::RoomAlreadyDeleted => "room is already deleted",
+            Self::ConfirmationMismatch => "confirmation value did not match",
 
             Self::ReportReasonInvalid => "invalid report reason",
             Self::AlreadyReported => "you have already reported this post",

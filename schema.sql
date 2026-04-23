@@ -103,7 +103,7 @@ CREATE TABLE rooms (
     created_by TEXT NOT NULL REFERENCES users(id),
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     merged_into TEXT REFERENCES rooms(id)
-);
+, deleted_at TEXT);
 CREATE TABLE threads (
     id TEXT PRIMARY KEY NOT NULL,
     title TEXT NOT NULL,
@@ -174,6 +174,8 @@ CREATE INDEX idx_reports_post_id ON reports(post_id);
 CREATE INDEX idx_reports_reporter ON reports(reporter);
 CREATE INDEX idx_reports_status ON reports(status);
 CREATE INDEX idx_reports_created_at ON reports(created_at);
+CREATE INDEX idx_users_deleted_at ON users(deleted_at);
+CREATE INDEX idx_rooms_deleted_at ON rooms(deleted_at);
 CREATE TABLE admin_log (
     id TEXT PRIMARY KEY NOT NULL,
     admin TEXT NOT NULL REFERENCES users(id),
@@ -183,7 +185,8 @@ CREATE TABLE admin_log (
         'merge_room', 'delete_room',
         'ban_user', 'unban_user',
         'suspend_user', 'unsuspend_user',
-        'revoke_invites', 'grant_invites'
+        'revoke_invites', 'grant_invites',
+        'delete_user'
     )),
     target_user TEXT REFERENCES users(id),
     thread_id TEXT REFERENCES threads(id),
@@ -193,8 +196,6 @@ CREATE TABLE admin_log (
     reason TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
-CREATE INDEX idx_admin_log_created_at ON admin_log(created_at);
-CREATE INDEX idx_admin_log_target_user ON admin_log(target_user);
 CREATE TABLE ban_trust_snapshots (
     id TEXT PRIMARY KEY NOT NULL,
     admin_log_id TEXT NOT NULL REFERENCES admin_log(id),
@@ -204,7 +205,8 @@ CREATE TABLE ban_trust_snapshots (
     snapshot_at TEXT NOT NULL,
     action_type TEXT NOT NULL CHECK (action_type IN ('ban', 'suspend'))
 );
+CREATE INDEX idx_admin_log_created_at ON admin_log(created_at);
+CREATE INDEX idx_admin_log_target_user ON admin_log(target_user);
 CREATE INDEX idx_ban_trust_snapshots_target ON ban_trust_snapshots(target_user);
 CREATE INDEX idx_ban_trust_snapshots_trusting ON ban_trust_snapshots(trusting_user);
 CREATE INDEX idx_ban_trust_snapshots_admin_log ON ban_trust_snapshots(admin_log_id);
-CREATE INDEX idx_users_deleted_at ON users(deleted_at);

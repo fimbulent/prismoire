@@ -9,6 +9,7 @@
 		const seg = page.url.pathname.split('/')[2] ?? '';
 		if (seg === 'reports') return 'reports';
 		if (seg === 'watchlists') return 'watchlists';
+		if (seg === 'actions') return 'actions';
 		if (seg === 'routes') return 'routes';
 		return 'overview';
 	});
@@ -40,6 +41,7 @@
 			{/if}
 		</a>
 		<a href="/admin/watchlists" class={tabClass(tab === 'watchlists')}>Watchlists</a>
+		<a href="/admin/actions" class={tabClass(tab === 'actions')}>Actions</a>
 		<a href="/admin/routes" class={tabClass(tab === 'routes')}>Routes</a>
 	</div>
 </div>

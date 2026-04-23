@@ -29,6 +29,7 @@
 		remove_post: 'removed a post in',
 		merge_room: 'merged room',
 		delete_room: 'deleted room',
+		delete_user: 'deleted user',
 		ban_user: 'banned',
 		unban_user: 'unbanned',
 		suspend_user: 'suspended',
@@ -91,7 +92,9 @@
 								title={entry.thread_title}
 							>{entry.thread_title}</a>
 						{/if}
-						{#if entry.room_slug && entry.action !== 'remove_post'}
+						{#if entry.action === 'delete_room' && entry.room_slug}
+							<span class="font-semibold text-text-primary">{entry.room_slug}</span>
+						{:else if entry.room_slug && entry.action !== 'remove_post'}
 							<span class="text-text-secondary">in {entry.room_slug}</span>
 						{/if}
 					</div>

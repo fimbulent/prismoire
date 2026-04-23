@@ -75,6 +75,24 @@ pub struct ReasonRequest {
     pub reason: String,
 }
 
+#[derive(Deserialize)]
+pub struct DeleteRoomRequest {
+    pub reason: String,
+    /// Typed back by the admin to confirm the deletion — must match the
+    /// target room's current slug. Guards against a mis-clicked
+    /// dropdown wiping the wrong room.
+    pub confirm_slug: String,
+}
+
+#[derive(Deserialize)]
+pub struct DeleteUserRequest {
+    pub reason: String,
+    /// Typed back by the admin to confirm the deletion — must match the
+    /// target user's current display name. Guards against a mis-typed
+    /// lookup deleting the wrong account.
+    pub confirm_display_name: String,
+}
+
 #[derive(Serialize)]
 pub struct BannedUserEntry {
     pub id: String,
@@ -896,4 +914,238 @@ pub async fn get_invite_tree(
         .collect();
 
     Ok(Json(tree))
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /api/admin/rooms/:id — delete a room, all its threads, and all
+// posts in those threads.
+// ---------------------------------------------------------------------------
+
+/// Permanently delete a room's content and tombstone the room itself.
+///
+/// Admin-initiated counterpart to user self-deletion, reached via the
+/// "Actions" tab on the admin dashboard. Requires a non-empty `reason`
+/// and a `confirm_slug` that matches the target room's current slug.
+///
+/// The room row is soft-deleted (`deleted_at` set) rather than hard
+/// dropped so `admin_log` entries referencing it — including the
+/// `delete_room` entry this handler emits — stay FK-valid and
+/// renderable in the log UI. The threads, posts, post revisions,
+/// recent-replier rows, and reports against posts in the room are all
+/// hard-deleted: the whole point of the action is to make the content
+/// disappear for every viewer, not just hide it.
+///
+/// `admin_log.thread_id` and `admin_log.post_id` for any historical
+/// entries that pointed at the deleted content are nulled out, because
+/// the content they referenced no longer exists and a dangling FK
+/// would fail the CHECK on read.
+pub async fn delete_room(
+    State(state): State<Arc<AppState>>,
+    Path(room_id): Path<String>,
+    user: AuthUser,
+    Json(req): Json<DeleteRoomRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    require_admin(&user)?;
+
+    let reason = req.reason.trim().to_string();
+    if reason.is_empty() {
+        return Err(AppError::code(ErrorCode::ReasonRequired));
+    }
+
+    let room = sqlx::query_as::<_, (String, String, Option<String>)>(
+        "SELECT id, slug, deleted_at FROM rooms WHERE id = ?",
+    )
+    .bind(&room_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::code(ErrorCode::RoomNotFound))?;
+
+    let (rid, slug, deleted_at) = room;
+    if deleted_at.is_some() {
+        return Err(AppError::code(ErrorCode::RoomAlreadyDeleted));
+    }
+    if req.confirm_slug.trim() != slug {
+        return Err(AppError::code(ErrorCode::ConfirmationMismatch));
+    }
+
+    let mut tx = state.db.begin().await?;
+
+    // 1. Null out admin_log FKs that point at posts / threads we are
+    //    about to hard-delete. The columns are nullable, so there's no
+    //    data integrity loss — the log entry's `action`, `reason`, and
+    //    `room_id` (which we keep) still tell the story.
+    sqlx::query(
+        "UPDATE admin_log SET post_id = NULL \
+         WHERE post_id IN (SELECT p.id FROM posts p JOIN threads t ON t.id = p.thread WHERE t.room = ?)",
+    )
+    .bind(&rid)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "UPDATE admin_log SET thread_id = NULL \
+         WHERE thread_id IN (SELECT id FROM threads WHERE room = ?)",
+    )
+    .bind(&rid)
+    .execute(&mut *tx)
+    .await?;
+
+    // 2. Hard-delete content, leaves-to-root to satisfy FKs.
+    sqlx::query(
+        "DELETE FROM reports \
+         WHERE post_id IN (SELECT p.id FROM posts p JOIN threads t ON t.id = p.thread WHERE t.room = ?)",
+    )
+    .bind(&rid)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "DELETE FROM post_revisions \
+         WHERE post_id IN (SELECT p.id FROM posts p JOIN threads t ON t.id = p.thread WHERE t.room = ?)",
+    )
+    .bind(&rid)
+    .execute(&mut *tx)
+    .await?;
+
+    // Posts carry `parent REFERENCES posts(id)` — delete leaves first
+    // and loop until no rows remain, peeling parent chains one layer
+    // at a time. Bounded by the thread depth of the room, which is
+    // small in practice.
+    loop {
+        let res = sqlx::query(
+            "DELETE FROM posts \
+             WHERE thread IN (SELECT id FROM threads WHERE room = ?) \
+               AND id NOT IN (SELECT parent FROM posts WHERE parent IS NOT NULL \
+                              AND thread IN (SELECT id FROM threads WHERE room = ?))",
+        )
+        .bind(&rid)
+        .bind(&rid)
+        .execute(&mut *tx)
+        .await?;
+        if res.rows_affected() == 0 {
+            break;
+        }
+    }
+
+    sqlx::query(
+        "DELETE FROM thread_recent_repliers \
+         WHERE thread_id IN (SELECT id FROM threads WHERE room = ?)",
+    )
+    .bind(&rid)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query("DELETE FROM threads WHERE room = ?")
+        .bind(&rid)
+        .execute(&mut *tx)
+        .await?;
+
+    // 3. Tombstone the room.
+    sqlx::query("UPDATE rooms SET deleted_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?")
+        .bind(&rid)
+        .execute(&mut *tx)
+        .await?;
+
+    // 4. Emit the admin log entry. Inserted inside the same
+    //    transaction so a rollback on any earlier step also rolls back
+    //    the log row.
+    let log_id = Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO admin_log (id, admin, action, room_id, reason) \
+         VALUES (?, ?, 'delete_room', ?, ?)",
+    )
+    .bind(&log_id)
+    .bind(&user.user_id)
+    .bind(&rid)
+    .bind(&reason)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /api/admin/users/:id — delete a user account (admin-initiated).
+// ---------------------------------------------------------------------------
+
+/// Admin-initiated account deletion.
+///
+/// Applies the same soft-delete as the user self-service endpoint
+/// (`privacy::soft_delete_user`): retract every post, drop credentials
+/// / sessions / settings / trust-edges, revoke open invites, deactivate
+/// signing keys, and anonymise the `users` row. Admins and
+/// already-deleted users are rejected before any mutation happens.
+/// Refuses to delete the caller's own account — self-delete has its
+/// own endpoint (`DELETE /api/me`) which also clears the session
+/// cookie, which this handler cannot do for someone else's session.
+///
+/// The deletion and the `admin_log` entry share a single transaction,
+/// so a crash mid-way through either rolls both back or records both.
+pub async fn delete_user_by_admin(
+    State(state): State<Arc<AppState>>,
+    Path(user_id): Path<String>,
+    user: AuthUser,
+    Json(req): Json<DeleteUserRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    require_admin(&user)?;
+
+    let reason = req.reason.trim().to_string();
+    if reason.is_empty() {
+        return Err(AppError::code(ErrorCode::ReasonRequired));
+    }
+
+    // Load the target, including `deleted_at`, because the shared
+    // helper (`fetch_target_user`) only returns the moderation status
+    // and we need the tombstone + current display name here.
+    let row = sqlx::query_as::<_, (String, String, String, Option<String>)>(
+        "SELECT id, display_name, role, deleted_at FROM users WHERE id = ?",
+    )
+    .bind(&user_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::code(ErrorCode::UserNotFound))?;
+
+    let (target_id, display_name, role, deleted_at) = row;
+    if deleted_at.is_some() {
+        return Err(AppError::code(ErrorCode::UserAlreadyDeleted));
+    }
+    if role == "admin" {
+        return Err(AppError::code(ErrorCode::CannotModerateAdmin));
+    }
+    if target_id == user.user_id {
+        // Admins self-deleting should go through the GDPR self-service
+        // endpoint; that path also clears their session cookie.
+        return Err(AppError::code(ErrorCode::Forbidden));
+    }
+    if req.confirm_display_name.trim() != display_name {
+        return Err(AppError::code(ErrorCode::ConfirmationMismatch));
+    }
+
+    // Run the shared soft-delete and emit the admin log entry inside a
+    // single transaction. Doing both together closes the audit-trail
+    // gap where a crash between the two could leave a deleted user
+    // with no corresponding log row.
+    let mut tx = state.db.begin().await?;
+
+    crate::privacy::soft_delete_user(&mut tx, &target_id).await?;
+
+    let log_id = Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO admin_log (id, admin, action, target_user, reason) \
+         VALUES (?, ?, 'delete_user', ?, ?)",
+    )
+    .bind(&log_id)
+    .bind(&user.user_id)
+    .bind(&target_id)
+    .bind(&reason)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    state.trust_graph_notify.notify_one();
+
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }

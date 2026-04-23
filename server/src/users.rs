@@ -8,10 +8,15 @@ use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::display_name::display_name_skeleton;
 use crate::error::{AppError, ErrorCode};
 use crate::session::{AuthUser, RestrictedAuthUser};
 use crate::state::AppState;
 use crate::trust::{MINIMUM_TRUST_THRESHOLD, TrustInfo, TrustPath, UserStatus, load_distrust_set};
+
+/// Hard upper bound on how many users a single search request can return.
+/// Acts as both the default and the clamp for caller-supplied `limit`.
+const USER_SEARCH_MAX: i64 = 20;
 
 /// Restricted (banned/suspended) users may only interact with their own
 /// profile. Endpoints that accept a `:username` path parameter call this
@@ -1012,4 +1017,124 @@ pub async fn delete_trust_edge(
     state.trust_graph_notify.notify_one();
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/users/search — Display-name autocomplete
+// ---------------------------------------------------------------------------
+
+/// Lightweight user chip returned by the search endpoint. Carries just
+/// enough to render an autocomplete dropdown row and drive the "selected
+/// user" preview card — callers who need the full profile should fetch
+/// `GET /api/users/:username` after the user picks a row.
+#[derive(Serialize)]
+pub struct UserChip {
+    pub id: String,
+    pub display_name: String,
+    pub status: String,
+    pub role: String,
+}
+
+#[derive(Serialize)]
+pub struct UserSearchResponse {
+    pub users: Vec<UserChip>,
+}
+
+#[derive(Deserialize)]
+pub struct UserSearchQuery {
+    #[serde(default)]
+    pub q: Option<String>,
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+/// GET /api/users/search?q=&limit= — prefix-match search over active users.
+///
+/// **Admin-only.** The response carries moderation status and role,
+/// and a prefix walk would trivially enumerate the user base — both
+/// of which are information the broader authenticated user population
+/// has no business seeing. Gate here until a non-admin caller
+/// justifies widening the surface (and at that point the response
+/// shape needs to be trimmed too).
+///
+/// Matches against `display_name_skeleton`, the confusable-safe
+/// canonical form stored alongside each display name, so searches are
+/// resilient to case differences and visually-similar characters.
+/// Returns at most `USER_SEARCH_MAX` rows, ordered by exact match
+/// first, then shortest name (shorter names tend to be the one the
+/// user is aiming for when the prefix is short).
+///
+/// Deleted users are excluded; banned/suspended users are included so
+/// admins performing moderation can still target them from the
+/// autocomplete.
+pub async fn search_users(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Query(q): Query<UserSearchQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    crate::admin::require_admin(&user)?;
+    let limit = q
+        .limit
+        .unwrap_or(USER_SEARCH_MAX / 2)
+        .clamp(1, USER_SEARCH_MAX);
+    let query = q.q.unwrap_or_default().trim().to_string();
+
+    if query.is_empty() {
+        return Ok(Json(UserSearchResponse { users: Vec::new() }));
+    }
+
+    // Match on the skeleton so a user searching for "Alice" finds
+    // "аlice" (Cyrillic 'а') and vice-versa. The skeleton of the query
+    // is lowercased and confusable-folded the same way the stored
+    // column is, so a simple `LIKE 'prefix%'` is sufficient.
+    let skeleton = display_name_skeleton(&query);
+    let pattern = format!(
+        "{}%",
+        skeleton
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    );
+
+    let rows: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT id, display_name, status, role \
+         FROM users \
+         WHERE deleted_at IS NULL \
+           AND display_name_skeleton LIKE ? ESCAPE '\\' \
+         ORDER BY \
+           (display_name_skeleton = ?) DESC, \
+           LENGTH(display_name), \
+           display_name \
+         LIMIT ?",
+    )
+    .bind(&pattern)
+    .bind(&skeleton)
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await?;
+
+    let users = rows
+        .into_iter()
+        .map(|(id, display_name, status_str, role)| {
+            // `deleted_at IS NULL` is enforced by the WHERE clause, so
+            // the effective status here is the raw column value. Fall
+            // back to "active" on any unexpected value rather than
+            // surfacing a 500.
+            let status = UserStatus::try_from(status_str.as_str()).unwrap_or(UserStatus::Active);
+            let status_wire = match status {
+                UserStatus::Active => "active",
+                UserStatus::Banned => "banned",
+                UserStatus::Suspended => "suspended",
+                UserStatus::Deleted => "deleted",
+            };
+            UserChip {
+                id,
+                display_name,
+                status: status_wire.to_string(),
+                role,
+            }
+        })
+        .collect();
+
+    Ok(Json(UserSearchResponse { users }))
 }
