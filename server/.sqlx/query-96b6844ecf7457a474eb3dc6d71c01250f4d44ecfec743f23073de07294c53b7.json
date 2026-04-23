@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT MIN(created_at) AS \"min_at?: String\" FROM reports WHERE status = 'pending'",
+  "describe": {
+    "columns": [
+      {
+        "name": "min_at?: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "96b6844ecf7457a474eb3dc6d71c01250f4d44ecfec743f23073de07294c53b7"
+}

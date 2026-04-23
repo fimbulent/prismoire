@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(DISTINCT author) AS \"n!: i64\" FROM (\n             SELECT author FROM posts\n               WHERE created_at > datetime('now', '-14 days')\n                 AND created_at <= datetime('now', '-7 days')\n             UNION\n             SELECT author FROM threads\n               WHERE created_at > datetime('now', '-14 days')\n                 AND created_at <= datetime('now', '-7 days')\n         )",
+  "describe": {
+    "columns": [
+      {
+        "name": "n!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8fe04f7880004a77c495518709b57ebe713fd1974ff36226f3ea81e0630beeb9"
+}

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DATE(created_at) AS \"day!: String\", COUNT(*) AS \"count!: i64\"\n         FROM posts\n         WHERE DATE(created_at) >= ?\n         GROUP BY DATE(created_at)",
+  "describe": {
+    "columns": [
+      {
+        "name": "day!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "count!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "ecc34817333b9493e083302de70ab80367657566cef991050cb2511995586a7f"
+}

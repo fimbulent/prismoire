@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DATE(created_at) AS \"day!: String\"\n         FROM users\n         WHERE DATE(created_at) >= ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "day!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "23cc0849ca19f8074f6b480b2a0db416f3be10e02c43ed5ed48503bb5999c245"
+}

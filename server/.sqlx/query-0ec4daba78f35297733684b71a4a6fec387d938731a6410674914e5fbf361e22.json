@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"n!: i64\" FROM rooms r\n         WHERE r.merged_into IS NULL\n           AND NOT EXISTS (SELECT 1 FROM threads t WHERE t.room = r.id)",
+  "describe": {
+    "columns": [
+      {
+        "name": "n!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0ec4daba78f35297733684b71a4a6fec387d938731a6410674914e5fbf361e22"
+}

@@ -115,102 +115,121 @@ pub async fn get_overview(
     let db = &state.db;
 
     // --- Users -----------------------------------------------------------
-    let (total_users,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
+    let total_users = sqlx::query!(r#"SELECT COUNT(*) AS "n!: i64" FROM users"#)
         .fetch_one(db)
-        .await?;
+        .await?
+        .n;
 
-    let (new_users_7d,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM users WHERE created_at > datetime('now', '-7 days')")
-            .fetch_one(db)
-            .await?;
+    let new_users_7d = sqlx::query!(
+        r#"SELECT COUNT(*) AS "n!: i64" FROM users WHERE created_at > datetime('now', '-7 days')"#,
+    )
+    .fetch_one(db)
+    .await?
+    .n;
 
     // "Active" = posted or created a thread within the window. Using posts
     // + threads rather than sessions gives a more honest signal of
     // participation (a long-lived session doesn't imply activity).
-    let (active_users_7d,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(DISTINCT author) FROM ( \
-             SELECT author FROM posts WHERE created_at > datetime('now', '-7 days') \
-             UNION \
-             SELECT author FROM threads WHERE created_at > datetime('now', '-7 days') \
-         )",
-    )
-    .fetch_one(db)
-    .await?;
-
-    let (active_users_prev_7d,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(DISTINCT author) FROM ( \
-             SELECT author FROM posts \
-               WHERE created_at > datetime('now', '-14 days') \
-                 AND created_at <= datetime('now', '-7 days') \
-             UNION \
-             SELECT author FROM threads \
-               WHERE created_at > datetime('now', '-14 days') \
-                 AND created_at <= datetime('now', '-7 days') \
-         )",
-    )
-    .fetch_one(db)
-    .await?;
-
-    // --- Content ---------------------------------------------------------
-    let (posts_today,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM posts WHERE DATE(created_at) = DATE('now')")
-            .fetch_one(db)
-            .await?;
-
-    let (posts_7d,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM posts WHERE created_at > datetime('now', '-7 days')")
-            .fetch_one(db)
-            .await?;
-
-    let (threads_today,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM threads WHERE DATE(created_at) = DATE('now')")
-            .fetch_one(db)
-            .await?;
-
-    let (threads_7d,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM threads WHERE created_at > datetime('now', '-7 days')",
-    )
-    .fetch_one(db)
-    .await?;
-
-    // Exclude merged rooms (they redirect to their target and aren't
-    // independently visible).
-    let (total_rooms,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM rooms WHERE merged_into IS NULL")
-            .fetch_one(db)
-            .await?;
-
-    let (empty_rooms,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM rooms r \
-         WHERE r.merged_into IS NULL \
-           AND NOT EXISTS (SELECT 1 FROM threads t WHERE t.room = r.id)",
-    )
-    .fetch_one(db)
-    .await?;
-
-    // --- Reports ---------------------------------------------------------
-    let (pending_reports,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM reports WHERE status = 'pending'")
-            .fetch_one(db)
-            .await?;
-
-    let oldest_pending_report_at: Option<String> = sqlx::query_as::<_, (Option<String>,)>(
-        "SELECT MIN(created_at) FROM reports WHERE status = 'pending'",
+    let active_users_7d = sqlx::query!(
+        r#"SELECT COUNT(DISTINCT author) AS "n!: i64" FROM (
+             SELECT author FROM posts WHERE created_at > datetime('now', '-7 days')
+             UNION
+             SELECT author FROM threads WHERE created_at > datetime('now', '-7 days')
+         )"#,
     )
     .fetch_one(db)
     .await?
-    .0;
+    .n;
+
+    let active_users_prev_7d = sqlx::query!(
+        r#"SELECT COUNT(DISTINCT author) AS "n!: i64" FROM (
+             SELECT author FROM posts
+               WHERE created_at > datetime('now', '-14 days')
+                 AND created_at <= datetime('now', '-7 days')
+             UNION
+             SELECT author FROM threads
+               WHERE created_at > datetime('now', '-14 days')
+                 AND created_at <= datetime('now', '-7 days')
+         )"#,
+    )
+    .fetch_one(db)
+    .await?
+    .n;
+
+    // --- Content ---------------------------------------------------------
+    let posts_today = sqlx::query!(
+        r#"SELECT COUNT(*) AS "n!: i64" FROM posts WHERE DATE(created_at) = DATE('now')"#,
+    )
+    .fetch_one(db)
+    .await?
+    .n;
+
+    let posts_7d = sqlx::query!(
+        r#"SELECT COUNT(*) AS "n!: i64" FROM posts WHERE created_at > datetime('now', '-7 days')"#,
+    )
+    .fetch_one(db)
+    .await?
+    .n;
+
+    let threads_today = sqlx::query!(
+        r#"SELECT COUNT(*) AS "n!: i64" FROM threads WHERE DATE(created_at) = DATE('now')"#,
+    )
+    .fetch_one(db)
+    .await?
+    .n;
+
+    let threads_7d = sqlx::query!(
+        r#"SELECT COUNT(*) AS "n!: i64" FROM threads WHERE created_at > datetime('now', '-7 days')"#,
+    )
+    .fetch_one(db)
+    .await?
+    .n;
+
+    // Exclude merged rooms (they redirect to their target and aren't
+    // independently visible).
+    let total_rooms =
+        sqlx::query!(r#"SELECT COUNT(*) AS "n!: i64" FROM rooms WHERE merged_into IS NULL"#)
+            .fetch_one(db)
+            .await?
+            .n;
+
+    let empty_rooms = sqlx::query!(
+        r#"SELECT COUNT(*) AS "n!: i64" FROM rooms r
+         WHERE r.merged_into IS NULL
+           AND NOT EXISTS (SELECT 1 FROM threads t WHERE t.room = r.id)"#,
+    )
+    .fetch_one(db)
+    .await?
+    .n;
+
+    // --- Reports ---------------------------------------------------------
+    let pending_reports =
+        sqlx::query!(r#"SELECT COUNT(*) AS "n!: i64" FROM reports WHERE status = 'pending'"#,)
+            .fetch_one(db)
+            .await?
+            .n;
+
+    let oldest_pending_report_at = sqlx::query!(
+        r#"SELECT MIN(created_at) AS "min_at?: String" FROM reports WHERE status = 'pending'"#,
+    )
+    .fetch_one(db)
+    .await?
+    .min_at;
 
     // --- Trust graph -----------------------------------------------------
-    let (trust_edges,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM trust_edges WHERE trust_type = 'trust'")
-            .fetch_one(db)
-            .await?;
+    let trust_edges = sqlx::query!(
+        r#"SELECT COUNT(*) AS "n!: i64" FROM trust_edges WHERE trust_type = 'trust'"#,
+    )
+    .fetch_one(db)
+    .await?
+    .n;
 
-    let (distrust_edges,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM trust_edges WHERE trust_type = 'distrust'")
-            .fetch_one(db)
-            .await?;
+    let distrust_edges = sqlx::query!(
+        r#"SELECT COUNT(*) AS "n!: i64" FROM trust_edges WHERE trust_type = 'distrust'"#,
+    )
+    .fetch_one(db)
+    .await?
+    .n;
 
     let (avg_trusts_per_user, avg_distrusts_per_user) = if total_users > 0 {
         let divisor = total_users as f64;
@@ -223,16 +242,20 @@ pub async fn get_overview(
     };
 
     // --- Sessions & auth -------------------------------------------------
-    let (active_sessions,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM sessions WHERE expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+    let active_sessions = sqlx::query!(
+        r#"SELECT COUNT(*) AS "n!: i64" FROM sessions
+         WHERE expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"#,
     )
     .fetch_one(db)
-    .await?;
+    .await?
+    .n;
 
-    let (logins_today,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM sessions WHERE DATE(created_at) = DATE('now')")
-            .fetch_one(db)
-            .await?;
+    let logins_today = sqlx::query!(
+        r#"SELECT COUNT(*) AS "n!: i64" FROM sessions WHERE DATE(created_at) = DATE('now')"#,
+    )
+    .fetch_one(db)
+    .await?
+    .n;
 
     // Failed WebAuthn verifications from the last 24 hours. Incremented
     // by `auth::login_complete` / `auth::discover_complete` whenever a
@@ -289,13 +312,13 @@ async fn fetch_posts_per_day(db: &sqlx::SqlitePool) -> Result<Vec<DayCount>, App
         .format("%Y-%m-%d")
         .to_string();
 
-    let rows: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT DATE(created_at) AS day, COUNT(*) AS count \
-         FROM posts \
-         WHERE DATE(created_at) >= ? \
-         GROUP BY DATE(created_at)",
+    let rows = sqlx::query!(
+        r#"SELECT DATE(created_at) AS "day!: String", COUNT(*) AS "count!: i64"
+         FROM posts
+         WHERE DATE(created_at) >= ?
+         GROUP BY DATE(created_at)"#,
+        since,
     )
-    .bind(&since)
     .fetch_all(db)
     .await?;
 
@@ -306,8 +329,8 @@ async fn fetch_posts_per_day(db: &sqlx::SqlitePool) -> Result<Vec<DayCount>, App
         let iso = date.format("%Y-%m-%d").to_string();
         let count = rows
             .iter()
-            .find(|(d, _)| d == &iso)
-            .map(|(_, c)| *c)
+            .find(|r| r.day == iso)
+            .map(|r| r.count)
             .unwrap_or(0);
         out.push(DayCount { date: iso, count });
     }
@@ -323,20 +346,21 @@ async fn fetch_new_users_per_week(db: &sqlx::SqlitePool) -> Result<Vec<WeekCount
     let monday = today - Duration::days(today.weekday().num_days_from_monday() as i64);
     let window_start = monday - Duration::weeks(NEW_USERS_PER_WEEK_WINDOW - 1);
 
-    let rows: Vec<(String,)> = sqlx::query_as(
-        "SELECT DATE(created_at) AS day \
-         FROM users \
-         WHERE DATE(created_at) >= ?",
+    let window_start_str = window_start.format("%Y-%m-%d").to_string();
+    let rows = sqlx::query!(
+        r#"SELECT DATE(created_at) AS "day!: String"
+         FROM users
+         WHERE DATE(created_at) >= ?"#,
+        window_start_str,
     )
-    .bind(window_start.format("%Y-%m-%d").to_string())
     .fetch_all(db)
     .await?;
 
     // Bucket in Rust — SQLite's strftime('%W') uses Sunday-start weeks in
     // some builds and is awkward to reconcile with a Monday anchor.
     let mut counts = vec![0i64; NEW_USERS_PER_WEEK_WINDOW as usize];
-    for (day_str,) in &rows {
-        if let Ok(day) = NaiveDate::parse_from_str(day_str, "%Y-%m-%d") {
+    for r in &rows {
+        if let Ok(day) = NaiveDate::parse_from_str(&r.day, "%Y-%m-%d") {
             let days_from_start = (day - window_start).num_days();
             if days_from_start < 0 {
                 continue;
