@@ -73,6 +73,7 @@ const ERROR_MESSAGES: Record<ErrorCode, string> = {
 
 	// Misc user
 	bio_too_long: 'Bio is too long.',
+	bio_already_empty: 'This user has no bio to remove.',
 
 	// Admin
 	admin_required: 'Admin access required.',

@@ -220,6 +220,20 @@ export async function adminGrantInvites(
 	if (!res.ok) await throwApiError(res);
 }
 
+export async function adminRemoveBio(
+	userId: string,
+	reason: string,
+	opts: FetchOpts = {}
+): Promise<void> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f(`/api/admin/users/${encodeURIComponent(userId)}/bio`, {
+		method: 'DELETE',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ reason })
+	});
+	if (!res.ok) await throwApiError(res);
+}
+
 export async function unbanUser(
 	userId: string,
 	reason: string,

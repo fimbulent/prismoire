@@ -35,7 +35,8 @@
 		suspend_user: 'suspended',
 		unsuspend_user: 'unsuspended',
 		revoke_invites: 'revoked invites for',
-		grant_invites: 'granted invites for'
+		grant_invites: 'granted invites for',
+		remove_bio: 'removed bio for'
 	};
 
 	async function loadMore() {

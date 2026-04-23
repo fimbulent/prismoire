@@ -869,6 +869,53 @@ pub async fn admin_grant_invites(
 }
 
 // ---------------------------------------------------------------------------
+// DELETE /api/admin/users/:id/bio — clear a user's bio
+// ---------------------------------------------------------------------------
+
+/// Clear a user's bio. Used to take down inappropriate bio content without
+/// suspending or banning the user.
+pub async fn admin_remove_bio(
+    State(state): State<Arc<AppState>>,
+    Path(user_id): Path<String>,
+    user: AuthUser,
+    Json(req): Json<ReasonRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    require_admin(&user)?;
+
+    let reason = req.reason.trim().to_string();
+    if reason.is_empty() {
+        return Err(AppError::code(ErrorCode::ReasonRequired));
+    }
+
+    let (target_id, _, _, _) = fetch_target_user(&state.db, &user_id).await?;
+
+    // Atomic read-check-update-log: clearing the bio and writing the audit
+    // entry must either both happen or neither. Without the tx, a log-insert
+    // failure after the UPDATE would leave the bio cleared with no record.
+    let mut tx = state.db.begin().await?;
+
+    let (bio,): (Option<String>,) = sqlx::query_as("SELECT bio FROM users WHERE id = ?")
+        .bind(&target_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+    if bio.is_none() {
+        return Err(AppError::code(ErrorCode::BioAlreadyEmpty));
+    }
+
+    sqlx::query("UPDATE users SET bio = NULL WHERE id = ?")
+        .bind(&target_id)
+        .execute(&mut *tx)
+        .await?;
+
+    insert_user_action_log(&mut *tx, &user.user_id, "remove_bio", &target_id, &reason).await?;
+
+    tx.commit().await?;
+
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
 // GET /api/admin/users/:id/invite-tree — preview invite tree
 // ---------------------------------------------------------------------------
 

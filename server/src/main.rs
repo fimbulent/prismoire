@@ -260,6 +260,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/admin/users/{id}/invites",
             post(admin::admin_grant_invites).delete(admin::admin_revoke_invites),
         )
+        .route("/api/admin/users/{id}/bio", delete(admin::admin_remove_bio))
         .route(
             "/api/admin/users/{id}/invite-tree",
             get(admin::get_invite_tree),

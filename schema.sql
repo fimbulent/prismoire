@@ -186,7 +186,8 @@ CREATE TABLE admin_log (
         'ban_user', 'unban_user',
         'suspend_user', 'unsuspend_user',
         'revoke_invites', 'grant_invites',
-        'delete_user'
+        'delete_user',
+        'remove_bio'
     )),
     target_user TEXT REFERENCES users(id),
     thread_id TEXT REFERENCES threads(id),

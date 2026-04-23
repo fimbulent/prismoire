@@ -28,7 +28,8 @@
 		unbanUser,
 		unsuspendUser,
 		adminRevokeInvites,
-		adminGrantInvites
+		adminGrantInvites,
+		adminRemoveBio
 	} from '$lib/api/admin';
 	import Checkbox from '$lib/components/ui/Checkbox.svelte';
 
@@ -221,7 +222,7 @@
 
 	let isAdmin = $derived(session.isAdmin && !profile.is_self && profile.role !== 'admin');
 	let adminOpen = $state(false);
-	let adminAction = $state<'suspend' | 'ban' | 'invites' | null>(null);
+	let adminAction = $state<'suspend' | 'ban' | 'invites' | 'bio' | null>(null);
 	let adminReason = $state('');
 	let adminDuration = $state('1d');
 	let adminBanTree = $state(false);
@@ -318,6 +319,21 @@
 			await adminRefresh();
 		} catch (e) {
 			adminError = errorMessage(e, 'Failed');
+		} finally {
+			adminSaving = false;
+		}
+	}
+
+	async function handleRemoveBio() {
+		const reason = adminReason.trim();
+		if (!reason) { adminError = 'Reason is required'; return; }
+		adminSaving = true;
+		adminError = null;
+		try {
+			await adminRemoveBio(profile.id, reason);
+			await adminRefresh();
+		} catch (e) {
+			adminError = errorMessage(e, 'Failed to remove bio');
 		} finally {
 			adminSaving = false;
 		}
@@ -472,6 +488,9 @@
 									<button onclick={() => { adminAction = 'invites'; }} class="admin-action-btn admin-action-btn-muted">
 										{profile.can_invite ? 'Revoke invites' : 'Grant invites'}
 									</button>
+									{#if profile.bio}
+										<button onclick={() => { adminAction = 'bio'; }} class="admin-action-btn admin-action-btn-muted">Remove bio</button>
+									{/if}
 								</div>
 							{:else if adminAction === 'suspend'}
 								<div>
@@ -557,6 +576,23 @@
 									{/if}
 									<div class="flex gap-2">
 										<button onclick={handleToggleInvites} disabled={adminSaving || !adminReason.trim()} class="admin-action-btn admin-action-btn-muted">{adminSaving ? 'Saving…' : (profile.can_invite ? 'Confirm revoke' : 'Confirm grant')}</button>
+										<button onclick={resetAdminForm} disabled={adminSaving} class="admin-action-btn admin-action-btn-cancel">Cancel</button>
+									</div>
+								</div>
+							{:else if adminAction === 'bio'}
+								<div>
+									<div class="text-xs font-semibold text-text-secondary mb-2">Remove bio for {profile.display_name} — reason (public)</div>
+									<input
+										type="text"
+										bind:value={adminReason}
+										placeholder="Reason for removing bio"
+										class="w-full bg-bg border border-border rounded-md text-text-primary text-sm px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted mb-2"
+									/>
+									{#if adminError}
+										<div class="text-danger text-xs mb-2">{adminError}</div>
+									{/if}
+									<div class="flex gap-2">
+										<button onclick={handleRemoveBio} disabled={adminSaving || !adminReason.trim()} class="admin-action-btn admin-action-btn-muted">{adminSaving ? 'Removing…' : 'Confirm remove'}</button>
 										<button onclick={resetAdminForm} disabled={adminSaving} class="admin-action-btn admin-action-btn-cancel">Cancel</button>
 									</div>
 								</div>

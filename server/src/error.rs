@@ -167,6 +167,8 @@ pub enum ErrorCode {
     // -- Misc user fields --------------------------------------------
     /// Bio exceeds the configured maximum length.
     BioTooLong,
+    /// Admin remove-bio: target user has no bio set.
+    BioAlreadyEmpty,
 
     // -- Admin -------------------------------------------------------
     /// Action requires admin privileges.
@@ -257,7 +259,8 @@ impl ErrorCode {
             | Self::NotSuspended
             | Self::InvitePrivilegeUnchanged
             | Self::UserAlreadyDeleted
-            | Self::RoomAlreadyDeleted => StatusCode::CONFLICT,
+            | Self::RoomAlreadyDeleted
+            | Self::BioAlreadyEmpty => StatusCode::CONFLICT,
 
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
 
@@ -354,6 +357,7 @@ impl ErrorCode {
             Self::InvalidTrustDirection => "direction must be 'trusts' or 'trusted_by'",
 
             Self::BioTooLong => "bio is too long",
+            Self::BioAlreadyEmpty => "user has no bio set",
 
             Self::AdminRequired => "admin access required",
             Self::ReasonRequired => "reason is required",

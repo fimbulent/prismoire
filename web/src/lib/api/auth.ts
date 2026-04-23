@@ -78,6 +78,7 @@ export type ErrorCode =
 	| 'invalid_trust_direction'
 	// Misc user
 	| 'bio_too_long'
+	| 'bio_already_empty'
 	// Admin
 	| 'admin_required'
 	| 'reason_required'
