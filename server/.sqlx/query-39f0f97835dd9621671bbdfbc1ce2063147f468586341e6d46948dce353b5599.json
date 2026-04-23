@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, credential_id, public_key, sign_count, created_at, last_used, label FROM credentials WHERE user_id = ? ORDER BY created_at ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "credential_id",
+        "ordinal": 1,
+        "type_info": "Blob"
+      },
+      {
+        "name": "public_key",
+        "ordinal": 2,
+        "type_info": "Blob"
+      },
+      {
+        "name": "sign_count",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_used",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "label",
+        "ordinal": 6,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "39f0f97835dd9621671bbdfbc1ce2063147f468586341e6d46948dce353b5599"
+}

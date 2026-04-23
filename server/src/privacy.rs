@@ -226,293 +226,222 @@ pub async fn export_my_data(
     let db = &state.db;
     let user_id = user.user_id.as_str();
 
-    let user_row: (
-        String,
-        String,
-        String,
-        String,
-        String,
-        i64,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        i64,
-        Option<String>,
-        Option<String>,
-    ) = sqlx::query_as(
-        "SELECT id, display_name, display_name_skeleton, created_at, signup_method, \
-                steam_verified, status, role, bio, invite_id, can_invite, suspended_until, \
-                deleted_at \
-         FROM users WHERE id = ?",
+    let user_row = sqlx::query!(
+        r#"SELECT id, display_name, display_name_skeleton, created_at, signup_method,
+           steam_verified AS "steam_verified!: bool", status, role, bio, invite_id,
+           can_invite AS "can_invite!: bool", suspended_until, deleted_at
+           FROM users WHERE id = ?"#,
+        user_id,
     )
-    .bind(user_id)
     .fetch_one(db)
     .await?;
 
-    let (
-        id,
-        display_name,
-        display_name_skeleton_val,
-        created_at,
-        signup_method,
-        steam_verified,
-        status,
-        role,
-        bio,
-        invite_id,
-        can_invite,
-        suspended_until,
-        deleted_at,
-    ) = user_row;
-
     // Resolve the inviter's display name if we have an invite_id.
-    let inviter_display_name: Option<String> = if let Some(iid) = invite_id.as_deref() {
-        sqlx::query_as::<_, (String,)>(
+    let inviter_display_name: Option<String> = if let Some(iid) = user_row.invite_id.as_deref() {
+        sqlx::query!(
             "SELECT u.display_name FROM invites i \
              JOIN users u ON u.id = i.created_by \
              WHERE i.id = ?",
+            iid,
         )
-        .bind(iid)
         .fetch_optional(db)
         .await?
-        .map(|(n,)| n)
+        .map(|r| r.display_name)
     } else {
         None
     };
 
-    let (theme,): (String,) = sqlx::query_as(
-        "SELECT COALESCE((SELECT theme FROM user_settings WHERE user_id = ?), 'rose-pine')",
+    let theme = sqlx::query!(
+        r#"SELECT COALESCE((SELECT theme FROM user_settings WHERE user_id = ?), 'rose-pine') AS "theme!: String""#,
+        user_id,
     )
-    .bind(user_id)
     .fetch_one(db)
-    .await?;
+    .await?
+    .theme;
 
-    let credential_rows: Vec<(
-        String,
-        Vec<u8>,
-        Vec<u8>,
-        i64,
-        String,
-        String,
-        Option<String>,
-    )> = sqlx::query_as(
+    let credential_rows = sqlx::query!(
         "SELECT id, credential_id, public_key, sign_count, created_at, last_used, label \
-             FROM credentials WHERE user_id = ? ORDER BY created_at ASC",
+         FROM credentials WHERE user_id = ? ORDER BY created_at ASC",
+        user_id,
     )
-    .bind(user_id)
     .fetch_all(db)
     .await?;
 
     let credentials: Vec<CredentialExport> = credential_rows
         .into_iter()
-        .map(
-            |(id, credential_id, public_key, sign_count, created_at, last_used, label)| {
-                CredentialExport {
-                    id,
-                    credential_id_b64: b64(&credential_id),
-                    public_key_b64: b64(&public_key),
-                    sign_count,
-                    created_at,
-                    last_used,
-                    label,
-                }
-            },
-        )
+        .map(|r| CredentialExport {
+            id: r.id,
+            credential_id_b64: b64(&r.credential_id),
+            public_key_b64: b64(&r.public_key),
+            sign_count: r.sign_count,
+            created_at: r.created_at,
+            last_used: r.last_used,
+            label: r.label,
+        })
         .collect();
 
-    let signing_key_rows: Vec<(String, Vec<u8>, Vec<u8>, String, i64)> = sqlx::query_as(
-        "SELECT id, public_key, private_key, created_at, active \
-         FROM signing_keys WHERE user_id = ? ORDER BY created_at ASC",
+    let signing_key_rows = sqlx::query!(
+        r#"SELECT id, public_key, private_key, created_at, active AS "active!: bool"
+         FROM signing_keys WHERE user_id = ? ORDER BY created_at ASC"#,
+        user_id,
     )
-    .bind(user_id)
     .fetch_all(db)
     .await?;
 
     let signing_keys: Vec<SigningKeyExport> = signing_key_rows
         .into_iter()
-        .map(
-            |(id, public_key, private_key, created_at, active)| SigningKeyExport {
-                id,
-                public_key_b64: b64(&public_key),
-                private_key_b64: b64(&private_key),
-                created_at,
-                active: active != 0,
-            },
-        )
+        .map(|r| SigningKeyExport {
+            id: r.id,
+            public_key_b64: b64(&r.public_key),
+            private_key_b64: b64(&r.private_key),
+            created_at: r.created_at,
+            active: r.active,
+        })
         .collect();
 
-    let trust_edge_rows: Vec<(String, String, String, String, String, Option<String>)> =
-        sqlx::query_as(
-            "SELECT te.id, te.target_user, u.display_name, te.trust_type, te.created_at, te.reason \
-             FROM trust_edges te \
-             JOIN users u ON u.id = te.target_user \
-             WHERE te.source_user = ? \
-             ORDER BY te.created_at ASC",
-        )
-        .bind(user_id)
-        .fetch_all(db)
-        .await?;
+    let trust_edge_rows = sqlx::query!(
+        "SELECT te.id, te.target_user, u.display_name, te.trust_type, te.created_at, te.reason \
+         FROM trust_edges te \
+         JOIN users u ON u.id = te.target_user \
+         WHERE te.source_user = ? \
+         ORDER BY te.created_at ASC",
+        user_id,
+    )
+    .fetch_all(db)
+    .await?;
 
     let trust_edges_outbound: Vec<TrustEdgeExport> = trust_edge_rows
         .into_iter()
-        .map(
-            |(id, target_user_id, target_display_name, trust_type, created_at, reason)| {
-                TrustEdgeExport {
-                    id,
-                    target_user_id,
-                    target_display_name,
-                    trust_type,
-                    created_at,
-                    reason,
-                }
-            },
-        )
+        .map(|r| TrustEdgeExport {
+            id: r.id,
+            target_user_id: r.target_user,
+            target_display_name: r.display_name,
+            trust_type: r.trust_type,
+            created_at: r.created_at,
+            reason: r.reason,
+        })
         .collect();
 
-    let invite_rows: Vec<(
-        String,
-        String,
-        String,
-        Option<String>,
-        Option<i64>,
-        Option<String>,
-    )> = sqlx::query_as(
+    let invite_rows = sqlx::query!(
         "SELECT id, code, created_at, revoked_at, max_uses, expires_at \
-             FROM invites WHERE created_by = ? ORDER BY created_at ASC",
+         FROM invites WHERE created_by = ? ORDER BY created_at ASC",
+        user_id,
     )
-    .bind(user_id)
     .fetch_all(db)
     .await?;
 
     let invites_created: Vec<InviteExport> = invite_rows
         .into_iter()
-        .map(
-            |(id, code, created_at, revoked_at, max_uses, expires_at)| InviteExport {
-                id,
-                code,
-                created_at,
-                revoked_at,
-                max_uses,
-                expires_at,
-            },
-        )
+        .map(|r| InviteExport {
+            id: r.id,
+            code: r.code,
+            created_at: r.created_at,
+            revoked_at: r.revoked_at,
+            max_uses: r.max_uses,
+            expires_at: r.expires_at,
+        })
         .collect();
 
-    let thread_rows: Vec<(String, String, String, String, i64, i64)> = sqlx::query_as(
-        "SELECT t.id, t.title, r.slug, t.created_at, t.locked, t.reply_count \
-         FROM threads t \
-         JOIN rooms r ON r.id = t.room \
-         WHERE t.author = ? \
-         ORDER BY t.created_at ASC",
+    let thread_rows = sqlx::query!(
+        r#"SELECT t.id, t.title, r.slug, t.created_at, t.locked AS "locked!: bool", t.reply_count
+         FROM threads t
+         JOIN rooms r ON r.id = t.room
+         WHERE t.author = ?
+         ORDER BY t.created_at ASC"#,
+        user_id,
     )
-    .bind(user_id)
     .fetch_all(db)
     .await?;
 
     let threads: Vec<ThreadExport> = thread_rows
         .into_iter()
-        .map(
-            |(id, title, room_slug, created_at, locked, reply_count)| ThreadExport {
-                id,
-                title,
-                room_slug,
-                created_at,
-                locked: locked != 0,
-                reply_count,
-            },
-        )
+        .map(|r| ThreadExport {
+            id: r.id,
+            title: r.title,
+            room_slug: r.slug,
+            created_at: r.created_at,
+            locked: r.locked,
+            reply_count: r.reply_count,
+        })
         .collect();
 
-    let post_rows: Vec<(String, String, Option<String>, String, Option<String>)> = sqlx::query_as(
+    let post_rows = sqlx::query!(
         "SELECT id, thread, parent, created_at, retracted_at \
          FROM posts WHERE author = ? ORDER BY created_at ASC",
+        user_id,
     )
-    .bind(user_id)
     .fetch_all(db)
     .await?;
 
     let mut posts: Vec<PostExport> = Vec::with_capacity(post_rows.len());
-    for (id, thread_id, parent_id, created_at, retracted_at) in post_rows {
-        let revision_rows: Vec<(i64, String, Vec<u8>, String)> = sqlx::query_as(
+    for post_row in post_rows {
+        let revision_rows = sqlx::query!(
             "SELECT revision, body, signature, created_at \
              FROM post_revisions WHERE post_id = ? ORDER BY revision ASC",
+            post_row.id,
         )
-        .bind(&id)
         .fetch_all(db)
         .await?;
 
         let revisions = revision_rows
             .into_iter()
-            .map(
-                |(revision, body, signature, created_at)| PostRevisionExport {
-                    revision,
-                    body,
-                    signature_b64: b64(&signature),
-                    created_at,
-                },
-            )
+            .map(|r| PostRevisionExport {
+                revision: r.revision,
+                body: r.body,
+                signature_b64: b64(&r.signature),
+                created_at: r.created_at,
+            })
             .collect();
 
         posts.push(PostExport {
-            id,
-            thread_id,
-            parent_id,
-            created_at,
-            retracted_at,
+            id: post_row.id,
+            thread_id: post_row.thread,
+            parent_id: post_row.parent,
+            created_at: post_row.created_at,
+            retracted_at: post_row.retracted_at,
             revisions,
         });
     }
 
-    let report_rows: Vec<(
-        String,
-        String,
-        String,
-        Option<String>,
-        String,
-        String,
-        Option<String>,
-    )> = sqlx::query_as(
+    let report_rows = sqlx::query!(
         "SELECT id, post_id, reason, detail, status, created_at, resolved_at \
-             FROM reports WHERE reporter = ? ORDER BY created_at ASC",
+         FROM reports WHERE reporter = ? ORDER BY created_at ASC",
+        user_id,
     )
-    .bind(user_id)
     .fetch_all(db)
     .await?;
 
     let reports_filed: Vec<ReportExport> = report_rows
         .into_iter()
-        .map(
-            |(id, post_id, reason, detail, status, created_at, resolved_at)| ReportExport {
-                id,
-                post_id,
-                reason,
-                detail,
-                status,
-                created_at,
-                resolved_at,
-            },
-        )
+        .map(|r| ReportExport {
+            id: r.id,
+            post_id: r.post_id,
+            reason: r.reason,
+            detail: r.detail,
+            status: r.status,
+            created_at: r.created_at,
+            resolved_at: r.resolved_at,
+        })
         .collect();
 
     // Moderation actions where the user is the target. Only action +
     // reason + timestamp are exported — referenced post/thread/room ids
     // stay out so the export does not leak other users' content.
-    let admin_log_rows: Vec<(String, String, Option<String>, String)> = sqlx::query_as(
+    let admin_log_rows = sqlx::query!(
         "SELECT id, action, reason, created_at \
          FROM admin_log WHERE target_user = ? ORDER BY created_at ASC",
+        user_id,
     )
-    .bind(user_id)
     .fetch_all(db)
     .await?;
 
     let moderation_actions_against_me: Vec<AdminLogExport> = admin_log_rows
         .into_iter()
-        .map(|(id, action, reason, created_at)| AdminLogExport {
-            id,
-            action,
-            reason,
-            created_at,
+        .map(|r| AdminLogExport {
+            id: r.id,
+            action: r.action,
+            reason: r.reason,
+            created_at: r.created_at,
         })
         .collect();
 
@@ -522,20 +451,20 @@ pub async fn export_my_data(
         export_version: EXPORT_VERSION,
         exported_at,
         user: UserExport {
-            id,
-            display_name,
-            display_name_skeleton: display_name_skeleton_val,
-            created_at,
-            signup_method,
-            steam_verified: steam_verified != 0,
-            status,
-            role,
-            bio,
-            invite_id,
+            id: user_row.id,
+            display_name: user_row.display_name,
+            display_name_skeleton: user_row.display_name_skeleton,
+            created_at: user_row.created_at,
+            signup_method: user_row.signup_method,
+            steam_verified: user_row.steam_verified,
+            status: user_row.status,
+            role: user_row.role,
+            bio: user_row.bio,
+            invite_id: user_row.invite_id,
             inviter_display_name,
-            can_invite: can_invite != 0,
-            suspended_until,
-            deleted_at,
+            can_invite: user_row.can_invite,
+            suspended_until: user_row.suspended_until,
+            deleted_at: user_row.deleted_at,
         },
         settings: SettingsExport { theme },
         credentials,
@@ -646,15 +575,16 @@ pub(crate) async fn soft_delete_user(
     // destroy accountability — the original signature remains
     // cryptographically valid"). The SELECT runs on the caller's
     // transaction so it sees the same snapshot as the later UPDATEs.
-    let key_row: Option<(Vec<u8>,)> =
-        sqlx::query_as("SELECT private_key FROM signing_keys WHERE user_id = ? AND active = 1")
-            .bind(user_id)
-            .fetch_optional(&mut **tx)
-            .await?;
+    let key_row = sqlx::query!(
+        "SELECT private_key FROM signing_keys WHERE user_id = ? AND active = 1",
+        user_id,
+    )
+    .fetch_optional(&mut **tx)
+    .await?;
 
     let signing_key = match key_row {
-        Some((bytes,)) => {
-            let key_bytes: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
+        Some(row) => {
+            let key_bytes: [u8; 32] = row.private_key.try_into().map_err(|v: Vec<u8>| {
                 eprintln!(
                     "privacy::soft_delete_user: signing key for user {user_id} has invalid length {} (expected 32)",
                     v.len()
@@ -677,11 +607,12 @@ pub(crate) async fn soft_delete_user(
     // Find every post that still needs retracting. Runs inside the
     // caller-owned transaction so a concurrent post creation between
     // SELECT and UPDATE can't leave a fresh post un-retracted.
-    let posts_to_retract: Vec<(String,)> =
-        sqlx::query_as("SELECT id FROM posts WHERE author = ? AND retracted_at IS NULL")
-            .bind(user_id)
-            .fetch_all(&mut **tx)
-            .await?;
+    let posts_to_retract = sqlx::query!(
+        "SELECT id FROM posts WHERE author = ? AND retracted_at IS NULL",
+        user_id,
+    )
+    .fetch_all(&mut **tx)
+    .await?;
 
     // Pre-compute retraction signatures in memory so the subsequent
     // UPDATEs are pure DB work (signing is CPU-only and does not touch
@@ -689,10 +620,10 @@ pub(crate) async fn soft_delete_user(
     let retractions: Vec<(String, Vec<u8>)> = if let Some(key) = signing_key.as_ref() {
         posts_to_retract
             .into_iter()
-            .map(|(post_id,)| {
-                let msg = format!("retract:{post_id}");
+            .map(|r| {
+                let msg = format!("retract:{}", r.id);
                 let sig = key.sign(msg.as_bytes()).to_bytes().to_vec();
-                (post_id, sig)
+                (r.id, sig)
             })
             .collect()
     } else {
@@ -702,7 +633,7 @@ pub(crate) async fn soft_delete_user(
         // retracted_at timestamp alone is still meaningful.
         posts_to_retract
             .into_iter()
-            .map(|(post_id,)| (post_id, Vec::new()))
+            .map(|r| (r.id, Vec::new()))
             .collect()
     };
 
@@ -711,19 +642,21 @@ pub(crate) async fn soft_delete_user(
     //    can make in an account lifetime, which is fine for an
     //    interactive delete.
     for (post_id, sig) in &retractions {
-        sqlx::query(
+        sqlx::query!(
             "UPDATE posts SET retracted_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), \
              retraction_signature = ? WHERE id = ?",
+            sig,
+            post_id,
         )
-        .bind(sig)
-        .bind(post_id)
         .execute(&mut **tx)
         .await?;
 
-        sqlx::query("UPDATE post_revisions SET body = '' WHERE post_id = ?")
-            .bind(post_id)
-            .execute(&mut **tx)
-            .await?;
+        sqlx::query!(
+            "UPDATE post_revisions SET body = '' WHERE post_id = ?",
+            post_id,
+        )
+        .execute(&mut **tx)
+        .await?;
     }
 
     // 2. Anonymise the user row. We keep the row (FKs from rooms,
@@ -736,33 +669,30 @@ pub(crate) async fn soft_delete_user(
     //    looks neutral post-deletion — moderation state on a dead
     //    account has no meaning and would only be noise in audit
     //    tooling.
-    sqlx::query(
+    sqlx::query!(
         "UPDATE users SET display_name = ?, display_name_skeleton = ?, bio = NULL, \
          deleted_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), can_invite = 0, \
          status = 'active', suspended_until = NULL \
          WHERE id = ? AND deleted_at IS NULL",
+        anon_name,
+        anon_skeleton,
+        user_id,
     )
-    .bind(&anon_name)
-    .bind(&anon_skeleton)
-    .bind(user_id)
     .execute(&mut **tx)
     .await?;
 
     // 3. Drop credentials so passkey login is no longer possible.
-    sqlx::query("DELETE FROM credentials WHERE user_id = ?")
-        .bind(user_id)
+    sqlx::query!("DELETE FROM credentials WHERE user_id = ?", user_id)
         .execute(&mut **tx)
         .await?;
 
     // 4. Drop all sessions (including the caller's current session).
-    sqlx::query("DELETE FROM sessions WHERE user_id = ?")
-        .bind(user_id)
+    sqlx::query!("DELETE FROM sessions WHERE user_id = ?", user_id)
         .execute(&mut **tx)
         .await?;
 
     // 5. Drop per-user settings.
-    sqlx::query("DELETE FROM user_settings WHERE user_id = ?")
-        .bind(user_id)
+    sqlx::query!("DELETE FROM user_settings WHERE user_id = ?", user_id)
         .execute(&mut **tx)
         .await?;
 
@@ -773,11 +703,13 @@ pub(crate) async fn soft_delete_user(
     //    authenticate, can't post, and its existing posts are all
     //    retracted), so keeping them around would just mean latent
     //    noise in the trust graph with no behaviour to vouch for.
-    sqlx::query("DELETE FROM trust_edges WHERE source_user = ? OR target_user = ?")
-        .bind(user_id)
-        .bind(user_id)
-        .execute(&mut **tx)
-        .await?;
+    sqlx::query!(
+        "DELETE FROM trust_edges WHERE source_user = ? OR target_user = ?",
+        user_id,
+        user_id,
+    )
+    .execute(&mut **tx)
+    .await?;
 
     // 6b. Drop ban/suspend trust snapshots that reference the deleted
     //     user in either capacity. As a `target_user`: self-delete
@@ -790,35 +722,38 @@ pub(crate) async fn soft_delete_user(
     //     to pollute the ban-adjacent watchlist with ghost rows.
     //     (Watchlist queries already filter deleted users, so this is
     //     belt-and-suspenders for any future consumer of the table.)
-    sqlx::query("DELETE FROM ban_trust_snapshots WHERE target_user = ? OR trusting_user = ?")
-        .bind(user_id)
-        .bind(user_id)
-        .execute(&mut **tx)
-        .await?;
+    sqlx::query!(
+        "DELETE FROM ban_trust_snapshots WHERE target_user = ? OR trusting_user = ?",
+        user_id,
+        user_id,
+    )
+    .execute(&mut **tx)
+    .await?;
 
     // 7. Drop any in-flight WebAuthn challenges tied to the user.
-    sqlx::query("DELETE FROM auth_challenges WHERE user_id = ?")
-        .bind(user_id)
+    sqlx::query!("DELETE FROM auth_challenges WHERE user_id = ?", user_id)
         .execute(&mut **tx)
         .await?;
 
     // 8. Revoke any open invites the user created so nobody else can
     //    sign up against the deleted account.
-    sqlx::query(
+    sqlx::query!(
         "UPDATE invites SET revoked_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
          WHERE created_by = ? AND revoked_at IS NULL",
+        user_id,
     )
-    .bind(user_id)
     .execute(&mut **tx)
     .await?;
 
     // 9. Deactivate signing keys rather than deleting them. Existing
     //    post-revision signatures remain verifiable against the public
     //    half, so content accountability is preserved.
-    sqlx::query("UPDATE signing_keys SET active = 0 WHERE user_id = ?")
-        .bind(user_id)
-        .execute(&mut **tx)
-        .await?;
+    sqlx::query!(
+        "UPDATE signing_keys SET active = 0 WHERE user_id = ?",
+        user_id
+    )
+    .execute(&mut **tx)
+    .await?;
 
     Ok(())
 }

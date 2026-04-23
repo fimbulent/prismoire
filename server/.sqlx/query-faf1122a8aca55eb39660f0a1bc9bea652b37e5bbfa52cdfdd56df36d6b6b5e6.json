@@ -1,0 +1,92 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, display_name, display_name_skeleton, created_at, signup_method,\n           steam_verified AS \"steam_verified!: bool\", status, role, bio, invite_id,\n           can_invite AS \"can_invite!: bool\", suspended_until, deleted_at\n           FROM users WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "display_name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "display_name_skeleton",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "signup_method",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "steam_verified!: bool",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "status",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "role",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "bio",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "invite_id",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "can_invite!: bool",
+        "ordinal": 10,
+        "type_info": "Integer"
+      },
+      {
+        "name": "suspended_until",
+        "ordinal": 11,
+        "type_info": "Text"
+      },
+      {
+        "name": "deleted_at",
+        "ordinal": 12,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "faf1122a8aca55eb39660f0a1bc9bea652b37e5bbfa52cdfdd56df36d6b6b5e6"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE users SET display_name = ?, display_name_skeleton = ?, bio = NULL, deleted_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), can_invite = 0, status = 'active', suspended_until = NULL WHERE id = ? AND deleted_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "8b5da62fe1dbb47b78190e2e0df2cf42713a402999db3a23927d4ba0bf12268e"
+}

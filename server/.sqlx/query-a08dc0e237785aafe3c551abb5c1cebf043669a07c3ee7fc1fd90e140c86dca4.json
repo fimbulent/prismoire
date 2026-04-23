@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COALESCE((SELECT theme FROM user_settings WHERE user_id = ?), 'rose-pine') AS \"theme!: String\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "theme!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a08dc0e237785aafe3c551abb5c1cebf043669a07c3ee7fc1fd90e140c86dca4"
+}

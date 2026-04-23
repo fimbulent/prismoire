@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT t.id, t.title, r.slug, t.created_at, t.locked AS \"locked!: bool\", t.reply_count\n         FROM threads t\n         JOIN rooms r ON r.id = t.room\n         WHERE t.author = ?\n         ORDER BY t.created_at ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "title",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "slug",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "locked!: bool",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "reply_count",
+        "ordinal": 5,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "aeb8cb378ca5d56cb9a813aa6cf039f79d8d7bf7c56ae82716a790268b0169b5"
+}

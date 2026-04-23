@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE signing_keys SET active = 0 WHERE user_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "6f44e8e770604893f8dc6b5bfc3bfb50e958101b09a26022df07dc9e6f73aa82"
+}

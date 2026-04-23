@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM ban_trust_snapshots WHERE target_user = ? OR trusting_user = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "88f6955ca8e6020fb3be4d081911d6672103e74f71b4924d4eae8b0112c2c457"
+}

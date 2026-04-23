@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT revision, body, signature, created_at FROM post_revisions WHERE post_id = ? ORDER BY revision ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "revision",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "body",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "signature",
+        "ordinal": 2,
+        "type_info": "Blob"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "67cf0410479e6b408cda4e08cb45456a663a4fc99bf289ece2b18510e15367ba"
+}

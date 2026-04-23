@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT te.id, te.target_user, u.display_name, te.trust_type, te.created_at, te.reason FROM trust_edges te JOIN users u ON u.id = te.target_user WHERE te.source_user = ? ORDER BY te.created_at ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "target_user",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "display_name",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "trust_type",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "reason",
+        "ordinal": 5,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "902dbcf1a56bffdfcf1112559be2cb6a3053eb50f05db1d3e52a41977bad0a87"
+}

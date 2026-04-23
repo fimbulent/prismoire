@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, code, created_at, revoked_at, max_uses, expires_at FROM invites WHERE created_by = ? ORDER BY created_at ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "code",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "revoked_at",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "max_uses",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "expires_at",
+        "ordinal": 5,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "a508c67302de075ae44c6763e046249fba19d98642946f1ffb87f0e9a8eb0408"
+}
