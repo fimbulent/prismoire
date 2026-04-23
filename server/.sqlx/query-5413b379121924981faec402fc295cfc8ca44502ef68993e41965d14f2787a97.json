@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO thread_recent_repliers (thread_id, reply_rank, replier_id, replied_at) VALUES (?, 0, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "5413b379121924981faec402fc295cfc8ca44502ef68993e41965d14f2787a97"
+}

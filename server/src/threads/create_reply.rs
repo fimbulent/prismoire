@@ -31,67 +31,73 @@ pub async fn create_reply(
     let body = validate_body(&req.body, MAX_REPLY_BODY_LEN)
         .map_err(|msg| AppError::with_message(ErrorCode::InvalidPostBody, msg))?;
 
-    let thread = sqlx::query_as::<_, (String, bool, String)>(
-        "SELECT id, locked, author FROM threads WHERE id = ?",
+    let thread = sqlx::query!(
+        r#"SELECT locked AS "locked: bool", author FROM threads WHERE id = ?"#,
+        thread_id,
     )
-    .bind(&thread_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| AppError::code(ErrorCode::ThreadNotFound))?;
 
-    let (_tid, locked, thread_author) = thread;
-    if locked {
+    if thread.locked {
         return Err(AppError::code(ErrorCode::ThreadLocked));
     }
+    let thread_author = thread.author;
 
-    let parent = sqlx::query_as::<_, (String, String, Option<String>)>(
+    let parent = sqlx::query!(
         "SELECT id, thread, retracted_at FROM posts WHERE id = ?",
+        req.parent_id,
     )
-    .bind(&req.parent_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| AppError::code(ErrorCode::PostNotFound))?;
 
-    let (parent_id, parent_thread, parent_retracted) = parent;
-    if parent_thread != thread_id {
+    if parent.thread != thread_id {
         return Err(AppError::code(ErrorCode::ParentThreadMismatch));
     }
-    if parent_retracted.is_some() {
+    if parent.retracted_at.is_some() {
         return Err(AppError::code(ErrorCode::ParentRetracted));
     }
+    let parent_id = parent.id;
 
     let signature = signing::sign_message(&state.db, &user.user_id, body.as_bytes()).await?;
 
     let post_id = uuid::Uuid::new_v4().to_string();
 
-    sqlx::query("INSERT INTO posts (id, author, thread, parent) VALUES (?, ?, ?, ?)")
-        .bind(&post_id)
-        .bind(&user.user_id)
-        .bind(&thread_id)
-        .bind(&parent_id)
-        .execute(&state.db)
-        .await?;
-
-    sqlx::query(
-        "INSERT INTO post_revisions (post_id, revision, body, signature) VALUES (?, 0, ?, ?)",
+    sqlx::query!(
+        "INSERT INTO posts (id, author, thread, parent) VALUES (?, ?, ?, ?)",
+        post_id,
+        user.user_id,
+        thread_id,
+        parent_id,
     )
-    .bind(&post_id)
-    .bind(&body)
-    .bind(&signature)
     .execute(&state.db)
     .await?;
 
-    let (post_created_at,): (String,) =
-        sqlx::query_as("SELECT created_at FROM post_revisions WHERE post_id = ? AND revision = 0")
-            .bind(&post_id)
-            .fetch_one(&state.db)
-            .await?;
+    sqlx::query!(
+        "INSERT INTO post_revisions (post_id, revision, body, signature) VALUES (?, 0, ?, ?)",
+        post_id,
+        body,
+        signature,
+    )
+    .execute(&state.db)
+    .await?;
 
-    sqlx::query("UPDATE threads SET reply_count = reply_count + 1, last_activity = ? WHERE id = ?")
-        .bind(&post_created_at)
-        .bind(&thread_id)
-        .execute(&state.db)
-        .await?;
+    let post_created_at = sqlx::query!(
+        "SELECT created_at FROM post_revisions WHERE post_id = ? AND revision = 0",
+        post_id,
+    )
+    .fetch_one(&state.db)
+    .await?
+    .created_at;
+
+    sqlx::query!(
+        "UPDATE threads SET reply_count = reply_count + 1, last_activity = ? WHERE id = ?",
+        post_created_at,
+        thread_id,
+    )
+    .execute(&state.db)
+    .await?;
 
     // Shift recent-repliers ranks up by 1 and insert the new reply at rank 0.
     //
@@ -104,44 +110,44 @@ pub async fn create_reply(
     let mut tx = state.db.begin().await?;
 
     // 1. Trim the tail to make room after the shift.
-    sqlx::query(
+    sqlx::query!(
         "DELETE FROM thread_recent_repliers \
          WHERE thread_id = ? AND reply_rank >= ? - 1",
+        thread_id,
+        RECENT_REPLIERS_BUFFER,
     )
-    .bind(&thread_id)
-    .bind(RECENT_REPLIERS_BUFFER)
     .execute(&mut *tx)
     .await?;
 
     // 2. Shift to negative intermediates: rank 0 → -1, 1 → -2, etc.
     //    All values are unique and don't collide with each other.
-    sqlx::query(
+    sqlx::query!(
         "UPDATE thread_recent_repliers \
          SET reply_rank = -(reply_rank + 1) \
          WHERE thread_id = ?",
+        thread_id,
     )
-    .bind(&thread_id)
     .execute(&mut *tx)
     .await?;
 
     // 3. Flip back to positive: -1 → 1, -2 → 2, etc. (shifted +1).
-    sqlx::query(
+    sqlx::query!(
         "UPDATE thread_recent_repliers \
          SET reply_rank = -reply_rank \
          WHERE thread_id = ? AND reply_rank < 0",
+        thread_id,
     )
-    .bind(&thread_id)
     .execute(&mut *tx)
     .await?;
 
     // 4. Insert new reply at rank 0.
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO thread_recent_repliers (thread_id, reply_rank, replier_id, replied_at) \
          VALUES (?, 0, ?, ?)",
+        thread_id,
+        user.user_id,
+        post_created_at,
     )
-    .bind(&thread_id)
-    .bind(&user.user_id)
-    .bind(&post_created_at)
     .execute(&mut *tx)
     .await?;
 

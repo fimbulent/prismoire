@@ -12,9 +12,7 @@ use crate::session::OptionalAuthUser;
 use crate::state::AppState;
 use crate::trust::{MINIMUM_TRUST_THRESHOLD, TrustInfo, UserStatus, load_distrust_set};
 
-use super::common::{
-    PostResponse, RepliesPageResponse, SubtreeResponse, ThreadDetailResponse, sql_placeholders,
-};
+use super::common::{PostResponse, RepliesPageResponse, SubtreeResponse, ThreadDetailResponse};
 
 /// Maximum number of top-level replies returned in the initial thread view.
 const TOP_LEVEL_LIMIT: usize = 30;
@@ -444,43 +442,26 @@ struct BodyInfo {
 
 /// Fetch thread metadata (pass 0).
 async fn fetch_thread_info(db: &sqlx::SqlitePool, thread_id: &str) -> Result<ThreadInfo, AppError> {
-    let row = sqlx::query_as::<
-        _,
-        (
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            bool,
-            bool,
-        ),
-    >(
-        "SELECT t.id, t.title, t.author, u.display_name, t.created_at, \
-         r.id, r.slug, t.locked, (r.slug = 'announcements') AS is_announcement \
-         FROM threads t \
-         JOIN users u ON u.id = t.author \
-         JOIN rooms r ON r.id = t.room \
-         WHERE t.id = ?",
+    sqlx::query_as!(
+        ThreadInfo,
+        r#"SELECT t.id AS "id!",
+                  t.title AS "title!",
+                  t.author AS "author_id!",
+                  u.display_name AS "author_name!",
+                  t.created_at AS "created_at!",
+                  r.id AS "room_id!",
+                  r.slug AS "room_slug!",
+                  t.locked AS "locked!: bool",
+                  (r.slug = 'announcements') AS "is_announcement!: bool"
+           FROM threads t
+           JOIN users u ON u.id = t.author
+           JOIN rooms r ON r.id = t.room
+           WHERE t.id = ?"#,
+        thread_id,
     )
-    .bind(thread_id)
     .fetch_optional(db)
     .await?
-    .ok_or_else(|| AppError::code(ErrorCode::ThreadNotFound))?;
-
-    Ok(ThreadInfo {
-        id: row.0,
-        title: row.1,
-        author_id: row.2,
-        author_name: row.3,
-        created_at: row.4,
-        room_id: row.5,
-        room_slug: row.6,
-        locked: row.7,
-        is_announcement: row.8,
-    })
+    .ok_or_else(|| AppError::code(ErrorCode::ThreadNotFound))
 }
 
 /// Gate anonymous thread access to announcement rooms only.
@@ -500,70 +481,37 @@ fn require_auth_for_non_announcement(
 }
 
 /// Pass 1: fetch post metadata without bodies.
-#[allow(clippy::type_complexity)]
 async fn fetch_post_metadata(
     db: &sqlx::SqlitePool,
     thread_id: &str,
 ) -> Result<Vec<PostMeta>, AppError> {
-    let rows = sqlx::query_as::<
-        _,
-        (
-            String,
-            Option<String>,
-            String,
-            String,
-            String,
-            Option<String>,
-            String,
-            Option<String>,
-        ),
-    >(
-        "SELECT p.id, p.parent, p.author, u.display_name, u.status, u.deleted_at, \
-                p.created_at, p.retracted_at \
-         FROM posts p \
-         JOIN users u ON u.id = p.author \
-         WHERE p.thread = ? \
-         ORDER BY p.created_at ASC",
+    let rows = sqlx::query!(
+        r#"SELECT p.id AS "id!", p.parent, p.author AS "author!",
+                  u.display_name, u.status, u.deleted_at,
+                  p.created_at AS "created_at!", p.retracted_at
+           FROM posts p
+           JOIN users u ON u.id = p.author
+           WHERE p.thread = ?
+           ORDER BY p.created_at ASC"#,
+        thread_id,
     )
-    .bind(thread_id)
     .fetch_all(db)
     .await?;
 
     Ok(rows
         .into_iter()
-        .map(
-            |(
-                id,
-                parent_id,
-                author_id,
-                author_name,
-                author_status,
-                author_deleted_at,
-                created_at,
-                retracted_at,
-            ): (
-                String,
-                Option<String>,
-                String,
-                String,
-                String,
-                Option<String>,
-                String,
-                Option<String>,
-            )| {
-                let raw =
-                    UserStatus::try_from(author_status.as_str()).unwrap_or(UserStatus::Active);
-                PostMeta {
-                    id,
-                    parent_id,
-                    author_id,
-                    author_name,
-                    author_status: UserStatus::effective(raw, author_deleted_at.as_deref()),
-                    created_at,
-                    retracted_at,
-                }
-            },
-        )
+        .map(|row| {
+            let raw = UserStatus::try_from(row.status.as_str()).unwrap_or(UserStatus::Active);
+            PostMeta {
+                id: row.id,
+                parent_id: row.parent,
+                author_id: row.author,
+                author_name: row.display_name,
+                author_status: UserStatus::effective(raw, row.deleted_at.as_deref()),
+                created_at: row.created_at,
+                retracted_at: row.retracted_at,
+            }
+        })
         .collect())
 }
 
@@ -576,37 +524,37 @@ async fn fetch_bodies(
         return Ok(HashMap::new());
     }
 
-    let placeholders = sql_placeholders(post_ids.len());
-    let sql = format!(
-        "SELECT pr.post_id, pr.body, pr.created_at, pr.revision, \
-         (SELECT pr0.created_at FROM post_revisions pr0 WHERE pr0.post_id = pr.post_id AND pr0.revision = 0) AS original_at \
-         FROM post_revisions pr \
-         WHERE pr.post_id IN {placeholders} \
-           AND pr.revision = ( \
-               SELECT MAX(pr2.revision) FROM post_revisions pr2 WHERE pr2.post_id = pr.post_id \
-           )"
-    );
+    let ids_json =
+        serde_json::to_string(post_ids).map_err(|_| AppError::code(ErrorCode::Internal))?;
 
-    let mut query = sqlx::query_as::<_, (String, String, String, i64, String)>(&sql);
-    for id in post_ids {
-        query = query.bind(id);
-    }
-
-    let rows = query.fetch_all(db).await?;
+    let rows = sqlx::query!(
+        r#"SELECT pr.post_id AS "post_id!",
+                  pr.body AS "body!",
+                  pr.created_at AS "latest_revision_at!",
+                  pr.revision AS "revision!"
+           FROM post_revisions pr
+           WHERE pr.post_id IN (SELECT value FROM json_each(?))
+             AND pr.revision = (
+                 SELECT MAX(pr2.revision) FROM post_revisions pr2 WHERE pr2.post_id = pr.post_id
+             )"#,
+        ids_json,
+    )
+    .fetch_all(db)
+    .await?;
 
     let mut map = HashMap::with_capacity(rows.len());
-    for (post_id, body, latest_revision_at, revision, _original_at) in rows {
-        let edited_at = if revision > 0 {
-            Some(latest_revision_at)
+    for row in rows {
+        let edited_at = if row.revision > 0 {
+            Some(row.latest_revision_at)
         } else {
             None
         };
         map.insert(
-            post_id,
+            row.post_id,
             BodyInfo {
-                body,
+                body: row.body,
                 edited_at,
-                revision,
+                revision: row.revision,
             },
         );
     }

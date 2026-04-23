@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE threads SET reply_count = reply_count + 1, last_activity = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "24409fd7efdf7565ee4beea7581aba415f01f6581c414503f9df7131fda63f33"
+}

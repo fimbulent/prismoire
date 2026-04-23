@@ -52,34 +52,36 @@ pub async fn create_thread(
     let post_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO threads (id, title, author, room, created_at, last_activity) \
          VALUES (?, ?, ?, ?, ?, ?)",
+        thread_id,
+        title,
+        user.user_id,
+        room_id,
+        now,
+        now,
     )
-    .bind(&thread_id)
-    .bind(&title)
-    .bind(&user.user_id)
-    .bind(&room_id)
-    .bind(&now)
-    .bind(&now)
     .execute(&state.db)
     .await?;
 
-    sqlx::query("INSERT INTO posts (id, author, thread, created_at) VALUES (?, ?, ?, ?)")
-        .bind(&post_id)
-        .bind(&user.user_id)
-        .bind(&thread_id)
-        .bind(&now)
-        .execute(&state.db)
-        .await?;
-
-    sqlx::query(
-        "INSERT INTO post_revisions (post_id, revision, body, signature, created_at) VALUES (?, 0, ?, ?, ?)",
+    sqlx::query!(
+        "INSERT INTO posts (id, author, thread, created_at) VALUES (?, ?, ?, ?)",
+        post_id,
+        user.user_id,
+        thread_id,
+        now,
     )
-    .bind(&post_id)
-    .bind(&body)
-    .bind(&signature)
-    .bind(&now)
+    .execute(&state.db)
+    .await?;
+
+    sqlx::query!(
+        "INSERT INTO post_revisions (post_id, revision, body, signature, created_at) VALUES (?, 0, ?, ?, ?)",
+        post_id,
+        body,
+        signature,
+        now,
+    )
     .execute(&state.db)
     .await?;
 
@@ -126,33 +128,37 @@ async fn get_or_create_room(
     slug: &str,
     created_by: &str,
 ) -> Result<String, AppError> {
-    let existing: Option<(String,)> =
-        sqlx::query_as("SELECT id FROM rooms WHERE slug = ? AND merged_into IS NULL")
-            .bind(slug)
-            .fetch_optional(&state.db)
-            .await?;
+    let existing = sqlx::query!(
+        "SELECT id FROM rooms WHERE slug = ? AND merged_into IS NULL",
+        slug,
+    )
+    .fetch_optional(&state.db)
+    .await?;
 
-    if let Some((id,)) = existing {
-        return Ok(id);
+    if let Some(row) = existing {
+        return Ok(row.id);
     }
 
     let id = uuid::Uuid::new_v4().to_string();
-    let result = sqlx::query("INSERT INTO rooms (id, slug, created_by) VALUES (?, ?, ?)")
-        .bind(&id)
-        .bind(slug)
-        .bind(created_by)
-        .execute(&state.db)
-        .await;
+    let result = sqlx::query!(
+        "INSERT INTO rooms (id, slug, created_by) VALUES (?, ?, ?)",
+        id,
+        slug,
+        created_by,
+    )
+    .execute(&state.db)
+    .await;
 
     match result {
         Ok(_) => Ok(id),
         Err(sqlx::Error::Database(ref e)) if e.message().contains("UNIQUE") => {
-            let (existing_id,): (String,) =
-                sqlx::query_as("SELECT id FROM rooms WHERE slug = ? AND merged_into IS NULL")
-                    .bind(slug)
-                    .fetch_one(&state.db)
-                    .await?;
-            Ok(existing_id)
+            let row = sqlx::query!(
+                "SELECT id FROM rooms WHERE slug = ? AND merged_into IS NULL",
+                slug,
+            )
+            .fetch_one(&state.db)
+            .await?;
+            Ok(row.id)
         }
         Err(e) => Err(e.into()),
     }

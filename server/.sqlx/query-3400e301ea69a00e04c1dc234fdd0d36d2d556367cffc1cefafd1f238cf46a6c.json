@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM thread_recent_repliers WHERE thread_id = ? AND reply_rank >= ? - 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "3400e301ea69a00e04c1dc234fdd0d36d2d556367cffc1cefafd1f238cf46a6c"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO post_revisions (post_id, revision, body, signature) VALUES (?, 0, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "5ac7a11b566ca862a962b53b1cad8b783d5af39d29ea2085529c00329da18a7e"
+}

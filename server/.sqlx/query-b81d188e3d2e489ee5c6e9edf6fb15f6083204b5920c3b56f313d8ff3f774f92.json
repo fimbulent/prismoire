@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT pr.post_id AS \"post_id!\",\n                  pr.body AS \"body!\",\n                  pr.created_at AS \"latest_revision_at!\",\n                  pr.revision AS \"revision!\"\n           FROM post_revisions pr\n           WHERE pr.post_id IN (SELECT value FROM json_each(?))\n             AND pr.revision = (\n                 SELECT MAX(pr2.revision) FROM post_revisions pr2 WHERE pr2.post_id = pr.post_id\n             )",
+  "describe": {
+    "columns": [
+      {
+        "name": "post_id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "body!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "latest_revision_at!",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "revision!",
+        "ordinal": 3,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "b81d188e3d2e489ee5c6e9edf6fb15f6083204b5920c3b56f313d8ff3f774f92"
+}

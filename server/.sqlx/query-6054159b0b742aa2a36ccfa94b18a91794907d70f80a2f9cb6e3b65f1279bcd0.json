@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT p.id AS \"id!\", p.parent, p.author AS \"author!\",\n                  u.display_name, u.status, u.deleted_at,\n                  p.created_at AS \"created_at!\", p.retracted_at\n           FROM posts p\n           JOIN users u ON u.id = p.author\n           WHERE p.thread = ?\n           ORDER BY p.created_at ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "parent",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "author!",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "display_name",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "status",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "deleted_at",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at!",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "retracted_at",
+        "ordinal": 7,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "6054159b0b742aa2a36ccfa94b18a91794907d70f80a2f9cb6e3b65f1279bcd0"
+}

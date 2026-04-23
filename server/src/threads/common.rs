@@ -327,20 +327,6 @@ pub fn is_thread_visible(
     false
 }
 
-/// Generate SQL placeholders for a batch of values: "(?, ?, ?)".
-pub fn sql_placeholders(n: usize) -> String {
-    let mut s = String::with_capacity(n * 3 + 2);
-    s.push('(');
-    for i in 0..n {
-        if i > 0 {
-            s.push_str(", ");
-        }
-        s.push('?');
-    }
-    s.push(')');
-    s
-}
-
 // ---------------------------------------------------------------------------
 // Warm sort scoring
 // ---------------------------------------------------------------------------

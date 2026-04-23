@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE thread_recent_repliers SET reply_rank = -(reply_rank + 1) WHERE thread_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "707388719f6f33fb1aeb1a70ec2056b5e4984d92bafc0083d8f4fcf99ece1453"
+}

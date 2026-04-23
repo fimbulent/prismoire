@@ -1,0 +1,68 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT t.id AS \"id!\",\n                  t.title AS \"title!\",\n                  t.author AS \"author_id!\",\n                  u.display_name AS \"author_name!\",\n                  t.created_at AS \"created_at!\",\n                  r.id AS \"room_id!\",\n                  r.slug AS \"room_slug!\",\n                  t.locked AS \"locked!: bool\",\n                  (r.slug = 'announcements') AS \"is_announcement!: bool\"\n           FROM threads t\n           JOIN users u ON u.id = t.author\n           JOIN rooms r ON r.id = t.room\n           WHERE t.id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "title!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "author_id!",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "author_name!",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at!",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "room_id!",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "room_slug!",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "locked!: bool",
+        "ordinal": 7,
+        "type_info": "Integer"
+      },
+      {
+        "name": "is_announcement!: bool",
+        "ordinal": 8,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "cfbfdb45078a504c4e8f5d6ae152c64321760dba68d5e1d0ced5ac8b794a1917"
+}
