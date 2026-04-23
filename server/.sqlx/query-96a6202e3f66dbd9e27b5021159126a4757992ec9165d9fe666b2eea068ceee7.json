@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT state, display_name FROM auth_challenges WHERE id = ? AND challenge_type = 'authentication'",
+  "describe": {
+    "columns": [
+      {
+        "name": "state",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "display_name",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "96a6202e3f66dbd9e27b5021159126a4757992ec9165d9fe666b2eea068ceee7"
+}

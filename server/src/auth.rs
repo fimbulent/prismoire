@@ -149,12 +149,13 @@ pub async fn signup_begin(
         .map_err(|msg| AppError::with_message(ErrorCode::InvalidDisplayName, msg))?;
     let skeleton = display_name_skeleton(&display_name);
 
-    let existing: Option<(String,)> =
-        sqlx::query_as("SELECT id FROM users WHERE display_name = ? OR display_name_skeleton = ?")
-            .bind(&display_name)
-            .bind(&skeleton)
-            .fetch_optional(&state.db)
-            .await?;
+    let existing = sqlx::query!(
+        "SELECT id FROM users WHERE display_name = ? OR display_name_skeleton = ?",
+        display_name,
+        skeleton,
+    )
+    .fetch_optional(&state.db)
+    .await?;
 
     if existing.is_some() {
         return Err(AppError::code(ErrorCode::DisplayNameTaken));
@@ -177,16 +178,17 @@ pub async fn signup_begin(
 
     let challenge_id = Uuid::new_v4().to_string();
     let state_bytes = serde_json::to_vec(&reg_state)?;
+    let user_uuid_str = user_uuid.to_string();
 
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO auth_challenges (id, challenge_type, state, display_name, invite_code, user_id) \
          VALUES (?, 'registration', ?, ?, ?, ?)",
+        challenge_id,
+        state_bytes,
+        display_name,
+        invite_code,
+        user_uuid_str,
     )
-    .bind(&challenge_id)
-    .bind(&state_bytes)
-    .bind(&display_name)
-    .bind(invite_code)
-    .bind(user_uuid.to_string())
     .execute(&state.db)
     .await?;
 
@@ -224,27 +226,27 @@ pub async fn signup_complete(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SignupCompleteRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let challenge = sqlx::query_as::<_, (Vec<u8>, Option<String>, Option<String>, Option<String>)>(
+    let challenge = sqlx::query!(
         "SELECT state, display_name, invite_code, user_id FROM auth_challenges \
          WHERE id = ? AND challenge_type = 'registration'",
+        req.challenge_id,
     )
-    .bind(&req.challenge_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| AppError::code(ErrorCode::InvalidChallenge))?;
 
-    let (state_bytes, display_name, invite_code, user_id) = challenge;
-    let display_name = display_name.ok_or_else(|| {
+    let state_bytes = challenge.state;
+    let invite_code = challenge.invite_code;
+    let display_name = challenge.display_name.ok_or_else(|| {
         eprintln!("signup_complete: missing display_name in challenge");
         AppError::code(ErrorCode::Internal)
     })?;
-    let user_id = user_id.ok_or_else(|| {
+    let user_id = challenge.user_id.ok_or_else(|| {
         eprintln!("signup_complete: missing user_id in challenge");
         AppError::code(ErrorCode::Internal)
     })?;
 
-    sqlx::query("DELETE FROM auth_challenges WHERE id = ?")
-        .bind(&req.challenge_id)
+    sqlx::query!("DELETE FROM auth_challenges WHERE id = ?", req.challenge_id)
         .execute(&state.db)
         .await?;
 
@@ -264,13 +266,13 @@ pub async fn signup_complete(
 
     let skeleton = display_name_skeleton(&display_name);
 
-    if let Err(err) = sqlx::query(
+    if let Err(err) = sqlx::query!(
         "INSERT INTO users (id, display_name, display_name_skeleton, signup_method) \
          VALUES (?, ?, ?, 'invite')",
+        user_id,
+        display_name,
+        skeleton,
     )
-    .bind(&user_id)
-    .bind(&display_name)
-    .bind(&skeleton)
     .execute(&state.db)
     .await
     {
@@ -280,46 +282,49 @@ pub async fn signup_complete(
 
     let cred_id = Uuid::new_v4().to_string();
     let passkey_bytes = serde_json::to_vec(&passkey)?;
+    let cred_id_bytes: &[u8] = passkey.cred_id().as_ref();
 
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO credentials (id, user_id, credential_id, public_key, sign_count) \
          VALUES (?, ?, ?, ?, 0)",
+        cred_id,
+        user_id,
+        cred_id_bytes,
+        passkey_bytes,
     )
-    .bind(&cred_id)
-    .bind(&user_id)
-    .bind(passkey.cred_id().as_ref() as &[u8])
-    .bind(&passkey_bytes)
     .execute(&state.db)
     .await?;
 
     signing::create_signing_key(&state.db, &user_id).await?;
 
-    sqlx::query("UPDATE users SET invite_id = ? WHERE id = ?")
-        .bind(&invite_id)
-        .bind(&user_id)
-        .execute(&state.db)
-        .await?;
+    sqlx::query!(
+        "UPDATE users SET invite_id = ? WHERE id = ?",
+        invite_id,
+        user_id,
+    )
+    .execute(&state.db)
+    .await?;
 
     let trust1_id = Uuid::new_v4().to_string();
     let trust2_id = Uuid::new_v4().to_string();
 
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO trust_edges (id, source_user, target_user, trust_type) \
          VALUES (?, ?, ?, 'trust')",
+        trust1_id,
+        inviter_id,
+        user_id,
     )
-    .bind(&trust1_id)
-    .bind(&inviter_id)
-    .bind(&user_id)
     .execute(&state.db)
     .await?;
 
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO trust_edges (id, source_user, target_user, trust_type) \
          VALUES (?, ?, ?, 'trust')",
+        trust2_id,
+        user_id,
+        inviter_id,
     )
-    .bind(&trust2_id)
-    .bind(&user_id)
-    .bind(&inviter_id)
     .execute(&state.db)
     .await?;
 
@@ -360,19 +365,23 @@ pub async fn login_begin(
     // extractor rejecting non-active sessions with 403. Self-deleted users
     // (`deleted_at IS NOT NULL`) are filtered out here — their credentials
     // have already been purged, so this is belt-and-suspenders.
-    let user: Option<(String,)> =
-        sqlx::query_as("SELECT id FROM users WHERE display_name = ? AND deleted_at IS NULL")
-            .bind(display_name)
-            .fetch_optional(&state.db)
-            .await?;
+    let user = sqlx::query!(
+        "SELECT id FROM users WHERE display_name = ? AND deleted_at IS NULL",
+        display_name,
+    )
+    .fetch_optional(&state.db)
+    .await?;
 
-    let (user_id,) = user.ok_or_else(|| AppError::code(ErrorCode::UserNotFound))?;
+    let user_id = user
+        .ok_or_else(|| AppError::code(ErrorCode::UserNotFound))?
+        .id;
 
-    let cred_rows: Vec<(Vec<u8>,)> =
-        sqlx::query_as("SELECT public_key FROM credentials WHERE user_id = ?")
-            .bind(&user_id)
-            .fetch_all(&state.db)
-            .await?;
+    let cred_rows = sqlx::query!(
+        "SELECT public_key FROM credentials WHERE user_id = ?",
+        user_id,
+    )
+    .fetch_all(&state.db)
+    .await?;
 
     if cred_rows.is_empty() {
         return Err(AppError::code(ErrorCode::NoCredentials));
@@ -380,7 +389,7 @@ pub async fn login_begin(
 
     let passkeys: Vec<Passkey> = cred_rows
         .iter()
-        .map(|(bytes,)| serde_json::from_slice(bytes))
+        .map(|r| serde_json::from_slice(&r.public_key))
         .collect::<Result<_, _>>()?;
 
     let (rcr, auth_state) = state.webauthn.start_passkey_authentication(&passkeys)?;
@@ -388,13 +397,13 @@ pub async fn login_begin(
     let challenge_id = Uuid::new_v4().to_string();
     let state_bytes = serde_json::to_vec(&auth_state)?;
 
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO auth_challenges (id, challenge_type, state, display_name) \
          VALUES (?, 'authentication', ?, ?)",
+        challenge_id,
+        state_bytes,
+        display_name,
     )
-    .bind(&challenge_id)
-    .bind(&state_bytes)
-    .bind(display_name)
     .execute(&state.db)
     .await?;
 
@@ -417,11 +426,11 @@ pub async fn login_complete(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoginCompleteRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let challenge = sqlx::query_as::<_, (Vec<u8>, Option<String>)>(
+    let challenge = sqlx::query!(
         "SELECT state, display_name FROM auth_challenges \
          WHERE id = ? AND challenge_type = 'authentication'",
+        req.challenge_id,
     )
-    .bind(&req.challenge_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| {
@@ -429,14 +438,13 @@ pub async fn login_complete(
         AppError::code(ErrorCode::InvalidChallenge)
     })?;
 
-    let (state_bytes, display_name) = challenge;
-    let display_name = display_name.ok_or_else(|| {
+    let state_bytes = challenge.state;
+    let display_name = challenge.display_name.ok_or_else(|| {
         eprintln!("login_complete: missing display_name in challenge");
         AppError::code(ErrorCode::Internal)
     })?;
 
-    sqlx::query("DELETE FROM auth_challenges WHERE id = ?")
-        .bind(&req.challenge_id)
+    sqlx::query!("DELETE FROM auth_challenges WHERE id = ?", req.challenge_id)
         .execute(&state.db)
         .await?;
 
@@ -455,18 +463,21 @@ pub async fn login_complete(
     // payload so the frontend knows to lock the UI down. Self-deleted users
     // are filtered out: their credentials are purged, but this closes the
     // path defensively if one somehow survived.
-    let user: Option<(String, String, String, Option<String>)> = sqlx::query_as(
+    let user = sqlx::query!(
         "SELECT id, role, status, suspended_until FROM users \
          WHERE display_name = ? AND deleted_at IS NULL",
+        display_name,
     )
-    .bind(&display_name)
     .fetch_optional(&state.db)
-    .await?;
-    let (user_id, role, status_str, suspended_until) = user.ok_or_else(|| {
+    .await?
+    .ok_or_else(|| {
         state.metrics.record_failed_auth();
         AppError::code(ErrorCode::UserNotFound)
     })?;
-    let status = parse_status_or_log(&status_str, &user_id);
+    let user_id = user.id;
+    let role = user.role;
+    let suspended_until = user.suspended_until;
+    let status = parse_status_or_log(&user.status, &user_id);
 
     update_credential_counter(&state.db, &user_id, &auth_result).await?;
 
@@ -506,12 +517,12 @@ pub async fn discover_begin(
     let challenge_id = Uuid::new_v4().to_string();
     let state_bytes = serde_json::to_vec(&disc_state)?;
 
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO auth_challenges (id, challenge_type, state) \
          VALUES (?, 'discoverable', ?)",
+        challenge_id,
+        state_bytes,
     )
-    .bind(&challenge_id)
-    .bind(&state_bytes)
     .execute(&state.db)
     .await?;
 
@@ -534,11 +545,11 @@ pub async fn discover_complete(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoginCompleteRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let challenge = sqlx::query_as::<_, (Vec<u8>,)>(
+    let challenge = sqlx::query!(
         "SELECT state FROM auth_challenges \
          WHERE id = ? AND challenge_type = 'discoverable'",
+        req.challenge_id,
     )
-    .bind(&req.challenge_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| {
@@ -546,10 +557,9 @@ pub async fn discover_complete(
         AppError::code(ErrorCode::InvalidChallenge)
     })?;
 
-    let (state_bytes,) = challenge;
+    let state_bytes = challenge.state;
 
-    sqlx::query("DELETE FROM auth_challenges WHERE id = ?")
-        .bind(&req.challenge_id)
+    sqlx::query!("DELETE FROM auth_challenges WHERE id = ?", req.challenge_id)
         .execute(&state.db)
         .await?;
 
@@ -566,11 +576,12 @@ pub async fn discover_complete(
     // `status` / `suspended_until` fields flow to the client so the frontend
     // renders the restricted UI surface. Self-deleted users are filtered
     // defensively (their credentials have been purged).
-    let user = sqlx::query_as::<_, (String, String, String, String, Option<String>)>(
+    let user_uuid_str = user_uuid.to_string();
+    let user = sqlx::query!(
         "SELECT id, display_name, role, status, suspended_until FROM users \
          WHERE id = ? AND deleted_at IS NULL",
+        user_uuid_str,
     )
-    .bind(user_uuid.to_string())
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| {
@@ -578,19 +589,23 @@ pub async fn discover_complete(
         AppError::code(ErrorCode::UserNotFound)
     })?;
 
-    let (user_id, display_name, role, status_str, suspended_until) = user;
-    let status = parse_status_or_log(&status_str, &user_id);
+    let user_id = user.id;
+    let display_name = user.display_name;
+    let role = user.role;
+    let suspended_until = user.suspended_until;
+    let status = parse_status_or_log(&user.status, &user_id);
 
-    let cred_rows: Vec<(Vec<u8>,)> =
-        sqlx::query_as("SELECT public_key FROM credentials WHERE user_id = ?")
-            .bind(&user_id)
-            .fetch_all(&state.db)
-            .await?;
+    let cred_rows = sqlx::query!(
+        "SELECT public_key FROM credentials WHERE user_id = ?",
+        user_id,
+    )
+    .fetch_all(&state.db)
+    .await?;
 
     let discoverable_keys: Vec<DiscoverableKey> = cred_rows
         .iter()
-        .map(|(bytes,)| {
-            let passkey: Passkey = serde_json::from_slice(bytes)?;
+        .map(|r| {
+            let passkey: Passkey = serde_json::from_slice(&r.public_key)?;
             Ok(DiscoverableKey::from(passkey))
         })
         .collect::<Result<_, serde_json::Error>>()?;
@@ -628,24 +643,26 @@ async fn update_credential_counter(
     user_id: &str,
     auth_result: &AuthenticationResult,
 ) -> Result<(), AppError> {
-    let cred_rows: Vec<(String, Vec<u8>)> =
-        sqlx::query_as("SELECT id, public_key FROM credentials WHERE user_id = ?")
-            .bind(user_id)
-            .fetch_all(db)
-            .await?;
+    let cred_rows = sqlx::query!(
+        "SELECT id, public_key FROM credentials WHERE user_id = ?",
+        user_id,
+    )
+    .fetch_all(db)
+    .await?;
 
-    for (cred_db_id, passkey_bytes) in &cred_rows {
-        let mut passkey: Passkey = serde_json::from_slice(passkey_bytes)?;
+    for row in &cred_rows {
+        let mut passkey: Passkey = serde_json::from_slice(&row.public_key)?;
         if passkey.update_credential(auth_result).is_some() {
             let updated_bytes = serde_json::to_vec(&passkey)?;
             let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-            sqlx::query(
+            let counter = auth_result.counter() as i64;
+            sqlx::query!(
                 "UPDATE credentials SET public_key = ?, sign_count = ?, last_used = ? WHERE id = ?",
+                updated_bytes,
+                counter,
+                now,
+                row.id,
             )
-            .bind(&updated_bytes)
-            .bind(auth_result.counter() as i64)
-            .bind(&now)
-            .bind(cred_db_id)
             .execute(db)
             .await?;
         }

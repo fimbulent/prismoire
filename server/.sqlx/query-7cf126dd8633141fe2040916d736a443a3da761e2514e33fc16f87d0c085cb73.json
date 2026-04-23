@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id FROM users WHERE display_name = ? AND deleted_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7cf126dd8633141fe2040916d736a443a3da761e2514e33fc16f87d0c085cb73"
+}

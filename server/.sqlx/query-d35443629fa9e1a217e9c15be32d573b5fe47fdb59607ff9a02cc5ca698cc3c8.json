@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, role, status, suspended_until FROM users WHERE display_name = ? AND deleted_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "role",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "status",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "suspended_until",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "d35443629fa9e1a217e9c15be32d573b5fe47fdb59607ff9a02cc5ca698cc3c8"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO auth_challenges (id, challenge_type, state) VALUES (?, 'discoverable', ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "6bad34c895060910413ace43d67f4f6aff9a1695512de327d75a56b31714f1b0"
+}

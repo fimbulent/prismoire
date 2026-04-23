@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT state FROM auth_challenges WHERE id = ? AND challenge_type = 'discoverable'",
+  "describe": {
+    "columns": [
+      {
+        "name": "state",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ad785bb4a08988aca4f333dfec8a97771bcda56820ca7cd2fe7f469b3af80175"
+}

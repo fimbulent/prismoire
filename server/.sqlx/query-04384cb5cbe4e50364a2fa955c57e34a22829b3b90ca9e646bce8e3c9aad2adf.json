@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT public_key FROM credentials WHERE user_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "public_key",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "04384cb5cbe4e50364a2fa955c57e34a22829b3b90ca9e646bce8e3c9aad2adf"
+}

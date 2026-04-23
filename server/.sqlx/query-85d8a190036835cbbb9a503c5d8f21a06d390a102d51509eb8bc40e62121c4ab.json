@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE credentials SET public_key = ?, sign_count = ?, last_used = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "85d8a190036835cbbb9a503c5d8f21a06d390a102d51509eb8bc40e62121c4ab"
+}

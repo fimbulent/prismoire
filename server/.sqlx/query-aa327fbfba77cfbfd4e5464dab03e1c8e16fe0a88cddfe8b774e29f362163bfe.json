@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO trust_edges (id, source_user, target_user, trust_type) VALUES (?, ?, ?, 'trust')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "aa327fbfba77cfbfd4e5464dab03e1c8e16fe0a88cddfe8b774e29f362163bfe"
+}

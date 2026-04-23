@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO auth_challenges (id, challenge_type, state, display_name, invite_code, user_id) VALUES (?, 'registration', ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "e96239c4fbb0ce22ec57afcc048352dbaced10ca8c5cc8c5f4f6a8220920c1db"
+}
