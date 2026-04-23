@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE admin_log SET thread_id = NULL WHERE thread_id IN (SELECT id FROM threads WHERE room = ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "e6fe8127f09fc206a91fa20febc538b1d7582fb679fe09417b883e495cdb38c7"
+}

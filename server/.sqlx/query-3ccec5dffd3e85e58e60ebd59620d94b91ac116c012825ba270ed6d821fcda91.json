@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT can_invite AS \"can_invite: bool\" FROM users WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "can_invite: bool",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3ccec5dffd3e85e58e60ebd59620d94b91ac116c012825ba270ed6d821fcda91"
+}

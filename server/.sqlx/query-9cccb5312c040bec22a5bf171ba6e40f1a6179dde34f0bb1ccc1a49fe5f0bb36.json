@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE threads SET locked = 0 WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "9cccb5312c040bec22a5bf171ba6e40f1a6179dde34f0bb1ccc1a49fe5f0bb36"
+}

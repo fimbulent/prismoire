@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE users SET status = 'banned' WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "a8d033e98d2641e166ec7e9a44a31c2c3152bb3a4261b0aabd9ea6bb85fda62c"
+}

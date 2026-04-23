@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT source_user, created_at FROM trust_edges WHERE target_user = ? AND trust_type = 'trust'",
+  "describe": {
+    "columns": [
+      {
+        "name": "source_user",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "6a2984372334efb3be50a6cc72183c7e0f4bbb7911995b62c62b9d266e2ce8bf"
+}

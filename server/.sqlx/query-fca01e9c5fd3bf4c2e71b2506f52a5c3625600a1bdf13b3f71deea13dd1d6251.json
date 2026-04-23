@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE post_revisions SET body = '[removed by admin]' WHERE post_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "fca01e9c5fd3bf4c2e71b2506f52a5c3625600a1bdf13b3f71deea13dd1d6251"
+}

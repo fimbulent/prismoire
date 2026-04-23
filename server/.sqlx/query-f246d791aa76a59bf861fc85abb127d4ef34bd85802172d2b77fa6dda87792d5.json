@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, thread, retracted_at FROM posts WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "thread",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "retracted_at",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "f246d791aa76a59bf861fc85abb127d4ef34bd85802172d2b77fa6dda87792d5"
+}

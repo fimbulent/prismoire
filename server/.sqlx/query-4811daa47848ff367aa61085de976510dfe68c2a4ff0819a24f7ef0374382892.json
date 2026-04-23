@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT bio FROM users WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "bio",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "4811daa47848ff367aa61085de976510dfe68c2a4ff0819a24f7ef0374382892"
+}

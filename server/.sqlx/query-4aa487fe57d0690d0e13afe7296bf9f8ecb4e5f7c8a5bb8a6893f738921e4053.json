@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM post_revisions WHERE post_id IN (SELECT p.id FROM posts p JOIN threads t ON t.id = p.thread WHERE t.room = ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "4aa487fe57d0690d0e13afe7296bf9f8ecb4e5f7c8a5bb8a6893f738921e4053"
+}

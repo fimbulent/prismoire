@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO admin_log (id, admin, action, target_user, thread_id, post_id, room_id, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "4a6fb908eaf1a1c999c6657950cfc49fa7eeae0e3aa2d796b295d9be697aa5b8"
+}

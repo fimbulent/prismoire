@@ -1,0 +1,92 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n                   al.id,\n                   al.admin AS admin_id,\n                   u.display_name AS admin_name,\n                   al.action,\n                   al.target_user AS target_user_id,\n                   tu.display_name AS target_user_name,\n                   al.thread_id,\n                   t.title AS thread_title,\n                   al.post_id,\n                   COALESCE(al.room_id, t.room) AS room_id,\n                   COALESCE(r.slug, rt.slug) AS room_slug,\n                   al.reason,\n                   al.created_at\n               FROM admin_log al\n               JOIN users u ON u.id = al.admin\n               LEFT JOIN users tu ON tu.id = al.target_user\n               LEFT JOIN threads t ON t.id = al.thread_id\n               LEFT JOIN rooms r ON r.id = al.room_id\n               LEFT JOIN rooms rt ON rt.id = t.room\n               ORDER BY al.created_at DESC, al.id DESC\n               LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "admin_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "admin_name",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "action",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "target_user_id",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "target_user_name",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "thread_id",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "thread_title",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "post_id",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "room_id",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "room_slug",
+        "ordinal": 10,
+        "type_info": "Text"
+      },
+      {
+        "name": "reason",
+        "ordinal": 11,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 12,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "ff8704badb70dcbb13433c6f8313b3d05164850ebc3a97e5d54efc191f75e15c"
+}

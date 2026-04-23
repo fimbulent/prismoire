@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM posts WHERE thread IN (SELECT id FROM threads WHERE room = ?) AND id NOT IN (SELECT parent FROM posts WHERE parent IS NOT NULL AND thread IN (SELECT id FROM threads WHERE room = ?))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "8a4b9f0b97b1214c0c96a2c633d472388c7e2d42b8f365cee3b7261852600b7e"
+}

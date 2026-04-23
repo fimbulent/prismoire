@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO admin_log (id, admin, action, room_id, reason) VALUES (?, ?, 'delete_room', ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "189c2a6ab253a994aa9b6667a83b9ff569fcba072ff69070aa2e862508377d37"
+}

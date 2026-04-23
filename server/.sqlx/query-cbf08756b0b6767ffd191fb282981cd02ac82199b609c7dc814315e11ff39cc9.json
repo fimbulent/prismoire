@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "WITH RECURSIVE invite_tree(user_id) AS (\n                 SELECT u.id FROM users u\n                 JOIN invites i ON i.id = u.invite_id\n                 WHERE i.created_by = ?\n               UNION ALL\n                 SELECT u.id FROM users u\n                 JOIN invites i ON i.id = u.invite_id\n                 JOIN invite_tree it ON i.created_by = it.user_id\n               )\n               SELECT u.id AS \"id!\", u.display_name AS \"display_name!\", u.role AS \"role!\"\n               FROM users u\n               JOIN invite_tree it ON u.id = it.user_id\n               WHERE u.status != 'banned'",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "display_name!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "role!",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "cbf08756b0b6767ffd191fb282981cd02ac82199b609c7dc814315e11ff39cc9"
+}

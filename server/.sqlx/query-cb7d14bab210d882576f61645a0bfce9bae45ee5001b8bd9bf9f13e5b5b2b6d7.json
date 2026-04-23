@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM reports WHERE post_id IN (SELECT p.id FROM posts p JOIN threads t ON t.id = p.thread WHERE t.room = ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "cb7d14bab210d882576f61645a0bfce9bae45ee5001b8bd9bf9f13e5b5b2b6d7"
+}

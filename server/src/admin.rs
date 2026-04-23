@@ -139,18 +139,18 @@ async fn insert_admin_log(
     reason: Option<&str>,
 ) -> Result<(), AppError> {
     let id = Uuid::new_v4().to_string();
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO admin_log (id, admin, action, target_user, thread_id, post_id, room_id, reason) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        id,
+        admin_id,
+        action,
+        target_user,
+        thread_id,
+        post_id,
+        room_id,
+        reason,
     )
-    .bind(&id)
-    .bind(admin_id)
-    .bind(action)
-    .bind(target_user)
-    .bind(thread_id)
-    .bind(post_id)
-    .bind(room_id)
-    .bind(reason)
     .execute(db)
     .await?;
     Ok(())
@@ -167,15 +167,15 @@ async fn insert_user_action_log<'e, E: sqlx::sqlite::SqliteExecutor<'e>>(
     reason: &str,
 ) -> Result<String, AppError> {
     let id = Uuid::new_v4().to_string();
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO admin_log (id, admin, action, target_user, reason) \
          VALUES (?, ?, ?, ?, ?)",
+        id,
+        admin_id,
+        action,
+        target_user,
+        reason,
     )
-    .bind(&id)
-    .bind(admin_id)
-    .bind(action)
-    .bind(target_user)
-    .bind(reason)
     .execute(db)
     .await?;
     Ok(id)
@@ -198,19 +198,19 @@ pub async fn lock_thread(
         return Err(AppError::code(ErrorCode::ReasonRequired));
     }
 
-    let thread = sqlx::query_as::<_, (String, bool)>("SELECT id, locked FROM threads WHERE id = ?")
-        .bind(&thread_id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(|| AppError::code(ErrorCode::ThreadNotFound))?;
+    let thread = sqlx::query!(
+        r#"SELECT id, locked AS "locked: bool" FROM threads WHERE id = ?"#,
+        thread_id,
+    )
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::code(ErrorCode::ThreadNotFound))?;
 
-    let (tid, already_locked) = thread;
-    if already_locked {
+    if thread.locked {
         return Err(AppError::code(ErrorCode::ThreadAlreadyLocked));
     }
 
-    sqlx::query("UPDATE threads SET locked = 1 WHERE id = ?")
-        .bind(&tid)
+    sqlx::query!("UPDATE threads SET locked = 1 WHERE id = ?", thread.id)
         .execute(&state.db)
         .await?;
 
@@ -219,7 +219,7 @@ pub async fn lock_thread(
         &user.user_id,
         "lock_thread",
         None,
-        Some(&tid),
+        Some(&thread.id),
         None,
         None,
         Some(&reason),
@@ -240,19 +240,19 @@ pub async fn unlock_thread(
 ) -> Result<impl IntoResponse, AppError> {
     require_admin(&user)?;
 
-    let thread = sqlx::query_as::<_, (String, bool)>("SELECT id, locked FROM threads WHERE id = ?")
-        .bind(&thread_id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(|| AppError::code(ErrorCode::ThreadNotFound))?;
+    let thread = sqlx::query!(
+        r#"SELECT id, locked AS "locked: bool" FROM threads WHERE id = ?"#,
+        thread_id,
+    )
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::code(ErrorCode::ThreadNotFound))?;
 
-    let (tid, locked) = thread;
-    if !locked {
+    if !thread.locked {
         return Err(AppError::code(ErrorCode::ThreadNotLocked));
     }
 
-    sqlx::query("UPDATE threads SET locked = 0 WHERE id = ?")
-        .bind(&tid)
+    sqlx::query!("UPDATE threads SET locked = 0 WHERE id = ?", thread.id)
         .execute(&state.db)
         .await?;
 
@@ -261,7 +261,7 @@ pub async fn unlock_thread(
         &user.user_id,
         "unlock_thread",
         None,
-        Some(&tid),
+        Some(&thread.id),
         None,
         None,
         None,
@@ -288,38 +288,39 @@ pub async fn remove_post(
         return Err(AppError::code(ErrorCode::ReasonRequired));
     }
 
-    let post = sqlx::query_as::<_, (String, String, Option<String>)>(
+    let post = sqlx::query!(
         "SELECT id, thread, retracted_at FROM posts WHERE id = ?",
+        post_id,
     )
-    .bind(&post_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| AppError::code(ErrorCode::PostNotFound))?;
 
-    let (pid, thread_id, retracted_at) = post;
-    if retracted_at.is_some() {
+    if post.retracted_at.is_some() {
         return Err(AppError::code(ErrorCode::PostAlreadyRetracted));
     }
 
-    sqlx::query(
+    sqlx::query!(
         "UPDATE posts SET retracted_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
+        post.id,
     )
-    .bind(&pid)
     .execute(&state.db)
     .await?;
 
-    sqlx::query("UPDATE post_revisions SET body = '[removed by admin]' WHERE post_id = ?")
-        .bind(&pid)
-        .execute(&state.db)
-        .await?;
+    sqlx::query!(
+        "UPDATE post_revisions SET body = '[removed by admin]' WHERE post_id = ?",
+        post.id,
+    )
+    .execute(&state.db)
+    .await?;
 
     insert_admin_log(
         &state.db,
         &user.user_id,
         "remove_post",
         None,
-        Some(&thread_id),
-        Some(&pid),
+        Some(&post.thread),
+        Some(&post.id),
         None,
         Some(&reason),
     )
@@ -337,100 +338,84 @@ pub async fn get_admin_log(
     _user: AuthUser,
     Query(params): Query<LogPaginationParams>,
 ) -> Result<impl IntoResponse, AppError> {
-    type LogRow = (
-        String,
-        String,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        String,
-    );
-
     // Some actions (lock_thread, unlock_thread, remove_post) record a thread
     // but not a room, so join rooms via the thread as a fallback and coalesce
     // the two. This means historical entries surface a room_slug without
     // needing a backfill migration.
-    let base_select = "SELECT al.id, al.admin, u.display_name, al.action, \
-             al.target_user, tu.display_name, \
-             al.thread_id, t.title, al.post_id, \
-             COALESCE(al.room_id, t.room), COALESCE(r.slug, rt.slug), \
-             al.reason, al.created_at \
-             FROM admin_log al \
-             JOIN users u ON u.id = al.admin \
-             LEFT JOIN users tu ON tu.id = al.target_user \
-             LEFT JOIN threads t ON t.id = al.thread_id \
-             LEFT JOIN rooms r ON r.id = al.room_id \
-             LEFT JOIN rooms rt ON rt.id = t.room";
-
-    let rows: Vec<LogRow> = if let Some(ref cursor) = params.cursor {
+    //
+    // The cursor/no-cursor cases are separate `query_as!` invocations because
+    // the macro requires the SQL to be a string literal; the shared SELECT is
+    // intentionally duplicated in exchange for compile-time checking.
+    let limit = LOG_PAGE_SIZE as i64 + 1;
+    let mut rows = if let Some(ref cursor) = params.cursor {
         let (cursor_ts, cursor_id) = parse_cursor(cursor)?;
 
-        sqlx::query_as::<_, LogRow>(&format!(
-            "{base_select} \
-                 WHERE (al.created_at < ? OR (al.created_at = ? AND al.id < ?)) \
-                 ORDER BY al.created_at DESC, al.id DESC \
-                 LIMIT ?"
-        ))
-        .bind(&cursor_ts)
-        .bind(&cursor_ts)
-        .bind(&cursor_id)
-        .bind(LOG_PAGE_SIZE as i64 + 1)
+        sqlx::query_as!(
+            AdminLogEntry,
+            r#"SELECT
+                   al.id,
+                   al.admin AS admin_id,
+                   u.display_name AS admin_name,
+                   al.action,
+                   al.target_user AS target_user_id,
+                   tu.display_name AS target_user_name,
+                   al.thread_id,
+                   t.title AS thread_title,
+                   al.post_id,
+                   COALESCE(al.room_id, t.room) AS room_id,
+                   COALESCE(r.slug, rt.slug) AS room_slug,
+                   al.reason,
+                   al.created_at
+               FROM admin_log al
+               JOIN users u ON u.id = al.admin
+               LEFT JOIN users tu ON tu.id = al.target_user
+               LEFT JOIN threads t ON t.id = al.thread_id
+               LEFT JOIN rooms r ON r.id = al.room_id
+               LEFT JOIN rooms rt ON rt.id = t.room
+               WHERE (al.created_at < ? OR (al.created_at = ? AND al.id < ?))
+               ORDER BY al.created_at DESC, al.id DESC
+               LIMIT ?"#,
+            cursor_ts,
+            cursor_ts,
+            cursor_id,
+            limit,
+        )
         .fetch_all(&state.db)
         .await?
     } else {
-        sqlx::query_as::<_, LogRow>(&format!(
-            "{base_select} ORDER BY al.created_at DESC, al.id DESC LIMIT ?"
-        ))
-        .bind(LOG_PAGE_SIZE as i64 + 1)
+        sqlx::query_as!(
+            AdminLogEntry,
+            r#"SELECT
+                   al.id,
+                   al.admin AS admin_id,
+                   u.display_name AS admin_name,
+                   al.action,
+                   al.target_user AS target_user_id,
+                   tu.display_name AS target_user_name,
+                   al.thread_id,
+                   t.title AS thread_title,
+                   al.post_id,
+                   COALESCE(al.room_id, t.room) AS room_id,
+                   COALESCE(r.slug, rt.slug) AS room_slug,
+                   al.reason,
+                   al.created_at
+               FROM admin_log al
+               JOIN users u ON u.id = al.admin
+               LEFT JOIN users tu ON tu.id = al.target_user
+               LEFT JOIN threads t ON t.id = al.thread_id
+               LEFT JOIN rooms r ON r.id = al.room_id
+               LEFT JOIN rooms rt ON rt.id = t.room
+               ORDER BY al.created_at DESC, al.id DESC
+               LIMIT ?"#,
+            limit,
+        )
         .fetch_all(&state.db)
         .await?
     };
 
     let has_more = rows.len() > LOG_PAGE_SIZE;
-    let entries: Vec<AdminLogEntry> = rows
-        .into_iter()
-        .take(LOG_PAGE_SIZE)
-        .map(
-            |(
-                id,
-                admin_id,
-                admin_name,
-                action,
-                target_user_id,
-                target_user_name,
-                thread_id,
-                thread_title,
-                post_id,
-                room_id,
-                room_slug,
-                reason,
-                created_at,
-            )| {
-                AdminLogEntry {
-                    id,
-                    admin_id,
-                    admin_name,
-                    action,
-                    target_user_id,
-                    target_user_name,
-                    thread_id,
-                    thread_title,
-                    post_id,
-                    room_id,
-                    room_slug,
-                    reason,
-                    created_at,
-                }
-            },
-        )
-        .collect();
+    rows.truncate(LOG_PAGE_SIZE);
+    let entries = rows;
 
     let next_cursor = if has_more {
         entries.last().map(|e| format!("{}|{}", e.created_at, e.id))
@@ -461,29 +446,29 @@ async fn snapshot_trust_edges(
 ) -> Result<i64, AppError> {
     let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
-    let edges = sqlx::query_as::<_, (String, String)>(
+    let edges = sqlx::query!(
         "SELECT source_user, created_at FROM trust_edges \
          WHERE target_user = ? AND trust_type = 'trust'",
+        target_user_id,
     )
-    .bind(target_user_id)
     .fetch_all(db)
     .await?;
 
     let count = edges.len() as i64;
-    for (trusting_user, edge_created_at) in &edges {
+    for edge in &edges {
         let id = Uuid::new_v4().to_string();
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO ban_trust_snapshots \
              (id, admin_log_id, target_user, trusting_user, edge_created_at, snapshot_at, action_type) \
              VALUES (?, ?, ?, ?, ?, ?, ?)",
+            id,
+            admin_log_id,
+            target_user_id,
+            edge.source_user,
+            edge.created_at,
+            now,
+            action_type,
         )
-        .bind(&id)
-        .bind(admin_log_id)
-        .bind(target_user_id)
-        .bind(trusting_user)
-        .bind(edge_created_at)
-        .bind(&now)
-        .bind(action_type)
         .execute(&mut *tx)
         .await?;
     }
@@ -496,8 +481,7 @@ async fn kill_sessions<'e, E: sqlx::sqlite::SqliteExecutor<'e>>(
     db: E,
     user_id: &str,
 ) -> Result<(), AppError> {
-    sqlx::query("DELETE FROM sessions WHERE user_id = ?")
-        .bind(user_id)
+    sqlx::query!("DELETE FROM sessions WHERE user_id = ?", user_id)
         .execute(db)
         .await?;
     Ok(())
@@ -509,11 +493,13 @@ async fn revoke_all_invites<'e, E: sqlx::sqlite::SqliteExecutor<'e>>(
     user_id: &str,
 ) -> Result<(), AppError> {
     let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    sqlx::query("UPDATE invites SET revoked_at = ? WHERE created_by = ? AND revoked_at IS NULL")
-        .bind(&now)
-        .bind(user_id)
-        .execute(db)
-        .await?;
+    sqlx::query!(
+        "UPDATE invites SET revoked_at = ? WHERE created_by = ? AND revoked_at IS NULL",
+        now,
+        user_id,
+    )
+    .execute(db)
+    .await?;
     Ok(())
 }
 
@@ -524,19 +510,18 @@ async fn fetch_target_user(
     db: &sqlx::SqlitePool,
     user_id: &str,
 ) -> Result<(String, String, UserStatus, String), AppError> {
-    let (id, display_name, status_str, role) =
-        sqlx::query_as::<_, (String, String, String, String)>(
-            "SELECT id, display_name, status, role FROM users WHERE id = ?",
-        )
-        .bind(user_id)
-        .fetch_optional(db)
-        .await?
-        .ok_or_else(|| AppError::code(ErrorCode::UserNotFound))?;
-    let status = UserStatus::try_from(status_str.as_str()).map_err(|e| {
+    let row = sqlx::query!(
+        "SELECT id, display_name, status, role FROM users WHERE id = ?",
+        user_id,
+    )
+    .fetch_optional(db)
+    .await?
+    .ok_or_else(|| AppError::code(ErrorCode::UserNotFound))?;
+    let status = UserStatus::try_from(row.status.as_str()).map_err(|e| {
         eprintln!("{e}");
         AppError::code(ErrorCode::Internal)
     })?;
-    Ok((id, display_name, status, role))
+    Ok((row.id, row.display_name, status, row.role))
 }
 
 /// Parse a duration string ("1d", "3d", "1w", "2w", "1m") into a chrono Duration.
@@ -586,27 +571,28 @@ pub async fn ban_user(
     let mut users_to_ban = vec![(target_id.clone(), target_name.clone())];
 
     if req.ban_tree {
-        let tree_users = sqlx::query_as::<_, (String, String, String)>(
-            "WITH RECURSIVE invite_tree(user_id) AS ( \
-                 SELECT u.id FROM users u \
-                 JOIN invites i ON i.id = u.invite_id \
-                 WHERE i.created_by = ? \
-               UNION ALL \
-                 SELECT u.id FROM users u \
-                 JOIN invites i ON i.id = u.invite_id \
-                 JOIN invite_tree it ON i.created_by = it.user_id \
-             ) \
-             SELECT u.id, u.display_name, u.role FROM users u \
-             JOIN invite_tree it ON u.id = it.user_id \
-             WHERE u.status != 'banned'",
+        let tree_users = sqlx::query!(
+            r#"WITH RECURSIVE invite_tree(user_id) AS (
+                 SELECT u.id FROM users u
+                 JOIN invites i ON i.id = u.invite_id
+                 WHERE i.created_by = ?
+               UNION ALL
+                 SELECT u.id FROM users u
+                 JOIN invites i ON i.id = u.invite_id
+                 JOIN invite_tree it ON i.created_by = it.user_id
+               )
+               SELECT u.id AS "id!", u.display_name AS "display_name!", u.role AS "role!"
+               FROM users u
+               JOIN invite_tree it ON u.id = it.user_id
+               WHERE u.status != 'banned'"#,
+            target_id,
         )
-        .bind(&target_id)
         .fetch_all(&state.db)
         .await?;
 
-        for (uid, name, r) in tree_users {
-            if r != "admin" {
-                users_to_ban.push((uid, name));
+        for row in tree_users {
+            if row.role != "admin" {
+                users_to_ban.push((row.id, row.display_name));
             }
         }
     }
@@ -616,8 +602,7 @@ pub async fn ban_user(
     let mut banned_entries = Vec::new();
 
     for (uid, name) in &users_to_ban {
-        sqlx::query("UPDATE users SET status = 'banned' WHERE id = ?")
-            .bind(uid)
+        sqlx::query!("UPDATE users SET status = 'banned' WHERE id = ?", uid)
             .execute(&mut *tx)
             .await?;
 
@@ -673,8 +658,7 @@ pub async fn unban_user(
     // log-insert failure can't leave the user unbanned without a record.
     let mut tx = state.db.begin().await?;
 
-    sqlx::query("UPDATE users SET status = 'active' WHERE id = ?")
-        .bind(&target_id)
+    sqlx::query!("UPDATE users SET status = 'active' WHERE id = ?", target_id)
         .execute(&mut *tx)
         .await?;
 
@@ -727,11 +711,13 @@ pub async fn suspend_user(
 
     let mut tx = state.db.begin().await?;
 
-    sqlx::query("UPDATE users SET status = 'suspended', suspended_until = ? WHERE id = ?")
-        .bind(&suspended_until)
-        .bind(&target_id)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query!(
+        "UPDATE users SET status = 'suspended', suspended_until = ? WHERE id = ?",
+        suspended_until,
+        target_id,
+    )
+    .execute(&mut *tx)
+    .await?;
 
     kill_sessions(&mut *tx, &target_id).await?;
     revoke_all_invites(&mut *tx, &target_id).await?;
@@ -769,10 +755,12 @@ pub async fn unsuspend_user(
     // log-insert failure can't leave the user unsuspended without a record.
     let mut tx = state.db.begin().await?;
 
-    sqlx::query("UPDATE users SET status = 'active', suspended_until = NULL WHERE id = ?")
-        .bind(&target_id)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query!(
+        "UPDATE users SET status = 'active', suspended_until = NULL WHERE id = ?",
+        target_id,
+    )
+    .execute(&mut *tx)
+    .await?;
 
     insert_user_action_log(
         &mut *tx,
@@ -813,17 +801,18 @@ pub async fn admin_revoke_invites(
     // diverge.
     let mut tx = state.db.begin().await?;
 
-    let (can_invite,): (bool,) = sqlx::query_as("SELECT can_invite FROM users WHERE id = ?")
-        .bind(&target_id)
-        .fetch_one(&mut *tx)
-        .await?;
+    let row = sqlx::query!(
+        r#"SELECT can_invite AS "can_invite: bool" FROM users WHERE id = ?"#,
+        target_id,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
 
-    if !can_invite {
+    if !row.can_invite {
         return Err(AppError::code(ErrorCode::InvitePrivilegeUnchanged));
     }
 
-    sqlx::query("UPDATE users SET can_invite = 0 WHERE id = ?")
-        .bind(&target_id)
+    sqlx::query!("UPDATE users SET can_invite = 0 WHERE id = ?", target_id)
         .execute(&mut *tx)
         .await?;
 
@@ -866,17 +855,18 @@ pub async fn admin_grant_invites(
     // diverge.
     let mut tx = state.db.begin().await?;
 
-    let (can_invite,): (bool,) = sqlx::query_as("SELECT can_invite FROM users WHERE id = ?")
-        .bind(&target_id)
-        .fetch_one(&mut *tx)
-        .await?;
+    let row = sqlx::query!(
+        r#"SELECT can_invite AS "can_invite: bool" FROM users WHERE id = ?"#,
+        target_id,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
 
-    if can_invite {
+    if row.can_invite {
         return Err(AppError::code(ErrorCode::InvitePrivilegeUnchanged));
     }
 
-    sqlx::query("UPDATE users SET can_invite = 1 WHERE id = ?")
-        .bind(&target_id)
+    sqlx::query!("UPDATE users SET can_invite = 1 WHERE id = ?", target_id)
         .execute(&mut *tx)
         .await?;
 
@@ -920,17 +910,15 @@ pub async fn admin_remove_bio(
     // failure after the UPDATE would leave the bio cleared with no record.
     let mut tx = state.db.begin().await?;
 
-    let (bio,): (Option<String>,) = sqlx::query_as("SELECT bio FROM users WHERE id = ?")
-        .bind(&target_id)
+    let row = sqlx::query!("SELECT bio FROM users WHERE id = ?", target_id)
         .fetch_one(&mut *tx)
         .await?;
 
-    if bio.is_none() {
+    if row.bio.is_none() {
         return Err(AppError::code(ErrorCode::BioAlreadyEmpty));
     }
 
-    sqlx::query("UPDATE users SET bio = NULL WHERE id = ?")
-        .bind(&target_id)
+    sqlx::query!("UPDATE users SET bio = NULL WHERE id = ?", target_id)
         .execute(&mut *tx)
         .await?;
 
@@ -957,34 +945,26 @@ pub async fn get_invite_tree(
 
     let _ = fetch_target_user(&state.db, &user_id).await?;
 
-    let rows = sqlx::query_as::<_, (String, String, String, i64)>(
-        "WITH RECURSIVE invite_tree(user_id, depth) AS ( \
-             SELECT u.id, 1 FROM users u \
-             JOIN invites i ON i.id = u.invite_id \
-             WHERE i.created_by = ? \
-           UNION ALL \
-             SELECT u.id, it.depth + 1 FROM users u \
-             JOIN invites i ON i.id = u.invite_id \
-             JOIN invite_tree it ON i.created_by = it.user_id \
-         ) \
-         SELECT u.id, u.display_name, u.status, it.depth \
-         FROM users u \
-         JOIN invite_tree it ON u.id = it.user_id \
-         ORDER BY it.depth ASC, u.created_at ASC",
+    let tree = sqlx::query_as!(
+        InviteTreeEntry,
+        r#"WITH RECURSIVE invite_tree(user_id, depth) AS (
+             SELECT u.id, 1 FROM users u
+             JOIN invites i ON i.id = u.invite_id
+             WHERE i.created_by = ?
+           UNION ALL
+             SELECT u.id, it.depth + 1 FROM users u
+             JOIN invites i ON i.id = u.invite_id
+             JOIN invite_tree it ON i.created_by = it.user_id
+           )
+           SELECT u.id AS "id!", u.display_name AS "display_name!",
+                  u.status AS "status!", it.depth AS "depth!: i64"
+           FROM users u
+           JOIN invite_tree it ON u.id = it.user_id
+           ORDER BY it.depth ASC, u.created_at ASC"#,
+        user_id,
     )
-    .bind(&user_id)
     .fetch_all(&state.db)
     .await?;
-
-    let tree: Vec<InviteTreeEntry> = rows
-        .into_iter()
-        .map(|(id, display_name, status, depth)| InviteTreeEntry {
-            id,
-            display_name,
-            status,
-            depth,
-        })
-        .collect();
 
     Ok(Json(tree))
 }
@@ -1025,21 +1005,21 @@ pub async fn delete_room(
         return Err(AppError::code(ErrorCode::ReasonRequired));
     }
 
-    let room = sqlx::query_as::<_, (String, String, Option<String>)>(
+    let room = sqlx::query!(
         "SELECT id, slug, deleted_at FROM rooms WHERE id = ?",
+        room_id,
     )
-    .bind(&room_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| AppError::code(ErrorCode::RoomNotFound))?;
 
-    let (rid, slug, deleted_at) = room;
-    if deleted_at.is_some() {
+    if room.deleted_at.is_some() {
         return Err(AppError::code(ErrorCode::RoomAlreadyDeleted));
     }
-    if req.confirm_slug.trim() != slug {
+    if req.confirm_slug.trim() != room.slug {
         return Err(AppError::code(ErrorCode::ConfirmationMismatch));
     }
+    let rid = room.id;
 
     let mut tx = state.db.begin().await?;
 
@@ -1047,36 +1027,36 @@ pub async fn delete_room(
     //    about to hard-delete. The columns are nullable, so there's no
     //    data integrity loss — the log entry's `action`, `reason`, and
     //    `room_id` (which we keep) still tell the story.
-    sqlx::query(
+    sqlx::query!(
         "UPDATE admin_log SET post_id = NULL \
          WHERE post_id IN (SELECT p.id FROM posts p JOIN threads t ON t.id = p.thread WHERE t.room = ?)",
+        rid,
     )
-    .bind(&rid)
     .execute(&mut *tx)
     .await?;
 
-    sqlx::query(
+    sqlx::query!(
         "UPDATE admin_log SET thread_id = NULL \
          WHERE thread_id IN (SELECT id FROM threads WHERE room = ?)",
+        rid,
     )
-    .bind(&rid)
     .execute(&mut *tx)
     .await?;
 
     // 2. Hard-delete content, leaves-to-root to satisfy FKs.
-    sqlx::query(
+    sqlx::query!(
         "DELETE FROM reports \
          WHERE post_id IN (SELECT p.id FROM posts p JOIN threads t ON t.id = p.thread WHERE t.room = ?)",
+        rid,
     )
-    .bind(&rid)
     .execute(&mut *tx)
     .await?;
 
-    sqlx::query(
+    sqlx::query!(
         "DELETE FROM post_revisions \
          WHERE post_id IN (SELECT p.id FROM posts p JOIN threads t ON t.id = p.thread WHERE t.room = ?)",
+        rid,
     )
-    .bind(&rid)
     .execute(&mut *tx)
     .await?;
 
@@ -1085,14 +1065,14 @@ pub async fn delete_room(
     // at a time. Bounded by the thread depth of the room, which is
     // small in practice.
     loop {
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "DELETE FROM posts \
              WHERE thread IN (SELECT id FROM threads WHERE room = ?) \
                AND id NOT IN (SELECT parent FROM posts WHERE parent IS NOT NULL \
                               AND thread IN (SELECT id FROM threads WHERE room = ?))",
+            rid,
+            rid,
         )
-        .bind(&rid)
-        .bind(&rid)
         .execute(&mut *tx)
         .await?;
         if res.rows_affected() == 0 {
@@ -1100,37 +1080,38 @@ pub async fn delete_room(
         }
     }
 
-    sqlx::query(
+    sqlx::query!(
         "DELETE FROM thread_recent_repliers \
          WHERE thread_id IN (SELECT id FROM threads WHERE room = ?)",
+        rid,
     )
-    .bind(&rid)
     .execute(&mut *tx)
     .await?;
 
-    sqlx::query("DELETE FROM threads WHERE room = ?")
-        .bind(&rid)
+    sqlx::query!("DELETE FROM threads WHERE room = ?", rid)
         .execute(&mut *tx)
         .await?;
 
     // 3. Tombstone the room.
-    sqlx::query("UPDATE rooms SET deleted_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?")
-        .bind(&rid)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query!(
+        "UPDATE rooms SET deleted_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
+        rid,
+    )
+    .execute(&mut *tx)
+    .await?;
 
     // 4. Emit the admin log entry. Inserted inside the same
     //    transaction so a rollback on any earlier step also rolls back
     //    the log row.
     let log_id = Uuid::new_v4().to_string();
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO admin_log (id, admin, action, room_id, reason) \
          VALUES (?, ?, 'delete_room', ?, ?)",
+        log_id,
+        user.user_id,
+        rid,
+        reason,
     )
-    .bind(&log_id)
-    .bind(&user.user_id)
-    .bind(&rid)
-    .bind(&reason)
     .execute(&mut *tx)
     .await?;
 
@@ -1172,29 +1153,29 @@ pub async fn delete_user_by_admin(
     // Load the target, including `deleted_at`, because the shared
     // helper (`fetch_target_user`) only returns the moderation status
     // and we need the tombstone + current display name here.
-    let row = sqlx::query_as::<_, (String, String, String, Option<String>)>(
+    let row = sqlx::query!(
         "SELECT id, display_name, role, deleted_at FROM users WHERE id = ?",
+        user_id,
     )
-    .bind(&user_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| AppError::code(ErrorCode::UserNotFound))?;
 
-    let (target_id, display_name, role, deleted_at) = row;
-    if deleted_at.is_some() {
+    if row.deleted_at.is_some() {
         return Err(AppError::code(ErrorCode::UserAlreadyDeleted));
     }
-    if role == "admin" {
+    if row.role == "admin" {
         return Err(AppError::code(ErrorCode::CannotModerateAdmin));
     }
-    if target_id == user.user_id {
+    if row.id == user.user_id {
         // Admins self-deleting should go through the GDPR self-service
         // endpoint; that path also clears their session cookie.
         return Err(AppError::code(ErrorCode::Forbidden));
     }
-    if req.confirm_display_name.trim() != display_name {
+    if req.confirm_display_name.trim() != row.display_name {
         return Err(AppError::code(ErrorCode::ConfirmationMismatch));
     }
+    let target_id = row.id;
 
     // Run the shared soft-delete and emit the admin log entry inside a
     // single transaction. Doing both together closes the audit-trail
@@ -1205,14 +1186,14 @@ pub async fn delete_user_by_admin(
     crate::privacy::soft_delete_user(&mut tx, &target_id).await?;
 
     let log_id = Uuid::new_v4().to_string();
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO admin_log (id, admin, action, target_user, reason) \
          VALUES (?, ?, 'delete_user', ?, ?)",
+        log_id,
+        user.user_id,
+        target_id,
+        reason,
     )
-    .bind(&log_id)
-    .bind(&user.user_id)
-    .bind(&target_id)
-    .bind(&reason)
     .execute(&mut *tx)
     .await?;
 

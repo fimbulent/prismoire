@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM thread_recent_repliers WHERE thread_id IN (SELECT id FROM threads WHERE room = ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "bcf781b8d521df87ad8287b5f1ca8aae91f45896a64127e187b0e6882f3a48b6"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO ban_trust_snapshots (id, admin_log_id, target_user, trusting_user, edge_created_at, snapshot_at, action_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "f4b13b93886fe7cdf2c2dc572aca3dd5011aea4a4056f116b25cdba2c9526be1"
+}
