@@ -26,7 +26,6 @@ use axum::extract::{Path, Query, State};
 use axum::response::IntoResponse;
 use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use crate::error::{AppError, ErrorCode};
 use crate::room_name::is_announcements;
@@ -607,7 +606,7 @@ async fn render_room_page(
     user: &AuthUser,
     cursor: Option<&str>,
 ) -> Result<Json<RoomListResponse>, AppError> {
-    let reader_uuid = Uuid::parse_str(&user.user_id).unwrap_or(Uuid::nil());
+    let reader_uuid = user.uuid();
     let graph = state.get_trust_graph()?;
     let reverse_map = graph.reverse_score_map(reader_uuid);
     let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
@@ -801,7 +800,7 @@ pub async fn tab_bar(
     // most expensive work in this handler. Skipping it when unused
     // makes the tab bar effectively free for heavy favoriters.
     if favorite_entries.len() < TAB_BAR_SLOTS {
-        let reader_uuid = Uuid::parse_str(&user.user_id).unwrap_or(Uuid::nil());
+        let reader_uuid = user.uuid();
         let graph = state.get_trust_graph()?;
         let reverse_map = graph.reverse_score_map(reader_uuid);
         let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
@@ -858,7 +857,7 @@ pub async fn search_rooms(
     user: AuthUser,
     Query(q): Query<RoomSearchQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    let reader_uuid = Uuid::parse_str(&user.user_id).unwrap_or(Uuid::nil());
+    let reader_uuid = user.uuid();
     let graph = state.get_trust_graph()?;
     let reverse_map = graph.reverse_score_map(reader_uuid);
     let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
@@ -943,7 +942,7 @@ pub async fn get_room(
     user: AuthUser,
     Path(id_or_slug): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let reader_uuid = Uuid::parse_str(&user.user_id).unwrap_or(Uuid::nil());
+    let reader_uuid = user.uuid();
     let graph = state.get_trust_graph()?;
     let reverse_map = graph.reverse_score_map(reader_uuid);
     let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;

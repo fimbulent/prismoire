@@ -294,10 +294,7 @@ pub async fn get_profile(
     let you_distrust = trust_stance == "distrust";
 
     let graph = state.get_trust_graph()?;
-    let viewer_uuid = Uuid::parse_str(&user.user_id).map_err(|_| {
-        eprintln!("invalid user id in session: {}", user.user_id);
-        AppError::code(ErrorCode::Internal)
-    })?;
+    let viewer_uuid = user.uuid();
     let target_uuid = Uuid::parse_str(&target_id).map_err(|_| {
         eprintln!("invalid target user id: {target_id}");
         AppError::code(ErrorCode::Internal)
@@ -384,10 +381,7 @@ pub async fn get_trust_detail(
     .n;
 
     let graph = state.get_trust_graph()?;
-    let viewer_uuid = Uuid::parse_str(&user.user_id).map_err(|_| {
-        eprintln!("invalid user id in session: {}", user.user_id);
-        AppError::code(ErrorCode::Internal)
-    })?;
+    let viewer_uuid = user.uuid();
     let target_uuid = Uuid::parse_str(&target_id).map_err(|_| {
         eprintln!("invalid target user id: {target_id}");
         AppError::code(ErrorCode::Internal)
@@ -692,10 +686,7 @@ pub async fn get_activity(
     let reverse_trust_ok = if is_self {
         true
     } else {
-        let viewer_uuid = Uuid::parse_str(&user.user_id).map_err(|_| {
-            eprintln!("invalid user id in session: {}", user.user_id);
-            AppError::code(ErrorCode::Internal)
-        })?;
+        let viewer_uuid = user.uuid();
         let graph = state.get_trust_graph()?;
         let reverse_map = graph.reverse_score_map(viewer_uuid);
         reverse_map
@@ -821,10 +812,7 @@ pub async fn get_trust_edges(
     let (target_id, ..) = resolve_user(&state.db, &username).await?;
 
     let graph = state.get_trust_graph()?;
-    let viewer_uuid = Uuid::parse_str(&user.user_id).map_err(|_| {
-        eprintln!("invalid user id in session: {}", user.user_id);
-        AppError::code(ErrorCode::Internal)
-    })?;
+    let viewer_uuid = user.uuid();
     let cached_dm = graph.distance_map(viewer_uuid);
     // The viewer isn't included in their own distance map; pin them at 0 so
     // they sort first rather than falling through to f64::MAX (untrusted).

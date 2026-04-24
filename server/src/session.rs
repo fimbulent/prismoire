@@ -8,6 +8,7 @@ use axum::response::{IntoResponse, Response};
 use chrono::{Duration, Utc};
 use rand::RngCore;
 use sqlx::SqlitePool;
+use uuid::Uuid;
 
 use crate::error::{AppError, ErrorCode};
 use crate::state::AppState;
@@ -61,6 +62,18 @@ pub struct AuthUser {
 impl AuthUser {
     pub fn is_admin(&self) -> bool {
         self.role == "admin"
+    }
+
+    /// Parse `user_id` as a [`Uuid`].
+    ///
+    /// Panics if `user_id` is not a valid UUID — but [`session_middleware`]
+    /// only hydrates an [`AuthSession`] from rows in the `users` table whose
+    /// `id` column is populated from [`Uuid::new_v4`] at signup. An unparseable
+    /// value here would mean DB corruption, which we surface rather than
+    /// silently coercing to [`Uuid::nil`] and misbehaving in trust-graph
+    /// lookups.
+    pub fn uuid(&self) -> Uuid {
+        Uuid::parse_str(&self.user_id).expect("AuthUser.user_id is a valid UUID from users.id")
     }
 }
 
@@ -133,6 +146,12 @@ pub struct RestrictedAuthUser {
 impl RestrictedAuthUser {
     pub fn is_admin(&self) -> bool {
         self.role == "admin"
+    }
+
+    /// Parse `user_id` as a [`Uuid`]. See [`AuthUser::uuid`] for the invariant.
+    pub fn uuid(&self) -> Uuid {
+        Uuid::parse_str(&self.user_id)
+            .expect("RestrictedAuthUser.user_id is a valid UUID from users.id")
     }
 }
 

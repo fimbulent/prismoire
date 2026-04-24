@@ -27,7 +27,6 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::Deserialize;
-use uuid::Uuid;
 
 use crate::error::{AppError, ErrorCode};
 use crate::rooms::{RoomResponse, build_favorites_response};
@@ -60,7 +59,7 @@ pub async fn list_favorites(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
 ) -> Result<impl IntoResponse, AppError> {
-    let reader_uuid = Uuid::parse_str(&user.user_id).unwrap_or(Uuid::nil());
+    let reader_uuid = user.uuid();
     let graph = state.get_trust_graph()?;
     let reverse_map = graph.reverse_score_map(reader_uuid);
     let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;

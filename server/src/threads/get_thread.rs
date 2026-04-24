@@ -5,7 +5,6 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
-use uuid::Uuid;
 
 use crate::error::{AppError, ErrorCode};
 use crate::session::OptionalAuthUser;
@@ -568,7 +567,7 @@ fn load_viewer_ctx(
 ) -> Result<ViewerCtx, AppError> {
     match user.as_ref() {
         Some(u) => {
-            let reader_uuid = Uuid::parse_str(&u.user_id).unwrap_or(Uuid::nil());
+            let reader_uuid = u.uuid();
             let graph = state.get_trust_graph()?;
             let dm = graph.distance_map(reader_uuid);
             let rm = graph.reverse_score_map(reader_uuid);

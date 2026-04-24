@@ -4,7 +4,6 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::response::IntoResponse;
-use uuid::Uuid;
 
 use crate::error::{AppError, ErrorCode};
 use crate::session::AuthUser;
@@ -389,7 +388,7 @@ pub async fn list_all_threads(
     user: AuthUser,
     Query(params): Query<PaginationParams>,
 ) -> Result<Json<ThreadListResponse>, AppError> {
-    let reader_uuid = Uuid::parse_str(&user.user_id).unwrap_or(Uuid::nil());
+    let reader_uuid = user.uuid();
     let graph = state.get_trust_graph()?;
     let trust_map = graph.distance_map(reader_uuid);
     let reverse_map = graph.reverse_score_map(reader_uuid);
@@ -645,7 +644,7 @@ pub async fn list_threads(
     user: AuthUser,
     Query(params): Query<PaginationParams>,
 ) -> Result<Json<ThreadListResponse>, AppError> {
-    let reader_uuid = Uuid::parse_str(&user.user_id).unwrap_or(Uuid::nil());
+    let reader_uuid = user.uuid();
     let graph = state.get_trust_graph()?;
     let trust_map = graph.distance_map(reader_uuid);
     let reverse_map = graph.reverse_score_map(reader_uuid);
@@ -885,7 +884,7 @@ pub async fn load_more_all_threads(
     }
 
     let cursor = parse_warm_cursor(&body.cursor)?;
-    let reader_uuid = Uuid::parse_str(&user.user_id).unwrap_or(Uuid::nil());
+    let reader_uuid = user.uuid();
     let graph = state.get_trust_graph()?;
     let trust_map = graph.distance_map(reader_uuid);
     let reverse_map = graph.reverse_score_map(reader_uuid);
@@ -955,7 +954,7 @@ pub async fn load_more_room_threads(
     }
 
     let cursor = parse_warm_cursor(&body.cursor)?;
-    let reader_uuid = Uuid::parse_str(&user.user_id).unwrap_or(Uuid::nil());
+    let reader_uuid = user.uuid();
     let graph = state.get_trust_graph()?;
     let trust_map = graph.distance_map(reader_uuid);
     let reverse_map = graph.reverse_score_map(reader_uuid);
