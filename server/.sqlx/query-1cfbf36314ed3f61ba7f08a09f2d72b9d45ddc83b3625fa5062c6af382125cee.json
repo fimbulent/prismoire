@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id FROM rooms WHERE (id = ? OR slug = ?) AND merged_into IS NULL AND deleted_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1cfbf36314ed3f61ba7f08a09f2d72b9d45ddc83b3625fa5062c6af382125cee"
+}

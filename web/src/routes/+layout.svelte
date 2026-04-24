@@ -6,6 +6,7 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { applyTheme } from '$lib/themes';
+	import Toasts from '$lib/components/ui/Toasts.svelte';
 
 	let { children } = $props();
 
@@ -144,4 +145,6 @@
 		<a href="/log" class="hover:text-text-secondary transition-colors">Admin Log</a>
 	</footer>
 {/if}
+
+<Toasts />
 </div>

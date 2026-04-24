@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM room_favorites WHERE user_id = ? AND room_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "23dbbc65fa0b9138028b9b734b6457ab8f242e00abc2a9df0de0603952b5d290"
+}

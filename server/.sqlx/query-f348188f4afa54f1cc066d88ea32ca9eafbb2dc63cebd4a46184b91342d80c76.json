@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE room_favorites SET position = ? WHERE user_id = ? AND room_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "f348188f4afa54f1cc066d88ea32ca9eafbb2dc63cebd4a46184b91342d80c76"
+}

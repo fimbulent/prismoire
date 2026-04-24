@@ -20,6 +20,7 @@ mod auth;
 mod csp_report;
 mod display_name;
 mod error;
+mod favorites;
 mod invites;
 mod metrics;
 mod middleware;
@@ -171,10 +172,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let authed = Router::new()
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/rooms", get(rooms::list_rooms))
-        .route("/api/rooms/top", get(rooms::top_rooms))
+        .route("/api/rooms/more", post(rooms::load_more_rooms))
+        .route("/api/rooms/tab-bar", get(rooms::tab_bar))
         .route("/api/rooms/search", get(rooms::search_rooms))
         .route("/api/rooms/{id}", get(rooms::get_room))
         .route("/api/rooms/{id}/threads", get(threads::list_threads))
+        .route(
+            "/api/rooms/{id}/favorite",
+            post(favorites::favorite_room).delete(favorites::unfavorite_room),
+        )
+        .route(
+            "/api/me/favorites",
+            get(favorites::list_favorites).put(favorites::reorder_favorites),
+        )
         .route(
             "/api/threads",
             get(threads::list_all_threads).post(threads::create_thread),

@@ -4,7 +4,7 @@ mod create_thread;
 mod get_thread;
 mod list_threads;
 
-pub use common::{PostResponse, parse_cursor, validate_body};
+pub use common::{PostResponse, is_thread_visible, parse_cursor, validate_body};
 pub use create_reply::create_reply;
 pub use create_thread::create_thread;
 pub use get_thread::{get_thread, get_thread_replies, get_thread_subtree};

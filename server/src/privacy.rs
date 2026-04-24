@@ -88,6 +88,7 @@ pub struct DataExport {
     pub posts: Vec<PostExport>,
     pub reports_filed: Vec<ReportExport>,
     pub moderation_actions_against_me: Vec<AdminLogExport>,
+    pub favorite_rooms: Vec<FavoriteRoomExport>,
 }
 
 #[derive(Serialize)]
@@ -200,6 +201,13 @@ pub struct ReportExport {
     pub status: String,
     pub created_at: String,
     pub resolved_at: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct FavoriteRoomExport {
+    pub room_slug: String,
+    pub position: i64,
+    pub created_at: String,
 }
 
 #[derive(Serialize)]
@@ -445,6 +453,26 @@ pub async fn export_my_data(
         })
         .collect();
 
+    let favorite_rows = sqlx::query!(
+        "SELECT r.slug, f.position, f.created_at \
+         FROM room_favorites f \
+         JOIN rooms r ON r.id = f.room_id \
+         WHERE f.user_id = ? \
+         ORDER BY f.position ASC",
+        user_id,
+    )
+    .fetch_all(db)
+    .await?;
+
+    let favorite_rooms: Vec<FavoriteRoomExport> = favorite_rows
+        .into_iter()
+        .map(|r| FavoriteRoomExport {
+            room_slug: r.slug,
+            position: r.position,
+            created_at: r.created_at,
+        })
+        .collect();
+
     let exported_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
     let export = DataExport {
@@ -475,6 +503,7 @@ pub async fn export_my_data(
         posts,
         reports_filed,
         moderation_actions_against_me,
+        favorite_rooms,
     };
 
     // Suggest a filename to the browser so "Save as…" is one click. The
@@ -732,6 +761,14 @@ pub(crate) async fn soft_delete_user(
 
     // 7. Drop any in-flight WebAuthn challenges tied to the user.
     sqlx::query!("DELETE FROM auth_challenges WHERE user_id = ?", user_id)
+        .execute(&mut **tx)
+        .await?;
+
+    // 7b. Drop per-user room favorites. The FK has ON DELETE CASCADE on
+    //     users.id, but this soft-delete only anonymises the users row
+    //     (the row stays for FK integrity with rooms/threads/posts), so
+    //     the cascade never fires. Delete explicitly.
+    sqlx::query!("DELETE FROM room_favorites WHERE user_id = ?", user_id)
         .execute(&mut **tx)
         .await?;
 

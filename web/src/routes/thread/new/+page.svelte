@@ -115,7 +115,8 @@
 					<div class="flex items-baseline justify-between gap-3">
 						<span class="text-text-primary font-medium">{r.slug}</span>
 						<span class="text-xs text-text-muted">
-							{r.thread_count} {r.thread_count === 1 ? 'thread' : 'threads'}
+							{r.recent_thread_count} {r.recent_thread_count === 1 ? 'thread' : 'threads'}
+							{r.activity_window_days >= 7 ? 'this week' : `last ${r.activity_window_days}d`}
 						</span>
 					</div>
 				{/snippet}

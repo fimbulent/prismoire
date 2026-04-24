@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT t.room AS \"room!: String\", t.author AS \"author!: String\",\n                  t.last_activity AS \"last_activity!: String\",\n                  (r.slug = 'announcements') AS \"is_announcement!: bool\"\n           FROM threads t\n           JOIN rooms r ON r.id = t.room\n           WHERE r.merged_into IS NULL AND r.deleted_at IS NULL\n             AND t.last_activity IS NOT NULL\n             AND NOT (t.reply_count = 0\n                  AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL)\n           ORDER BY t.last_activity DESC\n           LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "room!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "author!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_activity!: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "is_announcement!: bool",
+        "ordinal": 3,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "f0ad9c1f3ea08a30b95155bc23155dd68e1b28bd77e2c0d074ce5344dbadb94a"
+}

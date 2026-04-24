@@ -211,3 +211,11 @@ CREATE INDEX idx_admin_log_target_user ON admin_log(target_user);
 CREATE INDEX idx_ban_trust_snapshots_target ON ban_trust_snapshots(target_user);
 CREATE INDEX idx_ban_trust_snapshots_trusting ON ban_trust_snapshots(trusting_user);
 CREATE INDEX idx_ban_trust_snapshots_admin_log ON ban_trust_snapshots(admin_log_id);
+CREATE TABLE room_favorites (
+    user_id    TEXT    NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    room_id    TEXT    NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    position   INTEGER NOT NULL,
+    created_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    PRIMARY KEY (user_id, room_id)
+);
+CREATE INDEX idx_room_favorites_user_pos ON room_favorites(user_id, position);

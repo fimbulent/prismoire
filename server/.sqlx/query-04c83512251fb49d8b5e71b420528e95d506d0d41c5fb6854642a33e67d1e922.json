@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT room_id FROM room_favorites WHERE user_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "room_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "04c83512251fb49d8b5e71b420528e95d506d0d41c5fb6854642a33e67d1e922"
+}

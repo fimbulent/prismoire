@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT r.id, r.slug, r.created_by, u.display_name, r.created_at FROM rooms r JOIN users u ON u.id = r.created_by WHERE r.merged_into IS NULL AND r.deleted_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "slug",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_by",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "display_name",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "ce343f7d50cf611f90178798b6e9f9d01089d05ab9b701edb1a4b560ed73e86c"
+}

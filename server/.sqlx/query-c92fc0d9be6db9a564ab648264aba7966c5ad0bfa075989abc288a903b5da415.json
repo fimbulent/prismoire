@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO room_favorites (user_id, room_id, position) VALUES (?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "c92fc0d9be6db9a564ab648264aba7966c5ad0bfa075989abc288a903b5da415"
+}

@@ -212,6 +212,13 @@ pub enum ErrorCode {
     /// Theme identifier is not in the allowed set.
     InvalidTheme,
 
+    // -- Favorites ---------------------------------------------------
+    /// User already has the maximum number of favorite rooms.
+    FavoriteCapExceeded,
+    /// Reorder payload's room set did not match the user's current
+    /// favorites — the client's view is stale and must refetch.
+    FavoriteSetMismatch,
+
     // -- Catch-all ---------------------------------------------------
     /// Generic client error when no more specific code applies.
     BadRequest,
@@ -260,7 +267,9 @@ impl ErrorCode {
             | Self::InvitePrivilegeUnchanged
             | Self::UserAlreadyDeleted
             | Self::RoomAlreadyDeleted
-            | Self::BioAlreadyEmpty => StatusCode::CONFLICT,
+            | Self::BioAlreadyEmpty
+            | Self::FavoriteSetMismatch
+            | Self::FavoriteCapExceeded => StatusCode::CONFLICT,
 
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
 
@@ -378,6 +387,9 @@ impl ErrorCode {
             Self::SelfReport => "you cannot report your own post",
 
             Self::InvalidTheme => "invalid theme",
+
+            Self::FavoriteCapExceeded => "favorite rooms limit reached",
+            Self::FavoriteSetMismatch => "favorite rooms changed in another tab; please refetch",
 
             Self::BadRequest => "bad request",
             Self::RateLimited => "rate limited",

@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT r.slug, f.position, f.created_at FROM room_favorites f JOIN rooms r ON r.id = f.room_id WHERE f.user_id = ? ORDER BY f.position ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "slug",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "position",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "f1d6129019e6d2f828d0f8bc267542a6dd88545139e572a0c0a991827d49ea7d"
+}
