@@ -53,6 +53,12 @@
 	  input pops against it.
 	- `inputClass` — any additional classes merged onto the input
 	  (e.g. conditional `border-danger` for validation errors).
+	- `suppressDropdown` — when true, the dropdown (results, empty
+	  state, and create row) is hidden regardless of internal state.
+	  Useful when the parent has surfaced a validation error against
+	  the current query and the suggestions would be misleading.
+	  Fetching continues in the background so the dropdown can
+	  reappear seamlessly once the suppression clears.
 
 	## Keyboard
 
@@ -93,6 +99,8 @@
 		inputBgClass?: string;
 		/** Extra Tailwind classes to merge onto the input element. */
 		inputClass?: string;
+		/** When true, hide the dropdown regardless of internal state. */
+		suppressDropdown?: boolean;
 	}
 
 	let {
@@ -114,7 +122,8 @@
 		required = false,
 		maxlength,
 		inputBgClass = 'bg-bg',
-		inputClass = ''
+		inputClass = '',
+		suppressDropdown = false
 	}: Props = $props();
 
 	let results = $state<T[]>([]);
@@ -315,11 +324,15 @@
 
 	/// Derived: whether to show the dropdown at all. Open + either
 	/// loading, there's a result to render, or the create row is live.
+	/// Suppressed externally (e.g. when the parent has a validation
+	/// error on the current query) to avoid offering misleading
+	/// suggestions.
 	const showDropdown = $derived(
-		open && (loading || results.length > 0 || createRowVisible)
+		!suppressDropdown && open && (loading || results.length > 0 || createRowVisible)
 	);
 	const showEmpty = $derived(
-		open &&
+		!suppressDropdown &&
+			open &&
 			!loading &&
 			results.length === 0 &&
 			!createRowVisible &&

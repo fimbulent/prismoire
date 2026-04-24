@@ -110,6 +110,7 @@
 				placeholder="e.g. technology, general, meta"
 				inputBgClass="bg-bg-surface"
 				inputClass={roomError ? 'border-danger' : ''}
+				suppressDropdown={!!roomError}
 			>
 				{#snippet renderItem(r: RoomChip)}
 					<div class="flex items-baseline justify-between gap-3">
