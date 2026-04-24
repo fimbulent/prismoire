@@ -50,7 +50,10 @@
           src = ./.;
           filter = path: type:
             type == "directory" ||
-            builtins.match ".*\\.(rs|toml|lock|sql)$" path != null;
+            builtins.match ".*\\.(rs|toml|lock|sql)$" path != null ||
+            # sqlx offline query metadata (server/.sqlx/*.json) — required
+            # when building with SQLX_OFFLINE=true in the Nix sandbox.
+            builtins.match ".*/\\.sqlx/.*\\.json$" path != null;
         };
 
         server = rustPlatform.buildRustPackage {
