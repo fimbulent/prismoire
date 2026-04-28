@@ -17,6 +17,7 @@
 import type { Handle, HandleFetch, HandleServerError } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
 import { ApiRequestError } from '$lib/api/auth';
+import { routeMetrics } from '$lib/server/route-metrics';
 import { DEFAULT_THEME } from '$lib/themes';
 
 const API_URL = env.API_URL ?? 'http://127.0.0.1:3000';
@@ -48,9 +49,61 @@ export const handle: Handle = async ({ event, resolve }) => {
 	// and read (just below) after the loads have run.
 	event.locals.theme = DEFAULT_THEME;
 
-	return resolve(event, {
-		transformPageChunk: ({ html }) => html.replace(THEME_PLACEHOLDER, event.locals.theme)
-	});
+	// Skip metrics for unmatched routes (`event.route.id === null`):
+	// static assets, prerendered files, and 404s. Bucketing those
+	// would either explode cardinality (per-URL) or add noise without
+	// diagnostic value. Matched-route handling continues below.
+	if (event.route.id === null) {
+		return resolve(event, {
+			transformPageChunk: ({ html }) => html.replace(THEME_PLACEHOLDER, event.locals.theme)
+		});
+	}
+
+	// Wrap `event.fetch` to attribute wall-clock time spent waiting on
+	// upstream Axum calls. We track *blocking time* — when at least
+	// one upstream fetch is in flight — rather than summing fetch
+	// durations, so parallel `Promise.all([...])` calls don't get
+	// double-counted. This makes residual = total − upstream a real
+	// measure of Node-side work that wasn't waiting on the API.
+	//
+	// Caveat: `originalFetch` resolves when response *headers* arrive,
+	// so subsequent body reads (`await res.json()`, `.text()`) run
+	// outside the timer and land in residual rather than upstream. For
+	// our payloads this is the right call — body bytes for a small
+	// JSON response are typically already in-kernel by the time
+	// headers resolve, so the residual misattribution is essentially
+	// just the JSON-parse CPU, which *is* Node-side work. If we ever
+	// stream large response bodies, revisit this and consider forcing
+	// a body read inside the timer.
+	let upstreamMs = 0;
+	let inFlight = 0;
+	let segmentStart = 0;
+	const originalFetch = event.fetch;
+	event.fetch = async (input, init) => {
+		if (inFlight === 0) segmentStart = performance.now();
+		inFlight += 1;
+		try {
+			return await originalFetch(input, init);
+		} finally {
+			inFlight -= 1;
+			if (inFlight === 0) upstreamMs += performance.now() - segmentStart;
+		}
+	};
+
+	const routeId = event.route.id;
+	const method = event.request.method;
+	const start = performance.now();
+	let status = 500;
+	try {
+		const response = await resolve(event, {
+			transformPageChunk: ({ html }) => html.replace(THEME_PLACEHOLDER, event.locals.theme)
+		});
+		status = response.status;
+		return response;
+	} finally {
+		const totalMs = performance.now() - start;
+		routeMetrics.record(method, routeId, status, totalMs, upstreamMs);
+	}
 };
 
 /**
