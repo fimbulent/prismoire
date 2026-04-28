@@ -25,7 +25,25 @@ function isAllowedForRestricted(pathname: string, session: SessionInfo): boolean
 	return false;
 }
 
-export const load: LayoutServerLoad = async ({ fetch, cookies, locals, url }) => {
+export const load: LayoutServerLoad = async ({ fetch, cookies, locals, url, setHeaders }) => {
+	// Every SSR response in this app is session-dependent: gated pages
+	// branch on the auth cookie, /` redirects authed → /r/all vs anon →
+	// /public, even /public itself renders different chrome depending on
+	// whether the viewer is signed in. Caching any of this — even
+	// heuristically by a browser or a PWA shell warming `start_url` — is
+	// a correctness bug: a logged-out 307 → /public served from cache
+	// would prevent a subsequently-logged-in PWA cold launch from ever
+	// reaching /r/all without a manual refresh (observed in production).
+	//
+	// `no-store` (not just `no-cache`) so intermediaries and the PWA
+	// shell don't even retain a copy to revalidate. Long-cached
+	// fingerprinted bundles under /_app/immutable/* are served by Caddy
+	// with their own headers and aren't affected by this. Pages that are
+	// genuinely safe to share across viewers (none today) can override
+	// by calling `setHeaders({ 'cache-control': ... })` from their own
+	// load.
+	setHeaders({ 'cache-control': 'no-store' });
+
 	const setupStatus = await getSetupStatus({ fetch }).catch(() => ({ needs_setup: false }));
 
 	// Only hit /api/auth/session when a session cookie is actually present.
