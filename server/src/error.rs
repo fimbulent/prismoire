@@ -143,6 +143,9 @@ pub enum ErrorCode {
     PostNotFound,
     /// Post body failed validation (empty, too long, etc).
     InvalidPostBody,
+    /// Link-post URL failed validation (bad scheme, missing host,
+    /// userinfo, etc).
+    InvalidPostLink,
     /// Thread title failed validation (empty, too long, etc).
     InvalidThreadTitle,
     /// Cannot edit a retracted post.
@@ -301,6 +304,7 @@ impl ErrorCode {
             | Self::InvalidSortMode
             | Self::SeenIdsExceeded
             | Self::InvalidPostBody
+            | Self::InvalidPostLink
             | Self::InvalidThreadTitle
             | Self::PostRetracted
             | Self::ParentThreadMismatch
@@ -362,6 +366,7 @@ impl ErrorCode {
 
             Self::PostNotFound => "post not found",
             Self::InvalidPostBody => "post body is invalid",
+            Self::InvalidPostLink => "link is invalid",
             Self::InvalidThreadTitle => "thread title is invalid",
             Self::PostRetracted => "cannot edit a retracted post",
             Self::PostAlreadyRetracted => "post is already retracted",

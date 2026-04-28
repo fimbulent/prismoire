@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT t.id, t.title,\n                      t.author AS author_id,\n                      u.display_name AS author_name,\n                      u.status AS author_status,\n                      u.deleted_at AS author_deleted_at,\n                      t.created_at,\n                      r.id AS room_id,\n                      r.slug AS room_slug,\n                      t.locked AS \"locked: bool\",\n                      (r.slug = 'announcements') AS \"is_announcement!: bool\",\n                      t.reply_count,\n                      t.last_activity\n               FROM threads t\n               JOIN users u ON u.id = t.author\n               JOIN rooms r ON r.id = t.room\n               WHERE r.merged_into IS NULL\n                 AND NOT (t.reply_count = 0\n                      AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL)\n                 AND (COALESCE(t.last_activity, t.created_at) < ?\n                      OR (COALESCE(t.last_activity, t.created_at) = ? AND t.id <= ?))\n               ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC\n               LIMIT ?",
+  "query": "SELECT t.id, t.title,\n                      t.author AS author_id,\n                      u.display_name AS author_name,\n                      u.status AS author_status,\n                      u.deleted_at AS author_deleted_at,\n                      t.created_at,\n                      r.id AS room_id,\n                      r.slug AS room_slug,\n                      t.locked AS \"locked: bool\",\n                      (r.slug = 'announcements') AS \"is_announcement!: bool\",\n                      t.reply_count,\n                      t.last_activity,\n                      t.link_url\n               FROM threads t\n               JOIN users u ON u.id = t.author\n               JOIN rooms r ON r.id = t.room\n               WHERE r.merged_into IS NULL\n                 AND NOT (t.reply_count = 0\n                      AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL)\n               ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC\n               LIMIT ?",
   "describe": {
     "columns": [
       {
@@ -67,10 +67,15 @@
         "name": "last_activity",
         "ordinal": 12,
         "type_info": "Text"
+      },
+      {
+        "name": "link_url",
+        "ordinal": 13,
+        "type_info": "Text"
       }
     ],
     "parameters": {
-      "Right": 4
+      "Right": 1
     },
     "nullable": [
       false,
@@ -85,8 +90,9 @@
       false,
       false,
       false,
+      true,
       true
     ]
   },
-  "hash": "3a8b9eb6a0d20b277e01d43792f1818dbd5c5391d791d394e04c98d0edb906f4"
+  "hash": "a908762018ba9f9670cd0274f3368cfc583aec952a6ec1bb0bed3153e84361af"
 }

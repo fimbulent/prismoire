@@ -113,7 +113,7 @@ CREATE TABLE threads (
     locked INTEGER NOT NULL DEFAULT 0,
     last_activity TEXT,
     reply_count INTEGER NOT NULL DEFAULT 0
-);
+, link_url TEXT);
 CREATE TABLE posts (
     id TEXT PRIMARY KEY NOT NULL,
     author TEXT NOT NULL REFERENCES users(id),

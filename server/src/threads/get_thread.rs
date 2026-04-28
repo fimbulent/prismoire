@@ -86,6 +86,7 @@ struct ThreadInfo {
     room_slug: String,
     locked: bool,
     is_announcement: bool,
+    link_url: Option<String>,
 }
 
 /// All the viewer-specific context needed for visibility and sorting.
@@ -455,7 +456,8 @@ async fn fetch_thread_info(db: &sqlx::SqlitePool, thread_id: &str) -> Result<Thr
                   r.id AS "room_id!",
                   r.slug AS "room_slug!",
                   t.locked AS "locked!: bool",
-                  (r.slug = 'announcements') AS "is_announcement!: bool"
+                  (r.slug = 'announcements') AS "is_announcement!: bool",
+                  t.link_url AS "link_url?"
            FROM threads t
            JOIN users u ON u.id = t.author
            JOIN rooms r ON r.id = t.room
@@ -745,6 +747,7 @@ pub async fn get_thread(
         has_more_replies,
         focused_post_id: None,
         top_level_loaded: None,
+        link_url: thread_info.link_url,
     })
     .into_response())
 }
@@ -898,6 +901,7 @@ async fn build_focused_response(
         has_more_replies,
         focused_post_id: Some(focus_id.to_string()),
         top_level_loaded,
+        link_url: thread_info.link_url.clone(),
     })
     .into_response())
 }

@@ -59,6 +59,7 @@ const ERROR_MESSAGES: Record<ErrorCode, string> = {
 	// Posts
 	post_not_found: 'Post not found.',
 	invalid_post_body: 'Post content is invalid.',
+	invalid_post_link: 'Link URL is invalid.',
 	invalid_thread_title: 'Thread title is invalid.',
 	post_retracted: 'This post has been retracted and cannot be edited.',
 	post_already_retracted: 'Post is already retracted.',

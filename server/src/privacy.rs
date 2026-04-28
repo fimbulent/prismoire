@@ -172,6 +172,7 @@ pub struct ThreadExport {
     pub created_at: String,
     pub locked: bool,
     pub reply_count: i64,
+    pub link_url: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -360,7 +361,7 @@ pub async fn export_my_data(
         .collect();
 
     let thread_rows = sqlx::query!(
-        r#"SELECT t.id, t.title, r.slug, t.created_at, t.locked AS "locked!: bool", t.reply_count
+        r#"SELECT t.id, t.title, r.slug, t.created_at, t.locked AS "locked!: bool", t.reply_count, t.link_url
          FROM threads t
          JOIN rooms r ON r.id = t.room
          WHERE t.author = ?
@@ -379,6 +380,7 @@ pub async fn export_my_data(
             created_at: r.created_at,
             locked: r.locked,
             reply_count: r.reply_count,
+            link_url: r.link_url,
         })
         .collect();
 

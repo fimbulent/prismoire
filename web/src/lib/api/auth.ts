@@ -66,6 +66,7 @@ export type ErrorCode =
 	// Posts
 	| 'post_not_found'
 	| 'invalid_post_body'
+	| 'invalid_post_link'
 	| 'invalid_thread_title'
 	| 'post_retracted'
 	| 'post_already_retracted'

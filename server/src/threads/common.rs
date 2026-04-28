@@ -9,6 +9,8 @@ pub const MIN_TITLE_LEN: usize = 5;
 pub const MAX_TITLE_LEN: usize = 150;
 pub const MAX_BODY_LEN: usize = 50_000;
 pub const MAX_REPLY_BODY_LEN: usize = 10_000;
+/// Cap link URLs at 2048 chars — matches common browser/proxy practical limits.
+pub const MAX_LINK_LEN: usize = 2048;
 pub const PAGE_SIZE: usize = 20;
 
 /// Maximum number of recent repliers stored per thread for warm sort scoring.
@@ -36,6 +38,8 @@ pub struct ThreadSummary {
     pub reply_count: i64,
     pub last_activity: Option<String>,
     pub viewer: UserViewerInfo,
+    /// External URL for "link posts". `None` means a regular text post.
+    pub link_url: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -143,6 +147,8 @@ pub struct ThreadDetailResponse {
     /// differs from `post.children.len()`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_level_loaded: Option<usize>,
+    /// External URL for "link posts". `None` means a regular text post.
+    pub link_url: Option<String>,
 }
 
 /// Response for the subtree expansion endpoint.
@@ -192,6 +198,46 @@ pub fn validate_body(body: &str, max_len: usize) -> Result<String, String> {
         return Err(format!("body must be at most {max_len} characters"));
     }
     Ok(trimmed)
+}
+
+/// Validate a link-post URL. Trims, enforces length, parses with the
+/// `url` crate, and requires:
+///
+/// - scheme `http` or `https` (other schemes — `javascript:`, `data:`,
+///   `file:`, custom — are rejected as link posts are meant for
+///   web-addressable content the reader can open),
+/// - a non-empty host,
+/// - no userinfo (`https://good.com@evil.com` is a phishing pattern),
+/// - no embedded control characters or whitespace in the trimmed input
+///   (the `url` parser tolerates some of these via percent-encoding;
+///   we reject up-front so the stored canonical string round-trips
+///   safely through feeds, rendering, and copy/paste).
+pub fn validate_link(url_str: &str) -> Result<String, String> {
+    let trimmed = url_str.trim();
+    if trimmed.is_empty() {
+        return Err("link cannot be empty".into());
+    }
+    if trimmed.len() > MAX_LINK_LEN {
+        return Err(format!("link must be at most {MAX_LINK_LEN} characters"));
+    }
+    if trimmed.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("link must not contain whitespace or control characters".into());
+    }
+    let parsed = url::Url::parse(trimmed).map_err(|_| "link is not a valid URL".to_string())?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        _ => return Err("link must start with http:// or https://".into()),
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "link must include a host".to_string())?;
+    if host.is_empty() {
+        return Err("link must include a host".into());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("link must not contain userinfo".into());
+    }
+    Ok(trimmed.to_string())
 }
 
 // ---------------------------------------------------------------------------

@@ -14,6 +14,8 @@ export interface ThreadSummary {
 	reply_count: number;
 	last_activity: string | null;
 	viewer: UserViewerInfo;
+	/** External URL for "link posts". `null` means a regular text post. */
+	link_url: string | null;
 }
 
 export interface ThreadListResponse {
@@ -61,6 +63,8 @@ export interface ThreadDetail {
 	 * when focused-view pagination appended an extra out-of-order reply; use
 	 * this (not `post.children.length`) as the offset for load-more. */
 	top_level_loaded?: number;
+	/** External URL for "link posts". `null` means a regular text post. */
+	link_url: string | null;
 }
 
 export interface SubtreeResponse {
@@ -75,7 +79,10 @@ export interface RepliesPageResponse {
 export interface CreateThreadRequest {
 	room: string;
 	title: string;
+	/** Optional for link posts; required for text posts. */
 	body: string;
+	/** When set, this is a link post. Must be http(s) and ≤ 2048 chars. */
+	link?: string;
 }
 
 interface FetchOpts {

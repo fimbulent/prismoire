@@ -13,15 +13,25 @@ use crate::state::AppState;
 use crate::trust::UserViewerInfo;
 
 use super::common::{
-    MAX_BODY_LEN, PostResponse, ThreadDetailResponse, validate_body, validate_title,
+    MAX_BODY_LEN, PostResponse, ThreadDetailResponse, validate_body, validate_link, validate_title,
 };
 
 /// Wire request for `POST /api/threads`.
+///
+/// `link` and `body` together determine the thread kind:
+/// - `link` is `Some` and `body` is empty/missing → link post (root post body
+///   is stored as empty, the URL is what the thread is "about").
+/// - `link` is `None` and `body` is non-empty → text post.
+/// - Both present → link post with the body acting as framing/context.
+/// - Neither present → rejected.
 #[derive(Deserialize)]
 pub struct CreateThreadWithRoomRequest {
     pub room: String,
     pub title: String,
+    #[serde(default)]
     pub body: String,
+    #[serde(default)]
+    pub link: Option<String>,
 }
 
 /// Create a new thread, implicitly creating the room if it doesn't exist.
@@ -37,8 +47,30 @@ pub async fn create_thread(
         .map_err(|msg| AppError::with_message(ErrorCode::InvalidRoomSlug, msg))?;
     let title = validate_title(&req.title)
         .map_err(|msg| AppError::with_message(ErrorCode::InvalidThreadTitle, msg))?;
-    let body = validate_body(&req.body, MAX_BODY_LEN)
-        .map_err(|msg| AppError::with_message(ErrorCode::InvalidPostBody, msg))?;
+
+    // Link posts may have an empty body (the URL is what the thread is about).
+    // Text posts must have a non-empty body. Either way, an oversized body is
+    // rejected.
+    let link_url = match req.link.as_deref() {
+        Some(s) if !s.trim().is_empty() => Some(
+            validate_link(s)
+                .map_err(|msg| AppError::with_message(ErrorCode::InvalidPostLink, msg))?,
+        ),
+        _ => None,
+    };
+    let body = if link_url.is_some() {
+        let trimmed = req.body.trim().to_string();
+        if trimmed.len() > MAX_BODY_LEN {
+            return Err(AppError::with_message(
+                ErrorCode::InvalidPostBody,
+                format!("body must be at most {MAX_BODY_LEN} characters"),
+            ));
+        }
+        trimmed
+    } else {
+        validate_body(&req.body, MAX_BODY_LEN)
+            .map_err(|msg| AppError::with_message(ErrorCode::InvalidPostBody, msg))?
+    };
 
     if is_announcements(&slug) && !user.is_admin() {
         return Err(AppError::code(ErrorCode::AnnouncementsAdminOnly));
@@ -53,14 +85,15 @@ pub async fn create_thread(
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
     sqlx::query!(
-        "INSERT INTO threads (id, title, author, room, created_at, last_activity) \
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO threads (id, title, author, room, created_at, last_activity, link_url) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
         thread_id,
         title,
         user.user_id,
         room_id,
         now,
         now,
+        link_url,
     )
     .execute(&state.db)
     .await?;
@@ -118,6 +151,7 @@ pub async fn create_thread(
             has_more_replies: false,
             focused_post_id: None,
             top_level_loaded: None,
+            link_url,
         }),
     ))
 }

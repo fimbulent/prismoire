@@ -10,14 +10,19 @@
 	const MIN_TITLE = 5;
 	const MAX_TITLE = 150;
 	const MAX_BODY = 50_000;
+	const MAX_LINK = 2048;
 	const BODY_COUNTER_THRESHOLD = 40_000;
 
 	let { data } = $props();
+
+	type PostKind = 'text' | 'link';
 
 	// svelte-ignore state_referenced_locally
 	let room = $state(data.prefillRoom);
 	let title = $state('');
 	let body = $state('');
+	let link = $state('');
+	let kind = $state<PostKind>('text');
 	let error = $state<string | null>(null);
 	let submitting = $state(false);
 
@@ -32,6 +37,17 @@
 		if (titleLen > MAX_TITLE) return `Title must be at most ${MAX_TITLE} characters`;
 		return null;
 	});
+	let linkError = $derived.by(() => {
+		if (kind !== 'link') return null;
+		const trimmed = link.trim();
+		if (!trimmed) return null;
+		if (trimmed.length > MAX_LINK) return `Link must be at most ${MAX_LINK} characters`;
+		const lower = trimmed.toLowerCase();
+		if (!lower.startsWith('http://') && !lower.startsWith('https://')) {
+			return 'Link must start with http:// or https://';
+		}
+		return null;
+	});
 
 	async function handleSubmit(e: SubmitEvent) {
 		e.preventDefault();
@@ -44,9 +60,20 @@
 			error = titleError;
 			return;
 		}
-		if (!body.trim()) {
-			error = 'Body cannot be empty';
-			return;
+		if (kind === 'link') {
+			if (!link.trim()) {
+				error = 'Link cannot be empty';
+				return;
+			}
+			if (linkError) {
+				error = linkError;
+				return;
+			}
+		} else {
+			if (!body.trim()) {
+				error = 'Body cannot be empty';
+				return;
+			}
 		}
 		if (bodyLen > MAX_BODY) {
 			error = `Body must be at most ${MAX_BODY} characters`;
@@ -56,10 +83,12 @@
 		submitting = true;
 		error = null;
 		try {
+			const trimmedBody = body.trim();
 			const thread = await createThread({
 				room: room.trim().toLowerCase(),
 				title: title.trim(),
-				body: body.trim()
+				body: trimmedBody,
+				...(kind === 'link' ? { link: link.trim() } : {})
 			});
 			goto(`/r/${encodeURIComponent(thread.room_slug)}/${thread.id}`);
 		} catch (e) {
@@ -135,6 +164,42 @@
 			{/if}
 		</div>
 
+		<fieldset class="border-none p-0 m-0">
+			<legend class="block text-sm font-medium text-text-secondary mb-1">Post type</legend>
+			<div class="inline-flex rounded-md border border-border overflow-hidden">
+				<label
+					class="text-sm px-3 py-1.5 cursor-pointer {kind === 'text'
+						? 'bg-accent text-bg font-medium'
+						: 'bg-bg-surface text-text-secondary hover:text-text-primary'}"
+				>
+					<input
+						type="radio"
+						name="post-kind"
+						value="text"
+						bind:group={kind}
+						disabled={submitting}
+						class="sr-only"
+					/>
+					Text
+				</label>
+				<label
+					class="text-sm px-3 py-1.5 cursor-pointer border-l border-border {kind === 'link'
+						? 'bg-accent text-bg font-medium'
+						: 'bg-bg-surface text-text-secondary hover:text-text-primary'}"
+				>
+					<input
+						type="radio"
+						name="post-kind"
+						value="link"
+						bind:group={kind}
+						disabled={submitting}
+						class="sr-only"
+					/>
+					Link
+				</label>
+			</div>
+		</fieldset>
+
 		<div>
 			<label for="thread-title" class="block text-sm font-medium text-text-secondary mb-1"
 				>Title</label
@@ -158,15 +223,42 @@
 			{/if}
 		</div>
 
+		{#if kind === 'link'}
+			<div transition:slide={{ duration: 150 }}>
+				<label for="thread-link" class="block text-sm font-medium text-text-secondary mb-1"
+					>URL</label
+				>
+				<input
+					id="thread-link"
+					type="url"
+					bind:value={link}
+					maxlength={MAX_LINK}
+					required
+					autocomplete="off"
+					disabled={submitting}
+					placeholder="https://example.com/article"
+					class="w-full bg-bg-surface border border-border rounded-md text-text-primary text-sm px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted"
+					class:border-danger={!!linkError}
+				/>
+				{#if linkError}
+					<p transition:slide={{ duration: 150 }} class="text-danger text-xs mt-1">
+						{linkError}
+					</p>
+				{/if}
+			</div>
+		{/if}
+
 		<div>
-			<label for="thread-body" class="block text-sm font-medium text-text-secondary mb-1"
-				>Body</label
-			>
+			<label for="thread-body" class="block text-sm font-medium text-text-secondary mb-1">
+				Body{#if kind === 'link'}<span class="text-text-muted font-normal"> (optional)</span>{/if}
+			</label>
 			<textarea
 				id="thread-body"
 				bind:value={body}
-				placeholder="Write your post in Markdown..."
-				rows={10}
+				placeholder={kind === 'link'
+					? 'Optional: add context or commentary in Markdown...'
+					: 'Write your post in Markdown...'}
+				rows={kind === 'link' ? 5 : 10}
 				disabled={submitting}
 				class="w-full bg-bg-surface border border-border rounded-md text-text-primary text-sm font-mono px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted resize-y leading-relaxed"
 				class:border-danger={bodyLen > MAX_BODY}
@@ -190,9 +282,10 @@
 				disabled={submitting ||
 					!room.trim() ||
 					!title.trim() ||
-					!body.trim() ||
+					(kind === 'text' ? !body.trim() : !link.trim()) ||
 					!!roomError ||
 					!!titleError ||
+					!!linkError ||
 					bodyLen > MAX_BODY}
 				class="text-sm px-4 py-2 rounded-md cursor-pointer border border-accent bg-accent text-bg font-medium hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
 			>

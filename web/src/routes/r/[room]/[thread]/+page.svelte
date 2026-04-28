@@ -18,11 +18,13 @@
 	import RemoveForm from '$lib/components/post/RemoveForm.svelte';
 	import ReplyTree from '$lib/components/post/ReplyTree.svelte';
 	import LockIcon from '$lib/components/ui/LockIcon.svelte';
+	import ExternalLinkIcon from '$lib/components/ui/ExternalLinkIcon.svelte';
 	import Badge from '$lib/components/ui/Badge.svelte';
 	import Notice from '$lib/components/ui/Notice.svelte';
 	import MoreButton from '$lib/components/ui/MoreButton.svelte';
 	import { session } from '$lib/stores/session.svelte';
 	import { errorMessage } from '$lib/i18n/errors';
+	import { linkHost, linkRest } from '$lib/utils/url';
 	import { tick } from 'svelte';
 
 	let { data } = $props();
@@ -385,6 +387,18 @@
 					<LockIcon class="w-5 h-5" />
 				{/if}
 			</h1>
+			{#if thread.link_url}
+				<a
+					href={thread.link_url}
+					target="_blank"
+					rel="nofollow ugc noopener noreferrer"
+					class="inline-flex items-center text-sm text-link no-underline hover:underline mb-3 break-all"
+				>
+					<ExternalLinkIcon size={12} class="shrink-0 mr-1.5" />
+					<span class="font-medium mr-0.5">{linkHost(thread.link_url)}</span>
+					<span class="text-text-muted truncate">{linkRest(thread.link_url)}</span>
+				</a>
+			{/if}
 			<div id="post-{thread.post.id}">
 				<PostCard post={thread.post} onreply={thread.locked ? undefined : startReplying} onremove={session.isAdmin ? (postId) => { removeTarget = postId; removeError = null; } : undefined}>
 					{#snippet extraActions()}

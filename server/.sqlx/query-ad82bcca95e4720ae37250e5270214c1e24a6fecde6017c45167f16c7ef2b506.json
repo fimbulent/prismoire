@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT t.id, t.title,\n                          t.author AS author_id,\n                          u.display_name AS author_name,\n                          u.status AS author_status,\n                          u.deleted_at AS author_deleted_at,\n                          t.created_at,\n                          t.locked AS \"locked: bool\",\n                          t.reply_count,\n                          t.last_activity\n                   FROM threads t\n                   JOIN users u ON u.id = t.author\n                   WHERE t.room = ?\n                     AND NOT (t.reply_count = 0\n                          AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL)\n                     AND (t.created_at < ? OR (t.created_at = ? AND t.id < ?))\n                   ORDER BY t.created_at DESC NULLS LAST, t.created_at DESC, t.id DESC\n                   LIMIT ?",
+  "query": "SELECT t.id, t.title,\n                      t.author AS author_id,\n                      u.display_name AS author_name,\n                      u.status AS author_status,\n                      u.deleted_at AS author_deleted_at,\n                      t.created_at,\n                      t.locked AS \"locked: bool\",\n                      t.reply_count,\n                      t.last_activity,\n                      t.link_url\n               FROM threads t\n               JOIN users u ON u.id = t.author\n               WHERE t.room = ?\n                 AND NOT (t.reply_count = 0\n                      AND (SELECT retracted_at FROM posts op WHERE op.thread = t.id AND op.parent IS NULL) IS NOT NULL)\n               ORDER BY t.last_activity DESC NULLS LAST, t.created_at DESC\n               LIMIT ?",
   "describe": {
     "columns": [
       {
@@ -52,10 +52,15 @@
         "name": "last_activity",
         "ordinal": 9,
         "type_info": "Text"
+      },
+      {
+        "name": "link_url",
+        "ordinal": 10,
+        "type_info": "Text"
       }
     ],
     "parameters": {
-      "Right": 5
+      "Right": 2
     },
     "nullable": [
       false,
@@ -67,8 +72,9 @@
       false,
       false,
       false,
+      true,
       true
     ]
   },
-  "hash": "f95840363d258f0fb76c8bdac2cd9b80820f6e344b4c2dcbaae9e4d6f2901aff"
+  "hash": "ad82bcca95e4720ae37250e5270214c1e24a6fecde6017c45167f16c7ef2b506"
 }

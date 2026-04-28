@@ -53,6 +53,7 @@ struct AllThreadsRow {
     is_announcement: bool,
     reply_count: i64,
     last_activity: Option<String>,
+    link_url: Option<String>,
 }
 
 /// Row type for "list threads in a single room" SELECTs. The caller
@@ -70,6 +71,7 @@ struct RoomThreadsRow {
     locked: bool,
     reply_count: i64,
     last_activity: Option<String>,
+    link_url: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -98,6 +100,7 @@ fn all_threads_to_summary(
         is_announcement: row.is_announcement,
         reply_count: row.reply_count,
         last_activity: row.last_activity,
+        link_url: row.link_url,
     }
 }
 
@@ -126,6 +129,7 @@ fn room_threads_to_summary(
         is_announcement,
         reply_count: row.reply_count,
         last_activity: row.last_activity,
+        link_url: row.link_url,
     }
 }
 
@@ -284,7 +288,8 @@ pub async fn list_public_announcement_threads(
                       t.locked AS "locked: bool",
                       (r.slug = 'announcements') AS "is_announcement!: bool",
                       t.reply_count,
-                      t.last_activity
+                      t.last_activity,
+                      t.link_url
                FROM threads t
                JOIN users u ON u.id = t.author
                JOIN rooms r ON r.id = t.room
@@ -317,7 +322,8 @@ pub async fn list_public_announcement_threads(
                       t.locked AS "locked: bool",
                       (r.slug = 'announcements') AS "is_announcement!: bool",
                       t.reply_count,
-                      t.last_activity
+                      t.last_activity,
+                      t.link_url
                FROM threads t
                JOIN users u ON u.id = t.author
                JOIN rooms r ON r.id = t.room
@@ -352,6 +358,7 @@ pub async fn list_public_announcement_threads(
                 is_announcement: row.is_announcement,
                 reply_count: row.reply_count,
                 last_activity: row.last_activity,
+                link_url: row.link_url,
                 viewer: UserViewerInfo {
                     distance: None,
                     distrusted: false,
@@ -462,7 +469,8 @@ pub async fn list_all_threads(
                           t.locked AS "locked: bool",
                           (r.slug = 'announcements') AS "is_announcement!: bool",
                           t.reply_count,
-                          t.last_activity
+                          t.last_activity,
+                          t.link_url
                    FROM threads t
                    JOIN users u ON u.id = t.author
                    JOIN rooms r ON r.id = t.room
@@ -495,7 +503,8 @@ pub async fn list_all_threads(
                           t.locked AS "locked: bool",
                           (r.slug = 'announcements') AS "is_announcement!: bool",
                           t.reply_count,
-                          t.last_activity
+                          t.last_activity,
+                          t.link_url
                    FROM threads t
                    JOIN users u ON u.id = t.author
                    JOIN rooms r ON r.id = t.room
@@ -528,7 +537,8 @@ pub async fn list_all_threads(
                           t.locked AS "locked: bool",
                           (r.slug = 'announcements') AS "is_announcement!: bool",
                           t.reply_count,
-                          t.last_activity
+                          t.last_activity,
+                          t.link_url
                    FROM threads t
                    JOIN users u ON u.id = t.author
                    JOIN rooms r ON r.id = t.room
@@ -556,7 +566,8 @@ pub async fn list_all_threads(
                           t.locked AS "locked: bool",
                           (r.slug = 'announcements') AS "is_announcement!: bool",
                           t.reply_count,
-                          t.last_activity
+                          t.last_activity,
+                          t.link_url
                    FROM threads t
                    JOIN users u ON u.id = t.author
                    JOIN rooms r ON r.id = t.room
@@ -719,7 +730,8 @@ pub async fn list_threads(
                           t.created_at,
                           t.locked AS "locked: bool",
                           t.reply_count,
-                          t.last_activity
+                          t.last_activity,
+                          t.link_url
                    FROM threads t
                    JOIN users u ON u.id = t.author
                    WHERE t.room = ?
@@ -749,7 +761,8 @@ pub async fn list_threads(
                           t.created_at,
                           t.locked AS "locked: bool",
                           t.reply_count,
-                          t.last_activity
+                          t.last_activity,
+                          t.link_url
                    FROM threads t
                    JOIN users u ON u.id = t.author
                    WHERE t.room = ?
@@ -779,7 +792,8 @@ pub async fn list_threads(
                           t.created_at,
                           t.locked AS "locked: bool",
                           t.reply_count,
-                          t.last_activity
+                          t.last_activity,
+                          t.link_url
                    FROM threads t
                    JOIN users u ON u.id = t.author
                    WHERE t.room = ?
@@ -804,7 +818,8 @@ pub async fn list_threads(
                           t.created_at,
                           t.locked AS "locked: bool",
                           t.reply_count,
-                          t.last_activity
+                          t.last_activity,
+                          t.link_url
                    FROM threads t
                    JOIN users u ON u.id = t.author
                    WHERE t.room = ?
@@ -1300,7 +1315,8 @@ async fn fetch_warm_candidates_all(
                       t.locked AS "locked: bool",
                       (r.slug = 'announcements') AS "is_announcement!: bool",
                       t.reply_count,
-                      t.last_activity
+                      t.last_activity,
+                      t.link_url
                FROM threads t
                JOIN users u ON u.id = t.author
                JOIN rooms r ON r.id = t.room
@@ -1333,7 +1349,8 @@ async fn fetch_warm_candidates_all(
                       t.locked AS "locked: bool",
                       (r.slug = 'announcements') AS "is_announcement!: bool",
                       t.reply_count,
-                      t.last_activity
+                      t.last_activity,
+                      t.link_url
                FROM threads t
                JOIN users u ON u.id = t.author
                JOIN rooms r ON r.id = t.room
@@ -1410,7 +1427,8 @@ async fn fetch_warm_candidates_room(
                       t.created_at,
                       t.locked AS "locked: bool",
                       t.reply_count,
-                      t.last_activity
+                      t.last_activity,
+                      t.link_url
                FROM threads t
                JOIN users u ON u.id = t.author
                WHERE t.room = ?
@@ -1439,7 +1457,8 @@ async fn fetch_warm_candidates_room(
                       t.created_at,
                       t.locked AS "locked: bool",
                       t.reply_count,
-                      t.last_activity
+                      t.last_activity,
+                      t.link_url
                FROM threads t
                JOIN users u ON u.id = t.author
                WHERE t.room = ?

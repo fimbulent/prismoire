@@ -12,7 +12,9 @@
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
 	import LockIcon from '$lib/components/ui/LockIcon.svelte';
+	import ExternalLinkIcon from '$lib/components/ui/ExternalLinkIcon.svelte';
 	import Badge from '$lib/components/ui/Badge.svelte';
+	import { linkHost } from '$lib/utils/url';
 	import UserName from '$lib/components/trust/UserName.svelte';
 	import MoreButton from '$lib/components/ui/MoreButton.svelte';
 	import Notice from '$lib/components/ui/Notice.svelte';
@@ -161,27 +163,44 @@
 				>
 					<div class="flex items-start gap-3">
 						<div class="flex-1 min-w-0">
-							<div class="mb-1 flex items-center gap-2">
-								{#if thread.is_announcement}
-									<Badge>Announcements</Badge>
-								{/if}
-								{#if thread.locked}
-									<LockIcon />
-								{/if}
+							{#if thread.is_announcement || thread.locked}
+								<div class="mb-1 flex items-center gap-2">
+									{#if thread.is_announcement}
+										<Badge>Announcements</Badge>
+									{/if}
+									{#if thread.locked}
+										<LockIcon />
+									{/if}
+								</div>
+							{/if}
+							<div class="mb-1">
 								<a
 									href={threadHref(thread)}
 									class="font-semibold text-text-primary no-underline hover:text-link hover:underline"
 									>{thread.title}</a
 								>
+								{#if thread.link_url}
+									<a
+										href={thread.link_url}
+										target="_blank"
+										rel="nofollow ugc noopener noreferrer"
+										class="ml-1.5 text-xs text-text-muted whitespace-nowrap no-underline hover:text-link hover:underline"
+									>
+										<ExternalLinkIcon />
+										{linkHost(thread.link_url)}
+									</a>
+								{/if}
 							</div>
 							<div class="flex items-center gap-2 text-xs text-text-muted">
 								<UserName name={thread.author_name} viewer={thread.viewer} compact linked={session.isLoggedIn} />
 								<span>&middot;</span>
 								<span>{relativeTime(thread.last_activity ?? thread.created_at)}</span>
 								<span>&middot;</span>
-								<span
+								<a
+									href={threadHref(thread)}
+									class="no-underline hover:text-text-secondary hover:underline"
 									>{thread.reply_count}
-									{thread.reply_count === 1 ? 'reply' : 'replies'}</span
+									{thread.reply_count === 1 ? 'reply' : 'replies'}</a
 								>
 								{#if isAll}
 									<span>&middot;</span>
