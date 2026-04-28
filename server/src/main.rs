@@ -231,6 +231,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             put(users::set_trust_edge).delete(users::delete_trust_edge),
         )
         .route(
+            "/api/users/{username}/tag",
+            put(users::set_user_tag).delete(users::delete_user_tag),
+        )
+        .route(
             "/api/settings",
             get(settings::get_settings).patch(settings::update_settings),
         )

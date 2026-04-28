@@ -219,3 +219,13 @@ CREATE TABLE room_favorites (
     PRIMARY KEY (user_id, room_id)
 );
 CREATE INDEX idx_room_favorites_user_pos ON room_favorites(user_id, position);
+CREATE TABLE user_tags (
+    viewer_id  TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    target_id  TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    tag        TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    PRIMARY KEY (viewer_id, target_id),
+    CHECK (viewer_id <> target_id),
+    CHECK (length(tag) > 0)
+);
+CREATE INDEX idx_user_tags_viewer ON user_tags(viewer_id);

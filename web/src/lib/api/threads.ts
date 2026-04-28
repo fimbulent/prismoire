@@ -1,5 +1,5 @@
 import { throwApiError, type FetchFn } from './auth';
-import type { TrustInfo } from './users';
+import type { UserViewerInfo } from './users';
 
 export interface ThreadSummary {
 	id: string;
@@ -13,7 +13,7 @@ export interface ThreadSummary {
 	is_announcement: boolean;
 	reply_count: number;
 	last_activity: string | null;
-	trust: TrustInfo;
+	viewer: UserViewerInfo;
 }
 
 export interface ThreadListResponse {
@@ -33,7 +33,7 @@ export interface PostResponse {
 	is_op: boolean;
 	retracted_at: string | null;
 	children: PostResponse[];
-	trust: TrustInfo;
+	viewer: UserViewerInfo;
 	has_more_children?: boolean;
 	/** True when the post's author is in the viewer's distrust set but the
 	 * post is shown anyway because the viewer has a descendant reply in this

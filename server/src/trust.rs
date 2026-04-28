@@ -476,41 +476,67 @@ impl TryFrom<&str> for UserStatus {
     }
 }
 
-/// Trust metadata attached to any user reference in API responses.
+/// Per-viewer metadata attached to any user reference in API responses.
 ///
-/// Built from a distance map (forward BFS results) and distrust set (viewer's
-/// distrust targets) via `TrustInfo::build`. Serializes as a nested `"trust"`
-/// object, e.g. `{ "trust": { "distance": 1.5, "distrusted": false } }`.
+/// Carries every per-viewer fact about a referenced user: trust
+/// distance, the viewer's distrust flag, the target's effective
+/// account status, and the viewer's optional private tag.
+///
+/// Built via `UserViewerInfo::build` from a distance map (forward BFS
+/// results), the viewer's distrust set, the viewer's tag map, and the
+/// target user's status. Serialized on the wire as a `"viewer"` object
+/// nested inside whatever envelope referenced the user, e.g.
+/// `{ "viewer": { "distance": 1.5, "distrusted": false, "tag": "Alice" } }`.
 #[derive(Clone, serde::Serialize)]
-pub struct TrustInfo {
+pub struct UserViewerInfo {
     pub distance: Option<f64>,
     pub distrusted: bool,
     #[serde(skip_serializing_if = "UserStatus::is_active")]
     pub status: UserStatus,
+    /// Viewer-private tag the current viewer has attached to this user
+    /// (max 35 grapheme clusters, plain text, see `users.rs::set_user_tag`).
+    /// Suppressed for the viewer themselves and for deleted users; absent
+    /// when the viewer has not tagged this user.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
 }
 
-impl TrustInfo {
-    /// Build TrustInfo for a user from the viewer's distance map, distrust set,
-    /// and the target user's account status.
+impl UserViewerInfo {
+    /// Build per-viewer info for a user from the viewer's distance map,
+    /// distrust set, tag map, and the target user's account status.
+    ///
+    /// The tag is suppressed for deleted users — the display name on a
+    /// deleted account is anonymised to `deleted-<hex>`, so a stale tag
+    /// pointing at it would just be a dangling note with no recognition
+    /// value (see UserName.svelte's deleted-user branch).
     pub fn build(
         user_id: &str,
         distance_map: &HashMap<String, f64>,
         distrust_set: &HashSet<String>,
+        tag_map: &HashMap<String, String>,
         status: UserStatus,
     ) -> Self {
+        let tag = if matches!(status, UserStatus::Deleted) {
+            None
+        } else {
+            tag_map.get(user_id).cloned()
+        };
         Self {
             distance: distance_map.get(user_id).copied(),
             distrusted: distrust_set.contains(user_id),
             status,
+            tag,
         }
     }
 
-    /// TrustInfo for the viewer themselves (distance 0, not distrusted).
-    pub fn self_trust() -> Self {
+    /// Per-viewer info for the viewer themselves (distance 0, not
+    /// distrusted, no tag — self-tag is rejected at the endpoint).
+    pub fn self_view() -> Self {
         Self {
             distance: None,
             distrusted: false,
             status: UserStatus::Active,
+            tag: None,
         }
     }
 }
@@ -527,6 +553,27 @@ pub async fn load_distrust_set(
     .fetch_all(db)
     .await?;
     Ok(rows.into_iter().map(|r| r.target_user).collect())
+}
+
+/// Load all of the viewer's private user tags as a `target_id -> tag` map.
+///
+/// Loaded once per request (mirroring `load_distrust_set`) and merged into
+/// `UserViewerInfo::build`. Bounded by however many users this viewer has
+/// tagged — expected to stay small in practice.
+pub async fn load_tag_map(
+    db: &sqlx::SqlitePool,
+    viewer_id: &str,
+) -> Result<HashMap<String, String>, sqlx::Error> {
+    // TODO: No enforcement in practice that this will be a small result set. Maybe we should limit
+    //  the total number of tags a user can have? (e.g. limit of 2000, auto-delete the tag
+    //  associated with the least recently active tagged user?)
+    let rows = sqlx::query!(
+        "SELECT target_id, tag FROM user_tags WHERE viewer_id = ?",
+        viewer_id,
+    )
+    .fetch_all(db)
+    .await?;
+    Ok(rows.into_iter().map(|r| (r.target_id, r.tag)).collect())
 }
 
 // ---------------------------------------------------------------------------

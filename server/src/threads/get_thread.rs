@@ -9,7 +9,9 @@ use serde::Deserialize;
 use crate::error::{AppError, ErrorCode};
 use crate::session::OptionalAuthUser;
 use crate::state::AppState;
-use crate::trust::{MINIMUM_TRUST_THRESHOLD, TrustInfo, UserStatus, load_distrust_set};
+use crate::trust::{
+    MINIMUM_TRUST_THRESHOLD, UserStatus, UserViewerInfo, load_distrust_set, load_tag_map,
+};
 
 use super::common::{PostResponse, RepliesPageResponse, SubtreeResponse, ThreadDetailResponse};
 
@@ -91,6 +93,7 @@ struct ViewerCtx {
     trust_map: Arc<HashMap<String, f64>>,
     reverse_map: Arc<HashMap<String, f64>>,
     distrust_set: HashSet<String>,
+    tag_map: HashMap<String, String>,
     reader_id: Option<String>,
 }
 
@@ -395,10 +398,11 @@ impl TreeCtx<'_> {
             && self.viewer.distrust_set.contains(&meta.author_id);
 
         PostResponse {
-            trust: TrustInfo::build(
+            viewer: UserViewerInfo::build(
                 &meta.author_id,
                 &self.viewer.trust_map,
                 &self.viewer.distrust_set,
+                &self.viewer.tag_map,
                 meta.author_status,
             ),
             id: meta.id.clone(),
@@ -575,6 +579,7 @@ fn load_viewer_ctx(
                 trust_map: dm,
                 reverse_map: rm,
                 distrust_set: HashSet::new(),
+                tag_map: HashMap::new(),
                 reader_id: Some(u.user_id.clone()),
             })
         }
@@ -582,12 +587,13 @@ fn load_viewer_ctx(
             trust_map: Arc::new(HashMap::new()),
             reverse_map: Arc::new(HashMap::new()),
             distrust_set: HashSet::new(),
+            tag_map: HashMap::new(),
             reader_id: None,
         }),
     }
 }
 
-/// Load viewer context including distrust set (requires async).
+/// Load viewer context including distrust set and per-viewer tags (requires async).
 async fn load_viewer_ctx_full(
     state: &AppState,
     user: &Option<crate::session::AuthUser>,
@@ -595,6 +601,7 @@ async fn load_viewer_ctx_full(
     let mut ctx = load_viewer_ctx(state, user)?;
     if let Some(u) = user.as_ref() {
         ctx.distrust_set = load_distrust_set(&state.db, &u.user_id).await?;
+        ctx.tag_map = load_tag_map(&state.db, &u.user_id).await?;
     }
     Ok(ctx)
 }
@@ -700,10 +707,11 @@ pub async fn get_thread(
     let reply_count = count_tree_replies(&op_children);
 
     let op = PostResponse {
-        trust: TrustInfo::build(
+        viewer: UserViewerInfo::build(
             &op_meta.author_id,
             &viewer.trust_map,
             &viewer.distrust_set,
+            &viewer.tag_map,
             op_meta.author_status,
         ),
         id: op_meta.id.clone(),
@@ -852,10 +860,11 @@ async fn build_focused_response(
     let reply_count = count_tree_replies(&op_children);
 
     let op = PostResponse {
-        trust: TrustInfo::build(
+        viewer: UserViewerInfo::build(
             &op_meta.author_id,
             &viewer.trust_map,
             &viewer.distrust_set,
+            &viewer.tag_map,
             op_meta.author_status,
         ),
         id: op_meta.id.clone(),

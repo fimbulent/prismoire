@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO user_tags (viewer_id, target_id, tag) VALUES (?, ?, ?) ON CONFLICT(viewer_id, target_id) DO UPDATE SET tag = excluded.tag, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "16a4be040860d452ab6a84d4cedb104a20d9c40786144f799f20c0af6e184e81"
+}

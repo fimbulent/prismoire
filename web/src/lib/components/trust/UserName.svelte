@@ -1,19 +1,23 @@
 <script lang="ts">
-	import type { TrustInfo } from '$lib/api/users';
+	import type { UserViewerInfo } from '$lib/api/users';
 	import { session } from '$lib/stores/session.svelte';
 	import TrustBadge from './TrustBadge.svelte';
 
 	interface Props {
 		name: string;
-		trust?: TrustInfo;
+		viewer?: UserViewerInfo;
 		compact?: boolean;
 		linked?: boolean;
 	}
 
-	let { name, trust, compact = false, linked = true }: Props = $props();
+	let { name, viewer, compact = false, linked = true }: Props = $props();
 
 	let isSelf = $derived(session.user?.display_name === name);
-	let status = $derived(trust?.status);
+	let status = $derived(viewer?.status);
+	// Viewer's private tag for this user (max 35 graphemes, plain text).
+	// Only rendered for non-self, non-deleted users — matches the
+	// server-side suppression rules in `UserViewerInfo::build`.
+	let tag = $derived(viewer?.tag ?? null);
 </script>
 
 {#if isSelf}
@@ -26,12 +30,15 @@
 	<span class="status-badge status-badge-deleted text-xs font-semibold px-1 py-0.5 rounded">deleted</span>
 {:else if linked}
 	<a href="/@{encodeURIComponent(name)}" class="font-semibold text-text-primary hover:underline {status ? 'line-through opacity-60' : ''}">{name}</a>
+	{#if tag}
+		<span class="text-xs text-text-muted italic" title="Your private tag for this user">({tag})</span>
+	{/if}
 	{#if status === 'banned'}
 		<span class="status-badge status-badge-banned text-xs font-semibold px-1 py-0.5 rounded">banned</span>
 	{:else if status === 'suspended'}
 		<span class="status-badge status-badge-suspended text-xs font-semibold px-1 py-0.5 rounded">suspended</span>
 	{:else}
-		<TrustBadge {trust} {compact} />
+		<TrustBadge {viewer} {compact} />
 	{/if}
 {:else}
 	<span class="font-semibold text-text-primary">{name}</span>

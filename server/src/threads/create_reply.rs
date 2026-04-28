@@ -8,7 +8,7 @@ use crate::error::{AppError, ErrorCode};
 use crate::session::AuthUser;
 use crate::signing;
 use crate::state::AppState;
-use crate::trust::TrustInfo;
+use crate::trust::UserViewerInfo;
 
 use super::common::{
     CreateReplyRequest, MAX_REPLY_BODY_LEN, PostResponse, RECENT_REPLIERS_BUFFER, validate_body,
@@ -167,7 +167,7 @@ pub async fn create_reply(
             is_op: user.user_id == thread_author,
             retracted_at: None,
             children: vec![],
-            trust: TrustInfo::self_trust(),
+            viewer: UserViewerInfo::self_view(),
             has_more_children: false,
             distrust_scaffold: false,
         }),

@@ -194,7 +194,7 @@
 
 <!-- Header -->
 <div class="flex items-center gap-2 mb-2 text-sm">
-	<UserName name={post.author_name} trust={post.trust} linked={session.isLoggedIn} />
+	<UserName name={post.author_name} viewer={post.viewer} linked={session.isLoggedIn} />
 	{#if post.distrust_scaffold}
 		<span
 			class="inline-flex items-center justify-center w-4 h-4 rounded-full border border-border text-text-muted text-[0.625rem] font-semibold leading-none cursor-help select-none"

@@ -79,6 +79,9 @@ export type ErrorCode =
 	// Misc user
 	| 'bio_too_long'
 	| 'bio_already_empty'
+	// User tags
+	| 'self_tag'
+	| 'tag_too_long'
 	// Admin
 	| 'admin_required'
 	| 'reason_required'

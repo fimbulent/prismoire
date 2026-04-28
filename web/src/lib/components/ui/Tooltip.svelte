@@ -61,7 +61,10 @@
 		line-height: 1.4;
 		text-transform: none;
 		letter-spacing: normal;
-		white-space: nowrap;
+		white-space: normal;
+		max-width: min(20rem, calc(100vw - 1rem));
+		width: max-content;
+		overflow-wrap: break-word;
 		pointer-events: none;
 		opacity: 0;
 		transition: opacity 0.12s ease;

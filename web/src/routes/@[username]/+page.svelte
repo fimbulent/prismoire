@@ -8,6 +8,8 @@
 		updateBio,
 		setTrustEdge,
 		deleteTrustEdge,
+		setUserTag,
+		clearUserTag,
 		type UserProfile,
 		type TrustDetailResponse,
 		type ActivityItem
@@ -61,6 +63,48 @@
 	let bioSaving = $state(false);
 	let bioError = $state<string | null>(null);
 
+	// Viewer's private tag for this profile. Editing is hidden for self,
+	// for the deleted account branch (which doesn't render anything
+	// editable), and for restricted viewers (who can't reach other
+	// profiles in the first place). Limit mirrors the server's
+	// MAX_TAG_GRAPHEMES, counted as grapheme clusters (not UTF-16 code
+	// units) so the count and truncation match what the server enforces.
+	const TAG_MAX = 35;
+	let editingTag = $state(false);
+	let tagText = $state('');
+	let tagSaving = $state(false);
+	let tagError = $state<string | null>(null);
+
+	// Grapheme-cluster counting via Intl.Segmenter (widely supported as
+	// of 2024). Falls back to code-point counting (still better than the
+	// raw .length UTF-16 count) when Segmenter is unavailable.
+	function countGraphemes(s: string): number {
+		if (typeof Intl !== 'undefined' && 'Segmenter' in Intl) {
+			const seg = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+			let n = 0;
+			for (const _ of seg.segment(s)) n++;
+			return n;
+		}
+		return [...s].length;
+	}
+
+	function truncateGraphemes(s: string, max: number): string {
+		if (typeof Intl !== 'undefined' && 'Segmenter' in Intl) {
+			const seg = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+			let result = '';
+			let n = 0;
+			for (const { segment } of seg.segment(s)) {
+				if (n >= max) break;
+				result += segment;
+				n++;
+			}
+			return result;
+		}
+		return [...s].slice(0, max).join('');
+	}
+
+	let tagGraphemes = $derived(countGraphemes(tagText));
+
 	let actionLoading = $state(false);
 	let actionError = $state<string | null>(null);
 
@@ -76,6 +120,8 @@
 		appendedActivityCursor = null;
 		editingBio = false;
 		bioError = null;
+		editingTag = false;
+		tagError = null;
 		actionError = null;
 		adminOpen = false;
 		adminAction = null;
@@ -196,6 +242,37 @@
 	function cancelEditBio() {
 		editingBio = false;
 		bioError = null;
+	}
+
+	function startEditTag() {
+		tagText = profile.viewer.tag ?? '';
+		editingTag = true;
+		tagError = null;
+	}
+
+	function cancelEditTag() {
+		editingTag = false;
+		tagError = null;
+	}
+
+	async function saveTag() {
+		tagSaving = true;
+		tagError = null;
+		try {
+			const value = tagText.trim();
+			if (value === '') {
+				await clearUserTag(username);
+				profile.viewer = { ...profile.viewer, tag: null };
+			} else {
+				await setUserTag(username, value);
+				profile.viewer = { ...profile.viewer, tag: value };
+			}
+			editingTag = false;
+		} catch (e) {
+			tagError = errorMessage(e, 'Failed to save tag');
+		} finally {
+			tagSaving = false;
+		}
 	}
 
 	function joinMethodLabel(method: string): string {
@@ -361,27 +438,83 @@
 
 	<!-- Profile Header -->
 	<div class="bg-bg-surface border border-border rounded-md p-6 mb-6">
-		<div class="flex items-start justify-between gap-4 mb-4">
-			<div class="flex items-center gap-3">
+		<div class="flex flex-wrap items-start justify-between gap-4 mb-4">
+			<div class="flex items-start gap-3">
 				<div class="w-14 h-14 rounded-full bg-bg-surface-raised border border-border flex items-center justify-center text-2xl font-bold text-accent">
 					{profile.display_name.charAt(0)}
 				</div>
 				<div>
 					<div class="flex items-center gap-2">
-						<h1 class="text-2xl font-bold leading-tight {profile.trust.status ? 'line-through opacity-60' : ''}">{profile.display_name}</h1>
-						{#if profile.trust.status === 'deleted'}
+						<h1 class="text-2xl font-bold leading-tight {profile.viewer.status ? 'line-through opacity-60' : ''}">{profile.display_name}</h1>
+						{#if profile.viewer.status === 'deleted'}
 							<span class="status-badge status-badge-deleted text-xs font-semibold px-1.5 py-0.5 rounded">Deleted</span>
-						{:else if profile.trust.status === 'banned'}
+						{:else if profile.viewer.status === 'banned'}
 							<span class="status-badge status-badge-banned text-xs font-semibold px-1.5 py-0.5 rounded">Banned</span>
-						{:else if profile.trust.status === 'suspended'}
+						{:else if profile.viewer.status === 'suspended'}
 							<span class="status-badge status-badge-suspended text-xs font-semibold px-1.5 py-0.5 rounded">Suspended</span>
 						{:else if !profile.is_self}
-							<TrustBadge trust={profile.trust} />
+							<TrustBadge viewer={profile.viewer} />
 						{/if}
 						{#if profile.role === 'admin'}
 							<span class="text-xs px-1.5 py-0.5 rounded font-semibold bg-accent text-bg">Admin</span>
 						{/if}
 					</div>
+					<!-- Private tag — only the viewer ever sees it; the tagged
+					     user is never told. Hidden for self-views, deleted
+					     accounts, and restricted viewers (whose UI is locked
+					     down anyway). Sits between the display name and the
+					     "Joined …" line so it reads as a viewer-private label
+					     attached to the identity. -->
+					{#if !profile.is_self && !viewerRestricted && profile.viewer.status !== 'deleted'}
+						<div class="flex flex-wrap items-center gap-2 mt-1 text-sm">
+							{#if editingTag}
+								<input
+									type="text"
+									bind:value={tagText}
+									oninput={() => {
+										if (countGraphemes(tagText) > TAG_MAX) {
+											tagText = truncateGraphemes(tagText, TAG_MAX);
+										}
+									}}
+									placeholder="e.g. Alice from work"
+									class="flex-1 min-w-0 max-w-xs bg-bg-surface-raised border border-border-subtle rounded-md px-2 py-1 text-sm text-text-primary focus:outline-none focus:border-accent"
+								/>
+								<button
+									onclick={saveTag}
+									disabled={tagSaving}
+									class="text-xs px-3 py-1 rounded bg-accent text-bg font-medium hover:opacity-90 disabled:opacity-50 cursor-pointer"
+								>{tagSaving ? 'Saving…' : 'Save'}</button>
+								<button
+									onclick={cancelEditTag}
+									class="text-xs px-3 py-1 rounded border border-border text-text-secondary hover:bg-bg-hover cursor-pointer"
+								>Cancel</button>
+								<span class="text-xs text-text-muted">{tagGraphemes}/{TAG_MAX}</span>
+								{#if tagError}
+									<span class="text-xs text-danger basis-full">{tagError}</span>
+								{/if}
+							{:else if profile.viewer.tag}
+								<span class="italic text-text-secondary">{profile.viewer.tag}</span>
+								<button
+									onclick={startEditTag}
+									class="text-xs text-accent hover:underline cursor-pointer bg-transparent border-none"
+								>Edit</button>
+								<Tooltip
+									text="A private label only you can see. Useful for remembering who someone is — e.g. their name elsewhere, where you met, or shared context."
+									position="bottom"
+								><span class="trust-score-hint">?</span></Tooltip>
+							{:else}
+								<button
+									onclick={startEditTag}
+									class="text-xs text-accent hover:underline cursor-pointer bg-transparent border-none"
+								>Add private tag</button>
+								<Tooltip
+									text="A private label only you can see. Useful for remembering who someone is — e.g. their name elsewhere, where you met, or shared context. The tagged user is never told."
+									position="bottom"
+								><span class="trust-score-hint">?</span></Tooltip>
+							{/if}
+						</div>
+					{/if}
+
 					<div class="text-sm text-text-muted mt-0.5">
 						Joined {relativeTime(profile.created_at)} {joinMethodLabel(profile.signup_method)}
 					</div>
@@ -476,9 +609,9 @@
 							{#key adminAction}<div transition:slide={{ duration: 150 }}>
 							{#if !adminAction}
 								<div class="flex gap-2 flex-wrap">
-									{#if profile.trust.status === 'banned'}
+									{#if profile.viewer.status === 'banned'}
 										<button onclick={() => { adminAction = 'ban'; }} class="admin-action-btn admin-action-btn-primary">Unban</button>
-									{:else if profile.trust.status === 'suspended'}
+									{:else if profile.viewer.status === 'suspended'}
 										<button onclick={handleUnsuspend} disabled={adminSaving} class="admin-action-btn admin-action-btn-primary">{adminSaving ? 'Unsuspending…' : 'Unsuspend'}</button>
 										<button onclick={() => { adminAction = 'ban'; }} class="admin-action-btn admin-action-btn-danger">Ban</button>
 									{:else}
@@ -527,7 +660,7 @@
 								</div>
 							{:else if adminAction === 'ban'}
 								<div>
-									{#if profile.trust.status === 'banned'}
+									{#if profile.viewer.status === 'banned'}
 										<div class="text-xs font-semibold text-text-secondary mb-2">Unban {profile.display_name} — reason (public)</div>
 										<input
 											type="text"
@@ -640,7 +773,7 @@
 					<div class="border-t border-border-subtle mt-4 pt-4">
 						<h2 class="text-sm font-semibold uppercase tracking-wider text-text-muted mb-3">Your trust</h2>
 						<div class="flex items-center gap-3 mb-3">
-							<TrustBadge trust={trustDetail.trust} />
+							<TrustBadge viewer={trustDetail.viewer} />
 							<Tooltip text={trustDetail.trust_score != null ? `Computed from trust and distrust relationships. Raw score: ${trustDetail.trust_score.toFixed(2)}` : 'No trust path exists to this user'}>
 								<span class="trust-score-hint">?</span>
 							</Tooltip>
@@ -655,13 +788,13 @@
 											<span class="text-text-muted">Direct trust</span>
 										{:else if path.type === '2hop' && path.via}
 											<span class="text-text-muted">via</span>
-											<UserName name={path.via.display_name} trust={path.via.trust} compact linked={!viewerRestricted} />
+											<UserName name={path.via.display_name} viewer={path.via.viewer} compact linked={!viewerRestricted} />
 											<span class="text-text-muted">→ {profile.display_name}</span>
 										{:else if path.type === '3hop' && path.via && path.via2}
 											<span class="text-text-muted">via</span>
-											<UserName name={path.via.display_name} trust={path.via.trust} compact linked={!viewerRestricted} />
+											<UserName name={path.via.display_name} viewer={path.via.viewer} compact linked={!viewerRestricted} />
 											<span class="text-text-muted">→</span>
-											<UserName name={path.via2.display_name} trust={path.via2.trust} compact linked={!viewerRestricted} />
+											<UserName name={path.via2.display_name} viewer={path.via2.viewer} compact linked={!viewerRestricted} />
 											<span class="text-text-muted">→ {profile.display_name}</span>
 										{/if}
 									</div>
@@ -670,7 +803,7 @@
 									<div class="flex items-center gap-2 flex-wrap">
 										<span class="text-text-muted text-xs">▼</span>
 										<span class="text-text-muted">Trusts</span>
-										<UserName name={reduction.display_name} trust={{ distance: null, distrusted: true }} compact linked={!viewerRestricted} />
+										<UserName name={reduction.display_name} viewer={{ distance: null, distrusted: true }} compact linked={!viewerRestricted} />
 									</div>
 								{/each}
 							</div>
@@ -685,7 +818,7 @@
 						<div class="space-y-2">
 							{#each trustDetail.trusts as user}
 								<div class="flex items-center gap-2 min-w-0">
-									<UserName name={user.display_name} trust={user.trust} compact linked={!viewerRestricted} />
+									<UserName name={user.display_name} viewer={user.viewer} compact linked={!viewerRestricted} />
 								</div>
 							{/each}
 							{#if trustDetail.trusts_total > trustDetail.trusts.length}
@@ -699,7 +832,7 @@
 						<div class="space-y-2">
 							{#each trustDetail.trusted_by as user}
 								<div class="flex items-center gap-2 min-w-0">
-									<UserName name={user.display_name} trust={user.trust} compact linked={!viewerRestricted} />
+									<UserName name={user.display_name} viewer={user.viewer} compact linked={!viewerRestricted} />
 								</div>
 							{/each}
 							{#if trustDetail.trusted_by_total > trustDetail.trusted_by.length}

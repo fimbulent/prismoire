@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM user_tags WHERE viewer_id = ? OR target_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "f03c2f0c685e47f36acd28a85ce24ecc8fdb27836d0aa73041a9503040681e97"
+}

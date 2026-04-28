@@ -89,6 +89,7 @@ pub struct DataExport {
     pub reports_filed: Vec<ReportExport>,
     pub moderation_actions_against_me: Vec<AdminLogExport>,
     pub favorite_rooms: Vec<FavoriteRoomExport>,
+    pub user_tags_set: Vec<UserTagExport>,
 }
 
 #[derive(Serialize)]
@@ -208,6 +209,14 @@ pub struct FavoriteRoomExport {
     pub room_slug: String,
     pub position: i64,
     pub created_at: String,
+}
+
+#[derive(Serialize)]
+pub struct UserTagExport {
+    pub target_user_id: String,
+    pub target_display_name: String,
+    pub tag: String,
+    pub updated_at: String,
 }
 
 #[derive(Serialize)]
@@ -473,6 +482,30 @@ pub async fn export_my_data(
         })
         .collect();
 
+    // Private viewer-scoped tags the user has attached to other users.
+    // Strictly the caller's data — these were never visible to anyone
+    // else, including the tagged users themselves.
+    let user_tag_rows = sqlx::query!(
+        "SELECT ut.target_id, u.display_name, ut.tag, ut.updated_at \
+         FROM user_tags ut \
+         JOIN users u ON u.id = ut.target_id \
+         WHERE ut.viewer_id = ? \
+         ORDER BY ut.updated_at ASC",
+        user_id,
+    )
+    .fetch_all(db)
+    .await?;
+
+    let user_tags_set: Vec<UserTagExport> = user_tag_rows
+        .into_iter()
+        .map(|r| UserTagExport {
+            target_user_id: r.target_id,
+            target_display_name: r.display_name,
+            tag: r.tag,
+            updated_at: r.updated_at,
+        })
+        .collect();
+
     let exported_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
     let export = DataExport {
@@ -504,6 +537,7 @@ pub async fn export_my_data(
         reports_filed,
         moderation_actions_against_me,
         favorite_rooms,
+        user_tags_set,
     };
 
     // Suggest a filename to the browser so "Save as…" is one click. The
@@ -771,6 +805,23 @@ pub(crate) async fn soft_delete_user(
     sqlx::query!("DELETE FROM room_favorites WHERE user_id = ?", user_id)
         .execute(&mut **tx)
         .await?;
+
+    // 7c. Drop user_tags in both directions. Same cascade caveat as 7b:
+    //     ON DELETE CASCADE on users.id never fires because we don't
+    //     actually delete the row. Outbound (`viewer_id`): the deleted
+    //     user's private tag list is personal data and goes with the
+    //     account. Inbound (`target_id`): other users' tags pointing at
+    //     this account would still resolve to a `[deleted]` placeholder
+    //     forever — drop them so a recycled username (after the row
+    //     itself is eventually purged) can't surface someone else's
+    //     stale label.
+    sqlx::query!(
+        "DELETE FROM user_tags WHERE viewer_id = ? OR target_id = ?",
+        user_id,
+        user_id,
+    )
+    .execute(&mut **tx)
+    .await?;
 
     // 8. Revoke any open invites the user created so nobody else can
     //    sign up against the deleted account.

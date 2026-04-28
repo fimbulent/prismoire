@@ -1,9 +1,23 @@
 import { throwApiError, type FetchFn } from './auth';
 
-export interface TrustInfo {
+/**
+ * Per-viewer envelope serialized on the wire as the `"viewer"` field
+ * nested inside whatever response references a user (post author,
+ * thread OP, trust edge target, etc.). Carries every per-viewer fact
+ * about that user — trust distance, distrust flag, account status,
+ * and the viewer's optional private tag.
+ *
+ * `tag` is the viewer's private label for this user (max 35 grapheme
+ * clusters). It is set/cleared via {@link setUserTag} / {@link clearUserTag}
+ * and is never visible to the tagged user. Absent when the viewer has
+ * not tagged this user, suppressed for deleted users, and never present
+ * for the viewer themselves.
+ */
+export interface UserViewerInfo {
 	distance: number | null;
 	distrusted: boolean;
 	status?: 'banned' | 'suspended' | 'deleted';
+	tag?: string | null;
 }
 
 export interface UserProfile {
@@ -16,13 +30,13 @@ export interface UserProfile {
 	is_self: boolean;
 	can_invite: boolean;
 	trust_stance: 'trust' | 'distrust' | 'neutral';
-	trust: TrustInfo;
+	viewer: UserViewerInfo;
 	trust_score: number | null;
 }
 
 export interface TrustUserRef {
 	display_name: string;
-	trust: TrustInfo;
+	viewer: UserViewerInfo;
 }
 
 export interface TrustPathResponse {
@@ -38,7 +52,7 @@ export interface ScoreReduction {
 
 export interface TrustEdgeUser {
 	display_name: string;
-	trust: TrustInfo;
+	viewer: UserViewerInfo;
 }
 
 export interface TrustDetailResponse {
@@ -48,7 +62,7 @@ export interface TrustDetailResponse {
 	reads: number;
 	readers: number;
 	trust_score: number | null;
-	trust: TrustInfo;
+	viewer: UserViewerInfo;
 	paths: TrustPathResponse[];
 	score_reductions: ScoreReduction[];
 	trusts: TrustEdgeUser[];
@@ -208,6 +222,43 @@ export async function deleteTrustEdge(
 ): Promise<void> {
 	const f = opts.fetch ?? globalThis.fetch;
 	const res = await f(`/api/users/${encodeURIComponent(username)}/trust-edge`, {
+		method: 'DELETE'
+	});
+	if (!res.ok) await throwApiError(res);
+}
+
+/**
+ * Attach (or replace) the viewer's private tag for `username`. Tags are
+ * strictly viewer-scoped — only the caller sees them, the tagged user
+ * is never told. Max 35 grapheme clusters (enforced server-side).
+ *
+ * Sending an empty string deletes the tag (matches the explicit
+ * {@link clearUserTag} DELETE endpoint).
+ */
+export async function setUserTag(
+	username: string,
+	tag: string,
+	opts: FetchOpts = {}
+): Promise<void> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f(`/api/users/${encodeURIComponent(username)}/tag`, {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ tag })
+	});
+	if (!res.ok) await throwApiError(res);
+}
+
+/**
+ * Remove the viewer's private tag for `username`. Idempotent — succeeds
+ * whether or not a tag was previously set.
+ */
+export async function clearUserTag(
+	username: string,
+	opts: FetchOpts = {}
+): Promise<void> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f(`/api/users/${encodeURIComponent(username)}/tag`, {
 		method: 'DELETE'
 	});
 	if (!res.ok) await throwApiError(res);

@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, ErrorCode};
-use crate::trust::TrustInfo;
+use crate::trust::UserViewerInfo;
 
 pub const MIN_TITLE_LEN: usize = 5;
 pub const MAX_TITLE_LEN: usize = 150;
@@ -35,7 +35,7 @@ pub struct ThreadSummary {
     pub is_announcement: bool,
     pub reply_count: i64,
     pub last_activity: Option<String>,
-    pub trust: TrustInfo,
+    pub viewer: UserViewerInfo,
 }
 
 #[derive(Serialize)]
@@ -105,7 +105,7 @@ pub struct PostResponse {
     pub is_op: bool,
     pub retracted_at: Option<String>,
     pub children: Vec<PostResponse>,
-    pub trust: TrustInfo,
+    pub viewer: UserViewerInfo,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub has_more_children: bool,
     /// True when the post's author is in the viewer's distrust set but the

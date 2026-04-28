@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT tag FROM user_tags WHERE viewer_id = ? AND target_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "tag",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c23eb76ae7a0d756bf8101268b2240ff1b8e5e78ffbf83236b3e189c2f93fd31"
+}

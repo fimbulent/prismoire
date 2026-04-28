@@ -10,7 +10,7 @@ use crate::room_name::{is_announcements, validate_room_slug};
 use crate::session::AuthUser;
 use crate::signing;
 use crate::state::AppState;
-use crate::trust::TrustInfo;
+use crate::trust::UserViewerInfo;
 
 use super::common::{
     MAX_BODY_LEN, PostResponse, ThreadDetailResponse, validate_body, validate_title,
@@ -109,7 +109,7 @@ pub async fn create_thread(
                 is_op: true,
                 retracted_at: None,
                 children: vec![],
-                trust: TrustInfo::self_trust(),
+                viewer: UserViewerInfo::self_view(),
                 has_more_children: false,
                 distrust_scaffold: false,
             },

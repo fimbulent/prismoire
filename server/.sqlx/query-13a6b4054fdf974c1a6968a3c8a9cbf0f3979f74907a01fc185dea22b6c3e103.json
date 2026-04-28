@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT ut.target_id, u.display_name, ut.tag, ut.updated_at FROM user_tags ut JOIN users u ON u.id = ut.target_id WHERE ut.viewer_id = ? ORDER BY ut.updated_at ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "target_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "display_name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "tag",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "13a6b4054fdf974c1a6968a3c8a9cbf0f3979f74907a01fc185dea22b6c3e103"
+}

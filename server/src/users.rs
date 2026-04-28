@@ -12,7 +12,10 @@ use crate::display_name::display_name_skeleton;
 use crate::error::{AppError, ErrorCode};
 use crate::session::{AuthUser, RestrictedAuthUser};
 use crate::state::AppState;
-use crate::trust::{MINIMUM_TRUST_THRESHOLD, TrustInfo, TrustPath, UserStatus, load_distrust_set};
+use crate::trust::{
+    MINIMUM_TRUST_THRESHOLD, TrustPath, UserStatus, UserViewerInfo, load_distrust_set, load_tag_map,
+};
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Hard upper bound on how many users a single search request can return.
 /// Acts as both the default and the clamp for caller-supplied `limit`.
@@ -59,7 +62,7 @@ pub struct UserProfileResponse {
     pub is_self: bool,
     pub can_invite: bool,
     pub trust_stance: String,
-    pub trust: TrustInfo,
+    pub viewer: UserViewerInfo,
     pub trust_score: Option<f64>,
 }
 
@@ -74,7 +77,7 @@ pub struct TrustPathResponse {
 #[derive(Serialize)]
 pub struct TrustUserRef {
     pub display_name: String,
-    pub trust: TrustInfo,
+    pub viewer: UserViewerInfo,
 }
 
 #[derive(Serialize)]
@@ -91,7 +94,7 @@ pub struct TrustDetailResponse {
     pub reads: u32,
     pub readers: u32,
     pub trust_score: Option<f64>,
-    pub trust: TrustInfo,
+    pub viewer: UserViewerInfo,
     pub paths: Vec<TrustPathResponse>,
     pub score_reductions: Vec<ScoreReduction>,
     pub trusts: Vec<TrustEdgeUser>,
@@ -103,7 +106,7 @@ pub struct TrustDetailResponse {
 #[derive(Serialize)]
 pub struct TrustEdgeUser {
     pub display_name: String,
-    pub trust: TrustInfo,
+    pub viewer: UserViewerInfo,
 }
 
 #[derive(Serialize)]
@@ -300,24 +303,39 @@ pub async fn get_profile(
         AppError::code(ErrorCode::Internal)
     })?;
 
+    let target_tag = if is_self {
+        None
+    } else {
+        sqlx::query!(
+            "SELECT tag FROM user_tags WHERE viewer_id = ? AND target_id = ?",
+            user.user_id,
+            target_id,
+        )
+        .fetch_optional(&state.db)
+        .await?
+        .map(|r| r.tag)
+    };
+
     let (trust_score, trust) = if is_self {
-        (None, TrustInfo::self_trust())
+        (None, UserViewerInfo::self_view())
     } else {
         match graph.trust_between(viewer_uuid, target_uuid) {
             Some((score, distance)) => (
                 Some(score),
-                TrustInfo {
+                UserViewerInfo {
                     distance,
                     distrusted: you_distrust,
                     status: target_status,
+                    tag: target_tag,
                 },
             ),
             None => (
                 None,
-                TrustInfo {
+                UserViewerInfo {
                     distance: None,
                     distrusted: you_distrust,
                     status: target_status,
+                    tag: target_tag,
                 },
             ),
         }
@@ -333,7 +351,7 @@ pub async fn get_profile(
         is_self,
         can_invite,
         trust_stance,
-        trust,
+        viewer: trust,
         trust_score,
     }))
 }
@@ -399,18 +417,20 @@ pub async fn get_trust_detail(
     distance_map.insert(user.user_id.clone(), 0.0);
 
     let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
+    let tag_map = load_tag_map(&state.db, &user.user_id).await?;
     let you_distrust = !is_self && distrust_set.contains(&target_id);
 
     // When the viewer has distrusted the target, trust is fixed at 0 — skip
     // paths and score reductions since they have no effect.
     let (trust_score, trust, paths, score_reductions) = if is_self || you_distrust {
         let trust = if is_self {
-            TrustInfo::self_trust()
+            UserViewerInfo::self_view()
         } else {
-            TrustInfo {
+            UserViewerInfo {
                 distance: None,
                 distrusted: true,
                 status: target_status,
+                tag: tag_map.get(&target_id).cloned(),
             }
         };
         (None, trust, Vec::new(), Vec::new())
@@ -451,7 +471,13 @@ pub async fn get_trust_detail(
                         path_type: "2hop".into(),
                         via: Some(TrustUserRef {
                             display_name: vname,
-                            trust: TrustInfo::build(&id, &distance_map, &distrust_set, vstatus),
+                            viewer: UserViewerInfo::build(
+                                &id,
+                                &distance_map,
+                                &distrust_set,
+                                &tag_map,
+                                vstatus,
+                            ),
                         }),
                         via2: None,
                     }
@@ -471,11 +497,23 @@ pub async fn get_trust_detail(
                         path_type: "3hop".into(),
                         via: Some(TrustUserRef {
                             display_name: v1name,
-                            trust: TrustInfo::build(&id1, &distance_map, &distrust_set, v1status),
+                            viewer: UserViewerInfo::build(
+                                &id1,
+                                &distance_map,
+                                &distrust_set,
+                                &tag_map,
+                                v1status,
+                            ),
                         }),
                         via2: Some(TrustUserRef {
                             display_name: v2name,
-                            trust: TrustInfo::build(&id2, &distance_map, &distrust_set, v2status),
+                            viewer: UserViewerInfo::build(
+                                &id2,
+                                &distance_map,
+                                &distrust_set,
+                                &tag_map,
+                                v2status,
+                            ),
                         }),
                     }
                 }
@@ -501,10 +539,11 @@ pub async fn get_trust_detail(
 
         (
             score,
-            TrustInfo {
+            UserViewerInfo {
                 distance,
                 distrusted: false,
                 status: target_status,
+                tag: tag_map.get(&target_id).cloned(),
             },
             built_paths,
             reductions,
@@ -515,8 +554,8 @@ pub async fn get_trust_detail(
     // Fetch all edges, sort by viewer's trust distance (closest first), then alphabetically.
     let sort_trust_edges = |mut edges: Vec<TrustEdgeUser>| -> Vec<TrustEdgeUser> {
         edges.sort_by(|a, b| {
-            let da = a.trust.distance.unwrap_or(f64::MAX);
-            let db = b.trust.distance.unwrap_or(f64::MAX);
+            let da = a.viewer.distance.unwrap_or(f64::MAX);
+            let db = b.viewer.distance.unwrap_or(f64::MAX);
             da.partial_cmp(&db)
                 .unwrap()
                 .then_with(|| a.display_name.cmp(&b.display_name))
@@ -549,10 +588,11 @@ pub async fn get_trust_detail(
             .map(|r| {
                 let raw = UserStatus::try_from(r.status.as_str()).unwrap_or(UserStatus::Active);
                 TrustEdgeUser {
-                    trust: TrustInfo::build(
+                    viewer: UserViewerInfo::build(
                         &r.id,
                         &distance_map,
                         &distrust_set,
+                        &tag_map,
                         UserStatus::effective(raw, r.deleted_at.as_deref()),
                     ),
                     display_name: r.display_name,
@@ -589,10 +629,11 @@ pub async fn get_trust_detail(
             .map(|r| {
                 let raw = UserStatus::try_from(r.status.as_str()).unwrap_or(UserStatus::Active);
                 TrustEdgeUser {
-                    trust: TrustInfo::build(
+                    viewer: UserViewerInfo::build(
                         &r.id,
                         &distance_map,
                         &distrust_set,
+                        &tag_map,
                         UserStatus::effective(raw, r.deleted_at.as_deref()),
                     ),
                     display_name: r.display_name,
@@ -614,7 +655,7 @@ pub async fn get_trust_detail(
         reads,
         readers,
         trust_score,
-        trust,
+        viewer: trust,
         paths,
         score_reductions,
         trusts,
@@ -868,23 +909,25 @@ pub async fn get_trust_edges(
     let total = rows.len() as i64;
 
     let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
+    let tag_map = load_tag_map(&state.db, &user.user_id).await?;
 
     let mut users: Vec<TrustEdgeUser> = rows
         .into_iter()
         .map(|r| {
             let raw = UserStatus::try_from(r.status.as_str()).unwrap_or(UserStatus::Active);
             let status = UserStatus::effective(raw, r.deleted_at.as_deref());
-            let trust = TrustInfo::build(&r.id, &distance_map, &distrust_set, status);
+            let trust =
+                UserViewerInfo::build(&r.id, &distance_map, &distrust_set, &tag_map, status);
             TrustEdgeUser {
                 display_name: r.display_name,
-                trust,
+                viewer: trust,
             }
         })
         .collect();
 
     users.sort_by(|a, b| {
-        let da = a.trust.distance.unwrap_or(f64::MAX);
-        let db = b.trust.distance.unwrap_or(f64::MAX);
+        let da = a.viewer.distance.unwrap_or(f64::MAX);
+        let db = b.viewer.distance.unwrap_or(f64::MAX);
         da.partial_cmp(&db)
             .unwrap()
             .then_with(|| a.display_name.cmp(&b.display_name))
@@ -1013,6 +1056,106 @@ pub async fn delete_trust_edge(
     }
 
     state.trust_graph_notify.notify_one();
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// PUT /api/users/:username/tag — Set viewer-private tag for another user
+// ---------------------------------------------------------------------------
+
+/// Maximum tag length in grapheme clusters (user-perceived characters).
+const MAX_TAG_GRAPHEMES: usize = 35;
+
+#[derive(Deserialize)]
+pub struct SetUserTagRequest {
+    pub tag: String,
+}
+
+/// Set or update the viewer's private tag for another user.
+///
+/// Tags are strictly viewer-scoped — the tagged user is never told. An
+/// empty (or whitespace-only) `tag` field deletes the tag (so the
+/// frontend can use a single PUT for both edits and clears). Length is
+/// measured in grapheme clusters so emoji and combining marks count as
+/// one each.
+pub async fn set_user_tag(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(username): Path<String>,
+    Json(req): Json<SetUserTagRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let (target_id, ..) = resolve_user(&state.db, &username).await?;
+
+    if user.user_id == target_id {
+        return Err(AppError::code(ErrorCode::SelfTag));
+    }
+
+    // Strip control characters (incl. CR/LF) so a tag can't smuggle in
+    // line breaks that would mess up inline rendering. Tabs are dropped
+    // for the same reason.
+    let cleaned: String = req
+        .tag
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        .trim()
+        .to_string();
+
+    if cleaned.is_empty() {
+        sqlx::query!(
+            "DELETE FROM user_tags WHERE viewer_id = ? AND target_id = ?",
+            user.user_id,
+            target_id,
+        )
+        .execute(&state.db)
+        .await?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
+    if cleaned.graphemes(true).count() > MAX_TAG_GRAPHEMES {
+        return Err(AppError::with_message(
+            ErrorCode::TagTooLong,
+            format!("tag must be at most {MAX_TAG_GRAPHEMES} characters"),
+        ));
+    }
+
+    sqlx::query!(
+        "INSERT INTO user_tags (viewer_id, target_id, tag) VALUES (?, ?, ?) \
+         ON CONFLICT(viewer_id, target_id) DO UPDATE SET \
+             tag = excluded.tag, \
+             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+        user.user_id,
+        target_id,
+        cleaned,
+    )
+    .execute(&state.db)
+    .await?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /api/users/:username/tag — Clear viewer-private tag
+// ---------------------------------------------------------------------------
+
+/// Explicit clear endpoint for the viewer's private tag. Idempotent —
+/// returns 204 even when no tag exists, since the desired post-state
+/// (no tag) is the same either way.
+pub async fn delete_user_tag(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(username): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let (target_id, ..) = resolve_user(&state.db, &username).await?;
+
+    sqlx::query!(
+        "DELETE FROM user_tags WHERE viewer_id = ? AND target_id = ?",
+        user.user_id,
+        target_id,
+    )
+    .execute(&state.db)
+    .await?;
 
     Ok(StatusCode::NO_CONTENT)
 }

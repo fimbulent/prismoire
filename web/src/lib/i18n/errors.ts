@@ -75,6 +75,10 @@ const ERROR_MESSAGES: Record<ErrorCode, string> = {
 	bio_too_long: 'Bio is too long.',
 	bio_already_empty: 'This user has no bio to remove.',
 
+	// User tags
+	self_tag: 'You cannot tag yourself.',
+	tag_too_long: 'Tag is too long (35 characters max).',
+
 	// Admin
 	admin_required: 'Admin access required.',
 	reason_required: 'A reason is required for this action.',

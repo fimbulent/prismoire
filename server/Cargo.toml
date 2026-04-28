@@ -20,6 +20,7 @@ sqlx = { workspace = true, features = ["migrate"] }
 tokio = { workspace = true }
 unicode-normalization = "0.1"
 unicode-security = "0.1"
+unicode-segmentation = "1"
 tower_governor = { version = "0.8", features = ["axum"] }
 url = "2"
 uuid = { workspace = true, features = ["v4", "serde"] }

@@ -164,6 +164,12 @@ pub enum ErrorCode {
     /// Trust-list direction parameter was neither "trusts" nor "trusted_by".
     InvalidTrustDirection,
 
+    // -- User tags ---------------------------------------------------
+    /// Cannot tag yourself.
+    SelfTag,
+    /// Tag exceeds the configured maximum length (in grapheme clusters).
+    TagTooLong,
+
     // -- Misc user fields --------------------------------------------
     /// Bio exceeds the configured maximum length.
     BioTooLong,
@@ -301,6 +307,8 @@ impl ErrorCode {
             | Self::ParentRetracted
             | Self::SelfTrustEdge
             | Self::InvalidTrustDirection
+            | Self::SelfTag
+            | Self::TagTooLong
             | Self::BioTooLong
             | Self::ReasonRequired
             | Self::ReportReasonInvalid
@@ -364,6 +372,9 @@ impl ErrorCode {
             Self::SelfTrustEdge => "cannot set trust edge on yourself",
             Self::NoTrustEdge => "no trust edge to remove",
             Self::InvalidTrustDirection => "direction must be 'trusts' or 'trusted_by'",
+
+            Self::SelfTag => "cannot tag yourself",
+            Self::TagTooLong => "tag is too long",
 
             Self::BioTooLong => "bio is too long",
             Self::BioAlreadyEmpty => "user has no bio set",

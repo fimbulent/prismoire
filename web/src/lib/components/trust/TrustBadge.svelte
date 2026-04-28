@@ -1,15 +1,15 @@
 <script lang="ts">
-	import type { TrustInfo } from '$lib/api/users';
+	import type { UserViewerInfo } from '$lib/api/users';
 
 	interface Props {
-		trust?: TrustInfo;
+		viewer?: UserViewerInfo;
 		compact?: boolean;
 	}
 
-	let { trust, compact = false }: Props = $props();
+	let { viewer, compact = false }: Props = $props();
 
-	let distance = $derived(trust?.distance ?? null);
-	let distrusted = $derived(trust?.distrusted ?? false);
+	let distance = $derived(viewer?.distance ?? null);
+	let distrusted = $derived(viewer?.distrusted ?? false);
 
 	type TrustLevel = 'direct' | '1_5hop' | '2hop' | '2_5hop' | '3hop' | 'untrusted';
 

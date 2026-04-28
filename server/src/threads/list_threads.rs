@@ -8,7 +8,7 @@ use axum::response::IntoResponse;
 use crate::error::{AppError, ErrorCode};
 use crate::session::AuthUser;
 use crate::state::AppState;
-use crate::trust::{TrustInfo, UserStatus, load_distrust_set};
+use crate::trust::{UserStatus, UserViewerInfo, load_distrust_set, load_tag_map};
 
 use super::common::{
     MAX_SEEN_IDS, PAGE_SIZE, PaginationParams, RecentReplier, ThreadListResponse, ThreadSort,
@@ -80,12 +80,13 @@ fn all_threads_to_summary(
     row: AllThreadsRow,
     trust_map: &HashMap<String, f64>,
     distrust_set: &HashSet<String>,
+    tag_map: &HashMap<String, String>,
 ) -> ThreadSummary {
     let raw = UserStatus::try_from(row.author_status.as_str()).unwrap_or(UserStatus::Active);
     let status = UserStatus::effective(raw, row.author_deleted_at.as_deref());
-    let trust = TrustInfo::build(&row.author_id, trust_map, distrust_set, status);
+    let viewer = UserViewerInfo::build(&row.author_id, trust_map, distrust_set, tag_map, status);
     ThreadSummary {
-        trust,
+        viewer,
         id: row.id,
         title: row.title,
         author_id: row.author_id,
@@ -107,12 +108,13 @@ fn room_threads_to_summary(
     is_announcement: bool,
     trust_map: &HashMap<String, f64>,
     distrust_set: &HashSet<String>,
+    tag_map: &HashMap<String, String>,
 ) -> ThreadSummary {
     let raw = UserStatus::try_from(row.author_status.as_str()).unwrap_or(UserStatus::Active);
     let status = UserStatus::effective(raw, row.author_deleted_at.as_deref());
-    let trust = TrustInfo::build(&row.author_id, trust_map, distrust_set, status);
+    let viewer = UserViewerInfo::build(&row.author_id, trust_map, distrust_set, tag_map, status);
     ThreadSummary {
-        trust,
+        viewer,
         id: row.id,
         title: row.title,
         author_id: row.author_id,
@@ -350,10 +352,11 @@ pub async fn list_public_announcement_threads(
                 is_announcement: row.is_announcement,
                 reply_count: row.reply_count,
                 last_activity: row.last_activity,
-                trust: TrustInfo {
+                viewer: UserViewerInfo {
                     distance: None,
                     distrusted: false,
                     status: UserStatus::effective(raw, row.author_deleted_at.as_deref()),
+                    tag: None,
                 },
             }
         })
@@ -393,6 +396,7 @@ pub async fn list_all_threads(
     let trust_map = graph.distance_map(reader_uuid);
     let reverse_map = graph.reverse_score_map(reader_uuid);
     let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
+    let tag_map = load_tag_map(&state.db, &user.user_id).await?;
 
     if params.sort == ThreadSort::Warm || params.sort == ThreadSort::Trusted {
         let sort = params.sort;
@@ -401,6 +405,7 @@ pub async fn list_all_threads(
             &trust_map,
             &distrust_set,
             &reverse_map,
+            &tag_map,
             &user.user_id,
             WARM_CANDIDATE_LIMIT,
             None,
@@ -580,7 +585,7 @@ pub async fn list_all_threads(
                 &distrust_set,
             )
         })
-        .map(|row| all_threads_to_summary(row, &trust_map, &distrust_set))
+        .map(|row| all_threads_to_summary(row, &trust_map, &distrust_set, &tag_map))
         .collect();
 
     apply_visible_reply_counts(
@@ -649,6 +654,7 @@ pub async fn list_threads(
     let trust_map = graph.distance_map(reader_uuid);
     let reverse_map = graph.reverse_score_map(reader_uuid);
     let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
+    let tag_map = load_tag_map(&state.db, &user.user_id).await?;
 
     let (room_id, room_slug, is_announcement) = resolve_room(&state.db, &room_id_or_slug).await?;
 
@@ -659,6 +665,7 @@ pub async fn list_threads(
             &trust_map,
             &distrust_set,
             &reverse_map,
+            &tag_map,
             &user.user_id,
             &room_id,
             &room_slug,
@@ -834,6 +841,7 @@ pub async fn list_threads(
                 is_announcement,
                 &trust_map,
                 &distrust_set,
+                &tag_map,
             )
         })
         .collect();
@@ -889,6 +897,7 @@ pub async fn load_more_all_threads(
     let trust_map = graph.distance_map(reader_uuid);
     let reverse_map = graph.reverse_score_map(reader_uuid);
     let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
+    let tag_map = load_tag_map(&state.db, &user.user_id).await?;
 
     let seen_ids: HashSet<String> = body.seen_ids.into_iter().collect();
 
@@ -901,6 +910,7 @@ pub async fn load_more_all_threads(
         &trust_map,
         &distrust_set,
         &reverse_map,
+        &tag_map,
         &user.user_id,
         fetch_limit,
         Some((&cursor.last_activity, &cursor.thread_id)),
@@ -959,6 +969,7 @@ pub async fn load_more_room_threads(
     let trust_map = graph.distance_map(reader_uuid);
     let reverse_map = graph.reverse_score_map(reader_uuid);
     let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
+    let tag_map = load_tag_map(&state.db, &user.user_id).await?;
 
     let (room_id, room_slug, is_announcement) = resolve_room(&state.db, &room_id_or_slug).await?;
 
@@ -970,6 +981,7 @@ pub async fn load_more_room_threads(
         &trust_map,
         &distrust_set,
         &reverse_map,
+        &tag_map,
         &user.user_id,
         &room_id,
         &room_slug,
@@ -1266,6 +1278,7 @@ async fn fetch_warm_candidates_all(
     trust_map: &HashMap<String, f64>,
     distrust_set: &HashSet<String>,
     reverse_map: &HashMap<String, f64>,
+    tag_map: &HashMap<String, String>,
     reader_id: &str,
     limit: i64,
     cursor: Option<(&str, &str)>,
@@ -1360,7 +1373,7 @@ async fn fetch_warm_candidates_all(
                 distrust_set,
             )
         })
-        .map(|row| all_threads_to_summary(row, trust_map, distrust_set))
+        .map(|row| all_threads_to_summary(row, trust_map, distrust_set, tag_map))
         .collect();
 
     Ok(CandidateBatch {
@@ -1378,6 +1391,7 @@ async fn fetch_warm_candidates_room(
     trust_map: &HashMap<String, f64>,
     distrust_set: &HashSet<String>,
     reverse_map: &HashMap<String, f64>,
+    tag_map: &HashMap<String, String>,
     reader_id: &str,
     room_id: &str,
     room_slug: &str,
@@ -1471,6 +1485,7 @@ async fn fetch_warm_candidates_room(
                 is_announcement,
                 trust_map,
                 distrust_set,
+                tag_map,
             )
         })
         .collect();

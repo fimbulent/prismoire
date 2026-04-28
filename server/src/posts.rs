@@ -10,7 +10,7 @@ use crate::session::AuthUser;
 use crate::signing;
 use crate::state::AppState;
 use crate::threads::{PostResponse, validate_body};
-use crate::trust::TrustInfo;
+use crate::trust::UserViewerInfo;
 
 // ---------------------------------------------------------------------------
 // Response types
@@ -139,7 +139,7 @@ pub async fn edit_post(
         is_op: meta.is_op,
         retracted_at: None,
         children: vec![],
-        trust: TrustInfo::self_trust(),
+        viewer: UserViewerInfo::self_view(),
         has_more_children: false,
         distrust_scaffold: false,
     }))
