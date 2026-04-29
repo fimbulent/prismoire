@@ -34,12 +34,6 @@
 	});
 
 	$effect(() => {
-		if (session.needsSetup && page.url.pathname !== '/setup') {
-			goto('/setup');
-		}
-	});
-
-	$effect(() => {
 		if (!dropdownOpen) return;
 		function handleClickOutside(e: MouseEvent) {
 			if (dropdownEl && !dropdownEl.contains(e.target as Node)) {

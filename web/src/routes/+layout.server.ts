@@ -46,6 +46,14 @@ export const load: LayoutServerLoad = async ({ fetch, cookies, locals, url, setH
 
 	const setupStatus = await getSetupStatus({ fetch }).catch(() => ({ needs_setup: false }));
 
+	// Instance-level bootstrap: if no admin exists yet, every page must
+	// funnel to /setup. Done here (not in +layout.svelte) so the redirect
+	// happens on the server and the user never sees a flash of the
+	// requested page before the client-side `goto('/setup')` fires.
+	if (setupStatus.needs_setup && url.pathname !== '/setup') {
+		throw redirect(307, '/setup');
+	}
+
 	// Only hit /api/auth/session when a session cookie is actually present.
 	// Saves a network round-trip per anonymous request.
 	//
