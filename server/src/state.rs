@@ -7,7 +7,7 @@ use webauthn_rs::Webauthn;
 
 use crate::error::{AppError, ErrorCode};
 use crate::metrics::Metrics;
-use crate::trust::TrustGraph;
+use crate::trust::{PendingDeltas, TrustGraph};
 
 /// Shared application state available to all request handlers.
 pub struct AppState {
@@ -32,6 +32,13 @@ pub struct AppState {
     /// rebuild timestamp). Recorded at instrumentation points and read
     /// by the admin overview endpoint.
     pub metrics: Arc<Metrics>,
+    /// Per-viewer pending trust-edge mutations not yet absorbed by a
+    /// rebuild. Mutation handlers record into this immediately after
+    /// their DB write commits; forward-BFS handlers read from it to
+    /// overlay the viewer's own outgoing edges on top of the cached
+    /// graph so trust badges respond instantly to button clicks
+    /// instead of waiting for the next debounced rebuild.
+    pub pending_deltas: Arc<PendingDeltas>,
 }
 
 impl AppState {

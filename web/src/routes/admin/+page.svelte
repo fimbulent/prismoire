@@ -181,13 +181,23 @@
 				</span>
 			</span>
 			<span>
-				Lock poison events:
+				Trust graph lock poison:
 				<span
 					class={overview.trust.trust_graph_lock_poisoned > 0
 						? 'text-danger font-semibold'
 						: 'text-text-secondary'}
 				>
 					{overview.trust.trust_graph_lock_poisoned}
+				</span>
+			</span>
+			<span>
+				Pending deltas lock poison:
+				<span
+					class={overview.trust.pending_deltas_lock_poisoned > 0
+						? 'text-danger font-semibold'
+						: 'text-text-secondary'}
+				>
+					{overview.trust.pending_deltas_lock_poisoned}
 				</span>
 			</span>
 		</div>

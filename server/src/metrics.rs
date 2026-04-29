@@ -44,6 +44,12 @@ pub struct Metrics {
     pub bfs_reverse_hits: AtomicU64,
     /// BFS reverse-cache (reverse_score_map) miss counter.
     pub bfs_reverse_misses: AtomicU64,
+    /// Delta-keyed forward-cache hit counter. Distinct from the stable
+    /// forward cache because its hit rate is meaningful only for
+    /// viewers with pending mutations.
+    pub bfs_delta_hits: AtomicU64,
+    /// Delta-keyed forward-cache miss counter.
+    pub bfs_delta_misses: AtomicU64,
 
     /// Recent graph-build durations, in milliseconds.
     graph_load_ms: Mutex<RingHistogram>,
@@ -71,6 +77,14 @@ pub struct Metrics {
     /// because the absolute count over process lifetime is the signal:
     /// any non-zero value warrants investigation.
     trust_graph_lock_poisoned: AtomicU64,
+
+    /// Cumulative count of times the `PendingDeltas` `RwLock` was
+    /// observed poisoned. Mirrors `trust_graph_lock_poisoned`: a
+    /// previous holder panicked while reading or writing the per-viewer
+    /// pending-delta map, so subsequent operations degrade gracefully
+    /// (reads return an empty delta, writes are skipped) and bump this
+    /// counter. Should be zero in healthy operation.
+    pending_deltas_lock_poisoned: AtomicU64,
 }
 
 /// Key identifying a route for metrics aggregation. We key on the
@@ -242,11 +256,14 @@ impl Metrics {
             bfs_forward_misses: AtomicU64::new(0),
             bfs_reverse_hits: AtomicU64::new(0),
             bfs_reverse_misses: AtomicU64::new(0),
+            bfs_delta_hits: AtomicU64::new(0),
+            bfs_delta_misses: AtomicU64::new(0),
             graph_load_ms: Mutex::new(RingHistogram::new(HISTOGRAM_CAPACITY)),
             last_rebuild_at: RwLock::new(None),
             routes: RwLock::new(HashMap::new()),
             failed_auth: HourlyCounter::new(),
             trust_graph_lock_poisoned: AtomicU64::new(0),
+            pending_deltas_lock_poisoned: AtomicU64::new(0),
         }
     }
 
@@ -270,6 +287,16 @@ impl Metrics {
         self.bfs_reverse_misses.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Increment the BFS delta-cache hit counter.
+    pub fn record_bfs_delta_hit(&self) {
+        self.bfs_delta_hits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment the BFS delta-cache miss counter.
+    pub fn record_bfs_delta_miss(&self) {
+        self.bfs_delta_misses.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Record a graph-build duration.
     pub fn record_graph_load_ms(&self, ms: f64) {
         if let Ok(mut h) = self.graph_load_ms.lock() {
@@ -286,6 +313,8 @@ impl Metrics {
         self.bfs_forward_misses.store(0, Ordering::Relaxed);
         self.bfs_reverse_hits.store(0, Ordering::Relaxed);
         self.bfs_reverse_misses.store(0, Ordering::Relaxed);
+        self.bfs_delta_hits.store(0, Ordering::Relaxed);
+        self.bfs_delta_misses.store(0, Ordering::Relaxed);
     }
 
     /// Record the timestamp of the most recent successful trust graph
@@ -313,6 +342,15 @@ impl Metrics {
     /// guard cannot be acquired because a previous writer panicked.
     pub fn record_trust_graph_lock_poisoned(&self) {
         self.trust_graph_lock_poisoned
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record one observation of the `PendingDeltas` `RwLock` being
+    /// poisoned. Called from inside `PendingDeltas` when a read or
+    /// write guard cannot be acquired because a previous holder
+    /// panicked.
+    pub fn record_pending_deltas_lock_poisoned(&self) {
+        self.pending_deltas_lock_poisoned
             .fetch_add(1, Ordering::Relaxed);
     }
 
@@ -381,9 +419,11 @@ impl Metrics {
         let fwd_misses = self.bfs_forward_misses.load(Ordering::Relaxed);
         let rev_hits = self.bfs_reverse_hits.load(Ordering::Relaxed);
         let rev_misses = self.bfs_reverse_misses.load(Ordering::Relaxed);
+        let delta_hits = self.bfs_delta_hits.load(Ordering::Relaxed);
+        let delta_misses = self.bfs_delta_misses.load(Ordering::Relaxed);
 
-        let total_hits = fwd_hits + rev_hits;
-        let total = total_hits + fwd_misses + rev_misses;
+        let total_hits = fwd_hits + rev_hits + delta_hits;
+        let total = total_hits + fwd_misses + rev_misses + delta_misses;
         let hit_rate = if total == 0 {
             None
         } else {
@@ -399,6 +439,8 @@ impl Metrics {
 
         let last_rebuild_at = self.last_rebuild_at.read().ok().and_then(|g| *g);
         let trust_graph_lock_poisoned = self.trust_graph_lock_poisoned.load(Ordering::Relaxed);
+        let pending_deltas_lock_poisoned =
+            self.pending_deltas_lock_poisoned.load(Ordering::Relaxed);
 
         MetricsSnapshot {
             bfs_hit_rate: hit_rate,
@@ -408,6 +450,7 @@ impl Metrics {
             graph_load_ms_p99: p99,
             last_rebuild_at,
             trust_graph_lock_poisoned,
+            pending_deltas_lock_poisoned,
         }
     }
 }
@@ -434,6 +477,10 @@ pub struct MetricsSnapshot {
     /// since process start. Should be zero; any non-zero value means a
     /// previous lock holder panicked.
     pub trust_graph_lock_poisoned: u64,
+    /// Cumulative count of `PendingDeltas` `RwLock` poisoning
+    /// observations since process start. Should be zero; any non-zero
+    /// value means a previous lock holder panicked.
+    pub pending_deltas_lock_poisoned: u64,
 }
 
 /// Per-route stats captured in a snapshot. Two scopes of counter:

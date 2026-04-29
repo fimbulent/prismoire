@@ -322,6 +322,7 @@ export interface TrustGraphStats {
 	graph_load_ms_p95: number | null;
 	graph_load_ms_p99: number | null;
 	trust_graph_lock_poisoned: number;
+	pending_deltas_lock_poisoned: number;
 }
 
 export interface SessionStats {

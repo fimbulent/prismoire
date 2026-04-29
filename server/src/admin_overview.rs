@@ -67,6 +67,12 @@ pub struct TrustGraphStats {
     /// since process start. Should be zero in healthy operation; any
     /// non-zero value indicates a previous lock holder panicked.
     pub trust_graph_lock_poisoned: u64,
+
+    /// Cumulative count of `PendingDeltas` `RwLock` poisoning
+    /// observations since process start. Should be zero in healthy
+    /// operation; any non-zero value indicates a previous lock holder
+    /// panicked.
+    pub pending_deltas_lock_poisoned: u64,
 }
 
 #[derive(Serialize)]
@@ -299,6 +305,7 @@ pub async fn get_overview(
             graph_load_ms_p95: m.graph_load_ms_p95,
             graph_load_ms_p99: m.graph_load_ms_p99,
             trust_graph_lock_poisoned: m.trust_graph_lock_poisoned,
+            pending_deltas_lock_poisoned: m.pending_deltas_lock_poisoned,
         },
         sessions: SessionStats {
             active_sessions,

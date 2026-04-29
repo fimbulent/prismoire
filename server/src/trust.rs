@@ -20,9 +20,15 @@ const MAX_DEPTH: u32 = 3;
 /// treated as untrusted (no trust relationship).
 pub const MINIMUM_TRUST_THRESHOLD: f64 = 0.45;
 
-/// Default total BFS cache budget (in bytes), split evenly between the
-/// forward and reverse caches.
+/// Default total BFS cache budget (in bytes). Carved 7/16 to the
+/// per-viewer forward cache, 1/16 to the delta-keyed forward cache (only
+/// active mutators populate it), and 8/16 to the reverse cache.
 const DEFAULT_BFS_CACHE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Fraction (in sixteenths) of the total BFS cache budget reserved for
+/// the delta-keyed forward cache. Most viewers have no pending delta,
+/// so a small share is sufficient.
+const DELTA_CACHE_BUDGET_SIXTEENTHS: u64 = 1;
 
 /// Approximate bytes per entry in a `HashMap<String, f64>` BFS result map.
 /// Accounts for: 36-byte UUID string + 24-byte String overhead + 8-byte f64
@@ -33,6 +39,11 @@ const BYTES_PER_MAP_ENTRY: u64 = 84;
 const MAP_BASE_OVERHEAD: u64 = 48;
 
 /// Weighter that estimates the heap size of a cached BFS result map.
+///
+/// Implemented for both the per-viewer key (`Uuid`) used by the
+/// stable forward/reverse caches and the per-viewer-per-seq key
+/// (`(Uuid, u64)`) used by the delta-keyed forward cache. The weight
+/// ignores the key — only the map size matters for the byte budget.
 #[derive(Clone)]
 struct BfsWeighter;
 
@@ -42,7 +53,14 @@ impl Weighter<Uuid, Arc<HashMap<String, f64>>> for BfsWeighter {
     }
 }
 
+impl Weighter<(Uuid, u64), Arc<HashMap<String, f64>>> for BfsWeighter {
+    fn weight(&self, _key: &(Uuid, u64), val: &Arc<HashMap<String, f64>>) -> u64 {
+        MAP_BASE_OVERHEAD + (val.len() as u64 * BYTES_PER_MAP_ENTRY)
+    }
+}
+
 type BfsCache = Cache<Uuid, Arc<HashMap<String, f64>>, BfsWeighter>;
+type DeltaBfsCache = Cache<(Uuid, u64), Arc<HashMap<String, f64>>, BfsWeighter>;
 
 /// Per-distrusted-target penalty for reliability computation.
 const DISTRUST_PENALTY: f64 = 0.25;
@@ -250,7 +268,28 @@ fn reliability(neighbors: &[u32], viewer_distrusts: &HashSet<u32>) -> f64 {
 fn forward_bfs(source: u32, graph: &CsrGraph, distrust_sets: &DistrustSets) -> Vec<(u32, f64)> {
     let empty = HashSet::new();
     let viewer_distrusts = distrust_sets.get(&source).unwrap_or(&empty);
+    let source_neighbors: Vec<u32> = graph.neighbors(source).to_vec();
+    forward_bfs_inner(source, graph, &source_neighbors, viewer_distrusts)
+}
 
+/// Inner BFS that operates on caller-provided seed neighbors and distrust set.
+///
+/// Factored out so both the cached-graph path (`forward_bfs`) and the
+/// delta-aware path (`forward_bfs_with_delta`) can share traversal logic
+/// while differing only in how the viewer's own outgoing edges and distrust
+/// set are sourced.
+///
+/// `source_neighbors` is the effective first-hop list (may include edges the
+/// viewer added since the last rebuild and exclude edges they removed).
+/// `viewer_distrusts` is the effective distrust set with the same overlay
+/// semantics. Only the source's outgoing edges are overlaid — every other
+/// node's neighbors come from the cached `graph` directly.
+fn forward_bfs_inner(
+    source: u32,
+    graph: &CsrGraph,
+    source_neighbors: &[u32],
+    viewer_distrusts: &HashSet<u32>,
+) -> Vec<(u32, f64)> {
     // BFS state: (current_node, depth, first_hop, path_score)
     let mut queue: VecDeque<(u32, u32, u32, f64)> = VecDeque::new();
     let mut target_groups: HashMap<u32, PathGroups> = HashMap::new();
@@ -260,8 +299,13 @@ fn forward_bfs(source: u32, graph: &CsrGraph, distrust_sets: &DistrustSets) -> V
     // represent independent evidence sources).
     let mut visited_per_group: HashMap<u32, HashSet<u32>> = HashMap::new();
 
-    for &neighbor in graph.neighbors(source) {
-        if neighbor == source {
+    // Track first-hops we've already seeded so a stale delta entry that
+    // duplicates an edge already in the cached graph (or any other source
+    // of duplicates) does not cause double-seeding.
+    let mut seeded_first_hops: HashSet<u32> = HashSet::new();
+
+    for &neighbor in source_neighbors {
+        if neighbor == source || !seeded_first_hops.insert(neighbor) {
             continue;
         }
         let penalized = reliability(graph.neighbors(neighbor), viewer_distrusts);
@@ -319,6 +363,325 @@ fn forward_bfs(source: u32, graph: &CsrGraph, distrust_sets: &DistrustSets) -> V
     }
 
     results
+}
+
+/// Compute the effective source neighbors and distrust set for `source`
+/// after applying `delta` against the cached graph.
+///
+/// Returns `(source_neighbors, viewer_distrusts)` ready to feed into
+/// `forward_bfs_inner`. Centralised so every delta-aware entry point on
+/// `TrustGraph` overlays edges identically.
+fn apply_delta_overlay(
+    source: u32,
+    graph: &TrustGraph,
+    delta: &ViewerDelta,
+) -> (Vec<u32>, HashSet<u32>) {
+    let mut neighbors: Vec<u32> = graph.forward.neighbors(source).to_vec();
+
+    if !delta.trust_removed.is_empty() {
+        let removed: HashSet<u32> = delta
+            .trust_removed
+            .iter()
+            .filter_map(|u| graph.index.get_id(u))
+            .collect();
+        if !removed.is_empty() {
+            neighbors.retain(|n| !removed.contains(n));
+        }
+    }
+    if !delta.trust_added.is_empty() {
+        let existing: HashSet<u32> = neighbors.iter().copied().collect();
+        for added_uuid in &delta.trust_added {
+            if let Some(added_id) = graph.index.get_id(added_uuid)
+                && !existing.contains(&added_id)
+            {
+                neighbors.push(added_id);
+            }
+        }
+    }
+
+    let mut distrusts: HashSet<u32> = graph
+        .distrust_sets
+        .get(&source)
+        .cloned()
+        .unwrap_or_default();
+    for removed_uuid in &delta.distrust_removed {
+        if let Some(removed_id) = graph.index.get_id(removed_uuid) {
+            distrusts.remove(&removed_id);
+        }
+    }
+    for added_uuid in &delta.distrust_added {
+        if let Some(added_id) = graph.index.get_id(added_uuid) {
+            distrusts.insert(added_id);
+        }
+    }
+
+    (neighbors, distrusts)
+}
+
+// ---------------------------------------------------------------------------
+// Pending deltas: per-viewer in-memory record of recent edge mutations
+// ---------------------------------------------------------------------------
+
+/// Outgoing-edge stance the viewer expresses toward a single target.
+///
+/// Mirrors the three values the trust UI buttons can produce. Used by
+/// mutation handlers to communicate the post-write state to
+/// [`PendingDeltas::apply`], which translates it into delta-set membership.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum TrustStance {
+    Neutral,
+    Trust,
+    Distrust,
+}
+
+/// Per-viewer record of trust-edge mutations not yet absorbed by a graph
+/// rebuild.
+///
+/// The cached `TrustGraph` is rebuilt on a debounced schedule, so between
+/// a viewer clicking Trust/Distrust/Neutral and the next rebuild firing
+/// their own outgoing edges in the cached graph are stale. To give
+/// immediate feedback (badge color updates without waiting for the
+/// rebuild), forward BFS layers a `ViewerDelta` on top of the cached
+/// graph for the source node only.
+///
+/// Other people's edges and the transitive ripple from this viewer's
+/// change still come from the cached graph — that is the staleness the
+/// debounce was intentionally amortising and is not (and should not be)
+/// affected by deltas.
+///
+/// Membership invariants:
+/// - For any target, at most one of `trust_added` / `trust_removed`
+///   contains it (likewise for distrust). Both being set simultaneously
+///   would be a self-cancelling delta.
+/// - A target may appear in both `trust_removed` and `distrust_added`
+///   (the viewer flipped from trust to distrust without going through
+///   neutral). [`PendingDeltas::apply`] computes the correct combination.
+#[derive(Clone, Default, Debug)]
+pub struct ViewerDelta {
+    /// Trust edges (viewer → target) the viewer has set since the last
+    /// rebuild that the cached graph does not yet contain.
+    pub trust_added: HashSet<Uuid>,
+    /// Trust edges (viewer → target) the viewer has cleared since the
+    /// last rebuild that the cached graph still contains.
+    pub trust_removed: HashSet<Uuid>,
+    /// Distrust edges the viewer has added since the last rebuild that
+    /// the cached graph's distrust set does not yet contain.
+    pub distrust_added: HashSet<Uuid>,
+    /// Distrust edges the viewer has cleared since the last rebuild
+    /// that the cached graph's distrust set still contains.
+    pub distrust_removed: HashSet<Uuid>,
+    /// Highest mutation sequence number contributing to this delta.
+    /// The rebuild loop captures a high-water seq before reading the DB
+    /// and purges entries with `seq < high_water` after the swap, which
+    /// drops deltas the new graph has fully absorbed.
+    pub seq: u64,
+}
+
+impl ViewerDelta {
+    /// Returns true if the delta carries no pending mutations.
+    ///
+    /// Hot-path callers short-circuit on this to take the cached BFS
+    /// fast path and skip the per-request BFS recompute.
+    pub fn is_empty(&self) -> bool {
+        self.trust_added.is_empty()
+            && self.trust_removed.is_empty()
+            && self.distrust_added.is_empty()
+            && self.distrust_removed.is_empty()
+    }
+}
+
+/// Process-wide store of per-viewer pending edge mutations.
+///
+/// Lives on `AppState` alongside the `TrustGraph` Arc. Mutation handlers
+/// call [`PendingDeltas::apply`] after their DB write commits; the
+/// rebuild loop calls [`PendingDeltas::current_seq`] before reading the
+/// DB and [`PendingDeltas::purge_below`] after the Arc swap to drop
+/// absorbed entries.
+///
+/// All entries are in-memory only — on process restart the rebuild reads
+/// the canonical state from the database, so no recovery is needed.
+pub struct PendingDeltas {
+    inner: std::sync::RwLock<HashMap<Uuid, ViewerDelta>>,
+    /// Monotonic sequence counter assigned at mutation-record time.
+    /// `AcqRel` on `fetch_add` synchronises with `Acquire` on the rebuild's
+    /// `current_seq` read so the rebuild's high-water value reliably
+    /// includes every mutation that committed before the rebuild started.
+    seq_counter: std::sync::atomic::AtomicU64,
+    /// Optional metrics handle. When present, lock-poisoning observations
+    /// bump `pending_deltas_lock_poisoned` so the admin dashboard can
+    /// surface them. `None` for tests that exercise this struct in
+    /// isolation.
+    metrics: Option<Arc<Metrics>>,
+}
+
+impl Default for PendingDeltas {
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
+
+impl PendingDeltas {
+    pub fn new(metrics: Option<Arc<Metrics>>) -> Self {
+        Self {
+            inner: std::sync::RwLock::new(HashMap::new()),
+            seq_counter: std::sync::atomic::AtomicU64::new(1),
+            metrics,
+        }
+    }
+
+    /// Record a poisoned-lock observation against the metrics handle if
+    /// one is attached. Centralised so every poison branch routes
+    /// through the same point and stays consistent with the trust-graph
+    /// poison-handling pattern (`AppState::get_trust_graph`).
+    fn record_poisoned(&self) {
+        if let Some(m) = &self.metrics {
+            m.record_pending_deltas_lock_poisoned();
+        }
+        tracing::error!("pending deltas lock poisoned");
+    }
+
+    /// Capture the current high-water sequence value.
+    ///
+    /// Called by the rebuild loop **before** it reads the trust edges
+    /// from the database. After the rebuild's Arc swap completes,
+    /// `purge_below(captured_value)` drops any delta whose mutations
+    /// committed before this capture — those mutations are reflected in
+    /// the new graph, so the delta is now redundant.
+    pub fn current_seq(&self) -> u64 {
+        self.seq_counter.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Read the viewer's current delta.
+    ///
+    /// Returns `Default::default()` (an empty delta) if the viewer has no
+    /// pending mutations. Most callers hit this path; the empty delta
+    /// short-circuits to the cached BFS fast path inside
+    /// `distance_map_with_delta` and friends.
+    ///
+    /// On lock poisoning the metric is bumped and an empty delta is
+    /// returned — the BFS path then degrades to the stable cached graph
+    /// without the per-viewer overlay, which is the safe behaviour
+    /// (slightly stale, never wrong).
+    pub fn get(&self, viewer: Uuid) -> ViewerDelta {
+        match self.inner.read() {
+            Ok(guard) => guard.get(&viewer).cloned().unwrap_or_default(),
+            Err(_) => {
+                self.record_poisoned();
+                ViewerDelta::default()
+            }
+        }
+    }
+
+    /// Record a mutation against the viewer's pending delta.
+    ///
+    /// `cached_was_trust` and `cached_was_distrust` describe what the
+    /// cached graph currently says about the (viewer → target) edge —
+    /// the caller should query [`TrustGraph::has_trust_edge`] /
+    /// [`TrustGraph::has_distrust_edge`] against the current graph just
+    /// before calling this method. They cannot both be true (a target
+    /// is either trusted, distrusted, or neutral in the cached graph).
+    ///
+    /// `new_stance` is the post-mutation DB state.
+    ///
+    /// Must be called **after** the DB transaction commits — the rebuild
+    /// loop's high-water-mark logic relies on the seq counter advancing
+    /// only for mutations that are durably committed. Calling before the
+    /// commit risks a window where the rebuild reads the DB without the
+    /// new edge yet observes a seq ≥ the delta's seq, which would cause
+    /// `purge_below` to drop a delta the rebuild did not absorb.
+    pub fn apply(
+        &self,
+        viewer: Uuid,
+        target: Uuid,
+        cached_was_trust: bool,
+        cached_was_distrust: bool,
+        new_stance: TrustStance,
+    ) {
+        debug_assert!(
+            !(cached_was_trust && cached_was_distrust),
+            "edge cannot be both trust and distrust in the cached graph"
+        );
+
+        // Fetch a fresh seq AFTER the caller's DB commit. AcqRel ensures
+        // the rebuild's later Acquire load observes everything the caller
+        // produced before this fetch_add (the SQLite commit on this
+        // connection has already returned, so subsequent SELECTs from any
+        // pool connection will see the new row).
+        let seq = self
+            .seq_counter
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+
+        let mut guard = match self.inner.write() {
+            Ok(g) => g,
+            Err(_) => {
+                // Lock poisoned: skip recording the delta. The DB has
+                // already accepted the mutation, so the next rebuild
+                // will absorb it; transient BFS results just won't see
+                // the per-viewer overlay until then.
+                self.record_poisoned();
+                return;
+            }
+        };
+        let entry = guard.entry(viewer).or_default();
+
+        // Recompute this target's delta membership from scratch — clear any
+        // stale entries from prior clicks on the same target before
+        // reapplying based on the freshly observed cached state.
+        entry.trust_added.remove(&target);
+        entry.trust_removed.remove(&target);
+        entry.distrust_added.remove(&target);
+        entry.distrust_removed.remove(&target);
+
+        let now_trust = matches!(new_stance, TrustStance::Trust);
+        let now_distrust = matches!(new_stance, TrustStance::Distrust);
+
+        if now_trust && !cached_was_trust {
+            entry.trust_added.insert(target);
+        }
+        if !now_trust && cached_was_trust {
+            entry.trust_removed.insert(target);
+        }
+        if now_distrust && !cached_was_distrust {
+            entry.distrust_added.insert(target);
+        }
+        if !now_distrust && cached_was_distrust {
+            entry.distrust_removed.insert(target);
+        }
+
+        entry.seq = entry.seq.max(seq);
+
+        // If the new mutation cancels out the prior pending change (back
+        // to the cached graph's state) and the entry is now empty, drop
+        // it to keep the map sparse.
+        if entry.is_empty() {
+            guard.remove(&viewer);
+        }
+    }
+
+    /// Drop entries whose latest mutation is older than `high_water`.
+    ///
+    /// Called by the rebuild loop after the Arc swap completes. Any
+    /// delta with `seq < high_water` was committed before the rebuild
+    /// captured its high-water mark and is therefore reflected in the
+    /// new graph; the delta entry is now redundant.
+    ///
+    /// Entries with `seq >= high_water` are kept: they represent
+    /// mutations that arrived after the rebuild started reading the DB
+    /// and may not have been included in the new graph. They will be
+    /// reconsidered on the next rebuild cycle.
+    pub fn purge_below(&self, high_water: u64) {
+        let mut guard = match self.inner.write() {
+            Ok(g) => g,
+            Err(_) => {
+                // Lock poisoned: skip the purge. Stale entries will be
+                // re-evaluated on the next rebuild cycle; the worst
+                // case is a few extra delta-cache misses until then.
+                self.record_poisoned();
+                return;
+            }
+        };
+        guard.retain(|_, delta| delta.seq >= high_water);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -633,6 +996,14 @@ pub struct TrustGraph {
     forward_cache: BfsCache,
     /// Per-user cache of reverse BFS score maps (reader → {author_uuid_str → score}).
     reverse_cache: BfsCache,
+    /// Delta-keyed forward cache for viewers with pending mutations.
+    /// Keyed by `(reader, delta.seq)` so each click on Trust/Distrust/
+    /// Neutral by the same viewer naturally orphans the previous entry
+    /// (the seq advances on every `PendingDeltas::apply`); the orphaned
+    /// entry is evicted by the byte budget. When the rebuild absorbs
+    /// the delta, callers fall back to the regular `forward_cache` and
+    /// the delta entry ages out without explicit invalidation.
+    delta_forward_cache: DeltaBfsCache,
     /// Metrics sink for BFS hit/miss counters. Optional so that ad-hoc
     /// graphs (`empty`, test fixtures) don't require a Metrics instance.
     metrics: Option<Arc<Metrics>>,
@@ -641,10 +1012,13 @@ pub struct TrustGraph {
 impl TrustGraph {
     /// Build the trust graph from the database.
     ///
-    /// Loads all trust edges from `trust_edges`, builds the UUID↔u32 index,
-    /// and constructs forward and reverse CSR graphs. `bfs_cache_bytes`
-    /// is the total memory budget (in bytes) for cached BFS results,
-    /// split evenly between the forward and reverse caches.
+    /// Loads all trust edges from `trust_edges`, builds the UUID↔u32
+    /// index, and constructs forward and reverse CSR graphs.
+    /// `bfs_cache_bytes` is the total memory budget (in bytes) for
+    /// cached BFS results. Half goes to the reverse cache; the other
+    /// half is split between the per-viewer forward cache and a
+    /// smaller delta-keyed forward cache used only by viewers with
+    /// pending edge mutations (see `DELTA_CACHE_BUDGET_SIXTEENTHS`).
     ///
     /// `metrics` is an optional sink that receives BFS hit/miss counters
     /// so the admin dashboard can surface cache health. Pass `None` for
@@ -725,13 +1099,16 @@ impl TrustGraph {
             "trust graph built"
         );
 
+        let (forward_budget, delta_budget, reverse_budget) =
+            Self::split_cache_budget(bfs_cache_bytes);
         Ok(Self {
             forward,
             reverse,
             index,
             distrust_sets,
-            forward_cache: Self::make_bfs_cache(bfs_cache_bytes / 2),
-            reverse_cache: Self::make_bfs_cache(bfs_cache_bytes / 2),
+            forward_cache: Self::make_bfs_cache(forward_budget),
+            reverse_cache: Self::make_bfs_cache(reverse_budget),
+            delta_forward_cache: Self::make_delta_bfs_cache(delta_budget),
             metrics,
         })
     }
@@ -748,8 +1125,22 @@ impl TrustGraph {
             distrust_sets: HashMap::new(),
             forward_cache: Self::make_bfs_cache(0),
             reverse_cache: Self::make_bfs_cache(0),
+            delta_forward_cache: Self::make_delta_bfs_cache(0),
             metrics: None,
         }
+    }
+
+    /// Split the total BFS cache budget across forward, delta, and
+    /// reverse caches. The reverse cache always gets half; the
+    /// forward half is sliced into the stable per-viewer cache and the
+    /// smaller delta-keyed cache (see `DELTA_CACHE_BUDGET_SIXTEENTHS`).
+    /// Returns `(forward_budget, delta_budget, reverse_budget)`.
+    fn split_cache_budget(total: u64) -> (u64, u64, u64) {
+        let reverse = total / 2;
+        let delta = total * DELTA_CACHE_BUDGET_SIXTEENTHS / 16;
+        // Use saturating subtraction so a tiny test budget doesn't underflow.
+        let forward = (total / 2).saturating_sub(delta);
+        (forward, delta, reverse)
     }
 
     /// Create a byte-weighted BFS cache with the given budget.
@@ -761,6 +1152,53 @@ impl TrustGraph {
             (budget_bytes / (MAP_BASE_OVERHEAD + 200 * BYTES_PER_MAP_ENTRY)) as usize
         };
         Cache::with_weighter(estimated_items, budget_bytes, BfsWeighter)
+    }
+
+    /// Create a byte-weighted delta-keyed BFS cache with the given
+    /// budget. Same per-entry footprint as `make_bfs_cache` — the
+    /// extra `u64` in the key is negligible against the map payload.
+    fn make_delta_bfs_cache(budget_bytes: u64) -> DeltaBfsCache {
+        let estimated_items = if budget_bytes == 0 {
+            0
+        } else {
+            (budget_bytes / (MAP_BASE_OVERHEAD + 200 * BYTES_PER_MAP_ENTRY)) as usize
+        };
+        Cache::with_weighter(estimated_items, budget_bytes, BfsWeighter)
+    }
+
+    /// Returns true if the cached graph contains a (`viewer` → `target`)
+    /// trust edge.
+    ///
+    /// Mutation handlers call this just before [`PendingDeltas::apply`] to
+    /// record the cached state of the edge being mutated, so the delta
+    /// store can compute the correct add/remove membership.
+    pub fn has_trust_edge(&self, viewer: Uuid, target: Uuid) -> bool {
+        let Some(viewer_id) = self.index.get_id(&viewer) else {
+            return false;
+        };
+        let Some(target_id) = self.index.get_id(&target) else {
+            return false;
+        };
+        self.forward.neighbors(viewer_id).contains(&target_id)
+    }
+
+    /// Returns true if the cached graph records `viewer` as distrusting
+    /// `target`.
+    ///
+    /// Companion to [`has_trust_edge`] used by mutation handlers when
+    /// recording deltas. Cannot be `true` simultaneously with
+    /// [`has_trust_edge`] for the same pair — the DB schema enforces
+    /// at most one edge per (source, target).
+    pub fn has_distrust_edge(&self, viewer: Uuid, target: Uuid) -> bool {
+        let Some(viewer_id) = self.index.get_id(&viewer) else {
+            return false;
+        };
+        let Some(target_id) = self.index.get_id(&target) else {
+            return false;
+        };
+        self.distrust_sets
+            .get(&viewer_id)
+            .is_some_and(|s| s.contains(&target_id))
     }
 
     /// Compute forward trust scores from `reader` to all reachable users
@@ -1004,6 +1442,192 @@ impl TrustGraph {
 
         None
     }
+
+    /// Delta-aware variant of [`forward_scores`](Self::forward_scores).
+    ///
+    /// Short-circuits to the cached path when `delta` is empty. Otherwise
+    /// runs a per-call BFS from `reader` overlaying the viewer's pending
+    /// edge mutations on top of the cached graph (only the source node's
+    /// outgoing edges and distrust set are overlaid — every other node's
+    /// neighbours come from the cached graph). Results are not cached.
+    pub fn forward_scores_with_delta(&self, reader: Uuid, delta: &ViewerDelta) -> Vec<TrustScore> {
+        if delta.is_empty() {
+            return self.forward_scores(reader);
+        }
+        let Some(source_id) = self.index.get_id(&reader) else {
+            return Vec::new();
+        };
+
+        let (source_neighbors, viewer_distrusts) = apply_delta_overlay(source_id, self, delta);
+        let mut scores: Vec<TrustScore> = forward_bfs_inner(
+            source_id,
+            &self.forward,
+            &source_neighbors,
+            &viewer_distrusts,
+        )
+        .into_iter()
+        .filter(|&(_, score)| score >= MINIMUM_TRUST_THRESHOLD)
+        .map(|(target_id, score)| {
+            let distance = score_to_distance(score);
+            TrustScore {
+                target_user: self.index.get_uuid(target_id),
+                score,
+                distance,
+            }
+        })
+        .collect();
+        scores.sort_by(|a, b| a.distance.total_cmp(&b.distance));
+        scores
+    }
+
+    /// Delta-aware variant of [`distance_map`](Self::distance_map).
+    ///
+    /// Short-circuits to the cached path when `delta` is empty.
+    /// Otherwise consults the delta-keyed forward cache, computing a
+    /// fresh BFS on miss. The cache key includes `delta.seq`, so the
+    /// next click by the same viewer (which advances the seq via
+    /// `PendingDeltas::apply`) naturally orphans the previous entry —
+    /// it gets evicted by the byte budget without explicit
+    /// invalidation. After the rebuild absorbs the delta the
+    /// short-circuit above kicks in, and the orphaned delta entries
+    /// age out the same way.
+    pub fn distance_map_with_delta(
+        &self,
+        reader: Uuid,
+        delta: &ViewerDelta,
+    ) -> Arc<HashMap<String, f64>> {
+        if delta.is_empty() {
+            return self.distance_map(reader);
+        }
+        let key = (reader, delta.seq);
+        // Probe-then-insert (mirrors `distance_map`'s pattern): the
+        // probe drives the hit/miss metric, while `get_or_insert_with`
+        // preserves quick_cache's single-flight guarantee under
+        // concurrent misses.
+        if let Some(cached) = self.delta_forward_cache.get(&key) {
+            if let Some(m) = &self.metrics {
+                m.record_bfs_delta_hit();
+            }
+            return cached;
+        }
+        if let Some(m) = &self.metrics {
+            m.record_bfs_delta_miss();
+        }
+        self.delta_forward_cache
+            .get_or_insert_with(&key, || {
+                let map: HashMap<String, f64> = self
+                    .forward_scores_with_delta(reader, delta)
+                    .into_iter()
+                    .map(|s| (s.target_user.to_string(), s.distance))
+                    .collect();
+                Ok::<_, ()>(Arc::new(map))
+            })
+            .unwrap()
+    }
+
+    /// Delta-aware variant of [`trust_between`](Self::trust_between).
+    ///
+    /// Short-circuits to the cached path when `delta` is empty. Otherwise
+    /// runs a single overlaid forward BFS from `source` and returns the
+    /// score for `target` (or `None` if unreachable).
+    pub fn trust_between_with_delta(
+        &self,
+        source: Uuid,
+        target: Uuid,
+        delta: &ViewerDelta,
+    ) -> Option<(f64, Option<f64>)> {
+        if delta.is_empty() {
+            return self.trust_between(source, target);
+        }
+        let source_id = self.index.get_id(&source)?;
+        let target_id = self.index.get_id(&target)?;
+
+        let (source_neighbors, viewer_distrusts) = apply_delta_overlay(source_id, self, delta);
+        for (node, score) in forward_bfs_inner(
+            source_id,
+            &self.forward,
+            &source_neighbors,
+            &viewer_distrusts,
+        ) {
+            if node == target_id {
+                let distance = if score >= MINIMUM_TRUST_THRESHOLD {
+                    Some(score_to_distance(score))
+                } else {
+                    None
+                };
+                return Some((score, distance));
+            }
+        }
+        None
+    }
+
+    /// Delta-aware variant of [`paths_to`](Self::paths_to).
+    ///
+    /// The overlay applies to the source's outgoing first-hop set and
+    /// the source's distrust set. Mid-hop neighbours still come from the
+    /// cached graph — consistent with `forward_bfs_inner`, which only
+    /// overlays edges leaving the source node.
+    pub fn paths_to_with_delta(
+        &self,
+        source: Uuid,
+        target: Uuid,
+        delta: &ViewerDelta,
+    ) -> Vec<TrustPath> {
+        if delta.is_empty() {
+            return self.paths_to(source, target);
+        }
+        let Some(source_id) = self.index.get_id(&source) else {
+            return Vec::new();
+        };
+        let Some(target_id) = self.index.get_id(&target) else {
+            return Vec::new();
+        };
+        if source_id == target_id {
+            return Vec::new();
+        }
+
+        let (source_neighbors, distrusted) = apply_delta_overlay(source_id, self, delta);
+
+        let mut paths = Vec::new();
+
+        if source_neighbors.contains(&target_id) {
+            paths.push(TrustPath::Direct);
+        }
+
+        for &mid in &source_neighbors {
+            if mid == source_id || mid == target_id || distrusted.contains(&mid) {
+                continue;
+            }
+            if self.forward.neighbors(mid).contains(&target_id) {
+                paths.push(TrustPath::TwoHop {
+                    via: self.index.get_uuid(mid),
+                });
+            }
+        }
+
+        for &mid1 in &source_neighbors {
+            if mid1 == source_id || mid1 == target_id || distrusted.contains(&mid1) {
+                continue;
+            }
+            for &mid2 in self.forward.neighbors(mid1) {
+                if mid2 == source_id
+                    || mid2 == target_id
+                    || mid2 == mid1
+                    || distrusted.contains(&mid2)
+                {
+                    continue;
+                }
+                if self.forward.neighbors(mid2).contains(&target_id) {
+                    paths.push(TrustPath::ThreeHop {
+                        via1: self.index.get_uuid(mid1),
+                        via2: self.index.get_uuid(mid2),
+                    });
+                }
+            }
+        }
+
+        paths
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1087,16 +1711,26 @@ pub async fn rebuild_loop(
     notify: Arc<Notify>,
     schedule: RebuildSchedule,
     metrics: Arc<Metrics>,
+    pending_deltas: Arc<PendingDeltas>,
 ) {
     use tokio::time::{Instant, sleep_until};
 
     // Run an initial build immediately (graph starts empty).
     // TODO: Retry with backoff if the initial build fails, rather than
     //  silently continuing with an empty graph.
+    //
+    // Capture the pending-deltas high-water mark BEFORE reading the DB,
+    // then purge entries below it after the swap. The AcqRel ordering on
+    // the seq counter guarantees we observe every mutation that committed
+    // before this load, so any delta with a lower seq is fully reflected
+    // in the new graph.
+    let initial_high_water = pending_deltas.current_seq();
     if let Err(e) =
         rebuild_trust_graph(&db, &graph, schedule.bfs_cache_bytes, Some(metrics.clone())).await
     {
         tracing::error!(error = %e, "trust graph initial build failed");
+    } else {
+        pending_deltas.purge_below(initial_high_water);
     }
 
     let mut last_rebuild = Instant::now();
@@ -1127,10 +1761,14 @@ pub async fn rebuild_loop(
             }
         }
 
+        // See the initial-build comment above for the ordering rationale.
+        let high_water = pending_deltas.current_seq();
         match rebuild_trust_graph(&db, &graph, schedule.bfs_cache_bytes, Some(metrics.clone()))
             .await
         {
-            Ok(()) => {}
+            Ok(()) => {
+                pending_deltas.purge_below(high_water);
+            }
             Err(e) => {
                 tracing::error!(error = %e, "trust graph rebuild failed");
             }
@@ -1144,441 +1782,5 @@ pub async fn rebuild_loop(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const A: Uuid = Uuid::from_u128(0xa);
-    const B: Uuid = Uuid::from_u128(0xb);
-    const C: Uuid = Uuid::from_u128(0xc);
-    const D: Uuid = Uuid::from_u128(0xd);
-    const E: Uuid = Uuid::from_u128(0xe);
-    const F: Uuid = Uuid::from_u128(0xf);
-    const H: Uuid = Uuid::from_u128(0x10);
-    const M: Uuid = Uuid::from_u128(0x11);
-    const S1: Uuid = Uuid::from_u128(0x12);
-    const S2: Uuid = Uuid::from_u128(0x13);
-
-    /// Build a TrustGraph directly from UUID edges (no database).
-    fn graph_from_edges(edges: &[(Uuid, Uuid)]) -> TrustGraph {
-        graph_from_edges_with_distrusts(edges, &[])
-    }
-
-    /// Build a TrustGraph with both trust and distrust edges (no database).
-    fn graph_from_edges_with_distrusts(
-        edges: &[(Uuid, Uuid)],
-        distrust_edges: &[(Uuid, Uuid)],
-    ) -> TrustGraph {
-        let index = NodeIndex::from_edges(edges);
-        let dense: Vec<(u32, u32)> = edges
-            .iter()
-            .map(|(s, t)| (index.get_id(s).unwrap(), index.get_id(t).unwrap()))
-            .collect();
-        let forward = CsrGraph::from_edges(index.num_nodes(), &dense);
-        let reverse = forward.transpose();
-
-        let mut distrust_sets: DistrustSets = HashMap::new();
-        for &(distruster, distrusted) in distrust_edges {
-            if let (Some(distruster_id), Some(distrusted_id)) =
-                (index.get_id(&distruster), index.get_id(&distrusted))
-            {
-                distrust_sets
-                    .entry(distruster_id)
-                    .or_default()
-                    .insert(distrusted_id);
-            }
-        }
-
-        TrustGraph {
-            forward,
-            reverse,
-            index,
-            distrust_sets,
-            forward_cache: TrustGraph::make_bfs_cache(1024 * 1024),
-            reverse_cache: TrustGraph::make_bfs_cache(1024 * 1024),
-            metrics: None,
-        }
-    }
-
-    // -- Score-to-distance tests --
-
-    #[test]
-    fn test_score_to_distance_direct_trust() {
-        let d = score_to_distance(1.0);
-        assert!((d - 1.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_score_to_distance_two_hop() {
-        let d = score_to_distance(DECAY);
-        assert!((d - 2.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_score_to_distance_three_hop() {
-        let d = score_to_distance(DECAY * DECAY);
-        assert!((d - 3.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_score_to_distance_zero() {
-        assert!((score_to_distance(0.0) - 3.0).abs() < f64::EPSILON);
-    }
-
-    // -- PathGroups unit tests --
-
-    #[test]
-    fn test_path_groups_single() {
-        let mut pg = PathGroups::new();
-        pg.add(0, 0.49);
-        assert!((pg.combined_score() - 0.49).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_path_groups_two_independent() {
-        let mut pg = PathGroups::new();
-        pg.add(0, 0.49);
-        pg.add(1, 0.49);
-        // 1 - (1-0.49)(1-0.49) = 0.7399
-        assert!((pg.combined_score() - 0.7399).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_path_groups_same_group_takes_max() {
-        let mut pg = PathGroups::new();
-        pg.add(0, 0.49);
-        pg.add(0, 0.343);
-        assert!((pg.combined_score() - 0.49).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_sybil_resistance_path_groups() {
-        // All through same first hop — max = 0.49
-        let mut pg = PathGroups::new();
-        pg.add(0, 0.49);
-        pg.add(0, 0.343);
-        pg.add(0, 0.343);
-        assert!((pg.combined_score() - 0.49).abs() < f64::EPSILON);
-    }
-
-    // -- Forward BFS tests (via TrustGraph public API) --
-
-    #[test]
-    fn test_forward_linear_chain() {
-        // A → B → C → D
-        let g = graph_from_edges(&[(A, B), (B, C), (C, D)]);
-        let scores = g.forward_scores(A);
-        let map: HashMap<Uuid, f64> = scores.iter().map(|s| (s.target_user, s.score)).collect();
-
-        assert!((map[&B] - 1.0).abs() < 0.001);
-        assert!((map[&C] - 0.7).abs() < 0.001);
-        assert!((map[&D] - 0.49).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_forward_two_independent_paths() {
-        // A → B → D, A → C → D
-        let g = graph_from_edges(&[(A, B), (A, C), (B, D), (C, D)]);
-        let scores = g.forward_scores(A);
-        let map: HashMap<Uuid, f64> = scores.iter().map(|s| (s.target_user, s.score)).collect();
-
-        // 1-(1-0.7)(1-0.7) = 0.91
-        assert!((map[&D] - 0.91).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_forward_sybil_attack() {
-        // A → H → M, A → H → S1 → M, A → H → S2 → M
-        let g = graph_from_edges(&[(A, H), (H, M), (H, S1), (H, S2), (S1, M), (S2, M)]);
-        let scores = g.forward_scores(A);
-        let map: HashMap<Uuid, f64> = scores.iter().map(|s| (s.target_user, s.score)).collect();
-
-        // All through first hop H — max in group H is A→H→M = 0.7
-        assert!((map[&M] - 0.7).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_forward_depth_limit() {
-        // A → B → C → D → E (4 hops, E unreachable)
-        let g = graph_from_edges(&[(A, B), (B, C), (C, D), (D, E)]);
-        let scores = g.forward_scores(A);
-        let map: HashMap<Uuid, f64> = scores.iter().map(|s| (s.target_user, s.score)).collect();
-
-        assert!(map.contains_key(&D));
-        assert!(!map.contains_key(&E));
-    }
-
-    #[test]
-    fn test_forward_no_self_loop() {
-        // A → B → A
-        let g = graph_from_edges(&[(A, B), (B, A)]);
-        let scores = g.forward_scores(A);
-        let map: HashMap<Uuid, f64> = scores.iter().map(|s| (s.target_user, s.score)).collect();
-
-        assert!(!map.contains_key(&A));
-        assert!(map.contains_key(&B));
-    }
-
-    // -- Reverse BFS tests --
-
-    #[test]
-    fn test_reverse_linear_chain() {
-        // A → B → C → D. Reverse from D.
-        let g = graph_from_edges(&[(A, B), (B, C), (C, D)]);
-        let rev = g.reverse_scores(D);
-
-        assert!((rev[&C] - 1.0).abs() < 0.001);
-        assert!((rev[&B] - 0.7).abs() < 0.001);
-        assert!((rev[&A] - 0.49).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_reverse_two_paths_matches_forward() {
-        // A → B → D, A → C → D
-        let g = graph_from_edges(&[(A, B), (A, C), (B, D), (C, D)]);
-
-        let fwd = g.forward_scores(A);
-        let fwd_d = fwd.iter().find(|s| s.target_user == D).unwrap().score;
-
-        let rev = g.reverse_scores(D);
-
-        assert!((rev[&A] - fwd_d).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_reverse_sybil_resistance() {
-        // A → H → R, A → H → S1 → R, A → H → S2 → R
-        let r = Uuid::from_u128(0xf);
-        let g = graph_from_edges(&[(A, H), (H, r), (H, S1), (H, S2), (S1, r), (S2, r)]);
-
-        let fwd = g.forward_scores(A);
-        let fwd_r = fwd.iter().find(|s| s.target_user == r).unwrap().score;
-
-        let rev = g.reverse_scores(r);
-
-        assert!((fwd_r - 0.7).abs() < 0.001);
-        assert!((rev[&A] - 0.7).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_reverse_mixed_depth() {
-        // A→X→R and A→Y→X→R (different first-hops from A)
-        let x = Uuid::from_u128(0x20);
-        let y = Uuid::from_u128(0x21);
-        let r = Uuid::from_u128(0x22);
-        let g = graph_from_edges(&[(A, x), (A, y), (x, r), (y, x)]);
-
-        let fwd = g.forward_scores(A);
-        let fwd_r = fwd.iter().find(|s| s.target_user == r).unwrap().score;
-
-        let rev = g.reverse_scores(r);
-
-        // group X = 0.7, group Y = 0.49 → 1-(0.3)(0.51) = 0.847
-        assert!((fwd_r - 0.847).abs() < 0.001);
-        assert!((rev[&A] - fwd_r).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_reverse_no_self_loop() {
-        let g = graph_from_edges(&[(A, B), (B, A)]);
-        let rev = g.reverse_scores(A);
-
-        assert!(!rev.contains_key(&A));
-        assert!((rev[&B] - 1.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_reverse_depth_limit() {
-        // A → B → C → D → E
-        let g = graph_from_edges(&[(A, B), (B, C), (C, D), (D, E)]);
-        let rev = g.reverse_scores(E);
-
-        assert!((rev[&D] - 1.0).abs() < 0.001);
-        assert!((rev[&C] - 0.7).abs() < 0.001);
-        assert!((rev[&B] - 0.49).abs() < 0.001);
-        assert!(!rev.contains_key(&A));
-    }
-
-    // -- trust_between tests --
-
-    #[test]
-    fn test_trust_between_direct() {
-        let g = graph_from_edges(&[(A, B)]);
-        let (score, distance) = g.trust_between(A, B).unwrap();
-        assert!((score - 1.0).abs() < 0.001);
-        assert!((distance.unwrap() - 1.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_trust_between_unreachable() {
-        let g = graph_from_edges(&[(A, B)]);
-        assert!(g.trust_between(B, A).is_none());
-    }
-
-    #[test]
-    fn test_empty_graph() {
-        let g = TrustGraph::empty();
-        assert!(g.forward_scores(A).is_empty());
-        assert!(g.reverse_scores(A).is_empty());
-        assert!(g.trust_between(A, B).is_none());
-    }
-
-    #[test]
-    fn test_unknown_user() {
-        let g = graph_from_edges(&[(A, B)]);
-        // C is not in the graph
-        assert!(g.forward_scores(C).is_empty());
-        assert!(g.reverse_scores(C).is_empty());
-    }
-
-    // -- paths_to tests --
-
-    #[test]
-    fn test_paths_to_direct() {
-        let g = graph_from_edges(&[(A, B)]);
-        let paths = g.paths_to(A, B);
-        assert_eq!(paths, vec![TrustPath::Direct]);
-    }
-
-    #[test]
-    fn test_paths_to_two_hop() {
-        let g = graph_from_edges(&[(A, B), (B, C)]);
-        let paths = g.paths_to(A, C);
-        assert_eq!(paths, vec![TrustPath::TwoHop { via: B }]);
-    }
-
-    #[test]
-    fn test_paths_to_three_hop() {
-        let g = graph_from_edges(&[(A, B), (B, C), (C, D)]);
-        let paths = g.paths_to(A, D);
-        assert_eq!(paths, vec![TrustPath::ThreeHop { via1: B, via2: C }]);
-    }
-
-    #[test]
-    fn test_paths_to_multiple() {
-        // A → B → D and A → C → D
-        let g = graph_from_edges(&[(A, B), (A, C), (B, D), (C, D)]);
-        let paths = g.paths_to(A, D);
-        assert_eq!(paths.len(), 2);
-        assert!(paths.contains(&TrustPath::TwoHop { via: B }));
-        assert!(paths.contains(&TrustPath::TwoHop { via: C }));
-    }
-
-    #[test]
-    fn test_paths_to_unreachable() {
-        let g = graph_from_edges(&[(A, B)]);
-        assert!(g.paths_to(B, A).is_empty());
-    }
-
-    #[test]
-    fn test_paths_to_beyond_depth() {
-        // A → B → C → D → E (4 hops to E, no paths)
-        let g = graph_from_edges(&[(A, B), (B, C), (C, D), (D, E)]);
-        assert!(g.paths_to(A, E).is_empty());
-    }
-
-    #[test]
-    fn test_paths_to_self() {
-        let g = graph_from_edges(&[(A, B), (B, A)]);
-        assert!(g.paths_to(A, A).is_empty());
-    }
-
-    #[test]
-    fn test_paths_to_mixed_depths() {
-        // A → B (direct to B), A → B → C (2-hop to C), plus A → C directly
-        let g = graph_from_edges(&[(A, B), (A, C), (B, C)]);
-        let paths = g.paths_to(A, C);
-        assert!(paths.contains(&TrustPath::Direct));
-        assert!(paths.contains(&TrustPath::TwoHop { via: B }));
-    }
-
-    // -- Distrust propagation tests --
-
-    #[test]
-    fn test_distrust_single_target_penalizes_intermediary() {
-        // A→B→C, B trusts E (distrusted by A)
-        let g = graph_from_edges_with_distrusts(&[(A, B), (B, C), (B, E)], &[(A, E)]);
-        let scores = g.forward_scores(A);
-        let map: HashMap<Uuid, f64> = scores.iter().map(|s| (s.target_user, s.score)).collect();
-
-        // B trusts E (distrusted) → reliability = 0.75
-        assert!((map[&B] - 0.75).abs() < 0.001);
-        // C = 0.75 * DECAY * 1.0 = 0.525
-        assert!((map[&C] - 0.525).abs() < 0.001);
-        // E is directly distrusted → 0.0, filtered out by threshold
-        assert!(!map.contains_key(&E));
-    }
-
-    #[test]
-    fn test_distrust_multiple_targets_compound() {
-        // A→B, B trusts C and D (both distrusted by A)
-        let g = graph_from_edges_with_distrusts(&[(A, B), (B, C), (B, D)], &[(A, C), (A, D)]);
-        let scores = g.forward_scores(A);
-        let map: HashMap<Uuid, f64> = scores.iter().map(|s| (s.target_user, s.score)).collect();
-
-        // B trusts 2 distrusted → reliability = 0.75^2 = 0.5625
-        assert!((map[&B] - 0.5625).abs() < 0.001);
-        // C and D are directly distrusted → filtered out by threshold
-        assert!(!map.contains_key(&C));
-        assert!(!map.contains_key(&D));
-    }
-
-    #[test]
-    fn test_distrust_no_penalty_clean_node() {
-        // A→B→C, A→E. A distrusts E. B doesn't trust E → no penalty.
-        let g = graph_from_edges_with_distrusts(&[(A, B), (B, C), (A, E)], &[(A, E)]);
-        let scores = g.forward_scores(A);
-        let map: HashMap<Uuid, f64> = scores.iter().map(|s| (s.target_user, s.score)).collect();
-
-        assert!((map[&B] - 1.0).abs() < 0.001);
-        assert!((map[&C] - 0.7).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_distrust_multipath_recovery() {
-        // A→B→D, A→C→D. B trusts E (distrusted by A), C is clean.
-        let g =
-            graph_from_edges_with_distrusts(&[(A, B), (A, C), (B, D), (C, D), (B, E)], &[(A, E)]);
-        let scores = g.forward_scores(A);
-        let map: HashMap<Uuid, f64> = scores.iter().map(|s| (s.target_user, s.score)).collect();
-
-        // Group B: 0.75 * 0.7 = 0.525, Group C: 1.0 * 0.7 = 0.7
-        // Combined: 1 - (1-0.525)(1-0.7) = 0.8575
-        assert!((map[&D] - 0.8575).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_distrust_compounds_along_path() {
-        // A→B→C→D, B trusts E (distrusted), C trusts F (distrusted)
-        let g = graph_from_edges_with_distrusts(
-            &[(A, B), (B, C), (C, D), (B, E), (C, F)],
-            &[(A, E), (A, F)],
-        );
-        let scores = g.forward_scores(A);
-        let map: HashMap<Uuid, f64> = scores.iter().map(|s| (s.target_user, s.score)).collect();
-
-        // B: reliability = 0.75 → 0.75
-        assert!((map[&B] - 0.75).abs() < 0.001);
-        // C: 0.75 * 0.7 * 0.75 = 0.39375 — below threshold, filtered
-        assert!(!map.contains_key(&C));
-        // D: 0.39375 * 0.7 ≈ 0.2756 — below threshold, filtered
-        assert!(!map.contains_key(&D));
-        // E, F distrusted → filtered
-        assert!(!map.contains_key(&E));
-        assert!(!map.contains_key(&F));
-    }
-
-    #[test]
-    fn test_distrust_sybil_resistance() {
-        // A→H, H→M, H→S1→M, H→S2→M, H→E. A distrusts E.
-        let g = graph_from_edges_with_distrusts(
-            &[(A, H), (H, M), (H, S1), (H, S2), (S1, M), (S2, M), (H, E)],
-            &[(A, E)],
-        );
-        let scores = g.forward_scores(A);
-        let map: HashMap<Uuid, f64> = scores.iter().map(|s| (s.target_user, s.score)).collect();
-
-        // All via first-hop H. H reliability = 0.75 (trusts E, distrusted by A).
-        // Best in group: H→M = 0.75 * 0.7 = 0.525
-        assert!((map[&M] - 0.525).abs() < 0.001);
-    }
-}
+#[path = "trust_tests.rs"]
+mod tests;

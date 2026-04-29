@@ -145,6 +145,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let trust_graph_notify = Arc::new(Notify::new());
     let trust_graph = Arc::new(RwLock::new(Arc::new(trust::TrustGraph::empty())));
     let app_metrics = Arc::new(metrics::Metrics::new());
+    let pending_deltas = Arc::new(trust::PendingDeltas::new(Some(app_metrics.clone())));
 
     let shared_state = Arc::new(AppState {
         db: pool.clone(),
@@ -154,6 +155,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         trust_graph_notify: trust_graph_notify.clone(),
         trust_graph: trust_graph.clone(),
         metrics: app_metrics.clone(),
+        pending_deltas: pending_deltas.clone(),
     });
 
     // Spawn the debounced trust graph rebuild background task.
@@ -165,6 +167,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         trust_graph_notify,
         trust::RebuildSchedule::default(),
         app_metrics,
+        pending_deltas,
     ));
 
     // Spawn the CSP report retention sweep. Runs once per hour and

@@ -13,7 +13,8 @@ use crate::error::{AppError, ErrorCode};
 use crate::session::{AuthUser, RestrictedAuthUser};
 use crate::state::AppState;
 use crate::trust::{
-    MINIMUM_TRUST_THRESHOLD, TrustPath, UserStatus, UserViewerInfo, load_distrust_set, load_tag_map,
+    MINIMUM_TRUST_THRESHOLD, TrustPath, TrustStance, UserStatus, UserViewerInfo, load_distrust_set,
+    load_tag_map,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -316,10 +317,11 @@ pub async fn get_profile(
         .map(|r| r.tag)
     };
 
+    let viewer_delta = state.pending_deltas.get(viewer_uuid);
     let (trust_score, trust) = if is_self {
         (None, UserViewerInfo::self_view())
     } else {
-        match graph.trust_between(viewer_uuid, target_uuid) {
+        match graph.trust_between_with_delta(viewer_uuid, target_uuid, &viewer_delta) {
             Some((score, distance)) => (
                 Some(score),
                 UserViewerInfo {
@@ -405,8 +407,10 @@ pub async fn get_trust_detail(
         AppError::code(ErrorCode::Internal)
     })?;
 
+    let viewer_delta = state.pending_deltas.get(viewer_uuid);
+
     // Single forward BFS from viewer — used for trust_between, distance_map, and path enrichment.
-    let viewer_scores = graph.forward_scores(viewer_uuid);
+    let viewer_scores = graph.forward_scores_with_delta(viewer_uuid, &viewer_delta);
 
     let mut distance_map: HashMap<String, f64> = viewer_scores
         .into_iter()
@@ -436,11 +440,11 @@ pub async fn get_trust_detail(
         (None, trust, Vec::new(), Vec::new())
     } else {
         let (score, distance) = graph
-            .trust_between(viewer_uuid, target_uuid)
+            .trust_between_with_delta(viewer_uuid, target_uuid, &viewer_delta)
             .map(|(s, d)| (Some(s), d))
             .unwrap_or((None, None));
 
-        let raw_paths = graph.paths_to(viewer_uuid, target_uuid);
+        let raw_paths = graph.paths_to_with_delta(viewer_uuid, target_uuid, &viewer_delta);
 
         let intermediary_uuids: Vec<Uuid> = raw_paths
             .iter()
@@ -854,7 +858,8 @@ pub async fn get_trust_edges(
 
     let graph = state.get_trust_graph()?;
     let viewer_uuid = user.uuid();
-    let cached_dm = graph.distance_map(viewer_uuid);
+    let viewer_delta = state.pending_deltas.get(viewer_uuid);
+    let cached_dm = graph.distance_map_with_delta(viewer_uuid, &viewer_delta);
     // The viewer isn't included in their own distance map; pin them at 0 so
     // they sort first rather than falling through to f64::MAX (untrusted).
     // TODO: Avoid cloning the entire cached map just to insert one entry.
@@ -998,9 +1003,26 @@ pub async fn set_trust_edge(
         return Err(AppError::code(ErrorCode::SelfTrustEdge));
     }
 
-    let trust_type = match req.edge_type {
-        TrustEdgeType::Trust => "trust",
-        TrustEdgeType::Distrust => "distrust",
+    let (trust_type, new_stance) = match req.edge_type {
+        TrustEdgeType::Trust => ("trust", TrustStance::Trust),
+        TrustEdgeType::Distrust => ("distrust", TrustStance::Distrust),
+    };
+
+    // Snapshot the cached graph's current view of this edge before
+    // committing. The pending-delta entry needs the cached "before"
+    // state to know whether this mutation is an add, a remove, or a
+    // flip — see `PendingDeltas::apply`.
+    let viewer_uuid = user.uuid();
+    let target_uuid = Uuid::parse_str(&target_id).map_err(|_| {
+        tracing::error!(target_id = %target_id, "invalid target user id");
+        AppError::code(ErrorCode::Internal)
+    })?;
+    let (cached_was_trust, cached_was_distrust) = {
+        let graph = state.get_trust_graph()?;
+        (
+            graph.has_trust_edge(viewer_uuid, target_uuid),
+            graph.has_distrust_edge(viewer_uuid, target_uuid),
+        )
     };
 
     let mut tx = state.db.begin().await?;
@@ -1026,6 +1048,17 @@ pub async fn set_trust_edge(
 
     tx.commit().await?;
 
+    // Record the mutation in the pending-deltas store *after* the commit
+    // so the seq counter only advances for durably persisted edges. The
+    // rebuild loop's high-water purge relies on this ordering.
+    state.pending_deltas.apply(
+        viewer_uuid,
+        target_uuid,
+        cached_was_trust,
+        cached_was_distrust,
+        new_stance,
+    );
+
     state.trust_graph_notify.notify_one();
 
     Ok(StatusCode::NO_CONTENT)
@@ -1043,6 +1076,21 @@ pub async fn delete_trust_edge(
 ) -> Result<impl IntoResponse, AppError> {
     let (target_id, ..) = resolve_user(&state.db, &username).await?;
 
+    // Snapshot the cached graph's current view before the DELETE — see
+    // `set_trust_edge` for the rationale.
+    let viewer_uuid = user.uuid();
+    let target_uuid = Uuid::parse_str(&target_id).map_err(|_| {
+        tracing::error!(target_id = %target_id, "invalid target user id");
+        AppError::code(ErrorCode::Internal)
+    })?;
+    let (cached_was_trust, cached_was_distrust) = {
+        let graph = state.get_trust_graph()?;
+        (
+            graph.has_trust_edge(viewer_uuid, target_uuid),
+            graph.has_distrust_edge(viewer_uuid, target_uuid),
+        )
+    };
+
     let result = sqlx::query!(
         "DELETE FROM trust_edges WHERE source_user = ? AND target_user = ?",
         user.user_id,
@@ -1054,6 +1102,14 @@ pub async fn delete_trust_edge(
     if result.rows_affected() == 0 {
         return Err(AppError::code(ErrorCode::NoTrustEdge));
     }
+
+    state.pending_deltas.apply(
+        viewer_uuid,
+        target_uuid,
+        cached_was_trust,
+        cached_was_distrust,
+        TrustStance::Neutral,
+    );
 
     state.trust_graph_notify.notify_one();
 

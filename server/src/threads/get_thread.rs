@@ -575,7 +575,8 @@ fn load_viewer_ctx(
         Some(u) => {
             let reader_uuid = u.uuid();
             let graph = state.get_trust_graph()?;
-            let dm = graph.distance_map(reader_uuid);
+            let reader_delta = state.pending_deltas.get(reader_uuid);
+            let dm = graph.distance_map_with_delta(reader_uuid, &reader_delta);
             let rm = graph.reverse_score_map(reader_uuid);
             Ok(ViewerCtx {
                 trust_map: dm,

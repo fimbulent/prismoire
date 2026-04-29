@@ -400,7 +400,8 @@ pub async fn list_all_threads(
 ) -> Result<Json<ThreadListResponse>, AppError> {
     let reader_uuid = user.uuid();
     let graph = state.get_trust_graph()?;
-    let trust_map = graph.distance_map(reader_uuid);
+    let reader_delta = state.pending_deltas.get(reader_uuid);
+    let trust_map = graph.distance_map_with_delta(reader_uuid, &reader_delta);
     let reverse_map = graph.reverse_score_map(reader_uuid);
     let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
     let tag_map = load_tag_map(&state.db, &user.user_id).await?;
@@ -662,7 +663,8 @@ pub async fn list_threads(
 ) -> Result<Json<ThreadListResponse>, AppError> {
     let reader_uuid = user.uuid();
     let graph = state.get_trust_graph()?;
-    let trust_map = graph.distance_map(reader_uuid);
+    let reader_delta = state.pending_deltas.get(reader_uuid);
+    let trust_map = graph.distance_map_with_delta(reader_uuid, &reader_delta);
     let reverse_map = graph.reverse_score_map(reader_uuid);
     let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
     let tag_map = load_tag_map(&state.db, &user.user_id).await?;
@@ -909,7 +911,8 @@ pub async fn load_more_all_threads(
     let cursor = parse_warm_cursor(&body.cursor)?;
     let reader_uuid = user.uuid();
     let graph = state.get_trust_graph()?;
-    let trust_map = graph.distance_map(reader_uuid);
+    let reader_delta = state.pending_deltas.get(reader_uuid);
+    let trust_map = graph.distance_map_with_delta(reader_uuid, &reader_delta);
     let reverse_map = graph.reverse_score_map(reader_uuid);
     let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
     let tag_map = load_tag_map(&state.db, &user.user_id).await?;
@@ -981,7 +984,8 @@ pub async fn load_more_room_threads(
     let cursor = parse_warm_cursor(&body.cursor)?;
     let reader_uuid = user.uuid();
     let graph = state.get_trust_graph()?;
-    let trust_map = graph.distance_map(reader_uuid);
+    let reader_delta = state.pending_deltas.get(reader_uuid);
+    let trust_map = graph.distance_map_with_delta(reader_uuid, &reader_delta);
     let reverse_map = graph.reverse_score_map(reader_uuid);
     let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
     let tag_map = load_tag_map(&state.db, &user.user_id).await?;
