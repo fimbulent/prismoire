@@ -75,7 +75,7 @@
 </script>
 
 <svelte:head>
-	<title>Settings \u2014 Prismoire</title>
+	<title>Settings — Prismoire</title>
 </svelte:head>
 
 <div class="max-w-4xl mx-auto px-6 pt-6 pb-16">

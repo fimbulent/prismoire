@@ -47,7 +47,7 @@
 </script>
 
 <svelte:head>
-	<title>Prismoire</title>
+	<title>Public Threads — Prismoire</title>
 </svelte:head>
 
 <div class="max-w-4xl mx-auto px-6 pb-16">

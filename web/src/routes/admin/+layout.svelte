@@ -14,6 +14,17 @@
 		return 'overview';
 	});
 
+	// Per-tab title so browser tabs / history / bookmarks can distinguish
+	// between admin sub-pages. The h1 stays "Admin Dashboard" because the
+	// tab strip already names the active sub-page in the UI.
+	const titleSuffix = $derived.by(() => {
+		if (tab === 'reports') return 'Reports';
+		if (tab === 'watchlists') return 'Watchlists';
+		if (tab === 'actions') return 'Actions';
+		if (tab === 'routes') return 'Routes';
+		return 'Dashboard';
+	});
+
 	const tabClass = (active: boolean) =>
 		`font-sans text-sm px-4 py-2 border-b-2 transition-colors whitespace-nowrap no-underline ${
 			active
@@ -23,7 +34,7 @@
 </script>
 
 <svelte:head>
-	<title>Admin Dashboard — Prismoire</title>
+	<title>Admin {titleSuffix} — Prismoire</title>
 </svelte:head>
 
 <div class="max-w-4xl mx-auto px-6 pt-6 pb-0">

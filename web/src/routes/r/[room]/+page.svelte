@@ -107,7 +107,7 @@
 		}
 	}
 
-	let heading = $derived(isAll ? 'All threads' : room?.slug ?? '');
+	let heading = $derived(isAll ? 'All threads' : room?.slug ?? page.params.room ?? '');
 
 	function threadHref(thread: ThreadSummary): string {
 		return `/r/${encodeURIComponent(thread.room_slug)}/${thread.id}`;
@@ -115,7 +115,7 @@
 </script>
 
 <svelte:head>
-	<title>{heading ? `${heading} — Prismoire` : 'Prismoire'}</title>
+	<title>{heading} — Prismoire</title>
 </svelte:head>
 
 <div class="max-w-4xl mx-auto px-6 pb-16">
