@@ -20,6 +20,7 @@
 	import { flip } from 'svelte/animate';
 	import { slide } from 'svelte/transition';
 	import { toast } from '$lib/components/ui/toast.svelte';
+	import { errorMessage } from '$lib/i18n/errors';
 
 	let { data } = $props();
 
@@ -99,7 +100,7 @@
 			rooms = [...rooms, ...newRooms];
 			nextCursor = page.next_cursor;
 		} catch (e) {
-			loadMoreError = e instanceof Error ? e.message : 'Failed to load more rooms.';
+			loadMoreError = errorMessage(e, 'Failed to load more rooms.');
 		} finally {
 			loadingMore = false;
 		}
@@ -142,7 +143,7 @@
 		} catch (e) {
 			// Roll back the optimistic flip.
 			applyFavoriteLocally(room.id, previous);
-			toast.error(e instanceof Error ? e.message : 'Failed to update favorite.');
+			toast.error(errorMessage(e, 'Failed to update favorite.'));
 		}
 	}
 
@@ -169,7 +170,7 @@
 			// Stale view (another tab modified favorites) — the server
 			// returns FavoriteSetMismatch and we re-pull to recover.
 			await invalidateAll();
-			toast.error(err instanceof Error ? err.message : 'Failed to save favorite order.');
+			toast.error(errorMessage(err, 'Failed to save favorite order.'));
 		}
 	}
 </script>
