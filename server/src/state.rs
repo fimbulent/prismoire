@@ -45,6 +45,7 @@ impl AppState {
             .map(|guard| Arc::clone(&guard))
             .map_err(|_| {
                 tracing::error!("trust graph lock poisoned");
+                self.metrics.record_trust_graph_lock_poisoned();
                 AppError::code(ErrorCode::Internal)
             })
     }

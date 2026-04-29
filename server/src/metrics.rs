@@ -63,6 +63,14 @@ pub struct Metrics {
     /// invalid). Recorded from the auth handlers and surfaced on the
     /// admin overview.
     failed_auth: HourlyCounter,
+
+    /// Cumulative count of times the trust graph `RwLock` was observed
+    /// poisoned. A poisoned lock means a previous holder panicked while
+    /// mutating the graph — an invariant violation that should be
+    /// effectively zero in healthy operation. Cumulative (not windowed)
+    /// because the absolute count over process lifetime is the signal:
+    /// any non-zero value warrants investigation.
+    trust_graph_lock_poisoned: AtomicU64,
 }
 
 /// Key identifying a route for metrics aggregation. We key on the
@@ -238,6 +246,7 @@ impl Metrics {
             last_rebuild_at: RwLock::new(None),
             routes: RwLock::new(HashMap::new()),
             failed_auth: HourlyCounter::new(),
+            trust_graph_lock_poisoned: AtomicU64::new(0),
         }
     }
 
@@ -297,6 +306,14 @@ impl Metrics {
     /// [`ROLLING_WINDOW_HOURS`] hours.
     pub fn failed_auth_count_24h(&self) -> u64 {
         self.failed_auth.count_24h_at(now_ms())
+    }
+
+    /// Record one observation of the trust graph `RwLock` being
+    /// poisoned. Called from `AppState::get_trust_graph` when a read
+    /// guard cannot be acquired because a previous writer panicked.
+    pub fn record_trust_graph_lock_poisoned(&self) {
+        self.trust_graph_lock_poisoned
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record one request's outcome against its route template.
@@ -381,6 +398,7 @@ impl Metrics {
             .unwrap_or((None, None, None));
 
         let last_rebuild_at = self.last_rebuild_at.read().ok().and_then(|g| *g);
+        let trust_graph_lock_poisoned = self.trust_graph_lock_poisoned.load(Ordering::Relaxed);
 
         MetricsSnapshot {
             bfs_hit_rate: hit_rate,
@@ -389,6 +407,7 @@ impl Metrics {
             graph_load_ms_p95: p95,
             graph_load_ms_p99: p99,
             last_rebuild_at,
+            trust_graph_lock_poisoned,
         }
     }
 }
@@ -411,6 +430,10 @@ pub struct MetricsSnapshot {
     pub graph_load_ms_p95: Option<f64>,
     pub graph_load_ms_p99: Option<f64>,
     pub last_rebuild_at: Option<DateTime<Utc>>,
+    /// Cumulative count of trust graph `RwLock` poisoning observations
+    /// since process start. Should be zero; any non-zero value means a
+    /// previous lock holder panicked.
+    pub trust_graph_lock_poisoned: u64,
 }
 
 /// Per-route stats captured in a snapshot. Two scopes of counter:
