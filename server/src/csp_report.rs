@@ -313,7 +313,7 @@ pub async fn receive_csp_report(State(state): State<Arc<AppState>>, body: Bytes)
         }
         report.truncate_fields();
         if let Err(e) = insert_report(&state.db, &report).await {
-            eprintln!("failed to insert CSP report: {e}");
+            tracing::error!(error = %e, "failed to insert CSP report");
         }
     }
     StatusCode::NO_CONTENT
@@ -381,7 +381,7 @@ pub async fn retention_loop(pool: SqlitePool) {
         .execute(&pool)
         .await
         {
-            eprintln!("csp_reports retention sweep failed: {e}");
+            tracing::error!(error = %e, "csp_reports retention sweep failed");
         }
     }
 }

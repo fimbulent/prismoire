@@ -141,7 +141,7 @@ fn build_meta_tree(rows: Vec<PostMeta>) -> Result<MetaTree, AppError> {
     }
 
     let root_idx = root_idx.ok_or_else(|| {
-        eprintln!("thread has no opening post");
+        tracing::error!("thread has no opening post");
         AppError::code(ErrorCode::Internal)
     })?;
     let op_author_id = author_of[root_idx].clone();

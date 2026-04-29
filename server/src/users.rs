@@ -211,7 +211,7 @@ async fn resolve_user(
     .await?
     .ok_or_else(|| AppError::code(ErrorCode::UserNotFound))?;
     let raw_status = UserStatus::try_from(row.status.as_str()).map_err(|e| {
-        eprintln!("{e}");
+        tracing::error!(username = %username, error = %e, "unrecognised users.status");
         AppError::code(ErrorCode::Internal)
     })?;
     let status = UserStatus::effective(raw_status, row.deleted_at.as_deref());
@@ -299,7 +299,7 @@ pub async fn get_profile(
     let graph = state.get_trust_graph()?;
     let viewer_uuid = user.uuid();
     let target_uuid = Uuid::parse_str(&target_id).map_err(|_| {
-        eprintln!("invalid target user id: {target_id}");
+        tracing::error!(target_id = %target_id, "invalid target user id");
         AppError::code(ErrorCode::Internal)
     })?;
 
@@ -401,7 +401,7 @@ pub async fn get_trust_detail(
     let graph = state.get_trust_graph()?;
     let viewer_uuid = user.uuid();
     let target_uuid = Uuid::parse_str(&target_id).map_err(|_| {
-        eprintln!("invalid target user id: {target_id}");
+        tracing::error!(target_id = %target_id, "invalid target user id");
         AppError::code(ErrorCode::Internal)
     })?;
 

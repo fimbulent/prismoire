@@ -48,9 +48,10 @@ pub async fn sign_message(
     let private_key_bytes = row.ok_or(SignError::NoKey)?.private_key;
 
     let key_bytes: [u8; 32] = private_key_bytes.try_into().map_err(|v: Vec<u8>| {
-        eprintln!(
-            "signing key for user {user_id} has invalid length {} (expected 32 bytes)",
-            v.len()
+        tracing::error!(
+            user_id = %user_id,
+            length = v.len(),
+            "signing key has invalid length (expected 32 bytes)"
         );
         SignError::InvalidKey
     })?;
@@ -105,11 +106,11 @@ impl From<SignError> for crate::error::AppError {
         match err {
             SignError::Db(e) => AppError::from(e),
             SignError::NoKey => {
-                eprintln!("signing error: no active signing key for user");
+                tracing::error!("signing error: no active signing key for user");
                 AppError::code(ErrorCode::Internal)
             }
             SignError::InvalidKey => {
-                eprintln!("signing error: invalid signing key format");
+                tracing::error!("signing error: invalid signing key format");
                 AppError::code(ErrorCode::Internal)
             }
             SignError::InvalidSignature => AppError::code(ErrorCode::InvalidSignature),

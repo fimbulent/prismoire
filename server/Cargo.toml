@@ -18,6 +18,8 @@ subtle = "2"
 serde_json = "1"
 sqlx = { workspace = true, features = ["migrate"] }
 tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 unicode-normalization = "0.1"
 unicode-security = "0.1"
 unicode-segmentation = "1"

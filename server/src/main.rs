@@ -92,6 +92,16 @@ async fn has_admin(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
 /// else to the Node process.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize structured logging. Honours RUST_LOG; defaults to `info`
+    // for prismoire crates and `warn` for everything else.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                tracing_subscriber::EnvFilter::new("warn,prismoire_server=info")
+            }),
+        )
+        .init();
+
     let config_arg = prismoire_config::parse_config_arg()?;
     let config = prismoire_config::load_config(config_arg.as_deref())?;
 
@@ -113,9 +123,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     if !admin_exists && setup_token.is_none() {
-        eprintln!(
-            "error: no admin account exists and server.setup_token_file is not configured.\n\
-             Set setup_token_file in the [server] section of your config file,\n\
+        tracing::error!(
+            "no admin account exists and server.setup_token_file is not configured. \
+             Set setup_token_file in the [server] section of your config file, \
              then visit /setup in the browser to create the initial admin account."
         );
         std::process::exit(1);

@@ -44,7 +44,7 @@ impl AppState {
             .read()
             .map(|guard| Arc::clone(&guard))
             .map_err(|_| {
-                eprintln!("trust graph lock poisoned");
+                tracing::error!("trust graph lock poisoned");
                 AppError::code(ErrorCode::Internal)
             })
     }

@@ -498,7 +498,7 @@ impl IntoResponse for AppError {
 impl From<sqlx::Error> for AppError {
     fn from(err: sqlx::Error) -> Self {
         let id = Uuid::new_v4();
-        eprintln!("[{id}] database error: {err}");
+        tracing::error!(error_id = %id, error = %err, "database error");
         AppError::code(ErrorCode::Internal)
     }
 }
@@ -506,7 +506,7 @@ impl From<sqlx::Error> for AppError {
 impl From<webauthn_rs::prelude::WebauthnError> for AppError {
     fn from(err: webauthn_rs::prelude::WebauthnError) -> Self {
         let id = Uuid::new_v4();
-        eprintln!("[{id}] webauthn error: {err}");
+        tracing::error!(error_id = %id, error = %err, "webauthn error");
         AppError::code(ErrorCode::PasskeyCeremonyFailed)
     }
 }
@@ -514,7 +514,7 @@ impl From<webauthn_rs::prelude::WebauthnError> for AppError {
 impl From<serde_json::Error> for AppError {
     fn from(err: serde_json::Error) -> Self {
         let id = Uuid::new_v4();
-        eprintln!("[{id}] serialization error: {err}");
+        tracing::error!(error_id = %id, error = %err, "serialization error");
         AppError::code(ErrorCode::Internal)
     }
 }

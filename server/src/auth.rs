@@ -122,8 +122,10 @@ fn parse_status_or_log(raw: &str, user_id: &str) -> UserStatus {
     match UserStatus::try_from(raw) {
         Ok(s) => s,
         Err(msg) => {
-            eprintln!(
-                "auth: unrecognised users.status for user {user_id}: {msg}; defaulting to active"
+            tracing::warn!(
+                user_id = %user_id,
+                error = %msg,
+                "auth: unrecognised users.status; defaulting to active"
             );
             UserStatus::Active
         }
@@ -238,11 +240,11 @@ pub async fn signup_complete(
     let state_bytes = challenge.state;
     let invite_code = challenge.invite_code;
     let display_name = challenge.display_name.ok_or_else(|| {
-        eprintln!("signup_complete: missing display_name in challenge");
+        tracing::error!("signup_complete: missing display_name in challenge");
         AppError::code(ErrorCode::Internal)
     })?;
     let user_id = challenge.user_id.ok_or_else(|| {
-        eprintln!("signup_complete: missing user_id in challenge");
+        tracing::error!("signup_complete: missing user_id in challenge");
         AppError::code(ErrorCode::Internal)
     })?;
 
@@ -257,7 +259,7 @@ pub async fn signup_complete(
         .finish_passkey_registration(&req.credential, &reg_state)?;
 
     let invite_code = invite_code.ok_or_else(|| {
-        eprintln!("signup_complete: missing invite_code in challenge");
+        tracing::error!("signup_complete: missing invite_code in challenge");
         AppError::code(ErrorCode::Internal)
     })?;
 
@@ -276,7 +278,7 @@ pub async fn signup_complete(
     .execute(&state.db)
     .await
     {
-        eprintln!("user creation constraint failure for display_name={display_name}: {err}");
+        tracing::error!(display_name = %display_name, error = %err, "user creation constraint failure");
         return Err(err.into());
     }
 
@@ -440,7 +442,7 @@ pub async fn login_complete(
 
     let state_bytes = challenge.state;
     let display_name = challenge.display_name.ok_or_else(|| {
-        eprintln!("login_complete: missing display_name in challenge");
+        tracing::error!("login_complete: missing display_name in challenge");
         AppError::code(ErrorCode::Internal)
     })?;
 

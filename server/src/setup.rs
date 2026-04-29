@@ -65,7 +65,7 @@ pub async fn setup_begin(
     }
 
     let expected = state.setup_token.as_deref().ok_or_else(|| {
-        eprintln!("setup_begin: no setup token configured");
+        tracing::error!("setup_begin: no setup token configured");
         AppError::code(ErrorCode::SetupTokenMissing)
     })?;
 
@@ -151,11 +151,11 @@ pub async fn setup_complete(
 
     let state_bytes = challenge.state;
     let display_name = challenge.display_name.ok_or_else(|| {
-        eprintln!("setup_complete: missing display_name in challenge");
+        tracing::error!("setup_complete: missing display_name in challenge");
         AppError::code(ErrorCode::Internal)
     })?;
     let user_id = challenge.user_id.ok_or_else(|| {
-        eprintln!("setup_complete: missing user_id in challenge");
+        tracing::error!("setup_complete: missing user_id in challenge");
         AppError::code(ErrorCode::Internal)
     })?;
 

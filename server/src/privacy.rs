@@ -650,9 +650,10 @@ pub(crate) async fn soft_delete_user(
     let signing_key = match key_row {
         Some(row) => {
             let key_bytes: [u8; 32] = row.private_key.try_into().map_err(|v: Vec<u8>| {
-                eprintln!(
-                    "privacy::soft_delete_user: signing key for user {user_id} has invalid length {} (expected 32)",
-                    v.len()
+                tracing::error!(
+                    user_id = %user_id,
+                    length = v.len(),
+                    "privacy::soft_delete_user: signing key has invalid length (expected 32)"
                 );
                 AppError::code(ErrorCode::Internal)
             })?;

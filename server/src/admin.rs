@@ -518,7 +518,7 @@ async fn fetch_target_user(
     .await?
     .ok_or_else(|| AppError::code(ErrorCode::UserNotFound))?;
     let status = UserStatus::try_from(row.status.as_str()).map_err(|e| {
-        eprintln!("{e}");
+        tracing::error!(user_id = %user_id, error = %e, "unrecognised users.status");
         AppError::code(ErrorCode::Internal)
     })?;
     Ok((row.id, row.display_name, status, row.role))

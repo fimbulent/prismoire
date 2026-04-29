@@ -718,11 +718,11 @@ impl TrustGraph {
             }
         }
 
-        eprintln!(
-            "trust graph built: {} nodes, {} trust edges, {} distrust edges",
-            index.num_nodes(),
-            dense_edges.len(),
-            distrust_rows.len()
+        tracing::info!(
+            nodes = index.num_nodes(),
+            trust_edges = dense_edges.len(),
+            distrust_edges = distrust_rows.len(),
+            "trust graph built"
         );
 
         Ok(Self {
@@ -1096,7 +1096,7 @@ pub async fn rebuild_loop(
     if let Err(e) =
         rebuild_trust_graph(&db, &graph, schedule.bfs_cache_bytes, Some(metrics.clone())).await
     {
-        eprintln!("trust graph initial build failed: {e}");
+        tracing::error!(error = %e, "trust graph initial build failed");
     }
 
     let mut last_rebuild = Instant::now();
@@ -1132,7 +1132,7 @@ pub async fn rebuild_loop(
         {
             Ok(()) => {}
             Err(e) => {
-                eprintln!("trust graph rebuild failed: {e}");
+                tracing::error!(error = %e, "trust graph rebuild failed");
             }
         }
         last_rebuild = Instant::now();

@@ -296,8 +296,10 @@ pub async fn session_middleware(
                     // this would mean DB corruption or a migration bug.
                     // Log and fall back to Active so the user's session
                     // is still usable; operator can sort it out.
-                    eprintln!(
-                        "session_middleware: unrecognised users.status for {user_id}: {msg}; defaulting to active"
+                    tracing::warn!(
+                        user_id = %user_id,
+                        error = %msg,
+                        "session_middleware: unrecognised users.status; defaulting to active"
                     );
                     UserStatus::Active
                 }
@@ -389,7 +391,7 @@ pub async fn cleanup_loop(pool: SqlitePool) {
             .execute(&pool)
             .await
         {
-            eprintln!("session cleanup sweep failed: {e}");
+            tracing::error!(error = %e, "session cleanup sweep failed");
         }
 
         if let Err(e) = sqlx::query!(
@@ -399,7 +401,7 @@ pub async fn cleanup_loop(pool: SqlitePool) {
         .execute(&pool)
         .await
         {
-            eprintln!("auth challenge cleanup sweep failed: {e}");
+            tracing::error!(error = %e, "auth challenge cleanup sweep failed");
         }
     }
 }
