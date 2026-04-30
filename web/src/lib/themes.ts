@@ -27,8 +27,7 @@ export type ThemeId =
 	| 'nord-light'
 	| 'everforest-dark'
 	| 'everforest-light'
-	| 'iceberg'
-	| 'iceberg-light';
+	| 'iceberg';
 
 export interface ThemeMeta {
 	id: ThemeId;
@@ -55,8 +54,7 @@ export const themes: ThemeMeta[] = [
 	{ id: 'nord-light', name: 'Nord Light' },
 	{ id: 'everforest-dark', name: 'Everforest Dark' },
 	{ id: 'everforest-light', name: 'Everforest Light' },
-	{ id: 'iceberg', name: 'Iceberg' },
-	{ id: 'iceberg-light', name: 'Iceberg Light' }
+	{ id: 'iceberg', name: 'Iceberg' }
 ];
 
 export const DEFAULT_THEME: ThemeId = 'rose-pine';

@@ -42,6 +42,14 @@ web-build:
 web-check:
     pnpm --dir web check
 
+# Audit theme contrast in app.css and print proposed fixes (dry run)
+theme-contrast:
+    node scripts/fix-theme-contrast.mjs
+
+# Apply minimum-deviation contrast fixes to app.css in place
+theme-contrast-apply:
+    node scripts/fix-theme-contrast.mjs --apply
+
 # Print the pnpm deps hash for flake.nix after changing JS dependencies
 nix-hash:
     nix build .#packages.x86_64-linux.web.pnpmDeps 2>&1 || true

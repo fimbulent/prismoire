@@ -30,7 +30,6 @@ const VALID_THEMES: &[&str] = &[
     "everforest-dark",
     "everforest-light",
     "iceberg",
-    "iceberg-light",
 ];
 
 pub const DEFAULT_THEME: &str = "rose-pine";
