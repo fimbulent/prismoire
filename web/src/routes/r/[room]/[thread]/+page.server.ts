@@ -7,7 +7,7 @@
 import { redirect, error as kitError } from '@sveltejs/kit';
 import type { PageServerLoad } from './$types';
 import { getThread, type ThreadDetailSort } from '$lib/api/threads';
-import { ApiRequestError } from '$lib/api/auth';
+import { throwMappedLoadError } from '$lib/api/load-error';
 
 const VALID_SORTS: ThreadDetailSort[] = ['trust', 'new'];
 
@@ -37,12 +37,19 @@ export const load: PageServerLoad = async ({ parent, fetch, params, url }) => {
 		}
 		return { thread, sort };
 	} catch (e) {
+		// Anonymous viewers can only see public threads; any error fetching
+		// a non-public thread for them means "log in to find out", not
+		// "this thread is broken" — so short-circuit to /login before the
+		// generic mapper runs. (This deliberately collapses 404 and 401
+		// into the same outcome for anonymous viewers so we don't leak
+		// the existence of private threads.)
 		if (!session) {
 			throw redirect(307, '/login');
 		}
-		if (e instanceof ApiRequestError && e.status === 404) {
-			throw kitError(404, 'Thread not found');
-		}
-		throw kitError(500, 'Failed to load thread');
+		throwMappedLoadError(e, {
+			fallback: 'Failed to load thread',
+			notFound: 'Thread not found',
+			unauthRedirect: '/login'
+		});
 	}
 };

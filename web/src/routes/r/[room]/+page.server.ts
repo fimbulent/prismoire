@@ -7,7 +7,7 @@ import { redirect, error as kitError } from '@sveltejs/kit';
 import type { PageServerLoad } from './$types';
 import { getRoom, type Room } from '$lib/api/rooms';
 import { listThreads, listAllThreads, type ThreadSort } from '$lib/api/threads';
-import { ApiRequestError } from '$lib/api/auth';
+import { throwMappedLoadError } from '$lib/api/load-error';
 
 const VALID_SORTS: ThreadSort[] = ['warm', 'new', 'active', 'trusted'];
 
@@ -47,9 +47,10 @@ export const load: PageServerLoad = async ({ parent, fetch, params, url }) => {
 			sort
 		};
 	} catch (e) {
-		if (e instanceof ApiRequestError && e.status === 404) {
-			throw kitError(404, 'Room not found');
-		}
-		throw kitError(500, 'Failed to load room');
+		throwMappedLoadError(e, {
+			fallback: 'Failed to load room',
+			notFound: 'Room not found',
+			unauthRedirect: '/login'
+		});
 	}
 };

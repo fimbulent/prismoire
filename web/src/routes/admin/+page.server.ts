@@ -1,7 +1,6 @@
-import { error as kitError, redirect } from '@sveltejs/kit';
 import type { PageServerLoad } from './$types';
 import { getAdminOverview } from '$lib/api/admin';
-import { ApiRequestError } from '$lib/api/auth';
+import { throwMappedLoadError } from '$lib/api/load-error';
 
 /// Admin → Overview tab. Auth is enforced by `+layout.server.ts`; this
 /// loader only fetches the overview payload.
@@ -10,10 +9,9 @@ export const load: PageServerLoad = async ({ fetch }) => {
 		const overview = await getAdminOverview({ fetch });
 		return { overview };
 	} catch (e) {
-		if (e instanceof ApiRequestError) {
-			if (e.status === 401) throw redirect(307, '/login');
-			if (e.status === 403) throw kitError(403, 'Forbidden');
-		}
-		throw kitError(500, 'Failed to load admin overview');
+		throwMappedLoadError(e, {
+			fallback: 'Failed to load admin overview',
+			unauthRedirect: '/login'
+		});
 	}
 };

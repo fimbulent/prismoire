@@ -6,7 +6,7 @@
 import { redirect, error as kitError } from '@sveltejs/kit';
 import type { PageServerLoad } from './$types';
 import { getTrustEdges } from '$lib/api/users';
-import { ApiRequestError } from '$lib/api/auth';
+import { throwMappedLoadError } from '$lib/api/load-error';
 
 export const load: PageServerLoad = async ({ parent, fetch, params }) => {
 	const { session, sessionError } = await parent();
@@ -30,9 +30,10 @@ export const load: PageServerLoad = async ({ parent, fetch, params }) => {
 			username: params.username
 		};
 	} catch (e) {
-		if (e instanceof ApiRequestError && e.status === 404) {
-			throw kitError(404, 'User not found');
-		}
-		throw kitError(500, 'Failed to load trust edges');
+		throwMappedLoadError(e, {
+			fallback: 'Failed to load trust edges',
+			notFound: 'User not found',
+			unauthRedirect: '/login'
+		});
 	}
 };

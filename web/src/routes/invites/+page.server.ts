@@ -6,6 +6,7 @@
 import { redirect, error as kitError } from '@sveltejs/kit';
 import type { PageServerLoad } from './$types';
 import { listInvites, listInvitedUsers } from '$lib/api/invites';
+import { throwMappedLoadError } from '$lib/api/load-error';
 
 export const load: PageServerLoad = async ({ parent, fetch }) => {
 	const { session, sessionError } = await parent();
@@ -21,7 +22,7 @@ export const load: PageServerLoad = async ({ parent, fetch }) => {
 			listInvitedUsers({ fetch })
 		]);
 		return { invites, invitedUsers };
-	} catch {
-		throw kitError(500, 'Failed to load invites');
+	} catch (e) {
+		throwMappedLoadError(e, { fallback: 'Failed to load invites', unauthRedirect: '/login' });
 	}
 };

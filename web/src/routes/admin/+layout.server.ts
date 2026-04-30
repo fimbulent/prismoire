@@ -1,7 +1,7 @@
 import { redirect, error as kitError } from '@sveltejs/kit';
 import type { LayoutServerLoad } from './$types';
 import { getAdminDashboard } from '$lib/api/admin';
-import { ApiRequestError } from '$lib/api/auth';
+import { throwMappedLoadError } from '$lib/api/load-error';
 
 /// Shared admin gate + pending-report count for the tab badge.
 ///
@@ -28,10 +28,9 @@ export const load: LayoutServerLoad = async ({ parent, fetch, depends }) => {
 		const dashboard = await getAdminDashboard({ fetch });
 		return { pendingReports: dashboard.pending_reports };
 	} catch (e) {
-		if (e instanceof ApiRequestError) {
-			if (e.status === 401) throw redirect(307, '/login');
-			if (e.status === 403) throw kitError(403, 'Forbidden');
-		}
-		throw kitError(500, 'Failed to load admin dashboard');
+		throwMappedLoadError(e, {
+			fallback: 'Failed to load admin dashboard',
+			unauthRedirect: '/login'
+		});
 	}
 };

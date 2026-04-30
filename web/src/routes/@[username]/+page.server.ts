@@ -11,7 +11,7 @@
 import { redirect, error as kitError } from '@sveltejs/kit';
 import type { PageServerLoad } from './$types';
 import { getUserProfile, getActivity } from '$lib/api/users';
-import { ApiRequestError } from '$lib/api/auth';
+import { throwMappedLoadError } from '$lib/api/load-error';
 
 const VALID_FILTERS = ['all', 'threads', 'comments'] as const;
 type ActivityFilter = (typeof VALID_FILTERS)[number];
@@ -44,9 +44,10 @@ export const load: PageServerLoad = async ({ parent, fetch, params, url }) => {
 			filter
 		};
 	} catch (e) {
-		if (e instanceof ApiRequestError && e.status === 404) {
-			throw kitError(404, 'User not found');
-		}
-		throw kitError(500, 'Failed to load profile');
+		throwMappedLoadError(e, {
+			fallback: 'Failed to load profile',
+			notFound: 'User not found',
+			unauthRedirect: '/login'
+		});
 	}
 };
