@@ -9,14 +9,26 @@
 
 export type ThemeId =
 	| 'rose-pine'
+	| 'rose-pine-moon'
+	| 'rose-pine-dawn'
+	| 'gruvbox-dark'
+	| 'gruvbox-light'
+	| 'tokyo-night'
+	| 'tokyo-night-storm'
+	| 'tokyo-night-day'
+	| 'catppuccin-mocha'
+	| 'catppuccin-macchiato'
+	| 'catppuccin-frappe'
+	| 'catppuccin-latte'
+	| 'kanagawa-wave'
+	| 'kanagawa-dragon'
+	| 'kanagawa-lotus'
 	| 'nord'
-	| 'everforest'
-	| 'midnight-blue'
-	| 'warm-ember'
-	| 'stone'
-	| 'moss'
-	| 'coral'
-	| 'blueprint';
+	| 'nord-light'
+	| 'everforest-dark'
+	| 'everforest-light'
+	| 'iceberg'
+	| 'iceberg-light';
 
 export interface ThemeMeta {
 	id: ThemeId;
@@ -25,14 +37,26 @@ export interface ThemeMeta {
 
 export const themes: ThemeMeta[] = [
 	{ id: 'rose-pine', name: 'Rosé Pine' },
+	{ id: 'rose-pine-moon', name: 'Rosé Pine Moon' },
+	{ id: 'rose-pine-dawn', name: 'Rosé Pine Dawn' },
+	{ id: 'gruvbox-dark', name: 'Gruvbox Dark' },
+	{ id: 'gruvbox-light', name: 'Gruvbox Light' },
+	{ id: 'tokyo-night', name: 'Tokyo Night' },
+	{ id: 'tokyo-night-storm', name: 'Tokyo Night Storm' },
+	{ id: 'tokyo-night-day', name: 'Tokyo Night Day' },
+	{ id: 'catppuccin-mocha', name: 'Catppuccin Mocha' },
+	{ id: 'catppuccin-macchiato', name: 'Catppuccin Macchiato' },
+	{ id: 'catppuccin-frappe', name: 'Catppuccin Frappé' },
+	{ id: 'catppuccin-latte', name: 'Catppuccin Latte' },
+	{ id: 'kanagawa-wave', name: 'Kanagawa Wave' },
+	{ id: 'kanagawa-dragon', name: 'Kanagawa Dragon' },
+	{ id: 'kanagawa-lotus', name: 'Kanagawa Lotus' },
 	{ id: 'nord', name: 'Nord' },
-	{ id: 'everforest', name: 'Everforest' },
-	{ id: 'midnight-blue', name: 'Midnight Blue' },
-	{ id: 'warm-ember', name: 'Warm Ember' },
-	{ id: 'stone', name: 'Stone' },
-	{ id: 'moss', name: 'Moss' },
-	{ id: 'coral', name: 'Coral' },
-	{ id: 'blueprint', name: 'Blueprint' }
+	{ id: 'nord-light', name: 'Nord Light' },
+	{ id: 'everforest-dark', name: 'Everforest Dark' },
+	{ id: 'everforest-light', name: 'Everforest Light' },
+	{ id: 'iceberg', name: 'Iceberg' },
+	{ id: 'iceberg-light', name: 'Iceberg Light' }
 ];
 
 export const DEFAULT_THEME: ThemeId = 'rose-pine';

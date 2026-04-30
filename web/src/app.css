@@ -65,17 +65,48 @@
    Keep the set of palette ids in sync with `src/lib/themes.ts` (the
    runtime source of truth for the theme picker UI). */
 
+/* Rosé Pine — official palette from https://rosepinetheme.com/palette/.
+   Mapping notes: surface tones come straight from Rose Pine's published
+   `base`/`surface`/`overlay`/`highlight low|med|high`. `--bg-surface-dim`
+   is mixed between base and surface (Rose Pine has no tone in that gap).
+   Trust gradient runs foam → gold → rose (soft warning); `love` is held
+   for `--danger`. `--accent-muted` is iris darkened ~15% in OKLCH. */
 [data-theme='rose-pine'] {
-	--bg: #1a1a2e;
-	--bg-surface: #22223a;
-	--bg-surface-dim: #1e1e34;
-	--bg-surface-raised: #2a2a44;
-	--bg-hover: #32324e;
+	--bg: #191724;
+	--bg-surface-dim: #1c1a29;
+	--bg-surface: #1f1d2e;
+	--bg-surface-raised: #26233a;
+	--bg-hover: #403d52;
 	--text-primary: #e0def4;
 	--text-secondary: #908caa;
 	--text-muted: #6e6a86;
-	--border: #393552;
-	--border-subtle: #2e2b45;
+	--border: #524f67;
+	--border-subtle: #403d52;
+	--accent: #c4a7e7;
+	--accent-muted: #8e7aab;
+	--trust-direct: #9ccfd8;
+	--trust-2hop: #f6c177;
+	--trust-3hop: #ebbcba;
+	--trust-untrusted: #6e6a86;
+	--link: #c4a7e7;
+	--link-hover: #e0def4;
+	--danger: #eb6f92;
+	--success: #9ccfd8;
+}
+
+/* Rosé Pine Moon — softer dark variant. Same hue mapping as the main
+   variant; uses Moon's own `rose` (#ea9a97) for trust-3hop. */
+[data-theme='rose-pine-moon'] {
+	--bg: #232136;
+	--bg-surface-dim: #26243d;
+	--bg-surface: #2a273f;
+	--bg-surface-raised: #393552;
+	--bg-hover: #44415a;
+	--text-primary: #e0def4;
+	--text-secondary: #908caa;
+	--text-muted: #6e6a86;
+	--border: #56526e;
+	--border-subtle: #44415a;
 	--accent: #c4a7e7;
 	--accent-muted: #8e7aab;
 	--trust-direct: #9ccfd8;
@@ -88,6 +119,432 @@
 	--success: #9ccfd8;
 }
 
+/* Rosé Pine Dawn — light variant. Surface progression inverts (overlay
+   is darker than base, matching the existing light-theme convention
+   in `stone`/`moss`). All hues are Dawn's own variants of the canonical
+   six (love/gold/rose/pine/foam/iris). */
+[data-theme='rose-pine-dawn'] {
+	--bg: #faf4ed;
+	--bg-surface-dim: #fcf7f0;
+	--bg-surface: #fffaf3;
+	--bg-surface-raised: #f2e9e1;
+	--bg-hover: #dfdad9;
+	--text-primary: #575279;
+	--text-secondary: #797593;
+	--text-muted: #9893a5;
+	--border: #cecacd;
+	--border-subtle: #dfdad9;
+	--accent: #907aa9;
+	--accent-muted: #6f5b88;
+	--trust-direct: #56949f;
+	--trust-2hop: #ea9d34;
+	--trust-3hop: #d7827e;
+	--trust-untrusted: #9893a5;
+	--link: #907aa9;
+	--link-hover: #575279;
+	--danger: #b4637a;
+	--success: #56949f;
+}
+
+/* Gruvbox Dark — official "medium contrast" palette (gruvbox.nvim).
+   Surface tones: bg0 → bg0_s → bg1 → bg2 → bg3 (Gruvbox publishes a
+   distinct tone for `bg-surface-dim`, so nothing fabricated here).
+   Bright hue variants throughout (better contrast on dark bg, per
+   Gruvbox convention). Trust gradient runs green → yellow → orange,
+   which collides yellow with `--accent` — accepted as inherent to
+   Gruvbox's tight rainbow palette. */
+[data-theme='gruvbox-dark'] {
+	--bg: #282828;
+	--bg-surface-dim: #32302f;
+	--bg-surface: #3c3836;
+	--bg-surface-raised: #504945;
+	--bg-hover: #665c54;
+	--text-primary: #ebdbb2;
+	--text-secondary: #a89984;
+	--text-muted: #928374;
+	--border: #7c6f64;
+	--border-subtle: #665c54;
+	--accent: #fabd2f;
+	--accent-muted: #d79921;
+	--trust-direct: #b8bb26;
+	--trust-2hop: #fabd2f;
+	--trust-3hop: #fe8019;
+	--trust-untrusted: #928374;
+	--link: #fabd2f;
+	--link-hover: #fbf1c7;
+	--danger: #fb4934;
+	--success: #b8bb26;
+}
+
+/* Gruvbox Light — same hue identity as dark but using Gruvbox's "dark"
+   hue variants for contrast on cream bg. Surface progression mirrors
+   the existing light themes (`stone`, `moss`): bg < bg-surface (lightest
+   card) > bg-surface-raised (deeper layer). `--bg-surface-dim` is mixed
+   between bg0 and bg0_h (Gruvbox has no published tone in that gap).
+   `--accent-muted` is yellow-dark darkened ~25% in HSL since Gruvbox
+   doesn't publish a tone darker than `dark`. */
+[data-theme='gruvbox-light'] {
+	--bg: #fbf1c7;
+	--bg-surface-dim: #faf3cf;
+	--bg-surface: #f9f5d7;
+	--bg-surface-raised: #ebdbb2;
+	--bg-hover: #d5c4a1;
+	--text-primary: #3c3836;
+	--text-secondary: #665c54;
+	--text-muted: #928374;
+	--border: #bdae93;
+	--border-subtle: #d5c4a1;
+	--accent: #b57614;
+	--accent-muted: #82550c;
+	--trust-direct: #79740e;
+	--trust-2hop: #b57614;
+	--trust-3hop: #af3a03;
+	--trust-untrusted: #928374;
+	--link: #b57614;
+	--link-hover: #3c3836;
+	--danger: #9d0006;
+	--success: #79740e;
+}
+
+/* Tokyo Night — official "Night" variant from folke/tokyonight.nvim
+   (the canonical reference upstream of the VSCode port).
+
+   Recessed-surface model: Tokyo Night's `bg_dark` is *darker* than
+   `bg` because in the IDE the editor pane is the lightest surface and
+   chrome (sidebars/statusbar) surrounds it more deeply. We preserve
+   that visual identity by mapping `bg_dark` → `--bg` (page bg) and
+   the canonical editor `bg` → `--bg-surface` (where posts/cards sit),
+   so cards visually "lift" to Tokyo Night's iconic color and the
+   chrome recesses around them. `--bg-surface-dim` is fabricated as
+   mid(bg_dark, bg). Raised + hover use the IDE's published lifted
+   tones (bg_highlight, fg_gutter).
+
+   Text scale uses VSCode README labels: Editor Foreground for primary,
+   Markdown Text for secondary, the brighter `#c0caf5` reserved for
+   `--link-hover`. */
+[data-theme='tokyo-night'] {
+	--bg: #16161e;
+	--bg-surface-dim: #181923;
+	--bg-surface: #1a1b26;
+	--bg-surface-raised: #292e42;
+	--bg-hover: #3b4261;
+	--text-primary: #a9b1d6;
+	--text-secondary: #9aa5ce;
+	--text-muted: #565f89;
+	--border: #414868;
+	--border-subtle: #292e42;
+	--accent: #7aa2f7;
+	--accent-muted: #3d59a1;
+	--trust-direct: #9ece6a;
+	--trust-2hop: #e0af68;
+	--trust-3hop: #ff9e64;
+	--trust-untrusted: #565f89;
+	--link: #7aa2f7;
+	--link-hover: #c0caf5;
+	--danger: #f7768e;
+	--success: #9ece6a;
+}
+
+/* Tokyo Night Storm — softer dark variant. Same recessed-surface
+   model and hue palette as Night; only `--bg` (bg_dark) and
+   `--bg-surface` (bg, canonical Storm editor) differ. Storm is
+   intrinsically low-contrast — the gap from bg_dark to bg is only
+   5 units, so the fabricated `--bg-surface-dim` is barely distinct
+   from `--bg`. Faithful to Storm's character. */
+[data-theme='tokyo-night-storm'] {
+	--bg: #1f2335;
+	--bg-surface-dim: #21263a;
+	--bg-surface: #24283b;
+	--bg-surface-raised: #292e42;
+	--bg-hover: #3b4261;
+	--text-primary: #a9b1d6;
+	--text-secondary: #9aa5ce;
+	--text-muted: #565f89;
+	--border: #414868;
+	--border-subtle: #292e42;
+	--accent: #7aa2f7;
+	--accent-muted: #3d59a1;
+	--trust-direct: #9ece6a;
+	--trust-2hop: #e0af68;
+	--trust-3hop: #ff9e64;
+	--trust-untrusted: #565f89;
+	--link: #7aa2f7;
+	--link-hover: #c0caf5;
+	--danger: #f7768e;
+	--success: #9ece6a;
+}
+
+/* Tokyo Night Day — light variant. Same recessed-surface model: the
+   IDE chrome (`sideBar.background` #d6d8df) sits *darker* than the
+   editor pane (#e6e7ed), so we map chrome → `--bg` and the canonical
+   editor → `--bg-surface`. `input.border` #c1c2c7 provides a published
+   deeper tone for `--bg-surface-raised` (recessed popover layer).
+   Only `--bg-hover` is fabricated (input.border darkened). */
+[data-theme='tokyo-night-day'] {
+	--bg: #d6d8df;
+	--bg-surface-dim: #dadce3;
+	--bg-surface: #e6e7ed;
+	--bg-surface-raised: #c1c2c7;
+	--bg-hover: #aeafb3;
+	--text-primary: #343b58;
+	--text-secondary: #40434f;
+	--text-muted: #6c6e75;
+	--border: #aeafb3;
+	--border-subtle: #c1c2c7;
+	--accent: #2959aa;
+	--accent-muted: #0f4b6e;
+	--trust-direct: #385f0d;
+	--trust-2hop: #8f5e15;
+	--trust-3hop: #965027;
+	--trust-untrusted: #6c6e75;
+	--link: #2959aa;
+	--link-hover: #343b58;
+	--danger: #8c4351;
+	--success: #385f0d;
+}
+
+/* Catppuccin — official palette from https://catppuccin.com/palette/.
+   All four flavors (Mocha, Macchiato, Frappé, Latte) share the same
+   mapping structure since Catppuccin publishes a uniform 12-tone scale
+   per flavor. Surface tokens map 1:1 to published tones — zero
+   fabrication on the surface scale across all four flavors.
+
+   Recessed-surface model (same as Tokyo Night): `crust` (chrome) → bg,
+   `base` (canonical editor) → bg-surface. `mantle` sits naturally
+   between as bg-surface-dim. `surface0/1/2` provide the lifted scale
+   for raised/hover/border. Latte's scale runs in the opposite
+   luminance direction (surface0 is *darker* than crust), which matches
+   Prismoire's light-theme convention out of the box.
+
+   Accent is mauve (Catppuccin's official default per the VSCode
+   extension). `--accent-muted` is the only fabricated token: mauve
+   mixed with black 35% per flavor. Lavender was considered as the
+   "muted" pair but reads as more emphasis (brighter) in dark flavors.
+
+   Trust gradient: green → yellow → peach (clean cool→warm using
+   Catppuccin's published hues). `--trust-untrusted` = overlay0,
+   matching Catppuccin's intended "muted UI" role. */
+[data-theme='catppuccin-mocha'] {
+	--bg: #11111b;
+	--bg-surface-dim: #181825;
+	--bg-surface: #1e1e2e;
+	--bg-surface-raised: #313244;
+	--bg-hover: #45475a;
+	--text-primary: #cdd6f4;
+	--text-secondary: #bac2de;
+	--text-muted: #a6adc8;
+	--border: #585b70;
+	--border-subtle: #313244;
+	--accent: #cba6f7;
+	--accent-muted: #846ca1;
+	--trust-direct: #a6e3a1;
+	--trust-2hop: #f9e2af;
+	--trust-3hop: #fab387;
+	--trust-untrusted: #6c7086;
+	--link: #cba6f7;
+	--link-hover: #cdd6f4;
+	--danger: #f38ba8;
+	--success: #a6e3a1;
+}
+
+[data-theme='catppuccin-macchiato'] {
+	--bg: #181926;
+	--bg-surface-dim: #1e2030;
+	--bg-surface: #24273a;
+	--bg-surface-raised: #363a4f;
+	--bg-hover: #494d64;
+	--text-primary: #cad3f5;
+	--text-secondary: #b8c0e0;
+	--text-muted: #a5adcb;
+	--border: #5b6078;
+	--border-subtle: #363a4f;
+	--accent: #c6a0f6;
+	--accent-muted: #8168a0;
+	--trust-direct: #a6da95;
+	--trust-2hop: #eed49f;
+	--trust-3hop: #f5a97f;
+	--trust-untrusted: #6e738d;
+	--link: #c6a0f6;
+	--link-hover: #cad3f5;
+	--danger: #ed8796;
+	--success: #a6da95;
+}
+
+[data-theme='catppuccin-frappe'] {
+	--bg: #232634;
+	--bg-surface-dim: #292c3c;
+	--bg-surface: #303446;
+	--bg-surface-raised: #414559;
+	--bg-hover: #51576d;
+	--text-primary: #c6d0f5;
+	--text-secondary: #b5bfe2;
+	--text-muted: #a5adce;
+	--border: #626880;
+	--border-subtle: #414559;
+	--accent: #ca9ee6;
+	--accent-muted: #836796;
+	--trust-direct: #a6d189;
+	--trust-2hop: #e5c890;
+	--trust-3hop: #ef9f76;
+	--trust-untrusted: #737994;
+	--link: #ca9ee6;
+	--link-hover: #c6d0f5;
+	--danger: #e78284;
+	--success: #a6d189;
+}
+
+[data-theme='catppuccin-latte'] {
+	--bg: #dce0e8;
+	--bg-surface-dim: #e6e9ef;
+	--bg-surface: #eff1f5;
+	--bg-surface-raised: #ccd0da;
+	--bg-hover: #bcc0cc;
+	--text-primary: #4c4f69;
+	--text-secondary: #5c5f77;
+	--text-muted: #6c6f85;
+	--border: #acb0be;
+	--border-subtle: #ccd0da;
+	--accent: #8839ef;
+	--accent-muted: #58259b;
+	--trust-direct: #40a02b;
+	--trust-2hop: #df8e1d;
+	--trust-3hop: #fe640b;
+	--trust-untrusted: #9ca0b0;
+	--link: #8839ef;
+	--link-hover: #4c4f69;
+	--danger: #d20f39;
+	--success: #40a02b;
+}
+
+/* Kanagawa — palette from rebelot/kanagawa.nvim
+   (lua/kanagawa/colors.lua + themes.lua). Three official variants:
+
+   - wave: main dark, indigo/blue-tinged. Editor `bg` is sumiInk3
+     (#1F1F28); chrome candidates sumiInk0/1/2 sit naturally below.
+     We adopt the recessed-surface model: sumiInk1 → --bg (chrome),
+     sumiInk3 → --bg-surface (editor). sumiInk4/5 lift upward for
+     gutter/cursor-line per upstream's bg_p1/p2 roles.
+
+   - dragon: warm/neutral-grey dark. Upstream names dragonBlack3
+     (#181616) as `bg`, but the dragonBlack scale isn't strictly
+     monotonic (dragonBlack2 #1D1C19 is *lighter* than bg). Sorting
+     by actual luminance: 0d0c0c < 12120f < 181616 < 282727 < 393836.
+     We use that ordering and skip dragonBlack2, which doesn't fit
+     a Prismoire slot cleanly.
+
+   - lotus: light, painterly cream/violet. Recessed for light mode:
+     lotusWhite0 (#d5cea3) is the chrome (darker), lotusWhite3
+     (#f2ecbc) is the editor (lightest). bg-surface-raised goes
+     darker for popover recession (matches Catppuccin Latte
+     convention).
+
+   Accent picks: wave uses crystalBlue (the iconic function-name
+   blue); dragon uses dragonBlue2 (the equivalent muted role);
+   lotus uses lotusViolet4 (the dramatic statement-keyword
+   violet that defines Lotus's character).
+
+   Trust gradients map to each variant's published green/yellow/
+   orange tones — every slot fills from the upstream palette, so
+   zero fabrication across all three variants. */
+[data-theme='kanagawa-wave'] {
+	--bg: #181820;
+	--bg-surface-dim: #1a1a22;
+	--bg-surface: #1f1f28;
+	--bg-surface-raised: #2a2a37;
+	--bg-hover: #363646;
+	--text-primary: #dcd7ba;
+	--text-secondary: #c8c093;
+	--text-muted: #727169;
+	--border: #54546d;
+	--border-subtle: #2a2a37;
+	--accent: #7e9cd8;
+	--accent-muted: #658594;
+	--trust-direct: #98bb6c;
+	--trust-2hop: #e6c384;
+	--trust-3hop: #ffa066;
+	--trust-untrusted: #717c7c;
+	--link: #7e9cd8;
+	--link-hover: #7fb4ca;
+	--danger: #e82424;
+	--success: #98bb6c;
+}
+
+[data-theme='kanagawa-dragon'] {
+	--bg: #0d0c0c;
+	--bg-surface-dim: #12120f;
+	--bg-surface: #181616;
+	--bg-surface-raised: #282727;
+	--bg-hover: #393836;
+	--text-primary: #c5c9c5;
+	--text-secondary: #c8c093;
+	--text-muted: #737c73;
+	--border: #625e5a;
+	--border-subtle: #282727;
+	--accent: #8ba4b0;
+	--accent-muted: #8992a7;
+	--trust-direct: #8a9a7b;
+	--trust-2hop: #c4b28a;
+	--trust-3hop: #b6927b;
+	--trust-untrusted: #7a8382;
+	--link: #8ba4b0;
+	--link-hover: #8ea4a2;
+	--danger: #c4746e;
+	--success: #87a987;
+}
+
+[data-theme='kanagawa-lotus'] {
+	--bg: #d5cea3;
+	--bg-surface-dim: #e5ddb0;
+	--bg-surface: #f2ecbc;
+	--bg-surface-raised: #e7dba0;
+	--bg-hover: #e4d794;
+	--text-primary: #545464;
+	--text-secondary: #716e61;
+	--text-muted: #8a8980;
+	--border: #a09cac;
+	--border-subtle: #e7dba0;
+	--accent: #624c83;
+	--accent-muted: #766b90;
+	--trust-direct: #6f894e;
+	--trust-2hop: #77713f;
+	--trust-3hop: #cc6d00;
+	--trust-untrusted: #8a8980;
+	--link: #4d699b;
+	--link-hover: #624c83;
+	--danger: #c84053;
+	--success: #6f894e;
+}
+
+/* Nord — official 16-color palette from nordtheme.com (nord0..nord15
+   across four sub-palettes: Polar Night, Snow Storm, Frost, Aurora).
+   The `nord` slug is dark (Polar Night ambiance, the default Nord
+   look); `nord-light` adds the Snow Storm ambiance per the same
+   docs.
+
+   Dark uses the standard (non-recessed) model. Per spec: nord0 is
+   "recommended default background", nord1 is "elevated UI surfaces
+   (status bars, panels, modals)", nord2 is "active editor line",
+   nord3 is "indent guides, comments, subtle UI text". That maps
+   directly to bg → bg-surface → bg-surface-raised → bg-hover.
+
+   Light follows the Catppuccin-Latte recessed convention: nord4
+   ("elevated UI in bright mode", darker) → --bg, nord6 ("recommended
+   default background in bright mode", lightest) → --bg-surface.
+   Snow Storm has only 3 tones, so raised/hover are fabricated by
+   blending nord4 toward nord3 (15% / 30%).
+
+   Accent is nord8 (the iconic Frost cyan — "primary accent,
+   function decls/calls" per spec) in dark, nord10 (deepest Frost
+   blue — most readable on light bg) in light. Trust gradient maps
+   straight onto Aurora's green/yellow/orange (nord14/13/12), which
+   carry "success/warning/dangerous" semantics in the spec.
+
+   Fabricated in dark: --bg-surface-dim (mid nord0↔nord1) and
+   --text-muted #7b88a1 (Polar Night doesn't publish a tone between
+   nord3 #4c566a and nord4 #d8dee9, so a desaturated mid stands
+   in). Fabricated in light: --bg-surface-raised, --bg-hover,
+   --accent-muted (Snow Storm's 3-tone scale isn't enough for the
+   5-slot surface scale). */
 [data-theme='nord'] {
 	--bg: #2e3440;
 	--bg-surface: #3b4252;
@@ -111,165 +568,167 @@
 	--success: #a3be8c;
 }
 
-[data-theme='everforest'] {
-	--bg: #272e33;
-	--bg-surface: #2e383c;
-	--bg-surface-dim: #2b3338;
-	--bg-surface-raised: #374145;
-	--bg-hover: #414b50;
+[data-theme='nord-light'] {
+	--bg: #d8dee9;
+	--bg-surface-dim: #e5e9f0;
+	--bg-surface: #eceff4;
+	--bg-surface-raised: #c3cad6;
+	--bg-hover: #aeb5c3;
+	--text-primary: #2e3440;
+	--text-secondary: #3b4252;
+	--text-muted: #4c566a;
+	--border: #4c566a;
+	--border-subtle: #c3cad6;
+	--accent: #5e81ac;
+	--accent-muted: #3d5470;
+	--trust-direct: #a3be8c;
+	--trust-2hop: #ebcb8b;
+	--trust-3hop: #d08770;
+	--trust-untrusted: #4c566a;
+	--link: #5e81ac;
+	--link-hover: #2e3440;
+	--danger: #bf616a;
+	--success: #a3be8c;
+}
+
+/* Everforest — palette from sainnhe/everforest/palette.md (medium
+   contrast variant for both dark and light). The previous single
+   `everforest` block was loosely based on the *hard* palette and
+   is replaced here by two correctly-mapped variants.
+
+   Dark uses the recessed-surface model: bg_dim (the dimmed/sidebar
+   bg) → --bg, bg0 (default editor) → --bg-surface. Everforest
+   doesn't publish an intermediate tone between bg_dim and bg0, so
+   --bg-surface-dim is fabricated as the OKLCH midpoint of the two.
+   bg1/bg2 lift upward for raised/hover; bg3 supplies the visible
+   border.
+
+   Light follows the Catppuccin-Latte light convention: bg_dim/bg2
+   → --bg (chrome, slightly darker), bg1 between, bg0 (#FDF6E3, the
+   famous Solarized cream) → --bg-surface (editor, lightest), and
+   bg3/bg4 going *darker* for popover recession.
+
+   Accent picks Everforest's iconic green (statusline1, function
+   names — the color most associated with the theme). To avoid
+   accent ≡ trust-direct collision, trust-direct uses aqua (a
+   distinct green-cyan) — same separation we used for Kanagawa.
+
+   `--accent-muted` is the only fabricated token in either variant:
+   accent mixed with black 35%. Trust gradient uses published
+   aqua/yellow/orange (cool→warm). */
+[data-theme='everforest-dark'] {
+	--bg: #232a2e;
+	--bg-surface-dim: #282f34;
+	--bg-surface: #2d353b;
+	--bg-surface-raised: #343f44;
+	--bg-hover: #3d484d;
 	--text-primary: #d3c6aa;
 	--text-secondary: #9da9a0;
-	--text-muted: #7a8478;
-	--border: #4f5b58;
-	--border-subtle: #414b50;
+	--text-muted: #859289;
+	--border: #475258;
+	--border-subtle: #343f44;
 	--accent: #a7c080;
-	--accent-muted: #83c092;
+	--accent-muted: #6d7d53;
 	--trust-direct: #83c092;
 	--trust-2hop: #dbbc7f;
 	--trust-3hop: #e69875;
 	--trust-untrusted: #7a8478;
-	--link: #a7c080;
-	--link-hover: #d3c6aa;
+	--link: #7fbbb3;
+	--link-hover: #83c092;
 	--danger: #e67e80;
-	--success: #83c092;
+	--success: #a7c080;
 }
 
-[data-theme='midnight-blue'] {
-	--bg: #0b1222;
-	--bg-surface: #111a2e;
-	--bg-surface-dim: #0e1628;
-	--bg-surface-raised: #182440;
-	--bg-hover: #1e2d4a;
-	--text-primary: #e2e8f0;
-	--text-secondary: #94a3b8;
-	--text-muted: #64748b;
-	--border: #1e3a5f;
-	--border-subtle: #162d4a;
-	--accent: #38bdf8;
-	--accent-muted: #0ea5e9;
-	--trust-direct: #2dd4bf;
-	--trust-2hop: #fbbf24;
-	--trust-3hop: #f97316;
-	--trust-untrusted: #64748b;
-	--link: #38bdf8;
-	--link-hover: #7dd3fc;
-	--danger: #f43f5e;
-	--success: #2dd4bf;
+[data-theme='everforest-light'] {
+	--bg: #efebd4;
+	--bg-surface-dim: #f4f0d9;
+	--bg-surface: #fdf6e3;
+	--bg-surface-raised: #e6e2cc;
+	--bg-hover: #e0dcc7;
+	--text-primary: #5c6a72;
+	--text-secondary: #829181;
+	--text-muted: #939f91;
+	--border: #bdc3af;
+	--border-subtle: #e6e2cc;
+	--accent: #8da101;
+	--accent-muted: #5b6800;
+	--trust-direct: #35a77c;
+	--trust-2hop: #dfa000;
+	--trust-3hop: #f57d26;
+	--trust-untrusted: #939f91;
+	--link: #3a94c5;
+	--link-hover: #35a77c;
+	--danger: #f85552;
+	--success: #8da101;
 }
 
-[data-theme='warm-ember'] {
-	--bg: #1c1917;
-	--bg-surface: #272220;
-	--bg-surface-dim: #221d1c;
-	--bg-surface-raised: #332d2a;
-	--bg-hover: #3f3835;
-	--text-primary: #e7e0db;
-	--text-secondary: #a8a09b;
-	--text-muted: #78716c;
-	--border: #44403c;
-	--border-subtle: #3a3634;
-	--accent: #f59e0b;
-	--accent-muted: #b87308;
-	--trust-direct: #34d399;
-	--trust-2hop: #fbbf24;
-	--trust-3hop: #fb923c;
-	--trust-untrusted: #78716c;
-	--link: #f59e0b;
-	--link-hover: #fbbf24;
-	--danger: #ef4444;
-	--success: #34d399;
+/* Iceberg — palette from cocopon/iceberg.vim. The .vim file uses
+   inline `hi` commands (no central palette dict), so colors are
+   read from the dark/light `if &background` blocks directly.
+   The light variant exists upstream and is included here as
+   `iceberg-light`.
+
+   Iceberg has only 3 published background tones per variant —
+   #0f1117/#161821/#1e2132 dark, #cad0de/#dcdfe7/#e8e9ec light.
+   That doesn't fill Prismoire's 5-slot surface scale. Dark uses
+   the recessed model with the 3 published tones spanning bg →
+   surface → raised; --bg-surface-dim and --bg-hover are fabricated
+   as midpoints / extensions. Light extends the same way, with
+   raised/hover blended toward the folded-text tone (#788098) for
+   recessed-light popover depth.
+
+   Accent is Iceberg's iconic soft blue (#84a0c6 dark, #2d539e
+   light — the function-name color in both modes).
+
+   Trust gradient is the awkward one: Iceberg has no published
+   yellow tone. Dark fabricates a yellow-tan (mid of green and
+   orange); light does the same with its darker green/orange.
+   Trust-3hop uses orange (not red) to keep --danger semantically
+   distinct, matching the convention from Catppuccin/Nord/Kanagawa. */
+[data-theme='iceberg'] {
+	--bg: #0f1117;
+	--bg-surface-dim: #131520;
+	--bg-surface: #161821;
+	--bg-surface-raised: #1e2132;
+	--bg-hover: #282b3c;
+	--text-primary: #c6c8d1;
+	--text-secondary: #989cad;
+	--text-muted: #6b7089;
+	--border: #444b71;
+	--border-subtle: #1e2132;
+	--accent: #84a0c6;
+	--accent-muted: #566880;
+	--trust-direct: #b4be82;
+	--trust-2hop: #cbb17d;
+	--trust-3hop: #e2a478;
+	--trust-untrusted: #6b7089;
+	--link: #84a0c6;
+	--link-hover: #89b8c2;
+	--danger: #e27878;
+	--success: #b4be82;
 }
 
-[data-theme='stone'] {
-	--bg: #f5f5f4;
-	--bg-surface: #ffffff;
-	--bg-surface-dim: #fafaf9;
-	--bg-surface-raised: #e7e5e4;
-	--bg-hover: #d6d3d1;
-	--text-primary: #1c1917;
-	--text-secondary: #57534e;
-	--text-muted: #a8a29e;
-	--border: #d6d3d1;
-	--border-subtle: #e7e5e4;
-	--accent: #7c3aed;
-	--accent-muted: #6d28d9;
-	--trust-direct: #0d9488;
-	--trust-2hop: #d97706;
-	--trust-3hop: #dc2626;
-	--trust-untrusted: #a8a29e;
-	--link: #7c3aed;
-	--link-hover: #1c1917;
-	--danger: #dc2626;
-	--success: #0d9488;
-}
-
-[data-theme='moss'] {
-	--bg: #e8efe4;
-	--bg-surface: #f2f7ef;
-	--bg-surface-dim: #edf3ea;
-	--bg-surface-raised: #d5e0cf;
-	--bg-hover: #c4d4bc;
-	--text-primary: #1a2618;
-	--text-secondary: #4a5d46;
-	--text-muted: #869880;
-	--border: #b8ccb0;
-	--border-subtle: #d5e0cf;
-	--accent: #2d6a4f;
-	--accent-muted: #1b4332;
-	--trust-direct: #0077b6;
-	--trust-2hop: #e36414;
-	--trust-3hop: #ae2012;
-	--trust-untrusted: #869880;
-	--link: #2d6a4f;
-	--link-hover: #1a2618;
-	--danger: #ae2012;
-	--success: #0077b6;
-}
-
-[data-theme='coral'] {
-	--bg: #fff1ee;
-	--bg-surface: #fff8f6;
-	--bg-surface-dim: #fff4f2;
-	--bg-surface-raised: #fdddd6;
-	--bg-hover: #f9c4b8;
-	--text-primary: #2d1610;
-	--text-secondary: #6b3a2e;
-	--text-muted: #b08878;
-	--border: #e8bfb3;
-	--border-subtle: #f5d8d0;
-	--accent: #c2410c;
-	--accent-muted: #9a3412;
-	--trust-direct: #1d4ed8;
-	--trust-2hop: #7e22ce;
-	--trust-3hop: #be123c;
-	--trust-untrusted: #b08878;
-	--link: #c2410c;
-	--link-hover: #2d1610;
-	--danger: #be123c;
-	--success: #1d4ed8;
-}
-
-[data-theme='blueprint'] {
-	--bg: #dce8f5;
-	--bg-surface: #e8f0fa;
-	--bg-surface-dim: #e2ecf8;
-	--bg-surface-raised: #c5d7ec;
-	--bg-hover: #afc8e2;
-	--text-primary: #0c1929;
-	--text-secondary: #2e4a6b;
-	--text-muted: #7090b0;
-	--border: #a3bdd8;
-	--border-subtle: #c5d7ec;
-	--accent: #1d4ed8;
-	--accent-muted: #1e3a8a;
-	--trust-direct: #0f766e;
-	--trust-2hop: #b45309;
-	--trust-3hop: #be123c;
-	--trust-untrusted: #7090b0;
-	--link: #1d4ed8;
-	--link-hover: #0c1929;
-	--danger: #be123c;
-	--success: #0f766e;
+[data-theme='iceberg-light'] {
+	--bg: #cad0de;
+	--bg-surface-dim: #dcdfe7;
+	--bg-surface: #e8e9ec;
+	--bg-surface-raised: #b9c0d0;
+	--bg-hover: #adb4c5;
+	--text-primary: #33374c;
+	--text-secondary: #788098;
+	--text-muted: #8389a3;
+	--border: #788098;
+	--border-subtle: #dcdfe7;
+	--accent: #2d539e;
+	--accent-muted: #1d3666;
+	--trust-direct: #668e3d;
+	--trust-2hop: #95813b;
+	--trust-3hop: #c57339;
+	--trust-untrusted: #8389a3;
+	--link: #2d539e;
+	--link-hover: #33374c;
+	--danger: #cc517a;
+	--success: #668e3d;
 }
 
 /* Theme preview swatches (Settings page).
@@ -280,14 +739,154 @@
    `src/lib/themes.ts` — that file is the runtime source of truth;
    these rules only exist to render the static preview swatches. */
 [data-swatch='rose-pine'] {
-	--swatch-bg: #1a1a2e;
-	--swatch-bg-surface: #22223a;
+	--swatch-bg: #191724;
+	--swatch-bg-surface: #1f1d2e;
+	--swatch-accent: #c4a7e7;
+	--swatch-text-primary: #e0def4;
+	--swatch-text-secondary: #908caa;
+	--swatch-trust-direct: #9ccfd8;
+	--swatch-trust-2hop: #f6c177;
+	--swatch-trust-3hop: #ebbcba;
+}
+[data-swatch='rose-pine-moon'] {
+	--swatch-bg: #232136;
+	--swatch-bg-surface: #2a273f;
 	--swatch-accent: #c4a7e7;
 	--swatch-text-primary: #e0def4;
 	--swatch-text-secondary: #908caa;
 	--swatch-trust-direct: #9ccfd8;
 	--swatch-trust-2hop: #f6c177;
 	--swatch-trust-3hop: #ea9a97;
+}
+[data-swatch='rose-pine-dawn'] {
+	--swatch-bg: #faf4ed;
+	--swatch-bg-surface: #fffaf3;
+	--swatch-accent: #907aa9;
+	--swatch-text-primary: #575279;
+	--swatch-text-secondary: #797593;
+	--swatch-trust-direct: #56949f;
+	--swatch-trust-2hop: #ea9d34;
+	--swatch-trust-3hop: #d7827e;
+}
+[data-swatch='gruvbox-dark'] {
+	--swatch-bg: #282828;
+	--swatch-bg-surface: #3c3836;
+	--swatch-accent: #fabd2f;
+	--swatch-text-primary: #ebdbb2;
+	--swatch-text-secondary: #a89984;
+	--swatch-trust-direct: #b8bb26;
+	--swatch-trust-2hop: #fabd2f;
+	--swatch-trust-3hop: #fe8019;
+}
+[data-swatch='gruvbox-light'] {
+	--swatch-bg: #fbf1c7;
+	--swatch-bg-surface: #f9f5d7;
+	--swatch-accent: #b57614;
+	--swatch-text-primary: #3c3836;
+	--swatch-text-secondary: #665c54;
+	--swatch-trust-direct: #79740e;
+	--swatch-trust-2hop: #b57614;
+	--swatch-trust-3hop: #af3a03;
+}
+[data-swatch='tokyo-night'] {
+	--swatch-bg: #16161e;
+	--swatch-bg-surface: #1a1b26;
+	--swatch-accent: #7aa2f7;
+	--swatch-text-primary: #a9b1d6;
+	--swatch-text-secondary: #9aa5ce;
+	--swatch-trust-direct: #9ece6a;
+	--swatch-trust-2hop: #e0af68;
+	--swatch-trust-3hop: #ff9e64;
+}
+[data-swatch='tokyo-night-storm'] {
+	--swatch-bg: #1f2335;
+	--swatch-bg-surface: #24283b;
+	--swatch-accent: #7aa2f7;
+	--swatch-text-primary: #a9b1d6;
+	--swatch-text-secondary: #9aa5ce;
+	--swatch-trust-direct: #9ece6a;
+	--swatch-trust-2hop: #e0af68;
+	--swatch-trust-3hop: #ff9e64;
+}
+[data-swatch='tokyo-night-day'] {
+	--swatch-bg: #d6d8df;
+	--swatch-bg-surface: #e6e7ed;
+	--swatch-accent: #2959aa;
+	--swatch-text-primary: #343b58;
+	--swatch-text-secondary: #40434f;
+	--swatch-trust-direct: #385f0d;
+	--swatch-trust-2hop: #8f5e15;
+	--swatch-trust-3hop: #965027;
+}
+[data-swatch='catppuccin-mocha'] {
+	--swatch-bg: #11111b;
+	--swatch-bg-surface: #1e1e2e;
+	--swatch-accent: #cba6f7;
+	--swatch-text-primary: #cdd6f4;
+	--swatch-text-secondary: #bac2de;
+	--swatch-trust-direct: #a6e3a1;
+	--swatch-trust-2hop: #f9e2af;
+	--swatch-trust-3hop: #fab387;
+}
+[data-swatch='catppuccin-macchiato'] {
+	--swatch-bg: #181926;
+	--swatch-bg-surface: #24273a;
+	--swatch-accent: #c6a0f6;
+	--swatch-text-primary: #cad3f5;
+	--swatch-text-secondary: #b8c0e0;
+	--swatch-trust-direct: #a6da95;
+	--swatch-trust-2hop: #eed49f;
+	--swatch-trust-3hop: #f5a97f;
+}
+[data-swatch='catppuccin-frappe'] {
+	--swatch-bg: #232634;
+	--swatch-bg-surface: #303446;
+	--swatch-accent: #ca9ee6;
+	--swatch-text-primary: #c6d0f5;
+	--swatch-text-secondary: #b5bfe2;
+	--swatch-trust-direct: #a6d189;
+	--swatch-trust-2hop: #e5c890;
+	--swatch-trust-3hop: #ef9f76;
+}
+[data-swatch='catppuccin-latte'] {
+	--swatch-bg: #dce0e8;
+	--swatch-bg-surface: #eff1f5;
+	--swatch-accent: #8839ef;
+	--swatch-text-primary: #4c4f69;
+	--swatch-text-secondary: #5c5f77;
+	--swatch-trust-direct: #40a02b;
+	--swatch-trust-2hop: #df8e1d;
+	--swatch-trust-3hop: #fe640b;
+}
+[data-swatch='kanagawa-wave'] {
+	--swatch-bg: #181820;
+	--swatch-bg-surface: #1f1f28;
+	--swatch-accent: #7e9cd8;
+	--swatch-text-primary: #dcd7ba;
+	--swatch-text-secondary: #c8c093;
+	--swatch-trust-direct: #98bb6c;
+	--swatch-trust-2hop: #e6c384;
+	--swatch-trust-3hop: #ffa066;
+}
+[data-swatch='kanagawa-dragon'] {
+	--swatch-bg: #0d0c0c;
+	--swatch-bg-surface: #181616;
+	--swatch-accent: #8ba4b0;
+	--swatch-text-primary: #c5c9c5;
+	--swatch-text-secondary: #c8c093;
+	--swatch-trust-direct: #8a9a7b;
+	--swatch-trust-2hop: #c4b28a;
+	--swatch-trust-3hop: #b6927b;
+}
+[data-swatch='kanagawa-lotus'] {
+	--swatch-bg: #d5cea3;
+	--swatch-bg-surface: #f2ecbc;
+	--swatch-accent: #624c83;
+	--swatch-text-primary: #545464;
+	--swatch-text-secondary: #716e61;
+	--swatch-trust-direct: #6f894e;
+	--swatch-trust-2hop: #77713f;
+	--swatch-trust-3hop: #cc6d00;
 }
 [data-swatch='nord'] {
 	--swatch-bg: #2e3440;
@@ -299,9 +898,19 @@
 	--swatch-trust-2hop: #ebcb8b;
 	--swatch-trust-3hop: #d08770;
 }
-[data-swatch='everforest'] {
-	--swatch-bg: #272e33;
-	--swatch-bg-surface: #2e383c;
+[data-swatch='nord-light'] {
+	--swatch-bg: #d8dee9;
+	--swatch-bg-surface: #eceff4;
+	--swatch-accent: #5e81ac;
+	--swatch-text-primary: #2e3440;
+	--swatch-text-secondary: #3b4252;
+	--swatch-trust-direct: #a3be8c;
+	--swatch-trust-2hop: #ebcb8b;
+	--swatch-trust-3hop: #d08770;
+}
+[data-swatch='everforest-dark'] {
+	--swatch-bg: #232a2e;
+	--swatch-bg-surface: #2d353b;
 	--swatch-accent: #a7c080;
 	--swatch-text-primary: #d3c6aa;
 	--swatch-text-secondary: #9da9a0;
@@ -309,63 +918,33 @@
 	--swatch-trust-2hop: #dbbc7f;
 	--swatch-trust-3hop: #e69875;
 }
-[data-swatch='midnight-blue'] {
-	--swatch-bg: #0b1222;
-	--swatch-bg-surface: #111a2e;
-	--swatch-accent: #38bdf8;
-	--swatch-text-primary: #e2e8f0;
-	--swatch-text-secondary: #94a3b8;
-	--swatch-trust-direct: #2dd4bf;
-	--swatch-trust-2hop: #fbbf24;
-	--swatch-trust-3hop: #f97316;
+[data-swatch='everforest-light'] {
+	--swatch-bg: #efebd4;
+	--swatch-bg-surface: #fdf6e3;
+	--swatch-accent: #8da101;
+	--swatch-text-primary: #5c6a72;
+	--swatch-text-secondary: #829181;
+	--swatch-trust-direct: #35a77c;
+	--swatch-trust-2hop: #dfa000;
+	--swatch-trust-3hop: #f57d26;
 }
-[data-swatch='warm-ember'] {
-	--swatch-bg: #1c1917;
-	--swatch-bg-surface: #272220;
-	--swatch-accent: #f59e0b;
-	--swatch-text-primary: #e7e0db;
-	--swatch-text-secondary: #a8a09b;
-	--swatch-trust-direct: #34d399;
-	--swatch-trust-2hop: #fbbf24;
-	--swatch-trust-3hop: #fb923c;
+[data-swatch='iceberg'] {
+	--swatch-bg: #0f1117;
+	--swatch-bg-surface: #161821;
+	--swatch-accent: #84a0c6;
+	--swatch-text-primary: #c6c8d1;
+	--swatch-text-secondary: #989cad;
+	--swatch-trust-direct: #b4be82;
+	--swatch-trust-2hop: #cbb17d;
+	--swatch-trust-3hop: #e2a478;
 }
-[data-swatch='stone'] {
-	--swatch-bg: #f5f5f4;
-	--swatch-bg-surface: #ffffff;
-	--swatch-accent: #7c3aed;
-	--swatch-text-primary: #1c1917;
-	--swatch-text-secondary: #57534e;
-	--swatch-trust-direct: #0d9488;
-	--swatch-trust-2hop: #d97706;
-	--swatch-trust-3hop: #dc2626;
-}
-[data-swatch='moss'] {
-	--swatch-bg: #e8efe4;
-	--swatch-bg-surface: #f2f7ef;
-	--swatch-accent: #2d6a4f;
-	--swatch-text-primary: #1a2618;
-	--swatch-text-secondary: #4a5d46;
-	--swatch-trust-direct: #0077b6;
-	--swatch-trust-2hop: #e36414;
-	--swatch-trust-3hop: #ae2012;
-}
-[data-swatch='coral'] {
-	--swatch-bg: #fff1ee;
-	--swatch-bg-surface: #fff8f6;
-	--swatch-accent: #c2410c;
-	--swatch-text-primary: #2d1610;
-	--swatch-text-secondary: #6b3a2e;
-	--swatch-trust-direct: #1d4ed8;
-	--swatch-trust-2hop: #7e22ce;
-	--swatch-trust-3hop: #be123c;
-}
-[data-swatch='blueprint'] {
-	--swatch-bg: #dce8f5;
-	--swatch-bg-surface: #e8f0fa;
-	--swatch-accent: #1d4ed8;
-	--swatch-text-primary: #0c1929;
-	--swatch-text-secondary: #2e4a6b;
-	--swatch-trust-direct: #0f766e;
-	--swatch-trust-2hop: #b45309;
-	--swatch-trust-3hop: #be123c;
+[data-swatch='iceberg-light'] {
+	--swatch-bg: #cad0de;
+	--swatch-bg-surface: #e8e9ec;
+	--swatch-accent: #2d539e;
+	--swatch-text-primary: #33374c;
+	--swatch-text-secondary: #788098;
+	--swatch-trust-direct: #668e3d;
+	--swatch-trust-2hop: #95813b;
+	--swatch-trust-3hop: #c57339;
 }

@@ -11,14 +11,26 @@ use crate::state::AppState;
 
 const VALID_THEMES: &[&str] = &[
     "rose-pine",
+    "rose-pine-moon",
+    "rose-pine-dawn",
+    "gruvbox-dark",
+    "gruvbox-light",
+    "tokyo-night",
+    "tokyo-night-storm",
+    "tokyo-night-day",
+    "catppuccin-mocha",
+    "catppuccin-macchiato",
+    "catppuccin-frappe",
+    "catppuccin-latte",
+    "kanagawa-wave",
+    "kanagawa-dragon",
+    "kanagawa-lotus",
     "nord",
-    "everforest",
-    "midnight-blue",
-    "warm-ember",
-    "stone",
-    "moss",
-    "coral",
-    "blueprint",
+    "nord-light",
+    "everforest-dark",
+    "everforest-light",
+    "iceberg",
+    "iceberg-light",
 ];
 
 pub const DEFAULT_THEME: &str = "rose-pine";
