@@ -11,7 +11,7 @@
 	let html = $derived(renderMarkdown(source, profile));
 </script>
 
-<div class="markdown font-prose text-prose">
+<div class="markdown font-prose text-prose" class:prominent={profile === 'full'}>
 	{@html html}
 </div>
 
@@ -37,16 +37,40 @@
 	     Harmless no-op for fonts without an `opsz` axis (e.g. our
 	     static-hinted Vollkorn cuts).
 	   - `text-rendering: optimizeLegibility` enables kerning and
-	     standard ligatures. The doc warns against using it globally
-	     (expensive on long pages); scoping it to `.markdown` keeps
-	     it on the prose surface where it earns its cost. */
+	     discretionary ligatures. The cost scales with glyph count, so
+	     a thread with 200 replies pays it across every reply body. We
+	     restrict it to `.prominent` — only `<Markdown profile="full">`
+	     instances (OP body, activity-feed thread starts) — where the
+	     reader's attention budget justifies the layout cost. Replies
+	     keep the browser default, which already enables standard
+	     kerning + common ligatures via CSS Fonts Module 3. */
 	.markdown {
 		font-optical-sizing: auto;
+		/* Allow soft hyphens on narrow columns (mobile, deep nesting).
+		   `<html lang="en">` is set in app.html so the browser knows
+		   which dictionary to consult; without that this is a no-op. */
+		hyphens: auto;
+		/* Defensive against pathological UGC: a 200-character unbroken
+		   token (long URL, hex blob, base64) would otherwise force the
+		   column wider than its container and break the layout. We
+		   pair `anywhere` with the default `word-break: normal` so
+		   ordinary words still break at hyphenation points or whitespace
+		   — `anywhere` only kicks in when there's no other option. The
+		   explicit `word-break: normal` is belt-and-braces against any
+		   ancestor rule that might have set `break-all`. */
+		overflow-wrap: anywhere;
+		word-break: normal;
+	}
+
+	.markdown.prominent {
 		text-rendering: optimizeLegibility;
 	}
 
 	.markdown :global(p) {
 		margin-bottom: 0.75em;
+		/* Avoid one-word last lines (widows). Modern browsers; older
+		   browsers ignore the value and fall back to `wrap`. */
+		text-wrap: pretty;
 	}
 
 	.markdown :global(p:last-child) {
@@ -63,6 +87,8 @@
 		line-height: 1.25;
 		margin-bottom: 0.5em;
 		color: var(--text-primary);
+		/* Balance multi-line headings so the last line isn't a stub. */
+		text-wrap: balance;
 	}
 
 	/* 1.200 scale, capped one step below the natural ladder: in-body
@@ -87,7 +113,13 @@
 	.markdown :global(a) {
 		color: var(--link);
 		text-decoration: underline;
-		text-underline-offset: 2px;
+		/* `0.15em` scales with the surrounding font-size, so links inside
+		   headings get a proportionally larger gap than links in body
+		   prose. `1px` thickness reads as a hairline at body sizes, which
+		   looks better than the browser default (typically ~auto / 2px)
+		   without sacrificing affordance. */
+		text-underline-offset: 0.15em;
+		text-decoration-thickness: 1px;
 	}
 
 	.markdown :global(a:hover) {
@@ -116,6 +148,9 @@
 		padding: 0.75em 1em;
 		margin-bottom: 0.75em;
 		overflow-x: auto;
+		/* Render `\t` as 4 spaces. Without this, browsers default to 8,
+		   which makes nested code (Python, Go) look pathological. */
+		tab-size: 4;
 	}
 
 	.markdown :global(pre code) {

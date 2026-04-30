@@ -19,6 +19,7 @@
 	import MoreButton from '$lib/components/ui/MoreButton.svelte';
 	import Notice from '$lib/components/ui/Notice.svelte';
 	import { errorMessage } from '$lib/i18n/errors';
+	import { smartypants } from '$lib/typography';
 
 	let { data } = $props();
 
@@ -173,11 +174,11 @@
 									{/if}
 								</div>
 							{/if}
-							<div class="mb-1 max-w-measure">
+							<div class="mb-1 max-w-measure text-balance">
 								<a
 									href={threadHref(thread)}
 									class="font-prose text-prose leading-snug font-semibold text-text-primary no-underline hover:text-link hover:underline"
-									>{thread.title}</a
+									>{smartypants(thread.title)}</a
 								>
 								{#if thread.link_url}
 									<a

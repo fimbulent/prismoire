@@ -1,4 +1,5 @@
 import { Marked, type Tokens } from 'marked';
+import { markedSmartypants } from 'marked-smartypants';
 import sanitizeHtml from 'sanitize-html';
 
 export type MarkdownProfile = 'full' | 'reply' | 'bio';
@@ -82,6 +83,12 @@ function createMarked(profile: MarkdownProfile): Marked {
 		gfm: true,
 		breaks: true
 	});
+
+	// Smart-punctuation pass: curly quotes, em/en dashes, ellipsis.
+	// Operates on token text after tokenization, so it skips `<code>`
+	// and `<pre>` content automatically. Cost is negligible (~tens of
+	// microseconds per post).
+	marked.use(markedSmartypants());
 
 	if (profile === 'reply' || profile === 'bio') {
 		marked.use({

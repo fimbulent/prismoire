@@ -6,6 +6,7 @@
 	import UserName from '$lib/components/trust/UserName.svelte';
 	import MoreButton from '$lib/components/ui/MoreButton.svelte';
 	import { errorMessage } from '$lib/i18n/errors';
+	import { smartypants } from '$lib/typography';
 
 	let { data } = $props();
 
@@ -77,7 +78,7 @@
 								<a
 									href={threadHref(thread)}
 									class="font-semibold text-text-primary no-underline hover:text-link hover:underline"
-									>{thread.title}</a
+									>{smartypants(thread.title)}</a
 								>
 							</div>
 							<div class="flex items-center gap-2 text-xs text-text-muted">

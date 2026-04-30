@@ -25,6 +25,7 @@
 	import { session } from '$lib/stores/session.svelte';
 	import { errorMessage } from '$lib/i18n/errors';
 	import { linkHost, linkRest } from '$lib/utils/url';
+	import { smartypants } from '$lib/typography';
 	import { tick } from 'svelte';
 
 	let { data } = $props();
@@ -363,7 +364,7 @@
 <svelte:window onpopstate={handlePopState} />
 
 <svelte:head>
-	<title>{thread.title} — Prismoire</title>
+	<title>{smartypants(thread.title)} — Prismoire</title>
 </svelte:head>
 
 <div class="max-w-4xl mx-auto px-6 pt-6 pb-16">
@@ -379,8 +380,8 @@
 		<!-- OP -->
 		<div class="bg-bg-surface border border-border rounded-md p-5 mb-6">
 			<div class="max-w-measure mx-auto">
-			<h1 class="font-prose text-3xl font-bold leading-tight mb-2 flex items-center gap-2">
-				{thread.title}
+			<h1 class="font-prose text-3xl font-bold leading-tight text-balance mb-2 flex items-center gap-2">
+				{smartypants(thread.title)}
 				{#if thread.is_announcement}
 					<Badge>Public</Badge>
 				{/if}

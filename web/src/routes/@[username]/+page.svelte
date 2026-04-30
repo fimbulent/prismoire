@@ -22,6 +22,7 @@
 	import MoreButton from '$lib/components/ui/MoreButton.svelte';
 	import Notice from '$lib/components/ui/Notice.svelte';
 	import { errorMessage } from '$lib/i18n/errors';
+	import { smartypants } from '$lib/typography';
 	import { session } from '$lib/stores/session.svelte';
 	import { formatDistanceToNowStrict } from 'date-fns';
 	import {
@@ -887,19 +888,19 @@
 						{:else}
 							<span>Replied in</span>
 							{#if viewerRestricted}
-								<span class="text-text-secondary">{item.thread_title}</span>
+								<span class="text-text-secondary">{smartypants(item.thread_title)}</span>
 							{:else}
-								<a href="/r/{item.room_slug}/{item.thread_id}?post={item.post_id}" class="text-link hover:underline">{item.thread_title}</a>
+								<a href="/r/{item.room_slug}/{item.thread_id}?post={item.post_id}" class="text-link hover:underline">{smartypants(item.thread_title)}</a>
 							{/if}
 						{/if}
 						<span class="ml-auto md:ml-0">{relativeTime(item.created_at)}</span>
 					</div>
-					<div class="md:max-w-measure md:flex-1 md:min-w-0">
+					<div class="md:max-w-measure md:flex-1 md:min-w-0 text-balance">
 						{#if item.type === 'thread_started'}
 							{#if viewerRestricted}
-								<span class="font-prose text-prose text-text-primary font-medium leading-snug">{item.thread_title}</span>
+								<span class="font-prose text-prose text-text-primary font-medium leading-snug">{smartypants(item.thread_title)}</span>
 							{:else}
-								<a href="/r/{item.room_slug}/{item.thread_id}" class="font-prose text-prose text-text-primary hover:underline font-medium leading-snug">{item.thread_title}</a>
+								<a href="/r/{item.room_slug}/{item.thread_id}" class="font-prose text-prose text-text-primary hover:underline font-medium leading-snug">{smartypants(item.thread_title)}</a>
 							{/if}
 						{/if}
 						<div class="text-prose leading-7 text-text-secondary mt-1">
