@@ -1,12 +1,16 @@
 @import 'tailwindcss';
 
-/* Fixed top-nav height. Kept as a CSS variable (rather than an inline
-   `style:` directive on the layout root) so no `style="..."` attribute
-   is emitted — our CSP forbids `style-src-attr`. Routes that need to
-   offset by the nav height reference `var(--nav-height)`. The nav
-   itself is pinned to this height via `h-[var(--nav-height)]`. */
+/* Fixed top-nav and bottom-footer heights. Kept as CSS variables
+   (rather than inline `style:` directives on the layout root) so no
+   `style="..."` attribute is emitted — our CSP forbids
+   `style-src-attr`. Routes that need to offset by these heights
+   reference `var(--nav-height)` / `var(--footer-height)`. The nav and
+   footer themselves are pinned via `h-[var(--nav-height)]` and
+   `h-[var(--footer-height)]` so the variables are the single source
+   of truth. */
 :root {
 	--nav-height: 3.25rem;
+	--footer-height: 4rem;
 }
 
 @theme {

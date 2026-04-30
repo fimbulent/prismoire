@@ -135,7 +135,7 @@
 </div>
 
 {#if session.isLoggedIn && !session.isRestricted}
-	<footer class="text-center py-6 text-xs text-text-muted mt-auto">
+	<footer class="h-[var(--footer-height)] flex items-center justify-center text-xs text-text-muted mt-auto">
 		<a href="/log" class="hover:text-text-secondary transition-colors">Admin Log</a>
 	</footer>
 {/if}
