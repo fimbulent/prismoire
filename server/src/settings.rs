@@ -34,6 +34,23 @@ const VALID_THEMES: &[&str] = &[
 
 pub const DEFAULT_THEME: &str = "rose-pine";
 
+/// Allow-list of prose-font slugs. Mirrors the catalogue in
+/// `web/src/lib/fonts.ts` and the `@font-face` declarations in
+/// `web/src/app.css`. Adding a font is a three-place change: the
+/// .woff2 files in `web/static/fonts/<slug>/`, an entry here, and an
+/// entry in the frontend catalogue (verified at compile time by the
+/// `font_slugs_exist_in_frontend` test below).
+const VALID_FONTS: &[&str] = &[
+    "inter",
+    "ibm-plex-sans",
+    "source-sans-3",
+    "literata",
+    "source-serif-4",
+    "vollkorn",
+];
+
+pub const DEFAULT_FONT: &str = "inter";
+
 // ---------------------------------------------------------------------------
 // Response types
 // ---------------------------------------------------------------------------
@@ -41,11 +58,13 @@ pub const DEFAULT_THEME: &str = "rose-pine";
 #[derive(Serialize)]
 pub struct SettingsResponse {
     pub theme: String,
+    pub font: String,
 }
 
 #[derive(Deserialize)]
 pub struct UpdateSettingsRequest {
     pub theme: Option<String>,
+    pub font: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -57,8 +76,8 @@ pub async fn get_settings(
     State(state): State<Arc<AppState>>,
     user: RestrictedAuthUser,
 ) -> Result<impl IntoResponse, AppError> {
-    let theme = get_user_theme(&state.db, &user.user_id).await?;
-    Ok(Json(SettingsResponse { theme }))
+    let (theme, font) = get_user_settings(&state.db, &user.user_id).await?;
+    Ok(Json(SettingsResponse { theme, font }))
 }
 
 // ---------------------------------------------------------------------------
@@ -86,18 +105,43 @@ pub async fn update_settings(
         .await?;
     }
 
-    let theme = get_user_theme(&state.db, &user.user_id).await?;
-    Ok(Json(SettingsResponse { theme }))
+    if let Some(ref font) = req.font {
+        if !VALID_FONTS.contains(&font.as_str()) {
+            return Err(AppError::code(ErrorCode::InvalidFont));
+        }
+
+        sqlx::query!(
+            "INSERT INTO user_settings (user_id, font) VALUES (?, ?) \
+             ON CONFLICT(user_id) DO UPDATE SET font = excluded.font",
+            user.user_id,
+            font,
+        )
+        .execute(&state.db)
+        .await?;
+    }
+
+    let (theme, font) = get_user_settings(&state.db, &user.user_id).await?;
+    Ok(Json(SettingsResponse { theme, font }))
 }
 
-/// Load the user's theme, falling back to the default.
-pub async fn get_user_theme(db: &sqlx::SqlitePool, user_id: &str) -> Result<String, AppError> {
-    let row = sqlx::query!("SELECT theme FROM user_settings WHERE user_id = ?", user_id,)
-        .fetch_optional(db)
-        .await?;
-    Ok(row
-        .map(|r| r.theme)
-        .unwrap_or_else(|| DEFAULT_THEME.to_string()))
+/// Load the user's full settings tuple `(theme, font)`, applying the
+/// per-column defaults when the row is missing. Combined into one
+/// helper so the GET / PATCH handlers and the session resolver each
+/// run a single round-trip instead of one query per column.
+pub async fn get_user_settings(
+    db: &sqlx::SqlitePool,
+    user_id: &str,
+) -> Result<(String, String), AppError> {
+    let row = sqlx::query!(
+        "SELECT theme, font FROM user_settings WHERE user_id = ?",
+        user_id,
+    )
+    .fetch_optional(db)
+    .await?;
+    Ok(match row {
+        Some(r) => (r.theme, r.font),
+        None => (DEFAULT_THEME.to_string(), DEFAULT_FONT.to_string()),
+    })
 }
 
 #[cfg(test)]
@@ -111,6 +155,17 @@ mod tests {
             assert!(
                 ts.contains(&format!("id: '{slug}'")),
                 "theme slug '{slug}' not found in web/src/lib/themes.ts"
+            );
+        }
+    }
+
+    #[test]
+    fn font_slugs_exist_in_frontend() {
+        let ts = include_str!("../../web/src/lib/fonts.ts");
+        for slug in VALID_FONTS {
+            assert!(
+                ts.contains(&format!("id: '{slug}'")),
+                "font slug '{slug}' not found in web/src/lib/fonts.ts"
             );
         }
     }

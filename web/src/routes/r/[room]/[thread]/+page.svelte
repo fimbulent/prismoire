@@ -378,7 +378,8 @@
 
 		<!-- OP -->
 		<div class="bg-bg-surface border border-border rounded-md p-5 mb-6">
-			<h1 class="text-2xl font-bold leading-tight mb-2 flex items-center gap-2">
+			<div class="max-w-measure mx-auto">
+			<h1 class="font-prose text-2xl font-bold leading-tight mb-2 flex items-center gap-2">
 				{thread.title}
 				{#if thread.is_announcement}
 					<Badge>Public</Badge>
@@ -450,6 +451,7 @@
 			{#if adminError}
 				<div class="mt-3 text-danger text-sm">{adminError}</div>
 			{/if}
+			</div>
 		</div>
 
 		{#if thread.is_announcement && !thread.locked}
@@ -468,6 +470,7 @@
 			>&larr; {viewRootStack.length <= 1 ? 'Back to full thread' : 'Previous comments'}</button>
 
 			<div class="py-4 border-b border-border-subtle">
+				<div class="max-w-measure">
 				<div id="post-{viewRoot.id}">
 					<PostCard post={viewRoot} onreply={thread.locked ? undefined : startReplying} onremove={session.isAdmin ? (postId) => { removeTarget = postId; removeError = null; } : undefined} />
 				</div>
@@ -477,6 +480,7 @@
 				{#if removeTarget === viewRoot.id}
 					<RemoveForm saving={removeSaving} error={removeError} onsubmit={handleRemovePost} oncancel={cancelRemove} />
 				{/if}
+				</div>
 				{#if viewRoot.children.length > 0}
 					<ReplyTree
 						parentId={viewRoot.id}
@@ -517,6 +521,7 @@
 
 				{#each thread.post.children as reply (reply.id)}
 					<div class="py-4 border-b border-border-subtle">
+						<div class="max-w-measure">
 						<div id="post-{reply.id}">
 							<PostCard post={reply} onreply={thread.locked ? undefined : startReplying} onremove={session.isAdmin ? (postId) => { removeTarget = postId; removeError = null; } : undefined} />
 						</div>
@@ -526,6 +531,7 @@
 						{#if removeTarget === reply.id}
 							<RemoveForm saving={removeSaving} error={removeError} onsubmit={handleRemovePost} oncancel={cancelRemove} />
 						{/if}
+						</div>
 						{#if reply.children.length > 0}
 							<ReplyTree
 								parentId={reply.id}
@@ -562,15 +568,16 @@
 		<!-- Bottom reply form -->
 		{#if session.isLoggedIn && !viewRoot && !thread.locked}
 		<div class="pt-8">
+			<div class="bg-bg-surface border border-border rounded-md p-3 focus-within:border-accent-muted">
 			<textarea
 				bind:value={topLevelBody}
-				class="w-full min-h-24 bg-bg-surface border border-border rounded-md text-text-primary font-mono text-sm p-3 resize-y leading-relaxed focus:outline-none focus:border-accent-muted placeholder:text-text-muted"
+				class="block w-full max-w-measure mx-auto min-h-24 bg-transparent text-text-primary font-prose text-sm field-sizing:content resize-none leading-relaxed focus:outline-none placeholder:text-text-muted"
 				placeholder="Reply to thread..."
 			></textarea>
 			{#if topLevelError}
-				<div class="text-danger text-sm mt-1">{topLevelError}</div>
+				<div class="text-danger text-sm mt-1 max-w-measure mx-auto">{topLevelError}</div>
 			{/if}
-			<div class="mt-2 flex justify-end gap-3 items-center">
+			<div class="mt-2 max-w-measure mx-auto flex justify-end gap-3 items-center">
 				<span class="text-xs text-text-muted mr-auto">Markdown supported</span>
 				{#if showTopLevelCounter}
 					<span
@@ -593,6 +600,7 @@
 					disabled={topLevelSaving || topLevelBody.trim() === '' || topLevelBodyLen > MAX_REPLY_BODY}
 					class="font-sans text-sm px-4 py-2 rounded-md cursor-pointer border border-accent bg-accent text-bg font-medium hover:opacity-90 disabled:opacity-50 transition-opacity duration-150"
 				>{topLevelSaving ? 'Posting…' : 'Post reply'}</button>
+			</div>
 			</div>
 		</div>
 		{/if}

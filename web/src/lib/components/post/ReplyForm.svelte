@@ -28,7 +28,7 @@
 <div class="mt-3" transition:slide={{ duration: 150 }}>
 	<textarea
 		bind:value={body}
-		class="w-full min-h-24 bg-bg border border-border rounded-md text-text-primary font-mono text-sm p-3 resize-y leading-relaxed focus:outline-none focus:border-accent-muted placeholder:text-text-muted"
+		class="w-full min-h-24 bg-bg border border-border rounded-md text-text-primary font-prose text-sm p-3 resize-y leading-relaxed focus:outline-none focus:border-accent-muted placeholder:text-text-muted"
 		placeholder="Reply to comment..."
 	></textarea>
 	{#if error}

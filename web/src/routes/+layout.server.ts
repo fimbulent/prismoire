@@ -11,6 +11,7 @@ import { redirect } from '@sveltejs/kit';
 import type { LayoutServerLoad } from './$types';
 import { ApiRequestError, getSession, getSetupStatus, type SessionInfo } from '$lib/api/auth';
 import type { ThemeId } from '$lib/themes';
+import type { FontId } from '$lib/fonts';
 
 /**
  * Banned/suspended users may visit only their own profile (and its
@@ -98,12 +99,17 @@ export const load: LayoutServerLoad = async ({ fetch, cookies, locals, url, setH
 		}
 	}
 
-	// Propagate the resolved theme back to `handle` in `hooks.server.ts`,
-	// which substitutes `%theme%` in `src/app.html` via `transformPageChunk`
-	// so SSR emits `<html data-theme="...">` on first byte. Falls back to
-	// the default already seeded in `handle` when there is no session.
+	// Propagate the resolved theme + prose font back to `handle` in
+	// `hooks.server.ts`, which substitutes `%theme%` / `%font%` in
+	// `src/app.html` via `transformPageChunk` so SSR emits
+	// `<html data-theme="..." data-font="...">` on first byte. Falls
+	// back to the defaults already seeded in `handle` when there is
+	// no session.
 	if (session?.theme) {
 		locals.theme = session.theme as ThemeId;
+	}
+	if (session?.font) {
+		locals.font = session.font as FontId;
 	}
 
 	return {

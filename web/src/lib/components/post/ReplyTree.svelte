@@ -88,6 +88,7 @@
 		<div transition:slide={{ duration: 200 }}>
 			{#each children as reply (reply.id)}
 				<div class="pl-4 py-3">
+					<div class="max-w-measure">
 					<div id="post-{reply.id}">
 						<PostCard post={reply} {onreply} {onremove} />
 					</div>
@@ -97,6 +98,7 @@
 					{#if removeTargetId === reply.id && oncancelremove && onsubmitremove}
 						<RemoveForm saving={removeSaving} error={removeError} onsubmit={onsubmitremove} oncancel={oncancelremove} />
 					{/if}
+					</div>
 					{#if reply.children.length > 0}
 						{#if depth >= maxDepth}
 							{@const descendants = countDescendants(reply)}

@@ -213,7 +213,7 @@
 				autocomplete="off"
 				disabled={submitting}
 				placeholder="What is this thread about?"
-				class="w-full bg-bg-surface border border-border rounded-md text-text-primary text-sm px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted"
+				class="w-full bg-bg-surface border border-border rounded-md text-text-primary font-prose text-sm px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted"
 				class:border-danger={!!titleError}
 			/>
 			{#if titleError}
@@ -260,7 +260,7 @@
 					: 'Write your post in Markdown...'}
 				rows={kind === 'link' ? 5 : 10}
 				disabled={submitting}
-				class="w-full bg-bg-surface border border-border rounded-md text-text-primary text-sm font-mono px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted resize-y leading-relaxed"
+				class="w-full bg-bg-surface border border-border rounded-md text-text-primary text-sm font-prose px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted resize-y leading-relaxed"
 				class:border-danger={bodyLen > MAX_BODY}
 			></textarea>
 			<div class="flex items-center justify-between mt-1">

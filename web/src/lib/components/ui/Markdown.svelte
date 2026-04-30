@@ -17,6 +17,7 @@
 
 <style>
 	.markdown {
+		font-family: var(--font-prose);
 		line-height: 1.75;
 	}
 

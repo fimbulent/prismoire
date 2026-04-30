@@ -68,7 +68,7 @@ CREATE INDEX idx_users_invite_id ON users(invite_id);
 CREATE TABLE user_settings (
     user_id TEXT PRIMARY KEY NOT NULL REFERENCES users(id),
     theme TEXT NOT NULL DEFAULT 'rose-pine'
-);
+, font TEXT NOT NULL DEFAULT 'inter');
 CREATE TABLE IF NOT EXISTS "trust_edges" (
     id TEXT PRIMARY KEY NOT NULL,
     source_user TEXT NOT NULL REFERENCES users(id),

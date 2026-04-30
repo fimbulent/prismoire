@@ -225,6 +225,7 @@ pub async fn setup_complete(
             display_name,
             "admin".into(),
             crate::settings::DEFAULT_THEME.into(),
+            crate::settings::DEFAULT_FONT.into(),
         )),
     ))
 }

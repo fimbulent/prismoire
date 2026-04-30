@@ -5,8 +5,11 @@
 	import { errorMessage } from '$lib/i18n/errors';
 	import { theme } from '$lib/stores/theme.svelte';
 	import { themes, type ThemeId } from '$lib/themes';
+	import { font } from '$lib/stores/font.svelte';
+	import { fonts, type FontId } from '$lib/fonts';
 
 	let savedId = $state<ThemeId | null>(null);
+	let savedFontId = $state<FontId | null>(null);
 
 	let exporting = $state(false);
 	let exportError = $state<string | null>(null);
@@ -26,6 +29,19 @@
 			}, 1500);
 		} catch {
 			// Silently fail — the theme is already applied visually
+		}
+	}
+
+	async function selectFont(id: FontId) {
+		font.set(id);
+		try {
+			await updateSettings({ font: id });
+			savedFontId = id;
+			setTimeout(() => {
+				if (savedFontId === id) savedFontId = null;
+			}, 1500);
+		} catch {
+			// Silently fail — the font is already applied visually
 		}
 	}
 
@@ -78,6 +94,17 @@
 	<title>Settings — Prismoire</title>
 </svelte:head>
 
+<style>
+	/* The font swatch in the picker uses `var(--font-prose)`, which is
+	   set by the `[data-font="…"]` blocks in `app.css`. Putting
+	   `data-font` on the swatch (rather than `<html>`) overrides
+	   `--font-prose` for the swatch's subtree only, so each swatch
+	   previews its own family without affecting the rest of the page. */
+	.font-preview {
+		font-family: var(--font-prose);
+	}
+</style>
+
 <div class="max-w-4xl mx-auto px-6 pt-6 pb-16">
 	<h1 class="text-lg font-bold mb-6">Settings</h1>
 
@@ -110,6 +137,36 @@
 					<div class="text-sm text-text-primary">
 						{t.name}
 						{#if theme.current === t.id && savedId === t.id}
+							<span class="text-xs text-success ml-1">Saved</span>
+						{/if}
+					</div>
+				</button>
+			{/each}
+		</div>
+	</section>
+
+	<section class="mt-10">
+		<h2 class="text-sm font-semibold text-text-secondary mb-1">Prose font</h2>
+		<p class="text-xs text-text-muted mb-3">
+			Applies to post content only — interface elements keep the default UI font.
+		</p>
+		<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+			{#each fonts as f (f.id)}
+				<button
+					onclick={() => selectFont(f.id)}
+					class="relative rounded-lg border-2 p-3 text-left transition-colors cursor-pointer"
+					class:border-accent={font.current === f.id}
+					class:border-border-subtle={font.current !== f.id}
+					class:hover:border-border={font.current !== f.id}
+				>
+					<div data-font={f.id} class="font-preview text-text-primary">
+						<div class="text-base">The quick brown fox</div>
+						<div class="text-sm text-text-secondary italic">jumps over the lazy dog</div>
+					</div>
+					<div class="text-sm text-text-primary mt-2">
+						{f.name}
+						<span class="text-xs text-text-muted ml-1">{f.category === 'serif' ? 'Serif' : 'Sans'}</span>
+						{#if font.current === f.id && savedFontId === f.id}
 							<span class="text-xs text-success ml-1">Saved</span>
 						{/if}
 					</div>

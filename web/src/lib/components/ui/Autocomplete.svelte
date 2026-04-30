@@ -243,6 +243,12 @@
 		} else if (e.key === 'Tab') {
 			open = false;
 			highlightIdx = -1;
+			// Cancel any pending debounced fetch and invalidate any
+			// in-flight request so a late response can't reopen the
+			// dropdown the user just dismissed.
+			clearTimer();
+			requestSeq++;
+			loading = false;
 		}
 	}
 

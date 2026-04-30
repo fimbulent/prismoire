@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n            COALESCE((SELECT theme FROM user_settings WHERE user_id = ?), 'rose-pine') AS \"theme!: String\",\n            COALESCE((SELECT font FROM user_settings WHERE user_id = ?), 'inter') AS \"font!: String\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "theme!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "font!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "bf3aeeedb6b2e229bfcd16389e73df3e185ad36d9e1708b1fbf4cefdfcbaabd3"
+}

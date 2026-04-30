@@ -117,6 +117,7 @@ pub struct UserExport {
 #[derive(Serialize)]
 pub struct SettingsExport {
     pub theme: String,
+    pub font: String,
 }
 
 #[derive(Serialize)]
@@ -269,13 +270,17 @@ pub async fn export_my_data(
         None
     };
 
-    let theme = sqlx::query!(
-        r#"SELECT COALESCE((SELECT theme FROM user_settings WHERE user_id = ?), 'rose-pine') AS "theme!: String""#,
+    let settings_row = sqlx::query!(
+        r#"SELECT
+            COALESCE((SELECT theme FROM user_settings WHERE user_id = ?), 'rose-pine') AS "theme!: String",
+            COALESCE((SELECT font FROM user_settings WHERE user_id = ?), 'inter') AS "font!: String""#,
+        user_id,
         user_id,
     )
     .fetch_one(db)
-    .await?
-    .theme;
+    .await?;
+    let theme = settings_row.theme;
+    let font = settings_row.font;
 
     let credential_rows = sqlx::query!(
         "SELECT id, credential_id, public_key, sign_count, created_at, last_used, label \
@@ -529,7 +534,7 @@ pub async fn export_my_data(
             suspended_until: user_row.suspended_until,
             deleted_at: user_row.deleted_at,
         },
-        settings: SettingsExport { theme },
+        settings: SettingsExport { theme, font },
         credentials,
         signing_keys,
         trust_edges_outbound,

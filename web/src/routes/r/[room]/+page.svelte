@@ -173,10 +173,10 @@
 									{/if}
 								</div>
 							{/if}
-							<div class="mb-1">
+							<div class="mb-1 max-w-measure">
 								<a
 									href={threadHref(thread)}
-									class="font-semibold text-text-primary no-underline hover:text-link hover:underline"
+									class="font-prose font-semibold text-text-primary no-underline hover:text-link hover:underline"
 									>{thread.title}</a
 								>
 								{#if thread.link_url}

@@ -1,8 +1,10 @@
 import { throwApiError, type FetchFn } from './auth';
 import type { ThemeId } from '$lib/themes';
+import type { FontId } from '$lib/fonts';
 
 export interface UserSettings {
 	theme: ThemeId;
+	font: FontId;
 }
 
 interface FetchOpts {

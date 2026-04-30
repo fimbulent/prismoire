@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT theme, font FROM user_settings WHERE user_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "theme",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "font",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "e9f2e46bd1f7916925d448b3fca712afe54fe3df3343df190806eca0253dc5f4"
+}

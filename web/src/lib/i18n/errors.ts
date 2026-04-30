@@ -102,6 +102,7 @@ const ERROR_MESSAGES: Record<ErrorCode, string> = {
 
 	// Settings
 	invalid_theme: 'Invalid theme.',
+	invalid_font: 'Invalid font.',
 
 	// Catch-all
 	bad_request: 'The request was invalid.',

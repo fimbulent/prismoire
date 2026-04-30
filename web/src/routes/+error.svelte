@@ -39,7 +39,7 @@
 		},
 		403: {
 			title: 'Out of reach',
-			body: 'This part of the network isn’t visible from where you stand in the trust graph.',
+			body: 'This part of the network isn’t visible to you.',
 			retry: false
 		},
 		404: {
@@ -54,7 +54,7 @@
 		},
 		500: {
 			title: 'Something broke',
-			body: 'An unexpected error occurred on our end. It’s been logged.',
+			body: 'An unexpected error occurred on our end.',
 			retry: true
 		},
 		503: {

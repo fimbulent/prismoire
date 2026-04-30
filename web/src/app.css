@@ -1,5 +1,105 @@
 @import 'tailwindcss';
 
+/* Self-hosted prose fonts.
+   Each family is a single Latin+latin-ext variable WOFF2 covering the
+   full weight axis, plus a matching italic file. Files live under
+   `static/fonts/<id>/` and are served from the same origin so no
+   cross-origin font fetch is needed. `font-display: swap` lets
+   prose render in the system fallback first and re-paint when the
+   web font arrives — better than hiding text on a slow connection.
+   Keep this list in sync with `src/lib/fonts.ts` and
+   `VALID_FONTS` in `server/src/settings.rs`. */
+
+@font-face {
+	font-family: 'Inter';
+	src: url('/fonts/inter/inter.woff2') format('woff2-variations');
+	font-weight: 100 900;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'Inter';
+	src: url('/fonts/inter/inter-italic.woff2') format('woff2-variations');
+	font-weight: 100 900;
+	font-style: italic;
+	font-display: swap;
+}
+
+@font-face {
+	font-family: 'IBM Plex Sans';
+	src: url('/fonts/ibm-plex-sans/ibm-plex-sans.woff2') format('woff2-variations');
+	font-weight: 100 700;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'IBM Plex Sans';
+	src: url('/fonts/ibm-plex-sans/ibm-plex-sans-italic.woff2') format('woff2-variations');
+	font-weight: 100 700;
+	font-style: italic;
+	font-display: swap;
+}
+
+@font-face {
+	font-family: 'Source Sans 3';
+	src: url('/fonts/source-sans-3/source-sans-3.woff2') format('woff2-variations');
+	font-weight: 200 900;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'Source Sans 3';
+	src: url('/fonts/source-sans-3/source-sans-3-italic.woff2') format('woff2-variations');
+	font-weight: 200 900;
+	font-style: italic;
+	font-display: swap;
+}
+
+@font-face {
+	font-family: 'Literata';
+	src: url('/fonts/literata/literata.woff2') format('woff2-variations');
+	font-weight: 200 900;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'Literata';
+	src: url('/fonts/literata/literata-italic.woff2') format('woff2-variations');
+	font-weight: 200 900;
+	font-style: italic;
+	font-display: swap;
+}
+
+@font-face {
+	font-family: 'Source Serif 4';
+	src: url('/fonts/source-serif-4/source-serif-4.woff2') format('woff2-variations');
+	font-weight: 200 900;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'Source Serif 4';
+	src: url('/fonts/source-serif-4/source-serif-4-italic.woff2') format('woff2-variations');
+	font-weight: 200 900;
+	font-style: italic;
+	font-display: swap;
+}
+
+@font-face {
+	font-family: 'Vollkorn';
+	src: url('/fonts/vollkorn/vollkorn.woff2') format('woff2-variations');
+	font-weight: 400 900;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'Vollkorn';
+	src: url('/fonts/vollkorn/vollkorn-italic.woff2') format('woff2-variations');
+	font-weight: 400 900;
+	font-style: italic;
+	font-display: swap;
+}
+
 /* Fixed top-nav and bottom-footer heights. Kept as CSS variables
    (rather than inline `style:` directives on the layout root) so no
    `style="..."` attribute is emitted — our CSP forbids
@@ -11,6 +111,45 @@
 :root {
 	--nav-height: 3.25rem;
 	--footer-height: 4rem;
+	/* Prose font default. Mirrors the inter face from `@font-face`
+	   above; per-user overrides are applied via `[data-font="…"]`
+	   blocks below. Consumed by `Markdown.svelte` (the only prose
+	   surface) — UI chrome continues to use `--font-sans`. */
+	--font-prose: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+/* Per-user prose-font overrides, keyed off the `data-font` attribute
+   on `<html>` (set server-side in `src/hooks.server.ts` via
+   `transformPageChunk` and flipped client-side by `applyFont` in
+   `src/lib/fonts.ts`). Each block only sets `--font-prose`; UI
+   chrome keeps using `--font-sans`. Each fallback stack matches the
+   family's category (sans-serif vs serif). */
+[data-font='inter'] {
+	--font-prose: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+[data-font='ibm-plex-sans'] {
+	--font-prose: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+[data-font='source-sans-3'] {
+	--font-prose: 'Source Sans 3', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+[data-font='literata'] {
+	--font-prose: 'Literata', Georgia, 'Times New Roman', serif;
+}
+[data-font='source-serif-4'] {
+	--font-prose: 'Source Serif 4', Georgia, 'Times New Roman', serif;
+}
+[data-font='vollkorn'] {
+	--font-prose: 'Vollkorn', Georgia, 'Times New Roman', serif;
+}
+
+/* Utility for surfaces that should pick up the user's chosen prose
+   font (thread titles, body textareas, bio editor, etc.). Mirrors the
+   pattern in `Markdown.svelte`, which renders rendered post bodies in
+   `var(--font-prose)`; applying this class to the *editor* surfaces
+   keeps WYSIWYG-ish parity between authoring and reading views. */
+.font-prose {
+	font-family: var(--font-prose);
 }
 
 @theme {
@@ -39,6 +178,14 @@
 
 	--font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 	--font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+
+	/* Reading measure for body prose — ~70ch lands at ~90 visible
+	   characters in Inter (the `ch` unit measures the "0" glyph, which
+	   is wider than the average prose character by ~1.28×). Applied
+	   inside chrome-width containers (e.g. the OP card) so the visual
+	   frame stays wide while running text stays readable. Use via
+	   `max-w-measure` on a wrapper. */
+	--container-measure: 70ch;
 }
 
 /* Trust color interpolation: themes only need --trust-direct and --trust-3hop.

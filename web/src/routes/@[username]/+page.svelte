@@ -558,7 +558,7 @@
 			<div transition:slide={{ duration: 150 }} class="mb-5">
 				<textarea
 					bind:value={bioText}
-					class="w-full bg-bg-surface-raised border border-border-subtle rounded-md px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent resize-none"
+					class="w-full bg-bg-surface-raised border border-border-subtle rounded-md px-3 py-2 text-sm text-text-primary font-prose focus:outline-none focus:border-accent resize-none"
 					rows={3}
 					maxlength={500}
 					placeholder="Write a short bio…"
@@ -875,36 +875,38 @@
 	{:else}
 		<div class="space-y-3 mb-6">
 			{#each activityItems as item (item.post_id + item.created_at)}
-				<div class="bg-bg-surface border border-border rounded-md p-4">
-					<div class="flex items-center gap-2 text-xs text-text-muted mb-1">
+				<div class="bg-bg-surface border border-border rounded-md p-4 md:flex md:gap-6">
+					<div class="flex items-center gap-2 text-xs text-text-muted mb-1 md:mb-0 md:flex-col md:items-start md:gap-1 md:w-40 md:shrink-0">
 						{#if item.type === 'thread_started'}
 							<span>Started thread in</span>
-								{#if viewerRestricted}
-									<span class="text-text-secondary">{item.room_slug}</span>
-								{:else}
-									<a href="/r/{item.room_slug}" class="text-link hover:underline">{item.room_slug}</a>
-								{/if}
+							{#if viewerRestricted}
+								<span class="text-text-secondary">{item.room_slug}</span>
 							{:else}
-								<span>Replied in</span>
-								{#if viewerRestricted}
-									<span class="text-text-secondary">{item.thread_title}</span>
-								{:else}
-									<a href="/r/{item.room_slug}/{item.thread_id}?post={item.post_id}" class="text-link hover:underline">{item.thread_title}</a>
-								{/if}
+								<a href="/r/{item.room_slug}" class="text-link hover:underline">{item.room_slug}</a>
 							{/if}
-							<span class="ml-auto">{relativeTime(item.created_at)}</span>
-						</div>
+						{:else}
+							<span>Replied in</span>
+							{#if viewerRestricted}
+								<span class="text-text-secondary">{item.thread_title}</span>
+							{:else}
+								<a href="/r/{item.room_slug}/{item.thread_id}?post={item.post_id}" class="text-link hover:underline">{item.thread_title}</a>
+							{/if}
+						{/if}
+						<span class="ml-auto md:ml-0">{relativeTime(item.created_at)}</span>
+					</div>
+					<div class="md:max-w-measure md:flex-1 md:min-w-0">
 						{#if item.type === 'thread_started'}
 							{#if viewerRestricted}
-								<span class="text-[0.95rem] text-text-primary font-medium leading-snug">{item.thread_title}</span>
+								<span class="font-prose text-[0.95rem] text-text-primary font-medium leading-snug">{item.thread_title}</span>
 							{:else}
-								<a href="/r/{item.room_slug}/{item.thread_id}" class="text-[0.95rem] text-text-primary hover:underline font-medium leading-snug">{item.thread_title}</a>
+								<a href="/r/{item.room_slug}/{item.thread_id}" class="font-prose text-[0.95rem] text-text-primary hover:underline font-medium leading-snug">{item.thread_title}</a>
 							{/if}
 						{/if}
 						<div class="text-[0.95rem] leading-7 text-text-secondary mt-1">
 							<Markdown source={item.body} profile={item.type === 'thread_started' ? 'full' : 'reply'} />
 						</div>
 					</div>
+				</div>
 				{/each}
 
 			{#if activityCursor}

@@ -5,6 +5,7 @@ export interface SessionInfo {
 	display_name: string;
 	role: string;
 	theme: string;
+	font: string;
 	/** Account status. `banned`/`suspended` users are locked into a restricted
 	 * UI showing only their own profile and settings. */
 	status: UserStatus;
@@ -103,6 +104,7 @@ export type ErrorCode =
 	| 'self_report'
 	// Settings
 	| 'invalid_theme'
+	| 'invalid_font'
 	// Catch-all
 	| 'bad_request'
 	| 'rate_limited'

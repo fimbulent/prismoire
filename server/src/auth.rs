@@ -59,6 +59,7 @@ pub struct SessionResponse {
     pub display_name: String,
     pub role: String,
     pub theme: String,
+    pub font: String,
     /// Account status (`active`, `suspended`, or `banned`). The frontend
     /// branches on this to lock the UI into a restricted profile-only view
     /// for suspended/banned users.
@@ -74,12 +75,19 @@ impl SessionResponse {
     /// Build a [`SessionResponse`] for a user newly authenticated or signing up.
     /// Freshly created accounts are always active; callers that may be handling
     /// a restricted login should use [`SessionResponse::new`] instead.
-    pub fn active(user_id: String, display_name: String, role: String, theme: String) -> Self {
+    pub fn active(
+        user_id: String,
+        display_name: String,
+        role: String,
+        theme: String,
+        font: String,
+    ) -> Self {
         Self {
             user_id,
             display_name,
             role,
             theme,
+            font,
             status: UserStatus::Active,
             suspended_until: None,
         }
@@ -93,6 +101,7 @@ impl SessionResponse {
         display_name: String,
         role: String,
         theme: String,
+        font: String,
         status: UserStatus,
         suspended_until: Option<String>,
     ) -> Self {
@@ -101,6 +110,7 @@ impl SessionResponse {
             display_name,
             role,
             theme,
+            font,
             status,
             suspended_until: if status == UserStatus::Suspended {
                 suspended_until
@@ -343,6 +353,7 @@ pub async fn signup_complete(
             display_name,
             "user".into(),
             crate::settings::DEFAULT_THEME.into(),
+            crate::settings::DEFAULT_FONT.into(),
         )),
     ))
 }
@@ -487,7 +498,7 @@ pub async fn login_complete(
     let mut headers = HeaderMap::new();
     headers.insert(SET_COOKIE, session_cookie(&token).parse().unwrap());
 
-    let theme = crate::settings::get_user_theme(&state.db, &user_id).await?;
+    let (theme, font) = crate::settings::get_user_settings(&state.db, &user_id).await?;
 
     Ok((
         headers,
@@ -496,6 +507,7 @@ pub async fn login_complete(
             display_name,
             role,
             theme,
+            font,
             status,
             suspended_until,
         )),
@@ -620,7 +632,7 @@ pub async fn discover_complete(
 
     update_credential_counter(&state.db, &user_id, &auth_result).await?;
 
-    let theme = crate::settings::get_user_theme(&state.db, &user_id).await?;
+    let (theme, font) = crate::settings::get_user_settings(&state.db, &user_id).await?;
 
     let token = create_session(&state.db, &user_id).await?;
     let mut headers = HeaderMap::new();
@@ -633,6 +645,7 @@ pub async fn discover_complete(
             display_name,
             role,
             theme,
+            font,
             status,
             suspended_until,
         )),
@@ -686,12 +699,13 @@ pub async fn session_info(
     State(state): State<Arc<AppState>>,
     user: RestrictedAuthUser,
 ) -> Result<Json<SessionResponse>, AppError> {
-    let theme = crate::settings::get_user_theme(&state.db, &user.user_id).await?;
+    let (theme, font) = crate::settings::get_user_settings(&state.db, &user.user_id).await?;
     Ok(Json(SessionResponse::new(
         user.user_id,
         user.display_name,
         user.role,
         theme,
+        font,
         user.status,
         user.suspended_until,
     )))

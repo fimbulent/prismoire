@@ -3,6 +3,7 @@
 
 import type { SessionInfo } from '$lib/api/auth';
 import type { ThemeId } from '$lib/themes';
+import type { FontId } from '$lib/fonts';
 
 declare global {
 	namespace App {
@@ -25,6 +26,15 @@ declare global {
 			 * populate `session.theme` without a second API call.
 			 */
 			theme: ThemeId;
+			/**
+			 * Prose-font id resolved for the current request. Same
+			 * lifecycle as `theme` — seeded with the default in
+			 * `handle`, overridden from the session in
+			 * `+layout.server.ts`, written into `<html data-font="…">`
+			 * by `transformPageChunk` so SSR renders post-body prose
+			 * in the user's chosen face on first byte.
+			 */
+			font: FontId;
 		}
 		/**
 		 * Shape of the data returned by the root `+layout.server.ts`

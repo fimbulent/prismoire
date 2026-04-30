@@ -220,6 +220,8 @@ pub enum ErrorCode {
     // -- Settings ----------------------------------------------------
     /// Theme identifier is not in the allowed set.
     InvalidTheme,
+    /// Prose font identifier is not in the allowed set.
+    InvalidFont,
 
     // -- Favorites ---------------------------------------------------
     /// User already has the maximum number of favorite rooms.
@@ -318,6 +320,7 @@ impl ErrorCode {
             | Self::ReportReasonInvalid
             | Self::SelfReport
             | Self::InvalidTheme
+            | Self::InvalidFont
             | Self::InvalidDuration
             | Self::ConfirmationMismatch
             | Self::BadRequest => StatusCode::BAD_REQUEST,
@@ -403,6 +406,7 @@ impl ErrorCode {
             Self::SelfReport => "you cannot report your own post",
 
             Self::InvalidTheme => "invalid theme",
+            Self::InvalidFont => "invalid font",
 
             Self::FavoriteCapExceeded => "favorite rooms limit reached",
             Self::FavoriteSetMismatch => "favorite rooms changed in another tab; please refetch",

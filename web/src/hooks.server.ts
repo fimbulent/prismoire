@@ -19,6 +19,7 @@ import { env } from '$env/dynamic/private';
 import { ApiRequestError } from '$lib/api/auth';
 import { routeMetrics } from '$lib/server/route-metrics';
 import { DEFAULT_THEME } from '$lib/themes';
+import { DEFAULT_FONT } from '$lib/fonts';
 
 const API_URL = env.API_URL ?? 'http://127.0.0.1:3000';
 
@@ -37,17 +38,25 @@ export const handleFetch: HandleFetch = async ({ event, request, fetch }) => {
 	return fetch(request);
 };
 
-// Root `<html>` placeholder substituted via `transformPageChunk`.
-// Kept as a narrow, well-known token so the replacement is O(1) and
-// scoped strictly to the `data-theme` attribute on the outer `<html>`
-// tag emitted by `src/app.html`.
+// Root `<html>` placeholders substituted via `transformPageChunk`.
+// Kept as narrow, well-known tokens so each replacement is O(1) and
+// scoped strictly to a single attribute on the outer `<html>` tag
+// emitted by `src/app.html`.
 const THEME_PLACEHOLDER = '%theme%';
+const FONT_PLACEHOLDER = '%font%';
+
+/** Apply both `<html>` attribute substitutions in one pass per chunk. */
+function applyRootChunkSubstitutions(html: string, theme: string, font: string): string {
+	return html.replace(THEME_PLACEHOLDER, theme).replace(FONT_PLACEHOLDER, font);
+}
 
 export const handle: Handle = async ({ event, resolve }) => {
-	// Default until the root layout load resolves the session-backed
-	// theme. `event.locals.theme` is mutable from `+layout.server.ts`
-	// and read (just below) after the loads have run.
+	// Defaults until the root layout load resolves the session-backed
+	// values. `event.locals.theme` and `event.locals.font` are mutable
+	// from `+layout.server.ts` and read (just below) after the loads
+	// have run.
 	event.locals.theme = DEFAULT_THEME;
+	event.locals.font = DEFAULT_FONT;
 
 	// Skip metrics for unmatched routes (`event.route.id === null`):
 	// static assets, prerendered files, and 404s. Bucketing those
@@ -55,7 +64,8 @@ export const handle: Handle = async ({ event, resolve }) => {
 	// diagnostic value. Matched-route handling continues below.
 	if (event.route.id === null) {
 		return resolve(event, {
-			transformPageChunk: ({ html }) => html.replace(THEME_PLACEHOLDER, event.locals.theme)
+			transformPageChunk: ({ html }) =>
+				applyRootChunkSubstitutions(html, event.locals.theme, event.locals.font)
 		});
 	}
 
@@ -96,7 +106,8 @@ export const handle: Handle = async ({ event, resolve }) => {
 	let status = 500;
 	try {
 		const response = await resolve(event, {
-			transformPageChunk: ({ html }) => html.replace(THEME_PLACEHOLDER, event.locals.theme)
+			transformPageChunk: ({ html }) =>
+				applyRootChunkSubstitutions(html, event.locals.theme, event.locals.font)
 		});
 		status = response.status;
 		return response;
