@@ -107,7 +107,7 @@
 		}
 	}
 
-	let heading = $derived(isAll ? 'All threads' : room?.slug ?? page.params.room ?? '');
+	let heading = $derived(isAll ? 'all' : room?.slug ?? page.params.room ?? '');
 
 	function threadHref(thread: ThreadSummary): string {
 		return `/r/${encodeURIComponent(thread.room_slug)}/${thread.id}`;
@@ -176,7 +176,7 @@
 							<div class="mb-1 max-w-measure">
 								<a
 									href={threadHref(thread)}
-									class="font-prose font-semibold text-text-primary no-underline hover:text-link hover:underline"
+									class="font-prose text-prose leading-snug font-semibold text-text-primary no-underline hover:text-link hover:underline"
 									>{thread.title}</a
 								>
 								{#if thread.link_url}
@@ -192,7 +192,7 @@
 								{/if}
 							</div>
 							<div class="flex items-center gap-2 text-xs text-text-muted">
-								<UserName name={thread.author_name} viewer={thread.viewer} compact linked={session.isLoggedIn} />
+								<UserName name={thread.author_name} viewer={thread.viewer} compact muted linked={session.isLoggedIn} />
 								<span>&middot;</span>
 								<span>{relativeTime(thread.last_activity ?? thread.created_at)}</span>
 								<span>&middot;</span>

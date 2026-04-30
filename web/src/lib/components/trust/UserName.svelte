@@ -7,10 +7,11 @@
 		name: string;
 		viewer?: UserViewerInfo;
 		compact?: boolean;
+		muted?: boolean;
 		linked?: boolean;
 	}
 
-	let { name, viewer, compact = false, linked = true }: Props = $props();
+	let { name, viewer, compact = false, muted = false, linked = true }: Props = $props();
 
 	let isSelf = $derived(session.user?.display_name === name);
 	let status = $derived(viewer?.status);
@@ -18,10 +19,17 @@
 	// Only rendered for non-self, non-deleted users — matches the
 	// server-side suppression rules in `UserViewerInfo::build`.
 	let tag = $derived(viewer?.tag ?? null);
+
+	// Muted mode dials the username back to medium weight + secondary
+	// color so it recedes into chrome rather than competing with
+	// adjacent content.
+	let nameClass = $derived(
+		muted ? 'font-medium text-text-secondary' : 'font-semibold text-text-primary'
+	);
 </script>
 
 {#if isSelf}
-	<a href="/@{encodeURIComponent(name)}" class="font-semibold text-text-primary bg-bg-surface-raised px-2 py-0.5 rounded border border-border hover:border-accent-muted transition-colors">{name}</a>
+	<a href="/@{encodeURIComponent(name)}" class="{nameClass} bg-bg-surface-raised px-2 py-0.5 rounded border border-border hover:border-accent-muted transition-colors">{name}</a>
 {:else if status === 'deleted'}
 	<!-- Deleted users: render as an inert, muted chip (no link, no trust badge).
 	     The display name is already anonymised server-side to `deleted-<hex>`,
@@ -29,7 +37,7 @@
 	<span class="font-semibold text-text-muted italic line-through">{name}</span>
 	<span class="status-badge status-badge-deleted text-xs font-semibold px-1 py-0.5 rounded">deleted</span>
 {:else if linked}
-	<a href="/@{encodeURIComponent(name)}" class="font-semibold text-text-primary hover:underline {status ? 'line-through opacity-60' : ''}">{name}</a>
+	<a href="/@{encodeURIComponent(name)}" class="{nameClass} hover:underline {status ? 'line-through opacity-60' : ''}">{name}</a>
 	{#if tag}
 		<span class="text-xs text-text-muted italic" title="Your private tag for this user">({tag})</span>
 	{/if}
@@ -41,7 +49,7 @@
 		<TrustBadge {viewer} {compact} />
 	{/if}
 {:else}
-	<span class="font-semibold text-text-primary">{name}</span>
+	<span class={nameClass}>{name}</span>
 {/if}
 
 <style>

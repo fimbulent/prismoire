@@ -260,7 +260,7 @@
 					: 'Write your post in Markdown...'}
 				rows={kind === 'link' ? 5 : 10}
 				disabled={submitting}
-				class="w-full bg-bg-surface border border-border rounded-md text-text-primary text-sm font-prose px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted resize-y leading-relaxed"
+				class="w-full bg-bg-surface border border-border rounded-md text-text-primary text-prose font-prose px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted resize-y"
 				class:border-danger={bodyLen > MAX_BODY}
 			></textarea>
 			<div class="flex items-center justify-between mt-1">

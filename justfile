@@ -97,3 +97,26 @@ admin-grant user_id:
 # Revoke admin role from a user
 admin-revoke user_id:
     cargo run -p prismoire -- admin revoke {{user_id}}
+
+# Codepoint coverage for self-hosted prose fonts. Recovered from the union
+# of the existing subsetted WOFF2s under web/static/fonts/*/. Roughly
+# Google Fonts latin + latin-ext + vietnamese, plus a few extras (Latin
+# Extended-C/D, currency, arrows, minus/division). Over-requesting is
+# safe — pyftsubset silently skips codepoints the source font lacks.
+font_unicodes := "U+0000,U+000D,U+0020-007E,U+00A0-024F,U+0259,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+1E00-1E9B,U+1E9D-1EFF,U+2000-200D,U+2010-2029,U+202F-2055,U+2057,U+205D,U+205F,U+2074,U+20A0-20AF,U+20B1-20B5,U+20B8-20BA,U+20BC-20BF,U+2113,U+2122,U+2191,U+2193,U+2212,U+2215,U+2C60-2C62,U+2C65-2C66,U+2C71,U+2C7C-2C7D,U+2C7F,U+A722-A725,U+A74E-A74F,U+A75A-A75B,U+A764-A765,U+A779-A787,U+A789,U+A7AD-A7AE,U+A7B3,U+A7B5,U+A7F2-A7F4,U+A7FF,U+FEFF,U+FFFD"
+
+# Subset a TTF/OTF to Latin+latin-ext and re-encode as WOFF2 (Brotli).
+# Preserves OpenType layout features and TrueType bytecode hints.
+# Use after dropping a new font release in: replace the matching file under
+# web/static/fonts/<family>/ with the output, then update @font-face in
+# web/src/app.css if the weight/style coverage changed.
+#
+# Example:
+#   just font-subset ~/Downloads/vollkorn-4.105/TTF/Vollkorn-Regular.ttf \
+#       web/static/fonts/vollkorn/vollkorn.woff2
+font-subset src dst:
+    pyftsubset "{{src}}" \
+        --flavor=woff2 \
+        --layout-features='*' \
+        --unicodes='{{font_unicodes}}' \
+        --output-file="{{dst}}"

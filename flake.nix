@@ -186,6 +186,11 @@
             nodejs_22
             nodePackages.pnpm
             mkcert
+            # `just font-subset` invokes pyftsubset, which needs the
+            # brotli module to emit WOFF2. The system pyftsubset (e.g.
+            # ~/.nix-profile) often lacks brotli, so we ship a Python
+            # with both bundled to make the recipe self-contained.
+            (python3.withPackages (ps: [ ps.fonttools ps.brotli ]))
           ];
         };
       });

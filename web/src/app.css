@@ -85,17 +85,38 @@
 	font-display: swap;
 }
 
+/* Vollkorn ships as static per-weight cuts (not a variable axis) because
+   the official 4.105 release is fully bytecode-hinted, while the variable
+   build is not — and serifs at body sizes on standard-DPI displays really
+   do show the difference. We carry only the weights actually used in the
+   prose stack: 400 (Regular) and 600 (`<strong>`), each with an italic
+   counterpart. Other weights synthesize faux-bold from these, which is
+   acceptable because nothing in the app currently asks for them. */
 @font-face {
 	font-family: 'Vollkorn';
-	src: url('/fonts/vollkorn/vollkorn.woff2') format('woff2-variations');
-	font-weight: 400 900;
+	src: url('/fonts/vollkorn/vollkorn.woff2') format('woff2');
+	font-weight: 400;
 	font-style: normal;
 	font-display: swap;
 }
 @font-face {
 	font-family: 'Vollkorn';
-	src: url('/fonts/vollkorn/vollkorn-italic.woff2') format('woff2-variations');
-	font-weight: 400 900;
+	src: url('/fonts/vollkorn/vollkorn-italic.woff2') format('woff2');
+	font-weight: 400;
+	font-style: italic;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'Vollkorn';
+	src: url('/fonts/vollkorn/vollkorn-semibold.woff2') format('woff2');
+	font-weight: 600;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'Vollkorn';
+	src: url('/fonts/vollkorn/vollkorn-semibold-italic.woff2') format('woff2');
+	font-weight: 600;
 	font-style: italic;
 	font-display: swap;
 }
@@ -111,11 +132,6 @@
 :root {
 	--nav-height: 3.25rem;
 	--footer-height: 4rem;
-	/* Prose font default. Mirrors the inter face from `@font-face`
-	   above; per-user overrides are applied via `[data-font="…"]`
-	   blocks below. Consumed by `Markdown.svelte` (the only prose
-	   surface) — UI chrome continues to use `--font-sans`. */
-	--font-prose: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }
 
 /* Per-user prose-font overrides, keyed off the `data-font` attribute
@@ -123,7 +139,10 @@
    `transformPageChunk` and flipped client-side by `applyFont` in
    `src/lib/fonts.ts`). Each block only sets `--font-prose`; UI
    chrome keeps using `--font-sans`. Each fallback stack matches the
-   family's category (sans-serif vs serif). */
+   family's category (sans-serif vs serif). The `inter` block is
+   redundant with the default declared in `@theme` below, but is
+   listed here for symmetry — operators reading this file can see the
+   complete switch table without having to cross-reference. */
 [data-font='inter'] {
 	--font-prose: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }
@@ -141,15 +160,6 @@
 }
 [data-font='vollkorn'] {
 	--font-prose: 'Vollkorn', Georgia, 'Times New Roman', serif;
-}
-
-/* Utility for surfaces that should pick up the user's chosen prose
-   font (thread titles, body textareas, bio editor, etc.). Mirrors the
-   pattern in `Markdown.svelte`, which renders rendered post bodies in
-   `var(--font-prose)`; applying this class to the *editor* surfaces
-   keeps WYSIWYG-ish parity between authoring and reading views. */
-.font-prose {
-	font-family: var(--font-prose);
 }
 
 @theme {
@@ -178,6 +188,22 @@
 
 	--font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 	--font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+	/* Prose font family. Declaring it here makes Tailwind generate a
+	   `font-prose` utility (`font-family: var(--font-prose)`); the
+	   per-user override comes from the `[data-font="…"]` blocks above
+	   (higher specificity than `:root`), so the same utility resolves
+	   to whatever face the viewer chose. */
+	--font-prose: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+
+	/* Long-form body type token — 17px / 1.65 line-height per the
+	   `docs/typography.md` §3 sweet spot. Tailwind v4 emits both
+	   `font-size` and `line-height` from the paired `--text-*` /
+	   `--text-*--line-height` declaration, so a single `text-prose`
+	   utility covers both. Used on rendered Markdown and on the
+	   matching editor surfaces (textareas) so author-side type
+	   matches reader-side. */
+	--text-prose: 1.0625rem;
+	--text-prose--line-height: 1.65;
 
 	/* Reading measure for body prose — ~70ch lands at ~90 visible
 	   characters in Inter (the `ch` unit measures the "0" glyph, which

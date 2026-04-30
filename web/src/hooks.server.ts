@@ -39,15 +39,17 @@ export const handleFetch: HandleFetch = async ({ event, request, fetch }) => {
 };
 
 // Root `<html>` placeholders substituted via `transformPageChunk`.
-// Kept as narrow, well-known tokens so each replacement is O(1) and
-// scoped strictly to a single attribute on the outer `<html>` tag
-// emitted by `src/app.html`.
+// Kept as narrow, well-known tokens. `%font%` appears more than once
+// in `src/app.html` (the `<html data-font="…">` attribute and the
+// preload `href`), so font substitution uses `replaceAll`. `%theme%`
+// only appears once today, but using `replaceAll` for both keeps the
+// helper symmetric and forgiving of future edits to `app.html`.
 const THEME_PLACEHOLDER = '%theme%';
 const FONT_PLACEHOLDER = '%font%';
 
 /** Apply both `<html>` attribute substitutions in one pass per chunk. */
 function applyRootChunkSubstitutions(html: string, theme: string, font: string): string {
-	return html.replace(THEME_PLACEHOLDER, theme).replace(FONT_PLACEHOLDER, font);
+	return html.replaceAll(THEME_PLACEHOLDER, theme).replaceAll(FONT_PLACEHOLDER, font);
 }
 
 export const handle: Handle = async ({ event, resolve }) => {

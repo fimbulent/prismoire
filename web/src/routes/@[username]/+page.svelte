@@ -558,7 +558,7 @@
 			<div transition:slide={{ duration: 150 }} class="mb-5">
 				<textarea
 					bind:value={bioText}
-					class="w-full bg-bg-surface-raised border border-border-subtle rounded-md px-3 py-2 text-sm text-text-primary font-prose focus:outline-none focus:border-accent resize-none"
+					class="w-full bg-bg-surface-raised border border-border-subtle rounded-md px-3 py-2 text-prose text-text-primary font-prose focus:outline-none focus:border-accent resize-none"
 					rows={3}
 					maxlength={500}
 					placeholder="Write a short bio…"
@@ -580,7 +580,7 @@
 				</div>
 			</div>
 		{:else if profile.bio}
-			<div class="text-[0.95rem] leading-7 text-text-secondary mb-5">
+			<div class="text-prose leading-7 text-text-secondary mb-5">
 				<Markdown source={profile.bio} profile="bio" />
 			</div>
 			{#if profile.is_self && !viewerRestricted}
@@ -897,12 +897,12 @@
 					<div class="md:max-w-measure md:flex-1 md:min-w-0">
 						{#if item.type === 'thread_started'}
 							{#if viewerRestricted}
-								<span class="font-prose text-[0.95rem] text-text-primary font-medium leading-snug">{item.thread_title}</span>
+								<span class="font-prose text-prose text-text-primary font-medium leading-snug">{item.thread_title}</span>
 							{:else}
-								<a href="/r/{item.room_slug}/{item.thread_id}" class="font-prose text-[0.95rem] text-text-primary hover:underline font-medium leading-snug">{item.thread_title}</a>
+								<a href="/r/{item.room_slug}/{item.thread_id}" class="font-prose text-prose text-text-primary hover:underline font-medium leading-snug">{item.thread_title}</a>
 							{/if}
 						{/if}
-						<div class="text-[0.95rem] leading-7 text-text-secondary mt-1">
+						<div class="text-prose leading-7 text-text-secondary mt-1">
 							<Markdown source={item.body} profile={item.type === 'thread_started' ? 'full' : 'reply'} />
 						</div>
 					</div>

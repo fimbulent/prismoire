@@ -192,8 +192,11 @@
 
 <svelte:document onclick={handleClickOutside} />
 
-<!-- Header -->
-<div class="flex items-center gap-2 mb-2 text-sm">
+<!-- Header. The OP gets a wider gap below so the title + author block
+     reads as the post's masthead before the body starts. Replies use a
+     tighter gap because their headers already sit visually paired with
+     the immediately-following short body. -->
+<div class="flex items-center gap-2 {post.parent_id === null ? 'mb-4' : 'mb-2'} text-sm">
 	<UserName name={post.author_name} viewer={post.viewer} linked={session.isLoggedIn} />
 	{#if post.distrust_scaffold}
 		<span

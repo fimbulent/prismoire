@@ -379,7 +379,7 @@
 		<!-- OP -->
 		<div class="bg-bg-surface border border-border rounded-md p-5 mb-6">
 			<div class="max-w-measure mx-auto">
-			<h1 class="font-prose text-2xl font-bold leading-tight mb-2 flex items-center gap-2">
+			<h1 class="font-prose text-3xl font-bold leading-tight mb-2 flex items-center gap-2">
 				{thread.title}
 				{#if thread.is_announcement}
 					<Badge>Public</Badge>
@@ -571,7 +571,7 @@
 			<div class="bg-bg-surface border border-border rounded-md p-3 focus-within:border-accent-muted">
 			<textarea
 				bind:value={topLevelBody}
-				class="block w-full max-w-measure mx-auto min-h-24 bg-transparent text-text-primary font-prose text-sm field-sizing:content resize-none leading-relaxed focus:outline-none placeholder:text-text-muted"
+				class="block w-full max-w-measure mx-auto min-h-24 bg-transparent text-text-primary font-prose text-prose field-sizing:content resize-none focus:outline-none placeholder:text-text-muted"
 				placeholder="Reply to thread..."
 			></textarea>
 			{#if topLevelError}
