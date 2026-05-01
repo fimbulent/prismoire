@@ -44,7 +44,7 @@ export const fonts: FontMeta[] = [
 	{ id: 'vollkorn', name: 'Vollkorn', category: 'serif' }
 ];
 
-export const DEFAULT_FONT: FontId = 'inter';
+export const DEFAULT_FONT: FontId = 'vollkorn';
 
 /**
  * Apply a prose font in the browser by flipping the `data-font`

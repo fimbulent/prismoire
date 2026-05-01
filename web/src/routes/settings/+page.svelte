@@ -3,13 +3,11 @@
 	import { updateSettings } from '$lib/api/settings';
 	import { exportMyData, deleteMyAccount } from '$lib/api/privacy';
 	import { errorMessage } from '$lib/i18n/errors';
+	import { toast } from '$lib/components/ui/toast.svelte';
 	import { theme } from '$lib/stores/theme.svelte';
 	import { themes, type ThemeId } from '$lib/themes';
 	import { font } from '$lib/stores/font.svelte';
 	import { fonts, type FontId } from '$lib/fonts';
-
-	let savedId = $state<ThemeId | null>(null);
-	let savedFontId = $state<FontId | null>(null);
 
 	let exporting = $state(false);
 	let exportError = $state<string | null>(null);
@@ -23,12 +21,9 @@
 		theme.set(id);
 		try {
 			await updateSettings({ theme: id });
-			savedId = id;
-			setTimeout(() => {
-				if (savedId === id) savedId = null;
-			}, 1500);
-		} catch {
-			// Silently fail — the theme is already applied visually
+			toast.success('Theme saved.');
+		} catch (e) {
+			toast.error(errorMessage(e, 'Failed to save theme.'));
 		}
 	}
 
@@ -36,12 +31,9 @@
 		font.set(id);
 		try {
 			await updateSettings({ font: id });
-			savedFontId = id;
-			setTimeout(() => {
-				if (savedFontId === id) savedFontId = null;
-			}, 1500);
-		} catch {
-			// Silently fail — the font is already applied visually
+			toast.success('Font saved.');
+		} catch (e) {
+			toast.error(errorMessage(e, 'Failed to save font.'));
 		}
 	}
 
@@ -110,7 +102,7 @@
 
 	<section>
 		<h2 class="text-sm font-semibold text-text-secondary mb-3">Theme</h2>
-		<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+		<div class="grid grid-cols-2 lg:grid-cols-3 gap-3">
 			{#each themes as t (t.id)}
 				<button
 					onclick={() => selectTheme(t.id)}
@@ -136,9 +128,6 @@
 					</div>
 					<div class="text-sm text-text-primary">
 						{t.name}
-						{#if theme.current === t.id && savedId === t.id}
-							<span class="text-xs text-success ml-1">Saved</span>
-						{/if}
 					</div>
 				</button>
 			{/each}
@@ -150,7 +139,7 @@
 		<p class="text-xs text-text-muted mb-3">
 			Applies to post content only — interface elements keep the default UI font.
 		</p>
-		<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+		<div class="grid grid-cols-2 lg:grid-cols-3 gap-3">
 			{#each fonts as f (f.id)}
 				<button
 					onclick={() => selectFont(f.id)}
@@ -166,9 +155,6 @@
 					<div class="text-sm text-text-primary mt-2">
 						{f.name}
 						<span class="text-xs text-text-muted ml-1">{f.category === 'serif' ? 'Serif' : 'Sans'}</span>
-						{#if font.current === f.id && savedFontId === f.id}
-							<span class="text-xs text-success ml-1">Saved</span>
-						{/if}
 					</div>
 				</button>
 			{/each}

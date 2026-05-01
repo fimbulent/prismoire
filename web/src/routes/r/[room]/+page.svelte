@@ -174,7 +174,7 @@
 									{/if}
 								</div>
 							{/if}
-							<div class="mb-1 max-w-measure text-balance">
+							<div class="mb-1 max-w-measure">
 								<a
 									href={threadHref(thread)}
 									class="font-prose text-prose leading-snug font-semibold text-text-primary no-underline hover:text-link hover:underline"

@@ -918,7 +918,7 @@
 						{/if}
 						<span class="ml-auto md:ml-0">{relativeTime(item.created_at)}</span>
 					</div>
-					<div class="md:max-w-measure md:flex-1 md:min-w-0 text-balance">
+					<div class="md:max-w-measure md:flex-1 md:min-w-0">
 						{#if item.type === 'thread_started'}
 							{#if viewerRestricted}
 								<span class="font-prose text-prose text-text-primary font-medium leading-snug">{smartypants(item.thread_title)}</span>

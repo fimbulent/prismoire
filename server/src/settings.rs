@@ -49,7 +49,7 @@ const VALID_FONTS: &[&str] = &[
     "vollkorn",
 ];
 
-pub const DEFAULT_FONT: &str = "inter";
+pub const DEFAULT_FONT: &str = "vollkorn";
 
 // ---------------------------------------------------------------------------
 // Response types

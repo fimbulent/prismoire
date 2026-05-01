@@ -87,8 +87,9 @@
 		line-height: 1.25;
 		margin-bottom: 0.5em;
 		color: var(--text-primary);
-		/* Balance multi-line headings so the last line isn't a stub. */
-		text-wrap: balance;
+		/* Avoid one-word last lines (widows) without recomputing earlier
+		   break points the way `balance` does. */
+		text-wrap: pretty;
 	}
 
 	/* 1.200 scale, capped one step below the natural ladder: in-body
