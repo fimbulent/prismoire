@@ -192,25 +192,40 @@
 									</a>
 								{/if}
 							</div>
-							<div class="flex items-center gap-2 text-xs text-text-muted">
-								<UserName name={thread.author_name} viewer={thread.viewer} compact muted linked={session.isLoggedIn} />
-								<span>&middot;</span>
-								<span>{relativeTime(thread.last_activity ?? thread.created_at)}</span>
-								<span>&middot;</span>
-								<a
-									href={threadHref(thread)}
-									class="no-underline hover:text-text-secondary hover:underline"
-									>{thread.reply_count}
-									{thread.reply_count === 1 ? 'reply' : 'replies'}</a
-								>
-								{#if isAll}
+							<!--
+								Two-atom layout: [username] [time · replies · room].
+								`flex-wrap` lets the row break onto a second line on
+								narrow viewports, and the only valid break point is
+								between the two children — the right group is wrapped
+								in `whitespace-nowrap` so time/replies/room stay
+								together and never break mid-content (e.g. avoiding
+								"5\nreplies"). No middot between username and time:
+								the `gap-x-2` carries the visual separation and
+								avoids an orphan separator on wrap (CSS can't
+								suppress a leading separator only when wrapped).
+							-->
+							<div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-text-muted">
+								<span class="whitespace-nowrap">
+									<UserName name={thread.author_name} viewer={thread.viewer} compact muted linked={session.isLoggedIn} />
+								</span>
+								<div class="inline-flex items-center gap-2 whitespace-nowrap">
+									<span>{relativeTime(thread.last_activity ?? thread.created_at)}</span>
 									<span>&middot;</span>
 									<a
-										href="/r/{encodeURIComponent(thread.room_slug)}"
-										class="text-accent-muted no-underline hover:underline"
-										>{thread.room_slug}</a
+										href={threadHref(thread)}
+										class="no-underline hover:text-text-secondary hover:underline"
+										>{thread.reply_count}
+										{thread.reply_count === 1 ? 'reply' : 'replies'}</a
 									>
-								{/if}
+									{#if isAll}
+										<span>&middot;</span>
+										<a
+											href="/r/{encodeURIComponent(thread.room_slug)}"
+											class="text-accent-muted no-underline hover:underline"
+											>{thread.room_slug}</a
+										>
+									{/if}
+								</div>
 							</div>
 						</div>
 					</div>

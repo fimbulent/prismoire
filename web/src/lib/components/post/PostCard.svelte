@@ -195,8 +195,16 @@
 <!-- Header. The OP gets a wider gap below so the title + author block
      reads as the post's masthead before the body starts. Replies use a
      tighter gap because their headers already sit visually paired with
-     the immediately-following short body. -->
-<div class="flex items-center gap-2 {post.parent_id === null ? 'mb-4' : 'mb-2'} text-sm">
+     the immediately-following short body.
+
+     `flex-wrap` lets the header break onto extra lines when the
+     username + private tag + trust badge + chips + time exceed the
+     available width — most acute on deeply-nested replies on mobile,
+     where the indentation already narrows the column. Each child is
+     its own flex item, so wraps happen at item boundaries rather than
+     mid-content. `gap-y-1` gives wrapped lines a small vertical
+     rhythm without expanding the header when it fits on one line. -->
+<div class="flex flex-wrap items-center gap-x-2 gap-y-1 {post.parent_id === null ? 'mb-4' : 'mb-2'} text-sm">
 	<UserName name={post.author_name} viewer={post.viewer} linked={session.isLoggedIn} />
 	{#if post.distrust_scaffold}
 		<span
@@ -208,16 +216,16 @@
 	{#if post.is_op}
 		<span class="text-xs font-bold px-1.5 py-0.5 rounded border border-accent-muted text-accent uppercase tracking-wider">op</span>
 	{/if}
-	<span class="text-text-muted text-xs">{relativeTime(post.created_at)}</span>
+	<span class="text-text-muted text-xs whitespace-nowrap">{relativeTime(post.created_at)}</span>
 	{#if post.retracted_at && post.body !== '[removed by admin]'}
-		<span class="text-text-muted text-xs italic">retracted {relativeTime(post.retracted_at)}</span>
+		<span class="text-text-muted text-xs italic whitespace-nowrap">retracted {relativeTime(post.retracted_at)}</span>
 	{:else if post.retracted_at}
-		<span class="text-text-muted text-xs italic">removed {relativeTime(post.retracted_at)}</span>
+		<span class="text-text-muted text-xs italic whitespace-nowrap">removed {relativeTime(post.retracted_at)}</span>
 	{:else if post.edited_at}
 		<span class="relative history-dropdown">
 			<button
 				onclick={(e: MouseEvent) => { e.stopPropagation(); toggleHistory(); }}
-				class="bg-transparent border-none text-text-muted text-xs italic cursor-pointer font-sans py-0 px-0 hover:text-text-secondary"
+				class="bg-transparent border-none text-text-muted text-xs italic cursor-pointer font-sans py-0 px-0 whitespace-nowrap hover:text-text-secondary"
 			>edited {relativeTime(post.edited_at)}</button>
 			{#if historyPostId === post.id}
 				<div class="absolute left-0 top-6 bg-bg-surface-raised border border-border rounded-md py-1 min-w-48 shadow-lg z-10">

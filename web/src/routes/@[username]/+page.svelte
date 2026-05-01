@@ -298,6 +298,21 @@
 		return formatDistanceToNowStrict(when, { addSuffix: false });
 	});
 
+	// Display-name h1 sizing tiers: shrink the heading for longer names so
+	// `name + badges` doesn't overflow the profile-card header on tight
+	// viewports. Display names are bounded at 20 graphemes server-side
+	// (`server/src/display_name.rs`), so the buckets only need to cover
+	// 3–20. Counted by code-unit length here, which over-counts surrogate
+	// pairs (a 2-codepoint emoji-like char looks like length 2) — that's
+	// fine, since wider glyphs *should* fall to the smaller bucket sooner.
+	let displayNameSizeClass = $derived(
+		profile.display_name.length <= 14
+			? 'text-2xl'
+			: profile.display_name.length <= 17
+				? 'text-xl'
+				: 'text-lg'
+	);
+
 	let isAdmin = $derived(session.isAdmin && !profile.is_self && profile.role !== 'admin');
 	let adminOpen = $state(false);
 	let adminAction = $state<'suspend' | 'ban' | 'invites' | 'bio' | null>(null);
@@ -444,9 +459,9 @@
 				<div class="w-14 h-14 rounded-full bg-bg-surface-raised border border-border flex items-center justify-center text-2xl font-bold text-accent">
 					{profile.display_name.charAt(0)}
 				</div>
-				<div>
-					<div class="flex items-center gap-2">
-						<h1 class="text-2xl font-bold leading-tight {profile.viewer.status ? 'line-through opacity-60' : ''}">{profile.display_name}</h1>
+				<div class="min-w-0">
+					<div class="flex flex-wrap items-center gap-2">
+						<h1 class="{displayNameSizeClass} font-bold leading-tight {profile.viewer.status ? 'line-through opacity-60' : ''}">{profile.display_name}</h1>
 						{#if profile.viewer.status === 'deleted'}
 							<span class="status-badge status-badge-deleted text-xs font-semibold px-1.5 py-0.5 rounded">Deleted</span>
 						{:else if profile.viewer.status === 'banned'}
@@ -523,7 +538,15 @@
 			</div>
 
 			{#if !profile.is_self}
-				<div class="flex flex-col items-end gap-1">
+				<!-- On mobile the parent row wraps the trust block onto its
+				     own line; left-aligned buttons in their natural width
+				     leave a hard-to-read patch of empty whitespace next to
+				     them. Force the block to full width below `md:` so the
+				     stance group can stretch and the buttons share that
+				     width equally (see `.trust-stance-btn` media query). At
+				     `md:` and up, revert to the original right-hugging
+				     compact shape. -->
+				<div class="flex flex-col gap-1 w-full md:w-auto items-stretch md:items-end">
 					<div class="trust-stance-group">
 						<button
 							onclick={() => handleStance('distrust')}
@@ -1143,5 +1166,19 @@
 	.trust-stance-btn.active-distrust {
 		background: var(--danger);
 		color: var(--bg);
+	}
+
+	/* On mobile, the wrapper stretches to full width (see the
+	   `w-full md:w-auto items-stretch md:items-end` classes on the
+	   trust block above). Without this rule the three buttons would
+	   keep their natural widths and leave a ragged right edge. With
+	   `flex: 1`, each button takes an equal third of the row so the
+	   group reads as a balanced segmented control. Above `md:` the
+	   wrapper collapses back to its compact right-hugging shape and
+	   the buttons resume their content-sized width. */
+	@media (max-width: 767px) {
+		.trust-stance-btn {
+			flex: 1;
+		}
 	}
 </style>
