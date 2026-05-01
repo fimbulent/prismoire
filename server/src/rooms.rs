@@ -31,7 +31,7 @@ use crate::error::{AppError, ErrorCode};
 use crate::room_name::is_announcements;
 use crate::session::AuthUser;
 use crate::state::AppState;
-use crate::threads::{is_thread_visible, parse_cursor};
+use crate::threads::is_thread_visible;
 use crate::trust::load_distrust_set;
 
 /// Rooms per page in the paginated `/api/rooms` listing.
@@ -64,6 +64,16 @@ const ROOM_ACTIVITY_SCOPE_LIMIT: i64 = 500;
 
 /// Hard upper bound on how many rooms a single search request can return.
 const ROOM_SEARCH_MAX: i64 = 20;
+
+/// Half-life of the warmth-score decay, in UTC calendar days. A bucket
+/// `n` days before today contributes `0.5^(n / WARMTH_HALF_LIFE_DAYS)`
+/// times its raw thread count to the room's score. With the default
+/// `2.0`, today's bucket weighs 1.0, two days ago weighs 0.5, four days
+/// ago weighs 0.25, etc. Tuning lever: shorter half-life = "what's hot
+/// right now" (room ordering reshuffles aggressively as fresh threads
+/// land); longer half-life = "what's been hot this week" (consistent
+/// activity over many days outweighs a single fresh thread).
+const WARMTH_HALF_LIFE_DAYS: f64 = 2.0;
 
 // ---------------------------------------------------------------------------
 // Wire types
@@ -126,16 +136,16 @@ pub struct TabBarResponse {
     pub rooms: Vec<TabBarEntry>,
 }
 
-/// Lightweight room chip returned by the search endpoint.
+/// Lightweight room chip returned by the search endpoint. Carries the
+/// `id` (used by the frontend autocomplete as the dedup/item key), the
+/// `slug` (the visible label), and the `is_announcement` flag (drives
+/// the announcements badge). Per-room activity counts are deliberately
+/// omitted — see the docstring on [`search_rooms`] for why.
 #[derive(Serialize)]
 pub struct RoomChip {
     pub id: String,
     pub slug: String,
     pub is_announcement: bool,
-    /// Count of visible threads in the response's activity window.
-    pub recent_thread_count: i64,
-    /// Length of the activity window in UTC calendar days (1..=7).
-    pub activity_window_days: u8,
 }
 
 #[derive(Serialize)]
@@ -216,19 +226,78 @@ impl ActivityResult {
     }
 }
 
-/// Sort key for a room in the listing.
+/// Compute a per-room "warmth" score from a sparkline (oldest-first;
+/// last index = today). Buckets closer to today contribute exponentially
+/// more, controlled by [`WARMTH_HALF_LIFE_DAYS`].
 ///
-/// Ordering (highest first):
-/// 1. `last_visible_activity` if any visible threads exist in the 7-day
-///    window — rooms with viewer-relevant recent activity float to the top.
-/// 2. `created_at` otherwise — quiet or entirely-invisible rooms sort by
-///    creation time so new rooms are discoverable.
+/// A room with a single thread today scores higher than a room with
+/// seven threads from a week ago — recency dominates volume — but a
+/// room with consistent daily activity outscores a single fresh thread,
+/// so steady rooms still beat outliers.
+fn warmth_score(sparkline: &[i64]) -> f64 {
+    let n = sparkline.len();
+    if n == 0 {
+        return 0.0;
+    }
+    sparkline
+        .iter()
+        .enumerate()
+        .map(|(i, &count)| {
+            let days_ago = (n - 1 - i) as f64;
+            let weight = 2f64.powf(-days_ago / WARMTH_HALF_LIFE_DAYS);
+            count as f64 * weight
+        })
+        .sum()
+}
+
+/// Lift `warmth_score` over an `Option<&RoomActivity>` so callers don't
+/// have to repeat the "no activity → score 0" pattern.
+fn room_warmth(activity: Option<&RoomActivity>) -> f64 {
+    activity.map(|a| warmth_score(&a.sparkline)).unwrap_or(0.0)
+}
+
+/// Sort key for a room in the listing: `(warmth_score, created_at, id)`.
 ///
-/// The cursor encodes this exact tuple so pagination is deterministic.
-fn room_sort_key<'a>(room: &'a RoomRow, activity: Option<&'a RoomActivity>) -> &'a str {
-    activity
-        .and_then(|a| a.last_visible_activity.as_deref())
-        .unwrap_or(&room.created_at)
+/// Compared with [`cmp_room_keys`] in DESC order:
+/// 1. `warmth_score` — viewer-visible recent activity, decay-weighted.
+/// 2. `created_at` — tiebreak for rooms that score equally (e.g. all
+///    rooms with score `0.0` have no recent visible activity, so they
+///    fall through to creation time, surfacing newly-created rooms).
+/// 3. `id` — final deterministic tiebreak.
+///
+/// The cursor encodes the same tuple (see [`parse_room_cursor`]).
+fn room_sort_key(room: &RoomRow, score: f64) -> (f64, &str, &str) {
+    (score, room.created_at.as_str(), room.id.as_str())
+}
+
+/// Compare two room sort keys with `f64::total_cmp` for the score
+/// component (so NaN-free, all-paths-defined ordering) and lex on the
+/// strings. Use as `cmp_room_keys(b, a)` in `sort_by` for DESC order.
+fn cmp_room_keys(a: (f64, &str, &str), b: (f64, &str, &str)) -> std::cmp::Ordering {
+    a.0.total_cmp(&b.0)
+        .then_with(|| a.1.cmp(b.1))
+        .then_with(|| a.2.cmp(b.2))
+}
+
+/// Parse a rooms-listing cursor into `(score, created_at, id)`.
+///
+/// Format: `<score>|<created_at>|<id>`. Distinct from
+/// [`crate::threads::parse_cursor`] because the rooms sort key is
+/// numeric (warmth score), not a timestamp — old timestamp-based
+/// cursors will fail to parse, which surfaces as an `InvalidCursor`
+/// error and a fresh page-1 request from the client.
+fn parse_room_cursor(cursor: &str) -> Result<(f64, String, String), AppError> {
+    let parts: Vec<&str> = cursor.splitn(3, '|').collect();
+    if parts.len() != 3 {
+        return Err(AppError::code(ErrorCode::InvalidCursor));
+    }
+    let score: f64 = parts[0]
+        .parse()
+        .map_err(|_| AppError::code(ErrorCode::InvalidCursor))?;
+    let _: uuid::Uuid = parts[2]
+        .parse()
+        .map_err(|_| AppError::code(ErrorCode::InvalidCursor))?;
+    Ok((score, parts[1].to_string(), parts[2].to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -321,9 +390,16 @@ fn bucket_for(last_activity: &str, day_starts: &[NaiveDate]) -> Option<usize> {
 ///
 /// Pulls the top [`TOP_ACTIVITY_CANDIDATES`] most-recent threads
 /// instance-wide, applies the visibility filter, and returns distinct
-/// room ids in most-recent-visible-activity-first order. Used both as
-/// the scope hint for `list_rooms`/`search_rooms` and as the sort order
-/// for `tab_bar` backfill.
+/// room ids in most-recent-visible-activity-first order.
+///
+/// Used as a *scope hint* by `list_rooms`, `search_rooms`, and
+/// `tab_bar`. For `list_rooms` and `tab_bar` the returned order is
+/// irrelevant — both re-rank the scope by warmth score computed from
+/// the per-room sparkline. `search_rooms`, however, deliberately skips
+/// the sparkline scan on its empty-query path and *uses* this
+/// function's order as the default room ordering when the user has
+/// just opened the autocomplete with no query typed; mutating the
+/// order here will visibly change that default.
 async fn discover_active_rooms(
     db: &sqlx::SqlitePool,
     reader_id: &str,
@@ -634,30 +710,30 @@ async fn render_room_page(
     .await?;
     let window_days = result.window_days;
 
-    // Sort by (sort_key DESC, id DESC). Collect into a Vec of (room,
-    // activity_opt, favorited) so we can cursor-slice afterwards without
-    // re-hashing.
-    let mut entries: Vec<(RoomRow, Option<RoomActivity>, bool)> = rooms
+    // Build (room, activity, favorited, score) so we can sort and
+    // cursor-slice without recomputing the warmth score per comparison.
+    let mut entries: Vec<(RoomRow, Option<RoomActivity>, bool, f64)> = rooms
         .into_iter()
         .map(|room| {
             let act = result.by_room.remove(&room.id);
             let fav = favorites.contains_key(&room.id);
-            (room, act, fav)
+            let score = room_warmth(act.as_ref());
+            (room, act, fav, score)
         })
         .collect();
 
     entries.sort_by(|a, b| {
-        let ka = room_sort_key(&a.0, a.1.as_ref());
-        let kb = room_sort_key(&b.0, b.1.as_ref());
-        kb.cmp(ka).then_with(|| b.0.id.cmp(&a.0.id))
+        let ka = room_sort_key(&a.0, a.3);
+        let kb = room_sort_key(&b.0, b.3);
+        cmp_room_keys(kb, ka) // DESC
     });
 
     // Apply cursor by skipping entries >= cursor position.
     //
-    // Stale-cursor case: if no entry is lex-less than the cursor (e.g.
-    // the cursor points at a room that has since been deleted, or a
-    // room whose activity has shifted it elsewhere in the ordering),
-    // `position(...)` returns `None` and we fall through to
+    // Stale-cursor case: if no entry compares strictly past the cursor
+    // (e.g. the cursor points at a room that has since been deleted, or
+    // a room whose warmth score has shifted it elsewhere in the
+    // ordering), `position(...)` returns `None` and we fall through to
     // `entries.len()` — i.e. an empty page with `next_cursor: null`.
     // The client treats that as "no more pages" and stops requesting.
     // This fails closed rather than loops or errors: the viewer simply
@@ -665,19 +741,16 @@ async fn render_room_page(
     // alternative (restart from the top, error) would be more
     // surprising than hitting the end of the list early.
     let start_idx = if let Some(cursor) = cursor {
-        let (cursor_ts, cursor_id) = parse_cursor(cursor)?;
+        let (cursor_score, cursor_created_at, cursor_id) = parse_room_cursor(cursor)?;
         entries
             .iter()
-            .position(|(room, act, _)| {
-                let key = room_sort_key(room, act.as_ref());
-                // Strictly past the cursor: cursor points to the last
-                // entry on the previous page, so we include everything
-                // lex-less than that (or equal-key and lex-less-id).
-                match key.cmp(cursor_ts.as_str()) {
-                    std::cmp::Ordering::Less => true,
-                    std::cmp::Ordering::Greater => false,
-                    std::cmp::Ordering::Equal => room.id < cursor_id,
-                }
+            .position(|(room, _act, _fav, score)| {
+                let entry_key = room_sort_key(room, *score);
+                let cursor_key = (cursor_score, cursor_created_at.as_str(), cursor_id.as_str());
+                // Strictly past the cursor (DESC): cursor points to the
+                // last entry on the previous page, so we include
+                // everything that compares less than it.
+                cmp_room_keys(entry_key, cursor_key) == std::cmp::Ordering::Less
             })
             .unwrap_or(entries.len())
     } else {
@@ -689,13 +762,17 @@ async fn render_room_page(
 
     let page: Vec<RoomResponse> = entries
         .drain(start_idx..end_idx)
-        .map(|(room, act, fav)| build_response(room, act, fav, window_days))
+        .map(|(room, act, fav, _score)| build_response(room, act, fav, window_days))
         .collect();
 
     let next_cursor = if has_more {
         page.last().map(|r| {
-            let ts = r.last_visible_activity.as_deref().unwrap_or(&r.created_at);
-            format!("{}|{}", ts, r.id)
+            // Recompute warmth from the response's own sparkline rather
+            // than threading the pre-drain score through; the sparkline
+            // is at most `MAX_ACTIVITY_WINDOW_DAYS` long so the cost is
+            // a handful of FP multiplications.
+            let score = warmth_score(&r.sparkline);
+            format!("{}|{}|{}", score, r.created_at, r.id)
         })
     } else {
         None
@@ -796,31 +873,54 @@ pub async fn tab_bar(
 
     // If favorites already fill every slot, short-circuit: the backfill
     // is the only consumer of viewer-visible activity, and computing
-    // that requires the trust graph + distrust set, which is by far the
-    // most expensive work in this handler. Skipping it when unused
-    // makes the tab bar effectively free for heavy favoriters.
+    // that requires the trust graph + distrust set + scoped sparkline
+    // pass, which is by far the most expensive work in this handler.
+    // Skipping it when unused makes the tab bar effectively free for
+    // heavy favoriters.
     if favorite_entries.len() < TAB_BAR_SLOTS {
         let reader_uuid = user.uuid();
         let graph = state.get_trust_graph()?;
         let reverse_map = graph.reverse_score_map(reader_uuid);
         let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
 
-        // Only the ordering matters here; we don't render sparklines on
-        // the tab bar, so skip the scoped sparkline pass entirely and
-        // let the bounded discovery scan drive backfill order.
+        // Discovery narrows the candidate pool; warmth scoring (below)
+        // produces the actual backfill order so it matches the rooms
+        // listing's ordering rule (decay-weighted recent activity, not
+        // just "most-recently-active thread first").
         let discovered =
             discover_active_rooms(&state.db, &user.user_id, &reverse_map, &distrust_set).await?;
+        let activity = compute_scoped_activity(
+            &state.db,
+            &user.user_id,
+            &reverse_map,
+            &distrust_set,
+            &discovered,
+        )
+        .await?;
 
-        for room_id in discovered {
+        // Score each discovered room and sort DESC by warmth, with the
+        // same `(score, created_at, id)` tuple used by the listing so
+        // backfill order is consistent with `/api/rooms`. Non-favorites
+        // only — favorites already fill the leading slots.
+        let rooms_by_id: HashMap<&str, &RoomRow> =
+            rooms.iter().map(|r| (r.id.as_str(), r)).collect();
+        let mut scored: Vec<(&RoomRow, f64)> = discovered
+            .iter()
+            .filter(|id| !favorites.contains_key(id.as_str()))
+            .filter_map(|id| rooms_by_id.get(id.as_str()).copied())
+            .map(|room| {
+                let score = room_warmth(activity.by_room.get(&room.id));
+                (room, score)
+            })
+            .collect();
+        scored.sort_by(|(ra, sa), (rb, sb)| {
+            cmp_room_keys(room_sort_key(rb, *sb), room_sort_key(ra, *sa)) // DESC
+        });
+
+        for (room, _score) in scored {
             if favorite_entries.len() >= TAB_BAR_SLOTS {
                 break;
             }
-            if favorites.contains_key(&room_id) {
-                continue;
-            }
-            let Some(room) = rooms.iter().find(|r| r.id == room_id) else {
-                continue;
-            };
             favorite_entries.push(TabBarEntry {
                 slug: room.slug.clone(),
                 is_announcement: is_announcements(&room.slug),
@@ -841,27 +941,22 @@ pub async fn tab_bar(
 /// GET /api/rooms/search?q=&limit= — prefix-match search over active rooms.
 ///
 /// Drives the autocomplete dropdown on forms that pick a room (new thread,
-/// admin "delete room"). Returns a lightweight `RoomChip` with a
-/// viewer-visible recent thread count; per-bucket sparklines are
-/// deliberately omitted since the dropdown UI does not render them.
+/// admin "delete room"). Returns a lightweight `RoomChip` with just the
+/// slug + announcement flag — no per-room activity counts, since the
+/// dropdown only renders the slug.
 ///
-/// TODO: may change shape. This endpoint fires per debounced keystroke, and
-/// its per-request cost is ~equivalent to `list_rooms` (trust BFS + two
-/// bounded thread scans). Candidates for lightening: drop
-/// `recent_thread_count` so we can skip `compute_scoped_activity` entirely
-/// (dropdown would show slug + announcement badge only), or add a
-/// `(reader_id, scope hash)` micro-cache in front of the scoped-activity
-/// call so adjacent-prefix queries collapse to one real compute.
+/// Cost shape:
+/// - **Non-empty query** (the per-keystroke hot path): one `fetch_all_rooms`
+///   query plus an in-memory prefix filter. No trust BFS, no thread scans.
+/// - **Empty query** (fired once on focus): adds a single bounded
+///   `discover_active_rooms` scan + trust BFS so the default ordering
+///   surfaces rooms with viewer-visible activity first; rooms without
+///   recent visible activity fall through to `created_at` DESC.
 pub async fn search_rooms(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
     Query(q): Query<RoomSearchQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    let reader_uuid = user.uuid();
-    let graph = state.get_trust_graph()?;
-    let reverse_map = graph.reverse_score_map(reader_uuid);
-    let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
-
     let limit = q
         .limit
         .unwrap_or(ROOM_SEARCH_MAX / 2)
@@ -869,21 +964,6 @@ pub async fn search_rooms(
     let query = q.q.unwrap_or_default().trim().to_lowercase();
 
     let rooms = fetch_all_rooms(&state.db).await?;
-
-    // Use discovery as the scope hint: rooms not in the top-N visible
-    // threads will have no recorded activity and sort by `created_at`.
-    let discovered =
-        discover_active_rooms(&state.db, &user.user_id, &reverse_map, &distrust_set).await?;
-    let result = compute_scoped_activity(
-        &state.db,
-        &user.user_id,
-        &reverse_map,
-        &distrust_set,
-        &discovered,
-    )
-    .await?;
-    let activity = &result.by_room;
-    let window_days = result.window_days;
 
     let mut matched: Vec<&RoomRow> = if query.is_empty() {
         rooms.iter().collect()
@@ -895,11 +975,29 @@ pub async fn search_rooms(
     };
 
     if query.is_empty() {
-        // Default ordering: most-active first.
+        // Default ordering: rooms surfaced by `discover_active_rooms`
+        // (most-recent-visible-activity-first) lead, then everything
+        // else by `created_at` DESC. This keeps a trust-aware default
+        // for the open-on-focus case without paying for the scoped
+        // sparkline scan.
+        let reader_uuid = user.uuid();
+        let graph = state.get_trust_graph()?;
+        let reverse_map = graph.reverse_score_map(reader_uuid);
+        let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
+        let discovered =
+            discover_active_rooms(&state.db, &user.user_id, &reverse_map, &distrust_set).await?;
+        let position: HashMap<&str, usize> = discovered
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (id.as_str(), i))
+            .collect();
         matched.sort_by(|a, b| {
-            let ka = room_sort_key(a, activity.get(&a.id));
-            let kb = room_sort_key(b, activity.get(&b.id));
-            kb.cmp(ka)
+            match (position.get(a.id.as_str()), position.get(b.id.as_str())) {
+                (Some(ia), Some(ib)) => ia.cmp(ib),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => b.created_at.cmp(&a.created_at), // DESC
+            }
         });
     } else {
         // Prefix match: shortest-match-first is the standard autocomplete
@@ -910,18 +1008,10 @@ pub async fn search_rooms(
     let chips: Vec<RoomChip> = matched
         .into_iter()
         .take(limit)
-        .map(|r| {
-            let recent_thread_count: i64 = activity
-                .get(&r.id)
-                .map(|a| a.sparkline.iter().sum())
-                .unwrap_or(0);
-            RoomChip {
-                id: r.id.clone(),
-                slug: r.slug.clone(),
-                is_announcement: is_announcements(&r.slug),
-                recent_thread_count,
-                activity_window_days: window_days,
-            }
+        .map(|r| RoomChip {
+            id: r.id.clone(),
+            slug: r.slug.clone(),
+            is_announcement: is_announcements(&r.slug),
         })
         .collect();
 

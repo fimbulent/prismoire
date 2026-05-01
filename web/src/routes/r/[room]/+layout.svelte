@@ -2,6 +2,7 @@
 	import { page } from '$app/state';
 	import { session } from '$lib/stores/session.svelte';
 	import { onMount, flushSync, untrack } from 'svelte';
+	import type { TabBarEntry } from '$lib/api/rooms';
 
 	let { data, children } = $props();
 
@@ -13,11 +14,40 @@
 
 	let currentSlug = $derived(page.params.room);
 
-	// How many of the server-provided rooms we actually render. Starts at
-	// the full list; `trimToFit()` shrinks it when the row overflows and
-	// grows it back when there's headroom.
+	// Source list that the trim algorithm measures against. If the room
+	// the user is currently viewing isn't in the server payload at all,
+	// synthesize a minimal entry and prepend it so the current room
+	// always has a tab right after "All". Rooms that ARE in the payload
+	// keep their natural position here; the visible-slice derive below
+	// rescues them to position 0 only when trim would have hidden them.
+	let baseList = $derived.by<TabBarEntry[]>(() => {
+		if (currentSlug === 'all' || !currentSlug) return rooms;
+		if (rooms.some((r) => r.slug === currentSlug)) return rooms;
+		const synthetic: TabBarEntry = {
+			slug: currentSlug,
+			is_announcement: false,
+			favorited: false,
+		};
+		return [synthetic, ...rooms];
+	});
+
+	// How many of `baseList` we actually render. Starts at the full
+	// length; `trimToFit()` shrinks it when the row overflows and grows
+	// it back when there's headroom.
 	let visibleCount = $state<number>(0);
-	let visibleRooms = $derived(rooms.slice(0, visibleCount));
+
+	// Visible slice for the {#each}. If the current room is in
+	// `baseList` but past `visibleCount` (trim hid it), pull it to the
+	// front and drop the trailing slot so total tab count stays equal
+	// to `visibleCount`.
+	let visibleRooms = $derived.by(() => {
+		const slice = baseList.slice(0, visibleCount);
+		if (currentSlug === 'all' || !currentSlug) return slice;
+		if (slice.some((r) => r.slug === currentSlug)) return slice;
+		const rescued = baseList.find((r) => r.slug === currentSlug);
+		if (!rescued) return slice;
+		return [rescued, ...slice.slice(0, Math.max(0, visibleCount - 1))];
+	});
 
 	let rowEl: HTMLDivElement | undefined = $state();
 
@@ -34,8 +64,8 @@
 	 */
 	function trimToFit() {
 		if (!rowEl) return;
-		if (rowEl.scrollWidth <= rowEl.clientWidth && visibleCount < rooms.length) {
-			visibleCount = rooms.length;
+		if (rowEl.scrollWidth <= rowEl.clientWidth && visibleCount < baseList.length) {
+			visibleCount = baseList.length;
 			flushSync();
 		}
 		while (visibleCount > 0 && rowEl.scrollWidth > rowEl.clientWidth) {
@@ -44,17 +74,31 @@
 		}
 	}
 
-	// Reset to full list and re-measure whenever `rooms` changes (e.g.
-	// after `invalidateAll()` following a favorite toggle). Without this
-	// ResizeObserver alone wouldn't re-fire — the container's width
-	// hasn't changed, only its contents have — leaving the tab bar
-	// under- or over-trimmed until the next browser resize. `untrack`
-	// prevents the reactive writes inside `trimToFit` from re-triggering
-	// this effect and causing an infinite loop.
+	// Reset to full list and re-measure whenever `baseList` changes
+	// (favorite toggle, or navigation that adds/removes the synthetic
+	// current-room entry). Without this ResizeObserver alone wouldn't
+	// re-fire — the container's width hasn't changed, only its contents
+	// have — leaving the tab bar under- or over-trimmed until the next
+	// browser resize. `untrack` prevents the reactive writes inside
+	// `trimToFit` from re-triggering this effect and causing an
+	// infinite loop.
 	$effect(() => {
-		const nextLen = rooms.length;
+		const nextLen = baseList.length;
 		untrack(() => {
 			visibleCount = nextLen;
+			flushSync();
+			trimToFit();
+		});
+	});
+
+	// Re-fit when navigating between rooms even if `baseList.length`
+	// doesn't change (e.g. both old and new rooms are in the payload):
+	// the rescue swap can put a wider/narrower slug into the visible
+	// slot, so `scrollWidth` may shift without a resize event.
+	$effect(() => {
+		currentSlug;
+		untrack(() => {
+			if (!rowEl) return;
 			flushSync();
 			trimToFit();
 		});
@@ -81,7 +125,7 @@
 					? 'text-accent border-accent font-semibold'
 					: 'text-text-secondary border-transparent hover:text-text-primary'}"
 			>
-				All
+				all
 			</a>
 			{#each visibleRooms as room (room.slug)}
 				<a

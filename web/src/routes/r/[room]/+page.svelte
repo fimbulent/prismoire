@@ -123,9 +123,10 @@
 	{#if error}
 		<div class="text-center text-danger py-12">{error}</div>
 	{:else}
+		<h1 class="sr-only">{heading}</h1>
 		<div class="pt-5 pb-3 flex items-center justify-between">
-			<div class="flex items-center gap-3">
-				<h1 class="text-lg font-bold">{heading}</h1>
+			<div class="text-xs flex items-center gap-1.5 text-text-muted">
+				<span>Sort by:</span>
 				<select
 					value={sortMode}
 					onchange={handleSortChange}

@@ -116,18 +116,13 @@ export async function tabBar(opts: FetchOpts = {}): Promise<TabBarEntry[]> {
 
 /**
  * Lightweight room row returned by the autocomplete search endpoint.
- * Carries slug + viewer-visible recent thread count so the dropdown
- * can show "slug (N threads this week)" or "slug (N threads last Nd)"
- * without needing the heavier {@link Room} shape.
+ * Carries only the fields needed to render a slug chip — keeps the
+ * search endpoint cheap so it can fire on every debounced keystroke.
  */
 export interface RoomChip {
 	id: string;
 	slug: string;
 	is_announcement: boolean;
-	/** Threads visible to the viewer within `activity_window_days`. */
-	recent_thread_count: number;
-	/** Width of the activity window this count represents (1..=7 days). */
-	activity_window_days: number;
 }
 
 /**
