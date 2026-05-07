@@ -30,6 +30,7 @@ mod rate_limit;
 mod reports;
 mod room_name;
 mod rooms;
+mod search;
 mod session;
 mod settings;
 mod setup;
@@ -188,6 +189,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/rooms/more", post(rooms::load_more_rooms))
         .route("/api/rooms/tab-bar", get(rooms::tab_bar))
         .route("/api/rooms/search", get(rooms::search_rooms))
+        .route("/api/search", get(search::search_dropdown))
+        .route("/api/search/threads", get(search::search_threads_paginated))
+        .route("/api/search/threads/more", post(search::load_more_threads))
+        .route("/api/search/posts", get(search::search_posts))
+        .route("/api/search/posts/more", post(search::load_more_posts))
+        .route("/api/search/users", get(users::search_users_paginated))
+        .route(
+            "/api/search/users/more",
+            post(users::load_more_search_users),
+        )
+        .route("/api/search/rooms", get(rooms::search_rooms_paginated))
+        .route(
+            "/api/search/rooms/more",
+            post(rooms::load_more_search_rooms),
+        )
         .route("/api/rooms/{id}", get(rooms::get_room))
         .route("/api/rooms/{id}/threads", get(threads::list_threads))
         .route(

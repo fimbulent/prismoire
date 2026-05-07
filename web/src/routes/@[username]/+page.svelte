@@ -21,8 +21,8 @@
 	import Tooltip from '$lib/components/ui/Tooltip.svelte';
 	import MoreButton from '$lib/components/ui/MoreButton.svelte';
 	import Notice from '$lib/components/ui/Notice.svelte';
+	import ProfileActivityPost from '$lib/components/post/ProfileActivityPost.svelte';
 	import { errorMessage } from '$lib/i18n/errors';
-	import { smartypants } from '$lib/typography';
 	import { session } from '$lib/stores/session.svelte';
 	import { formatDistanceToNowStrict } from 'date-fns';
 	import {
@@ -899,38 +899,7 @@
 	{:else}
 		<div class="space-y-3 mb-6">
 			{#each activityItems as item (item.post_id + item.created_at)}
-				<div class="bg-bg-surface border border-border rounded-md p-4 md:flex md:gap-6">
-					<div class="flex items-center gap-2 text-xs text-text-muted mb-1 md:mb-0 md:flex-col md:items-start md:gap-1 md:w-40 md:shrink-0">
-						{#if item.type === 'thread_started'}
-							<span>Started thread in</span>
-							{#if viewerRestricted}
-								<span class="text-text-secondary">{item.room_slug}</span>
-							{:else}
-								<a href="/r/{item.room_slug}" class="text-link hover:underline">{item.room_slug}</a>
-							{/if}
-						{:else}
-							<span>Replied in</span>
-							{#if viewerRestricted}
-								<span class="text-text-secondary">{smartypants(item.thread_title)}</span>
-							{:else}
-								<a href="/r/{item.room_slug}/{item.thread_id}?post={item.post_id}" class="text-link hover:underline">{smartypants(item.thread_title)}</a>
-							{/if}
-						{/if}
-						<span class="ml-auto md:ml-0">{relativeTime(item.created_at)}</span>
-					</div>
-					<div class="md:max-w-measure md:flex-1 md:min-w-0">
-						{#if item.type === 'thread_started'}
-							{#if viewerRestricted}
-								<span class="font-prose text-prose text-text-primary font-medium leading-snug">{smartypants(item.thread_title)}</span>
-							{:else}
-								<a href="/r/{item.room_slug}/{item.thread_id}" class="font-prose text-prose text-text-primary hover:underline font-medium leading-snug">{smartypants(item.thread_title)}</a>
-							{/if}
-						{/if}
-						<div class="text-prose leading-7 text-text-secondary mt-1">
-							<Markdown source={item.body} profile={item.type === 'thread_started' ? 'full' : 'reply'} />
-						</div>
-					</div>
-				</div>
+				<ProfileActivityPost {item} {viewerRestricted} />
 				{/each}
 
 			{#if activityCursor}

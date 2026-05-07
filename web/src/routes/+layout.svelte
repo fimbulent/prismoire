@@ -7,6 +7,7 @@
 	import { page } from '$app/state';
 	import { applyTheme } from '$lib/themes';
 	import Toasts from '$lib/components/ui/Toasts.svelte';
+	import NavSearch from '$lib/components/ui/NavSearch.svelte';
 
 	let { children } = $props();
 
@@ -74,6 +75,9 @@
 	<a href="/" class="text-accent font-bold tracking-wide text-lg hover:opacity-90">Prismoire</a>
 
 	<div class="flex items-center gap-4 text-sm">
+		{#if session.isLoggedIn && !session.isRestricted}
+			<NavSearch />
+		{/if}
 		{#if session.isLoggedIn}
 			<div class="relative" bind:this={dropdownEl}>
 				<button

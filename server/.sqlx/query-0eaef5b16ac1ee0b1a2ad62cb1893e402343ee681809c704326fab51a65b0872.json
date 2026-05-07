@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT t.id AS \"id!\"\n           FROM threads_fts\n           JOIN threads t ON t.rowid = threads_fts.rowid\n           WHERE threads_fts MATCH ?\n           LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0eaef5b16ac1ee0b1a2ad62cb1893e402343ee681809c704326fab51a65b0872"
+}

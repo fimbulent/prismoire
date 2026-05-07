@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE threads_fts SET op_body = '' WHERE rowid IN (SELECT rowid FROM threads WHERE author = ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "e0a89291cc3e1c74a13ac7a5e9229cd1f5339d73cfd85e60244e251859b3a6c6"
+}

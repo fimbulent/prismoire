@@ -1,11 +1,9 @@
 <script lang="ts">
-	import { relativeTime } from '$lib/format';
 	import { goto, invalidateAll } from '$app/navigation';
 	import Autocomplete from '$lib/components/ui/Autocomplete.svelte';
-	import Badge from '$lib/components/ui/Badge.svelte';
 	import FavoriteStar from '$lib/components/ui/FavoriteStar.svelte';
 	import MoreButton from '$lib/components/ui/MoreButton.svelte';
-	import Sparkline from '$lib/components/ui/Sparkline.svelte';
+	import RoomCard from '$lib/components/post/RoomCard.svelte';
 	import {
 		favoriteRoom,
 		unfavoriteRoom,
@@ -221,48 +219,7 @@
 		{:else}
 			<div class="space-y-3">
 				{#each rooms as room (room.id)}
-					<div
-						class="border border-border rounded-md p-5 bg-bg-surface transition-[background,border-color] duration-150 hover:bg-bg-hover hover:border-accent-muted"
-					>
-						<div class="flex items-start gap-3">
-							<a
-								href="/r/{encodeURIComponent(room.slug)}"
-								class="flex-1 min-w-0 no-underline text-text-primary"
-							>
-								<div class="mb-1.5 flex items-center gap-2">
-									<h3 class="text-base font-bold">{room.slug}</h3>
-									{#if room.is_announcement}
-										<Badge>Announcements</Badge>
-									{/if}
-								</div>
-								<div class="flex items-center gap-4 text-xs text-text-muted">
-									<span>
-										{room.recent_thread_count}
-										{room.recent_thread_count === 1 ? 'thread' : 'threads'}
-										{room.activity_window_days >= 7
-											? 'this week'
-											: `last ${room.activity_window_days}d`}
-									</span>
-									{#if room.last_visible_activity}
-										<span>
-											Last active
-											<span class="text-text-secondary">
-												{relativeTime(room.last_visible_activity)}
-											</span>
-										</span>
-									{/if}
-									<Sparkline
-										values={room.sparkline}
-										label="Thread activity over 7 days"
-									/>
-								</div>
-							</a>
-							<FavoriteStar
-								favorited={room.favorited}
-								onToggle={(next) => toggleFavorite(room, next)}
-							/>
-						</div>
-					</div>
+					<RoomCard {room} onToggleFavorite={toggleFavorite} />
 				{/each}
 			</div>
 			{#if nextCursor}

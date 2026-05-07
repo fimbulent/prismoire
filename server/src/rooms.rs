@@ -29,6 +29,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, ErrorCode};
 use crate::room_name::is_announcements;
+use crate::search::{
+    MoreSearchRequest, PAGE_SIZE, SUBSTRING_OVERSAMPLE, decode_offset_cursor, encode_offset_cursor,
+    escape_like, validate_query_length, validate_seen_ids,
+};
 use crate::session::AuthUser;
 use crate::state::AppState;
 use crate::threads::is_thread_visible;
@@ -784,6 +788,50 @@ async fn render_room_page(
     }))
 }
 
+/// Build `RoomResponse`s for a caller-specified ordered list of room
+/// ids, preserving that order. Used by the search-rooms endpoint to
+/// return the rich list-rooms shape (sparkline + thread count +
+/// favorited flag) instead of a slug-only chip.
+///
+/// Rooms in `ordered_ids` that no longer exist (soft-deleted or merged)
+/// are silently skipped — same shape as `build_favorites_response`.
+///
+/// All rooms in the returned vec share the same `activity_window_days`,
+/// derived from the scoped activity scan over the input set.
+async fn build_room_responses_for_ids(
+    db: &sqlx::SqlitePool,
+    user_id: &str,
+    reverse_map: &HashMap<String, f64>,
+    distrust_set: &HashSet<String>,
+    ordered_ids: &[String],
+) -> Result<Vec<RoomResponse>, AppError> {
+    if ordered_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let rooms = fetch_all_rooms(db).await?;
+    let favorites = fetch_favorites_map(db, user_id).await?;
+
+    let scope: Vec<String> = ordered_ids.to_vec();
+    let mut result =
+        compute_scoped_activity(db, user_id, reverse_map, distrust_set, &scope).await?;
+    let window_days = result.window_days;
+
+    let mut rooms_by_id: HashMap<String, RoomRow> =
+        rooms.into_iter().map(|r| (r.id.clone(), r)).collect();
+
+    let mut out = Vec::with_capacity(ordered_ids.len());
+    for room_id in ordered_ids {
+        let Some(room) = rooms_by_id.remove(room_id) else {
+            continue;
+        };
+        let act = result.by_room.remove(&room.id);
+        let fav = favorites.contains_key(&room.id);
+        out.push(build_response(room, act, fav, window_days));
+    }
+    Ok(out)
+}
+
 /// Shared helper used by the `GET /api/me/favorites` endpoint (in the
 /// `favorites` module) to return the viewer's full favorite list with
 /// per-room sparklines + thread counts, ordered by the user's stored
@@ -1082,4 +1130,147 @@ pub async fn get_room(
 
     let act = result.by_room.remove(&room.id);
     Ok(Json(build_response(room, act, favorited, window_days)))
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/search/rooms — paginated rooms search (results page)
+// ---------------------------------------------------------------------------
+
+/// Query string for the paginated rooms search endpoint.
+#[derive(Deserialize)]
+pub struct PaginatedRoomSearchQuery {
+    #[serde(default)]
+    pub q: Option<String>,
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+/// Wire response for the paginated rooms search endpoint. Carries the
+/// rich `RoomResponse` shape (sparkline + thread count + favorited
+/// flag) so the search results page can reuse `RoomCard` and surface
+/// the same chrome as the rooms listing.
+#[derive(Serialize)]
+pub struct PaginatedRoomSearchResponse {
+    pub rooms: Vec<RoomResponse>,
+    pub next_cursor: Option<String>,
+}
+
+/// `GET /api/search/rooms?q=…&cursor=…` — paginated rooms.
+///
+/// Substring `LIKE` over `rooms.slug`, prioritising exact matches and
+/// shorter slugs (the same ordering as the dropdown's room section).
+/// Rooms are visible to all authenticated viewers, so no trust
+/// filtering is needed for the candidate set — but the per-viewer
+/// activity sparkline + thread count returned alongside each row are
+/// computed from threads the reader can see, mirroring `/api/rooms`.
+/// `GET /api/search/rooms?q=…&cursor=…` — page-1 (and SSR) entry
+/// point. Subsequent pages should use [`load_more_search_rooms`] so the
+/// client can pass `seen_ids` for cross-page dedup.
+pub async fn search_rooms_paginated(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Query(q): Query<PaginatedRoomSearchQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    search_rooms_core(&state, &user, q.q, q.cursor.as_deref(), &HashSet::new()).await
+}
+
+/// `POST /api/search/rooms/more` — page-2+ entry point. Body carries
+/// the query, the previous page's cursor, and `seen_ids` (capped at
+/// [`crate::search::MAX_SEEN_IDS`]) for cross-page dedup.
+pub async fn load_more_search_rooms(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Json(body): Json<MoreSearchRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    validate_seen_ids(&body.seen_ids)?;
+    let seen: HashSet<String> = body.seen_ids.into_iter().collect();
+    search_rooms_core(&state, &user, body.q, Some(body.cursor.as_str()), &seen).await
+}
+
+async fn search_rooms_core(
+    state: &Arc<AppState>,
+    user: &AuthUser,
+    q: Option<String>,
+    cursor: Option<&str>,
+    seen_ids: &HashSet<String>,
+) -> Result<Json<PaginatedRoomSearchResponse>, AppError> {
+    let raw = q.unwrap_or_default();
+    let trimmed = raw.trim();
+    let offset = decode_offset_cursor(cursor)?;
+
+    if trimmed.is_empty() {
+        return Ok(Json(PaginatedRoomSearchResponse {
+            rooms: Vec::new(),
+            next_cursor: None,
+        }));
+    }
+    validate_query_length(trimmed)?;
+
+    let lower = trimmed.to_lowercase();
+    let escaped = escape_like(&lower);
+    let substring_pattern = format!("%{escaped}%");
+    let prefix_pattern = format!("{escaped}%");
+
+    // Substring oversample: pull a fixed-size pool, then page in
+    // memory. Keeps cursor semantics simple (offset within the pool)
+    // and avoids leaking the underlying ordering into the wire format.
+    let rows = sqlx::query!(
+        r#"SELECT id
+           FROM rooms
+           WHERE merged_into IS NULL
+             AND deleted_at IS NULL
+             AND LOWER(slug) LIKE ? ESCAPE '\'
+           ORDER BY (LOWER(slug) = ?) DESC,
+                    (LOWER(slug) LIKE ? ESCAPE '\') DESC,
+                    LENGTH(slug),
+                    slug
+           LIMIT ?"#,
+        substring_pattern,
+        lower,
+        prefix_pattern,
+        SUBSTRING_OVERSAMPLE,
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    let total = rows.len();
+    // Drop slice rows already in the client's `seen_ids` (post-slice
+    // safety net for cross-page duplicates). Cursor still advances by
+    // `PAGE_SIZE` regardless. Filtering before the activity scan is
+    // cheap — `build_room_responses_for_ids` runs a per-room visibility
+    // BFS, so skipping seen rows here also avoids the wasted work.
+    let page_ids: Vec<String> = rows
+        .into_iter()
+        .skip(offset)
+        .take(PAGE_SIZE)
+        .map(|r| r.id)
+        .filter(|id| !seen_ids.contains(id))
+        .collect();
+
+    // Trust-graph + distrust set are needed by the activity scan to
+    // filter threads the reader can see. Fetched lazily only when
+    // there's at least one row to enrich — saves a BFS on empty pages.
+    let rich_rooms = if page_ids.is_empty() {
+        Vec::new()
+    } else {
+        let reader_uuid = user.uuid();
+        let graph = state.get_trust_graph()?;
+        let reverse_map = graph.reverse_score_map(reader_uuid);
+        let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
+        build_room_responses_for_ids(
+            &state.db,
+            &user.user_id,
+            &reverse_map,
+            &distrust_set,
+            &page_ids,
+        )
+        .await?
+    };
+
+    let next_cursor = encode_offset_cursor(offset + PAGE_SIZE, total);
+
+    Ok(Json(PaginatedRoomSearchResponse {
+        rooms: rich_rooms,
+        next_cursor,
+    }))
 }

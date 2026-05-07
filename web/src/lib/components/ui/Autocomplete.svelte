@@ -142,6 +142,19 @@
 
 	let containerEl = $state<HTMLDivElement | null>(null);
 
+	/**
+	 * Vertical placement of the dropdown relative to the input. The
+	 * dropdown defaults to opening downward (`'down'`); when the input
+	 * is so close to the bottom of the viewport that the dropdown would
+	 * be clipped, we flip it to open upward instead. CSP-safe: the
+	 * actual position is driven by Tailwind class swaps in the markup,
+	 * not by an inline `style` attribute. The threshold matches the
+	 * dropdown's `max-h-64` (256px), with a small margin so a one- or
+	 * two-row dropdown still opens downward when there's room.
+	 */
+	let direction = $state<'down' | 'up'>('down');
+	const DROPDOWN_MAX_HEIGHT = 256; // matches `max-h-64` Tailwind class
+
 	function clearTimer() {
 		if (debounceTimer !== null) {
 			clearTimeout(debounceTimer);
@@ -336,6 +349,28 @@
 	const showDropdown = $derived(
 		!suppressDropdown && open && (loading || results.length > 0 || createRowVisible)
 	);
+
+	/**
+	 * Decide downward vs. upward placement when the dropdown is about
+	 * to be visible. Re-runs on every open transition (and on row-set
+	 * changes that might toggle visibility), so a dropdown that opens
+	 * mid-page-scroll is positioned against the viewport at that
+	 * moment. Uses `getBoundingClientRect` for live viewport-relative
+	 * measurements; no `window` access is needed beyond `innerHeight`.
+	 */
+	$effect(() => {
+		if (!showDropdown) return;
+		if (!containerEl || typeof window === 'undefined') return;
+		const rect = containerEl.getBoundingClientRect();
+		const spaceBelow = window.innerHeight - rect.bottom;
+		const spaceAbove = rect.top;
+		// Flip up only when there's not enough room below AND there's
+		// more room above. Otherwise keep the default (down) — partial
+		// clipping with a scroll bar inside the dropdown is preferable
+		// to flipping into a worse position.
+		direction =
+			spaceBelow < DROPDOWN_MAX_HEIGHT && spaceAbove > spaceBelow ? 'up' : 'down';
+	});
 	const showEmpty = $derived(
 		!suppressDropdown &&
 			open &&
@@ -371,7 +406,10 @@
 		<ul
 			id={id ? `${id}-listbox` : undefined}
 			role="listbox"
-			class="absolute z-20 left-0 right-0 mt-1 max-h-64 overflow-y-auto bg-bg-surface border border-border rounded-md shadow-lg py-1"
+			class="absolute z-20 left-0 right-0 max-h-64 overflow-y-auto bg-bg-surface border border-border rounded-md shadow-lg py-1 {direction ===
+			'up'
+				? 'bottom-full mb-1'
+				: 'top-full mt-1'}"
 		>
 			{#if loading && results.length === 0}
 				<li class="px-3 py-2 text-xs text-text-muted">Searching…</li>
@@ -426,7 +464,10 @@
 		<ul
 			id={id ? `${id}-listbox` : undefined}
 			role="listbox"
-			class="absolute z-20 left-0 right-0 mt-1 bg-bg-surface border border-border rounded-md shadow-lg py-1"
+			class="absolute z-20 left-0 right-0 bg-bg-surface border border-border rounded-md shadow-lg py-1 {direction ===
+			'up'
+				? 'bottom-full mb-1'
+				: 'top-full mt-1'}"
 		>
 			<li class="px-3 py-2 text-xs text-text-muted">No matches</li>
 		</ul>

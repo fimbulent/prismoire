@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use axum::Json;
@@ -10,6 +10,10 @@ use uuid::Uuid;
 
 use crate::display_name::display_name_skeleton;
 use crate::error::{AppError, ErrorCode};
+use crate::search::{
+    MoreSearchRequest, PAGE_SIZE, SUBSTRING_OVERSAMPLE, decode_offset_cursor, encode_offset_cursor,
+    escape_like, validate_query_length, validate_seen_ids,
+};
 use crate::session::{AuthUser, RestrictedAuthUser};
 use crate::state::AppState;
 use crate::trust::{
@@ -1334,4 +1338,195 @@ pub async fn search_users(
         .collect();
 
     Ok(Json(UserSearchResponse { users }))
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/search/users — paginated users search (results page)
+// ---------------------------------------------------------------------------
+
+/// Query string for the paginated users search endpoint.
+#[derive(Deserialize)]
+pub struct PaginatedUserSearchQuery {
+    #[serde(default)]
+    pub q: Option<String>,
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+/// One row in the `/search/users` results page.
+#[derive(Serialize)]
+pub struct PaginatedUserSearchHit {
+    pub id: String,
+    pub display_name: String,
+    pub viewer: UserViewerInfo,
+}
+
+/// Wire response for the paginated users search endpoint.
+#[derive(Serialize)]
+pub struct PaginatedUserSearchResponse {
+    pub users: Vec<PaginatedUserSearchHit>,
+    pub next_cursor: Option<String>,
+}
+
+/// `GET /api/search/users?q=…&cursor=…` — paginated users.
+///
+/// Skeleton-prefix match on `users.display_name_skeleton` (the
+/// confusable-folded canonical form), filtered through the
+/// mutual-visibility predicate from `docs/search.md`:
+///
+/// ```text
+/// visible(A, V) =
+///    reverse_score_map[A] >= MINIMUM_TRUST_THRESHOLD
+/// || distance_map[A]      >= MINIMUM_TRUST_THRESHOLD
+/// ```
+///
+/// Both maps are already threshold-filtered (see `trust.rs`), so a
+/// `contains_key` check on the forward map is equivalent to comparing
+/// the score against the threshold. Distrusted users are pruned
+/// regardless.
+/// `GET /api/search/users?q=…&cursor=…` — page-1 (and SSR) entry
+/// point. Subsequent pages should use [`load_more_search_users`] so the
+/// client can pass `seen_ids` for cross-page dedup.
+pub async fn search_users_paginated(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Query(q): Query<PaginatedUserSearchQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    search_users_core(&state, &user, q.q, q.cursor.as_deref(), &HashSet::new()).await
+}
+
+/// `POST /api/search/users/more` — page-2+ entry point. Body carries
+/// the query, the previous page's cursor, and `seen_ids` (capped at
+/// [`crate::search::MAX_SEEN_IDS`]) for cross-page dedup.
+pub async fn load_more_search_users(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Json(body): Json<MoreSearchRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    validate_seen_ids(&body.seen_ids)?;
+    let seen: HashSet<String> = body.seen_ids.into_iter().collect();
+    search_users_core(&state, &user, body.q, Some(body.cursor.as_str()), &seen).await
+}
+
+async fn search_users_core(
+    state: &Arc<AppState>,
+    user: &AuthUser,
+    q: Option<String>,
+    cursor: Option<&str>,
+    seen_ids: &HashSet<String>,
+) -> Result<Json<PaginatedUserSearchResponse>, AppError> {
+    let raw = q.unwrap_or_default();
+    let trimmed = raw.trim();
+    let offset = decode_offset_cursor(cursor)?;
+
+    if trimmed.is_empty() {
+        return Ok(Json(PaginatedUserSearchResponse {
+            users: Vec::new(),
+            next_cursor: None,
+        }));
+    }
+    validate_query_length(trimmed)?;
+
+    // Skeleton-fold the query the same way every stored display name was
+    // folded at write time, so the `LIKE` runs over comparable shapes.
+    // If folding strips everything (the input was nothing but
+    // punctuation / combining marks / emoji), there is no possible
+    // match — short-circuit before issuing the wildcard `LIKE '%'`,
+    // which would scan the full users table.
+    let skeleton = display_name_skeleton(trimmed);
+    if skeleton.is_empty() {
+        return Ok(Json(PaginatedUserSearchResponse {
+            users: Vec::new(),
+            next_cursor: None,
+        }));
+    }
+
+    let reader_uuid = user.uuid();
+    let graph = state.get_trust_graph()?;
+    let reader_delta = state.pending_deltas.get(reader_uuid);
+    let trust_map = graph.distance_map_with_delta(reader_uuid, &reader_delta);
+    let reverse_map = graph.reverse_score_map(reader_uuid);
+    let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
+    let tag_map = load_tag_map(&state.db, &user.user_id).await?;
+
+    let pattern = format!("{}%", escape_like(&skeleton));
+
+    let rows = sqlx::query!(
+        r#"SELECT id, display_name, status, deleted_at
+           FROM users
+           WHERE deleted_at IS NULL
+             AND display_name_skeleton LIKE ? ESCAPE '\'
+           ORDER BY (display_name_skeleton = ?) DESC,
+                    LENGTH(display_name),
+                    display_name
+           LIMIT ?"#,
+        pattern,
+        skeleton,
+        SUBSTRING_OVERSAMPLE,
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    let visible: Vec<_> = rows
+        .into_iter()
+        .filter(|r| {
+            is_paginated_search_user_visible(
+                &r.id,
+                &user.user_id,
+                &trust_map,
+                &reverse_map,
+                &distrust_set,
+            )
+        })
+        .collect();
+
+    let total_visible = visible.len();
+
+    // Drop slice rows already in the client's `seen_ids` (post-slice
+    // safety net for cross-page duplicates). Cursor still advances by
+    // `PAGE_SIZE` regardless.
+    let users: Vec<PaginatedUserSearchHit> = visible
+        .into_iter()
+        .skip(offset)
+        .take(PAGE_SIZE)
+        .filter(|r| !seen_ids.contains(&r.id))
+        .map(|r| {
+            let raw_status = UserStatus::try_from(r.status.as_str()).unwrap_or(UserStatus::Active);
+            let status = UserStatus::effective(raw_status, r.deleted_at.as_deref());
+            let viewer = UserViewerInfo::build(&r.id, &trust_map, &distrust_set, &tag_map, status);
+            PaginatedUserSearchHit {
+                id: r.id,
+                display_name: r.display_name,
+                viewer,
+            }
+        })
+        .collect();
+
+    let next_cursor = encode_offset_cursor(offset + PAGE_SIZE, total_visible);
+
+    Ok(Json(PaginatedUserSearchResponse { users, next_cursor }))
+}
+
+/// Mutual-visibility predicate for the paginated users search. Self
+/// is always visible — searching for your own name should surface
+/// your profile (e.g. as a quick way to check what others see, or to
+/// copy a link to it).
+fn is_paginated_search_user_visible(
+    candidate_id: &str,
+    reader_id: &str,
+    trust_map: &HashMap<String, f64>,
+    reverse_map: &HashMap<String, f64>,
+    distrust_set: &HashSet<String>,
+) -> bool {
+    if candidate_id == reader_id {
+        return true;
+    }
+    if distrust_set.contains(candidate_id) {
+        return false;
+    }
+    let viewer_trusts_them = trust_map.contains_key(candidate_id);
+    let they_trust_viewer = reverse_map
+        .get(candidate_id)
+        .is_some_and(|&s| s >= MINIMUM_TRUST_THRESHOLD);
+    viewer_trusts_them || they_trust_viewer
 }

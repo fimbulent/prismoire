@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id\n           FROM rooms\n           WHERE merged_into IS NULL\n             AND deleted_at IS NULL\n             AND LOWER(slug) LIKE ? ESCAPE '\\'\n           ORDER BY (LOWER(slug) = ?) DESC,\n                    (LOWER(slug) LIKE ? ESCAPE '\\') DESC,\n                    LENGTH(slug),\n                    slug\n           LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a3995666a4e95e6ec6c3522d8ff8c1f98ff5eea3304ac08a848493722aab5ab0"
+}

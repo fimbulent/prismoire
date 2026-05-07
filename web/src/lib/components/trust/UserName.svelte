@@ -29,15 +29,31 @@
 </script>
 
 {#if isSelf}
-	<a href="/@{encodeURIComponent(name)}" class="{nameClass} bg-bg-surface-raised px-2 py-0.5 rounded border border-border hover:border-accent-muted transition-colors">{name}</a>
+	<!-- Self chip: anchor when linked (default), span when an outer
+	     element handles navigation. Either way, no trust badge / tag /
+	     status — none of those make sense for the viewer's own row. -->
+	{#if linked}
+		<a href="/@{encodeURIComponent(name)}" class="{nameClass} bg-bg-surface-raised px-2 py-0.5 rounded border border-border hover:border-accent-muted transition-colors">{name}</a>
+	{:else}
+		<span class="{nameClass} bg-bg-surface-raised px-2 py-0.5 rounded border border-border">{name}</span>
+	{/if}
 {:else if status === 'deleted'}
 	<!-- Deleted users: render as an inert, muted chip (no link, no trust badge).
 	     The display name is already anonymised server-side to `deleted-<hex>`,
 	     so the profile page is intentionally not navigable. -->
 	<span class="font-semibold text-text-muted italic line-through">{name}</span>
 	<span class="status-badge status-badge-deleted text-xs font-semibold px-1 py-0.5 rounded">deleted</span>
-{:else if linked}
-	<a href="/@{encodeURIComponent(name)}" class="{nameClass} hover:underline {status ? 'line-through opacity-60' : ''}">{name}</a>
+{:else}
+	<!-- Standard user row: name (anchor or span) + tag + trust /
+	     status badge. `linked={false}` is for places where an outer
+	     element already provides the click target (e.g. a list-row
+	     button); the trust badge and tag still render so the row
+	     conveys the same information density as a linked one. -->
+	{#if linked}
+		<a href="/@{encodeURIComponent(name)}" class="{nameClass} hover:underline {status ? 'line-through opacity-60' : ''}">{name}</a>
+	{:else}
+		<span class="{nameClass} {status ? 'line-through opacity-60' : ''}">{name}</span>
+	{/if}
 	{#if tag}
 		<span class="text-xs text-text-muted italic" title="Your private tag for this user">({tag})</span>
 	{/if}
@@ -48,8 +64,6 @@
 	{:else}
 		<TrustBadge {viewer} {compact} />
 	{/if}
-{:else}
-	<span class={nameClass}>{name}</span>
 {/if}
 
 <style>

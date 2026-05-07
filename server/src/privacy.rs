@@ -22,6 +22,9 @@
 //!
 //! - Retracts every non-retracted post (one signed retraction per post,
 //!   bodies nulled — same shape as `posts::retract_post`).
+//! - Clears the user's content from the FTS5 search tables
+//!   (`posts_fts`, `threads_fts.op_body`) so `/search` does not leak
+//!   the indexed text of retracted posts after deletion.
 //! - Anonymises the `users` row: display_name becomes `deleted-<hex>`,
 //!   bio nulled, `deleted_at` set, `can_invite = 0`.
 //! - Drops credentials, sessions, user_settings, auth_challenges, and
@@ -729,6 +732,38 @@ pub(crate) async fn soft_delete_user(
         .execute(&mut **tx)
         .await?;
     }
+
+    // 1b. Belt-and-suspenders FTS cleanup. The retraction triggers
+    //     `posts_fts_after_retract` and `threads_fts_op_after_retract`
+    //     (see `migrations/20260506234657_create_fts_tables.sql`)
+    //     already handle the common case as step 1's UPDATEs run, but
+    //     contentless FTS5 tables retain indexed text independent of
+    //     the underlying rows, so any drift between the trigger set
+    //     and the data would silently leak the deleted user's content
+    //     through `/search`. Spec: `docs/search.md` §GDPR.
+    //
+    //     posts_fts: drop every row keyed by a post the user authored,
+    //     including previously-retracted ones whose FTS row should
+    //     already be gone.
+    sqlx::query!(
+        "DELETE FROM posts_fts WHERE rowid IN \
+         (SELECT rowid FROM posts WHERE author = ?)",
+        user_id,
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    //     threads_fts: blank op_body on every thread the user authored.
+    //     Titles are kept (mirrors the underlying `threads.title`
+    //     which we don't blank either — threads are conversation
+    //     anchors that other users' replies refer to).
+    sqlx::query!(
+        "UPDATE threads_fts SET op_body = '' WHERE rowid IN \
+         (SELECT rowid FROM threads WHERE author = ?)",
+        user_id,
+    )
+    .execute(&mut **tx)
+    .await?;
 
     // 2. Anonymise the user row. We keep the row (FKs from rooms,
     //    threads, posts, reports, admin_log all reference users.id) but

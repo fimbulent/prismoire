@@ -7,19 +7,13 @@
 		type ThreadSummary,
 		type ThreadSort
 	} from '$lib/api/threads';
-	import { relativeTime } from '$lib/format';
 	import { session } from '$lib/stores/session.svelte';
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
-	import LockIcon from '$lib/components/ui/LockIcon.svelte';
-	import ExternalLinkIcon from '$lib/components/ui/ExternalLinkIcon.svelte';
-	import Badge from '$lib/components/ui/Badge.svelte';
-	import { linkHost } from '$lib/utils/url';
-	import UserName from '$lib/components/trust/UserName.svelte';
+	import ThreadListRow from '$lib/components/post/ThreadListRow.svelte';
 	import MoreButton from '$lib/components/ui/MoreButton.svelte';
 	import Notice from '$lib/components/ui/Notice.svelte';
 	import { errorMessage } from '$lib/i18n/errors';
-	import { smartypants } from '$lib/typography';
 
 	let { data } = $props();
 
@@ -109,10 +103,6 @@
 	}
 
 	let heading = $derived(isAll ? 'all' : room?.slug ?? page.params.room ?? '');
-
-	function threadHref(thread: ThreadSummary): string {
-		return `/r/${encodeURIComponent(thread.room_slug)}/${thread.id}`;
-	}
 </script>
 
 <svelte:head>
@@ -160,77 +150,12 @@
 			</div>
 		{:else}
 			{#each threads as thread, i (thread.id)}
-				<div
-					class="px-5 py-4 transition-colors duration-100 hover:bg-bg-hover {i < threads.length - 1 ? 'border-b border-border-subtle' : ''}"
-				>
-					<div class="flex items-start gap-3">
-						<div class="flex-1 min-w-0">
-							{#if thread.is_announcement || thread.locked}
-								<div class="mb-1 flex items-center gap-2">
-									{#if thread.is_announcement}
-										<Badge>Announcements</Badge>
-									{/if}
-									{#if thread.locked}
-										<LockIcon />
-									{/if}
-								</div>
-							{/if}
-							<div class="mb-1 max-w-measure">
-								<a
-									href={threadHref(thread)}
-									class="font-prose text-prose leading-snug font-semibold text-text-primary no-underline hover:text-link hover:underline"
-									>{smartypants(thread.title)}</a
-								>
-								{#if thread.link_url}
-									<a
-										href={thread.link_url}
-										target="_blank"
-										rel="nofollow ugc noopener noreferrer"
-										class="ml-1.5 text-xs text-text-muted whitespace-nowrap no-underline hover:text-link hover:underline"
-									>
-										<ExternalLinkIcon />
-										{linkHost(thread.link_url)}
-									</a>
-								{/if}
-							</div>
-							<!--
-								Two-atom layout: [username] [time · replies · room].
-								`flex-wrap` lets the row break onto a second line on
-								narrow viewports, and the only valid break point is
-								between the two children — the right group is wrapped
-								in `whitespace-nowrap` so time/replies/room stay
-								together and never break mid-content (e.g. avoiding
-								"5\nreplies"). No middot between username and time:
-								the `gap-x-2` carries the visual separation and
-								avoids an orphan separator on wrap (CSS can't
-								suppress a leading separator only when wrapped).
-							-->
-							<div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-text-muted">
-								<span class="whitespace-nowrap">
-									<UserName name={thread.author_name} viewer={thread.viewer} compact muted linked={session.isLoggedIn} />
-								</span>
-								<div class="inline-flex items-center gap-2 whitespace-nowrap">
-									<span>{relativeTime(thread.last_activity ?? thread.created_at)}</span>
-									<span>&middot;</span>
-									<a
-										href={threadHref(thread)}
-										class="no-underline hover:text-text-secondary hover:underline"
-										>{thread.reply_count}
-										{thread.reply_count === 1 ? 'reply' : 'replies'}</a
-									>
-									{#if isAll}
-										<span>&middot;</span>
-										<a
-											href="/r/{encodeURIComponent(thread.room_slug)}"
-											class="text-accent-muted no-underline hover:underline"
-											>{thread.room_slug}</a
-										>
-									{/if}
-								</div>
-							</div>
-						</div>
-					</div>
-				</div>
+				<ThreadListRow
+					{thread}
+					showRoomSlug={isAll}
+					isLast={i === threads.length - 1}
+					linkedAuthor={session.isLoggedIn}
+				/>
 			{/each}
 
 			{#if nextCursor}

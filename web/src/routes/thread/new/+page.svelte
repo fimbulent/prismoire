@@ -106,7 +106,7 @@
 <div class="max-w-4xl mx-auto px-6 pt-6 pb-16">
 	<h1 class="text-xl font-bold mb-6">New Thread</h1>
 
-	<form onsubmit={handleSubmit} class="space-y-4">
+	<form onsubmit={handleSubmit} class="space-y-5">
 		{#if error}
 			<div
 				transition:slide={{ duration: 150 }}
@@ -160,40 +160,81 @@
 			{/if}
 		</div>
 
-		<fieldset class="border-none p-0 m-0">
+		<fieldset class="border-none p-0">
 			<legend class="block text-sm font-medium text-text-secondary mb-1">Post type</legend>
-			<div class="inline-flex rounded-md border border-border overflow-hidden">
-				<label
-					class="text-sm px-3 py-1.5 cursor-pointer {kind === 'text'
-						? 'bg-accent text-bg font-medium'
-						: 'bg-bg-surface text-text-secondary hover:text-text-primary'}"
+			<!--
+				Pills + URL share a single visual row. The pill group keeps
+				`rounded-l-md` always, and only adds `rounded-r-md` when the
+				URL input is hidden. The URL input has `border-l-0` so it
+				borrows the pill group's right border instead of stacking
+				its own (which would render as a chunky double line).
+
+				Layout uses CSS Grid (not flex) so the slide-axis-x
+				transition on the URL input animates correctly. In flex,
+				`flex-1`'s `flex-basis: 0%` overrides any inline `width`
+				the slide transition tries to write, producing a snap. In
+				grid, the URL track is always allocated `minmax(0, 1fr)` —
+				the input's animated width is honored, and the row width
+				doesn't shift when the input appears or disappears.
+			-->
+			<div class="grid grid-cols-[auto_minmax(0,1fr)] items-stretch">
+				<div
+					class="inline-flex border border-border overflow-hidden rounded-l-md"
+					class:rounded-r-md={kind !== 'link'}
 				>
+					<label
+						class="text-sm px-3 py-2 cursor-pointer flex items-center {kind === 'text'
+							? 'bg-accent text-bg font-medium'
+							: 'bg-bg-surface text-text-secondary hover:text-text-primary'}"
+					>
+						<input
+							type="radio"
+							name="post-kind"
+							value="text"
+							bind:group={kind}
+							disabled={submitting}
+							class="sr-only"
+						/>
+						Text
+					</label>
+					<label
+						class="text-sm px-3 py-2 cursor-pointer border-l border-border flex items-center {kind === 'link'
+							? 'bg-accent text-bg font-medium'
+							: 'bg-bg-surface text-text-secondary hover:text-text-primary'}"
+					>
+						<input
+							type="radio"
+							name="post-kind"
+							value="link"
+							bind:group={kind}
+							disabled={submitting}
+							class="sr-only"
+						/>
+						Link
+					</label>
+				</div>
+				{#if kind === 'link'}
+					<label for="thread-link" class="sr-only">URL</label>
 					<input
-						type="radio"
-						name="post-kind"
-						value="text"
-						bind:group={kind}
+						id="thread-link"
+						type="url"
+						bind:value={link}
+						maxlength={MAX_LINK}
+						required
+						autocomplete="off"
 						disabled={submitting}
-						class="sr-only"
+						placeholder="https://example.com/article"
+						transition:slide={{ axis: 'x', duration: 150 }}
+						class="flex-1 min-w-0 bg-bg-surface border border-l-0 border-border rounded-r-md text-text-primary text-sm px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted"
+						class:border-danger={!!linkError}
 					/>
-					Text
-				</label>
-				<label
-					class="text-sm px-3 py-1.5 cursor-pointer border-l border-border {kind === 'link'
-						? 'bg-accent text-bg font-medium'
-						: 'bg-bg-surface text-text-secondary hover:text-text-primary'}"
-				>
-					<input
-						type="radio"
-						name="post-kind"
-						value="link"
-						bind:group={kind}
-						disabled={submitting}
-						class="sr-only"
-					/>
-					Link
-				</label>
+				{/if}
 			</div>
+			{#if linkError}
+				<p transition:slide={{ duration: 150 }} class="text-danger text-xs mt-1">
+					{linkError}
+				</p>
+			{/if}
 		</fieldset>
 
 		<div>
@@ -209,7 +250,7 @@
 				autocomplete="off"
 				disabled={submitting}
 				placeholder="What is this thread about?"
-				class="w-full bg-bg-surface border border-border rounded-md text-text-primary font-prose text-sm px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted"
+				class="w-full bg-bg-surface border border-border rounded-md text-text-primary font-prose text-prose px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted"
 				class:border-danger={!!titleError}
 			/>
 			{#if titleError}
@@ -219,44 +260,27 @@
 			{/if}
 		</div>
 
-		{#if kind === 'link'}
-			<div transition:slide={{ duration: 150 }}>
-				<label for="thread-link" class="block text-sm font-medium text-text-secondary mb-1"
-					>URL</label
-				>
-				<input
-					id="thread-link"
-					type="url"
-					bind:value={link}
-					maxlength={MAX_LINK}
-					required
-					autocomplete="off"
-					disabled={submitting}
-					placeholder="https://example.com/article"
-					class="w-full bg-bg-surface border border-border rounded-md text-text-primary text-sm px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted"
-					class:border-danger={!!linkError}
-				/>
-				{#if linkError}
-					<p transition:slide={{ duration: 150 }} class="text-danger text-xs mt-1">
-						{linkError}
-					</p>
-				{/if}
-			</div>
-		{/if}
-
 		<div>
 			<label for="thread-body" class="block text-sm font-medium text-text-secondary mb-1">
 				Body{#if kind === 'link'}<span class="text-text-muted font-normal"> (optional)</span>{/if}
 			</label>
+			<!--
+				Height is driven by `min-height` (toggled via class) rather
+				than the `rows` attribute, because `rows` cannot be CSS-
+				transitioned. The two min-h values approximately match
+				rows=5 / rows=10 at the prose font-size + line-height.
+				`resize-y` still works: once the user manually resizes,
+				the inline height overrides min-height and subsequent
+				kind toggles won't shrink it.
+			-->
 			<textarea
 				id="thread-body"
 				bind:value={body}
 				placeholder={kind === 'link'
 					? 'Optional: add context or commentary in Markdown...'
 					: 'Write your post in Markdown...'}
-				rows={kind === 'link' ? 5 : 10}
 				disabled={submitting}
-				class="w-full bg-bg-surface border border-border rounded-md text-text-primary text-prose font-prose px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted resize-y"
+				class="w-full bg-bg-surface border border-border rounded-md text-text-primary text-prose font-prose px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted resize-y transition-[min-height] duration-200 ease-out {kind === 'link' ? 'min-h-40' : 'min-h-72'}"
 				class:border-danger={bodyLen > MAX_BODY}
 			></textarea>
 			<div class="flex items-center justify-between mt-1">

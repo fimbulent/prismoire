@@ -229,3 +229,90 @@ CREATE TABLE user_tags (
     CHECK (length(tag) > 0)
 );
 CREATE INDEX idx_user_tags_viewer ON user_tags(viewer_id);
+CREATE VIRTUAL TABLE threads_fts USING fts5(
+    title,
+    op_body,
+    content='',
+    tokenize = "unicode61 remove_diacritics 2"
+)
+/* threads_fts(title,op_body) */;
+CREATE TABLE IF NOT EXISTS 'threads_fts_data'(id INTEGER PRIMARY KEY, block BLOB);
+CREATE TABLE IF NOT EXISTS 'threads_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS 'threads_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB);
+CREATE TABLE IF NOT EXISTS 'threads_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID;
+CREATE VIRTUAL TABLE posts_fts USING fts5(
+    body,
+    content='',
+    tokenize = "unicode61 remove_diacritics 2"
+)
+/* posts_fts(body) */;
+CREATE TABLE IF NOT EXISTS 'posts_fts_data'(id INTEGER PRIMARY KEY, block BLOB);
+CREATE TABLE IF NOT EXISTS 'posts_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS 'posts_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB);
+CREATE TABLE IF NOT EXISTS 'posts_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID;
+CREATE TRIGGER threads_fts_after_insert
+AFTER INSERT ON threads
+BEGIN
+    INSERT INTO threads_fts (rowid, title, op_body)
+    VALUES (NEW.rowid, NEW.title, '');
+END;
+CREATE TRIGGER threads_fts_after_delete
+AFTER DELETE ON threads
+BEGIN
+    DELETE FROM threads_fts WHERE rowid = OLD.rowid;
+END;
+CREATE TRIGGER threads_fts_after_update_title
+AFTER UPDATE OF title ON threads
+BEGIN
+    UPDATE threads_fts
+    SET title = NEW.title
+    WHERE rowid = NEW.rowid;
+END;
+CREATE TRIGGER threads_fts_op_body_after_revision
+AFTER INSERT ON post_revisions
+WHEN (SELECT parent FROM posts WHERE id = NEW.post_id) IS NULL
+ AND NEW.revision = (SELECT MAX(revision) FROM post_revisions WHERE post_id = NEW.post_id)
+BEGIN
+    UPDATE threads_fts
+    SET op_body = NEW.body
+    WHERE rowid = (
+        SELECT t.rowid FROM threads t
+        WHERE t.id = (SELECT thread FROM posts WHERE id = NEW.post_id)
+    );
+END;
+CREATE TRIGGER threads_fts_op_after_retract
+AFTER UPDATE OF retracted_at ON posts
+WHEN OLD.retracted_at IS NULL
+ AND NEW.retracted_at IS NOT NULL
+ AND NEW.parent IS NULL
+BEGIN
+    UPDATE threads_fts
+    SET op_body = ''
+    WHERE rowid = (SELECT rowid FROM threads WHERE id = NEW.thread);
+END;
+CREATE TRIGGER posts_fts_after_revision
+AFTER INSERT ON post_revisions
+WHEN (SELECT retracted_at FROM posts WHERE id = NEW.post_id) IS NULL
+ AND NEW.revision = (SELECT MAX(revision) FROM post_revisions WHERE post_id = NEW.post_id)
+BEGIN
+    DELETE FROM posts_fts
+    WHERE rowid = (SELECT rowid FROM posts WHERE id = NEW.post_id);
+
+    INSERT INTO posts_fts (rowid, body)
+    VALUES (
+        (SELECT rowid FROM posts WHERE id = NEW.post_id),
+        NEW.body
+    );
+END;
+CREATE TRIGGER posts_fts_after_retract
+AFTER UPDATE OF retracted_at ON posts
+WHEN OLD.retracted_at IS NULL
+ AND NEW.retracted_at IS NOT NULL
+BEGIN
+    DELETE FROM posts_fts WHERE rowid = OLD.rowid;
+END;
+CREATE TRIGGER posts_fts_after_delete
+AFTER DELETE ON posts
+BEGIN
+    DELETE FROM posts_fts WHERE rowid = OLD.rowid;
+END;
