@@ -101,15 +101,29 @@ impl KeyExtractor for SessionKeyExtractor {
     }
 }
 
-type IpLayer = GovernorLayer<ClientIpKeyExtractor, NoOpMiddleware<QuantaInstant>, axum::body::Body>;
-type AuthLayer =
+pub type IpLayer =
     GovernorLayer<ClientIpKeyExtractor, NoOpMiddleware<QuantaInstant>, axum::body::Body>;
-type UserLayer =
-    GovernorLayer<SessionKeyExtractor, NoOpMiddleware<QuantaInstant>, axum::body::Body>;
-type ReportLayer =
-    GovernorLayer<SessionKeyExtractor, NoOpMiddleware<QuantaInstant>, axum::body::Body>;
-type CspReportLayer =
+pub type AuthLayer =
     GovernorLayer<ClientIpKeyExtractor, NoOpMiddleware<QuantaInstant>, axum::body::Body>;
+pub type UserLayer =
+    GovernorLayer<SessionKeyExtractor, NoOpMiddleware<QuantaInstant>, axum::body::Body>;
+pub type ReportLayer =
+    GovernorLayer<SessionKeyExtractor, NoOpMiddleware<QuantaInstant>, axum::body::Body>;
+pub type CspReportLayer =
+    GovernorLayer<ClientIpKeyExtractor, NoOpMiddleware<QuantaInstant>, axum::body::Body>;
+
+/// Bundle of rate-limit layers returned by [`build_layers`].
+///
+/// Grouped into a struct so the application router builder can receive
+/// them as one parameter and apply each at its correct scope (auth-only
+/// vs per-session vs global IP) without juggling a 5-tuple.
+pub struct RateLimitLayers {
+    pub ip: IpLayer,
+    pub auth: AuthLayer,
+    pub user: UserLayer,
+    pub report: ReportLayer,
+    pub csp_report: CspReportLayer,
+}
 
 /// Translate a [`GovernorError`] into the project's structured
 /// [`AppError`] JSON envelope.
@@ -207,7 +221,7 @@ const CSP_REPORT_BURST_SIZE: u32 = 5;
 pub fn build_layers(
     config: &prismoire_config::RateLimitConfig,
     trust_proxy_headers: bool,
-) -> (IpLayer, AuthLayer, UserLayer, ReportLayer, CspReportLayer) {
+) -> RateLimitLayers {
     let ip_extractor = ClientIpKeyExtractor::from_config(trust_proxy_headers);
 
     let ip_config = Arc::new(
@@ -259,11 +273,11 @@ pub fn build_layers(
             .expect("invalid CSP report rate limit config"),
     );
 
-    (
-        GovernorLayer::new(ip_config).error_handler(govern_error_handler),
-        GovernorLayer::new(auth_config).error_handler(govern_error_handler),
-        GovernorLayer::new(user_config).error_handler(govern_error_handler),
-        GovernorLayer::new(report_config).error_handler(govern_error_handler),
-        GovernorLayer::new(csp_report_config).error_handler(govern_error_handler),
-    )
+    RateLimitLayers {
+        ip: GovernorLayer::new(ip_config).error_handler(govern_error_handler),
+        auth: GovernorLayer::new(auth_config).error_handler(govern_error_handler),
+        user: GovernorLayer::new(user_config).error_handler(govern_error_handler),
+        report: GovernorLayer::new(report_config).error_handler(govern_error_handler),
+        csp_report: GovernorLayer::new(csp_report_config).error_handler(govern_error_handler),
+    }
 }

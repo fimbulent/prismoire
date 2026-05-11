@@ -23,19 +23,29 @@ fi
 # Regenerate the sqlx offline query cache when server Rust or migrations
 # change. The cache is consulted by SQLX_OFFLINE=true builds (Nix / CI),
 # so letting it drift from the actual queries breaks offline builds.
+# `--tests --features test-auth` ensures the cache also covers queries
+# in `src/test_support.rs` (gated by `cfg(any(test, feature = "test-auth"))`)
+# and any integration-test queries — without this, CI's
+# `--features test-auth` build would fail to look those up in `.sqlx/`.
 STAGED_SERVER_RS=$(git diff --cached --name-only --diff-filter=ACM | grep '^server/.*\.rs$' || true)
 if [ -n "$STAGED_SERVER_RS" ] || [ -n "$STAGED_MIGRATIONS" ]; then
     echo "  → Regenerating .sqlx/ offline cache..."
-    (cd server && cargo sqlx prepare)
+    (cd server && cargo sqlx prepare -- --tests --features test-auth)
     git add server/.sqlx
 fi
 
-# Check for clippy warnings
+# Check for clippy warnings. `--tests --features test-auth` lints both
+# the bypass handlers in `src/test_support.rs` and the integration test
+# crates under `tests/`.
 echo "  → Running cargo clippy..."
-cargo clippy --manifest-path server/Cargo.toml --quiet -- -D warnings
+cargo clippy --manifest-path server/Cargo.toml --tests --features test-auth --quiet -- -D warnings
 
-# Run tests
+# Run tests. `--features test-auth` is required to exercise the
+# integration tests under `tests/`, which mount the `/test/*` bypass
+# routes. Files there start with `#![cfg(feature = "test-auth")]` and
+# compile to empty crates without the feature, so skipping it would
+# silently bypass the whole handler-test tier.
 echo "  → Running cargo test..."
-cargo test --manifest-path server/Cargo.toml --quiet
+cargo test --manifest-path server/Cargo.toml --features test-auth --quiet
 
 echo "✓ All pre-commit checks passed"

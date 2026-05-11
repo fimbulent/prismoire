@@ -243,7 +243,14 @@ pub async fn setup_guard_middleware(
 ) -> Response {
     if state.needs_setup.load(Ordering::Relaxed) {
         let path = request.uri().path();
-        if !path.starts_with("/api/setup/") && path != "/api/health" {
+        let is_exempt = path.starts_with("/api/setup/") || path == "/api/health";
+        // Under the `test-auth` feature, the test-only bypass router lives
+        // under `/test/*` and must be reachable before setup completes —
+        // `POST /test/setup-admin` is the *equivalent* of the real setup
+        // flow for integration tests. See `server/src/test_support.rs`.
+        #[cfg(any(test, feature = "test-auth"))]
+        let is_exempt = is_exempt || path.starts_with("/test/");
+        if !is_exempt {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(serde_json::json!({

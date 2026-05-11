@@ -63,9 +63,12 @@ db-create:
 db-migrate:
     cd server && cargo sqlx migrate run
 
-# Regenerate the .sqlx/ offline query cache
+# Regenerate the .sqlx/ offline query cache.
+# `--tests --features test-auth` ensures the cache covers both
+# `src/test_support.rs` (cfg-gated bypass handlers) and the integration
+# tests under `tests/`, both of which CI builds with the feature on.
 db-prepare:
-    cd server && cargo sqlx prepare
+    cd server && cargo sqlx prepare -- --tests --features test-auth
 
 # Dump the current schema (from migrations) to schema.sql
 db-schema:

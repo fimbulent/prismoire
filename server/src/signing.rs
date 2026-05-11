@@ -1,4 +1,4 @@
-use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+use ed25519_dalek::{Signer, SigningKey};
 use rand::rngs::OsRng;
 use sqlx::SqlitePool;
 use uuid::Uuid;
@@ -59,26 +59,6 @@ pub async fn sign_message(
 
     let signature = signing_key.sign(message);
     Ok(signature.to_bytes().to_vec())
-}
-
-/// Verify an Ed25519 signature against a public key.
-#[expect(dead_code)]
-pub fn verify_signature(
-    public_key: &[u8],
-    message: &[u8],
-    signature: &[u8],
-) -> Result<(), SignError> {
-    let key_bytes: [u8; 32] = public_key.try_into().map_err(|_| SignError::InvalidKey)?;
-    let verifying_key = VerifyingKey::from_bytes(&key_bytes).map_err(|_| SignError::InvalidKey)?;
-
-    let sig_bytes: [u8; 64] = signature
-        .try_into()
-        .map_err(|_| SignError::InvalidSignature)?;
-    let sig = ed25519_dalek::Signature::from_bytes(&sig_bytes);
-
-    verifying_key
-        .verify_strict(message, &sig)
-        .map_err(|_| SignError::InvalidSignature)
 }
 
 #[derive(Debug)]

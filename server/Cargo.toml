@@ -28,3 +28,26 @@ url = "2"
 uuid = { workspace = true, features = ["v4", "serde"] }
 # conditional-ui: enables discoverable credentials for passkey autofill
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation", "conditional-ui"] }
+
+[features]
+# Mounts test-only auth bypass handlers (POST /test/setup-admin and
+# POST /test/signup-as) for integration tests. NEVER enable in release
+# builds — these routes create users and mint sessions without any
+# WebAuthn ceremony. See server/src/test_support.rs and docs/handler_tests.md.
+test-auth = []
+
+[dev-dependencies]
+# `tower::ServiceExt::oneshot` drives the Axum router in-process from
+# integration tests without binding to a TCP port.
+tower = { version = "0.5", features = ["util"] }
+# `BodyExt::collect` to materialise response bodies for assertions.
+http-body-util = "0.1"
+
+# Integration tests under `server/tests/` exercise real HTTP handlers
+# through the test-only `/test/*` bypass routes mounted by the
+# `test-auth` feature. Each test file starts with
+# `#![cfg(feature = "test-auth")]` so it compiles to an empty crate when
+# the feature is off — `cargo test -p prismoire-server` then runs the
+# unit tests only, and CI's `--features test-auth` pulls them in. New
+# integration tests get the same cfg gate and require no Cargo.toml
+# entry. See docs/handler_tests.md.
