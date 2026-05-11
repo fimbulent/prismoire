@@ -1,9 +1,12 @@
 //! CSRF protection via Origin / Referer header checking.
 //!
-//! Prismoire uses `HttpOnly` + `SameSite=Strict` session cookies as the
-//! primary CSRF defense — modern browsers will not attach the session cookie
-//! to cross-site requests at all. This middleware adds a defense-in-depth
-//! check on every state-changing request (non-safe HTTP methods): the
+//! Prismoire uses `HttpOnly` + `SameSite=Lax` session cookies as a first
+//! line of defense — modern browsers will not attach the session cookie to
+//! cross-site non-safe requests (POST/PUT/PATCH/DELETE). `Lax` (rather than
+//! `Strict`) is required so the cookie is sent on top-level GET navigations
+//! including PWA cold launches; the trade-off is that Lax does attach the
+//! cookie to cross-site top-level GETs, so this middleware carries the real
+//! load for state-changing requests: on every non-safe HTTP method the
 //! `Origin` header (with `Referer` as a fallback for clients that strip
 //! `Origin`) must match the server's own origin, as declared by
 //! `webauthn.rp_origin` in the config.

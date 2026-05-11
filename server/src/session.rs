@@ -213,14 +213,14 @@ pub async fn delete_session(db: &SqlitePool, token: &str) -> Result<(), sqlx::Er
 /// Build a Set-Cookie header value for the session cookie.
 pub fn session_cookie(token: &str) -> String {
     format!(
-        "{SESSION_COOKIE_NAME}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}",
+        "{SESSION_COOKIE_NAME}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}",
         SESSION_DURATION_DAYS * 24 * 60 * 60
     )
 }
 
 /// Build a Set-Cookie header value that clears the session cookie.
 pub fn clear_session_cookie() -> String {
-    format!("{SESSION_COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0")
+    format!("{SESSION_COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0")
 }
 
 /// Extract the session token from a Cookie header value.

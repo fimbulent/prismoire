@@ -28,21 +28,25 @@ function isAllowedForRestricted(pathname: string, session: SessionInfo): boolean
 
 export const load: LayoutServerLoad = async ({ fetch, cookies, locals, url, setHeaders }) => {
 	// Every SSR response in this app is session-dependent: gated pages
-	// branch on the auth cookie, /` redirects authed → /r/all vs anon →
-	// /public, even /public itself renders different chrome depending on
-	// whether the viewer is signed in. Caching any of this — even
-	// heuristically by a browser or a PWA shell warming `start_url` — is
-	// a correctness bug: a logged-out 307 → /public served from cache
-	// would prevent a subsequently-logged-in PWA cold launch from ever
-	// reaching /r/all without a manual refresh (observed in production).
+	// branch on the auth cookie, `/` redirects authed → /r/all vs anon →
+	// /public, and even /public itself renders different chrome depending
+	// on whether the viewer is signed in. On top of that, the trust-graph
+	// model means two authenticated viewers can see materially different
+	// content for the same URL. Caching any of this at the browser or an
+	// intermediary risks one viewer's render leaking to another.
 	//
-	// `no-store` (not just `no-cache`) so intermediaries and the PWA
-	// shell don't even retain a copy to revalidate. Long-cached
-	// fingerprinted bundles under /_app/immutable/* are served by Caddy
-	// with their own headers and aren't affected by this. Pages that are
-	// genuinely safe to share across viewers (none today) can override
-	// by calling `setHeaders({ 'cache-control': ... })` from their own
-	// load.
+	// `no-store` (not just `no-cache`) so nothing retains a copy at all —
+	// in particular, this opts the page out of bfcache, which would
+	// otherwise restore a fully-rendered authenticated view after the
+	// user has logged out (a real concern on shared devices). The bfcache
+	// UX cost (back-button re-fetches instead of instant-restores) is
+	// the price we pay for that guarantee.
+	//
+	// Long-cached fingerprinted bundles under /_app/immutable/* are
+	// served by Caddy with their own headers and aren't affected. Pages
+	// that are genuinely safe to share across viewers (none today) can
+	// override by calling `setHeaders({ 'cache-control': ... })` from
+	// their own load.
 	setHeaders({ 'cache-control': 'no-store' });
 
 	const setupStatus = await getSetupStatus({ fetch }).catch(() => ({ needs_setup: false }));
