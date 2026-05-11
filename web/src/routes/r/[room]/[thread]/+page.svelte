@@ -244,6 +244,7 @@
 			thread.reply_count += 1;
 			thread = thread;
 			replyingToId = null;
+			tick().then(() => scrollToFocusedPost(newPost.id));
 		} catch (e) {
 			replyError = errorMessage(e, 'Failed to post reply');
 		} finally {
@@ -261,6 +262,7 @@
 			thread.reply_count += 1;
 			thread = thread;
 			topLevelBody = '';
+			tick().then(() => scrollToFocusedPost(newPost.id));
 		} catch (e) {
 			topLevelError = errorMessage(e, 'Failed to post reply');
 		} finally {
@@ -270,7 +272,12 @@
 
 	function insertReply(root: PostResponse, newPost: PostResponse) {
 		if (root.id === newPost.parent_id) {
-			root.children = [...root.children, newPost];
+			// Prepend rather than append: in "new" sort the just-submitted
+			// post is by definition the newest, and in "trust" sort the
+			// reader's own posts sort to the top of their sibling group
+			// (sort_key = 0.0 server-side). Either way, the new post belongs
+			// at the head of its siblings.
+			root.children = [newPost, ...root.children];
 			return true;
 		}
 		for (const child of root.children) {
@@ -459,6 +466,50 @@
 			<Notice>This post is readable to the public, but replies to this post are visible only to trusted users.</Notice>
 		{/if}
 
+		<!-- Reply form: positioned above the replies so the just-submitted
+		     reply (which sorts to the top of its sibling group) lands near
+		     the composer rather than across the page. Hidden inside a
+		     re-rooted view because that view is for reading a sub-conversation,
+		     not for composing a top-level thread reply. -->
+		{#if session.isLoggedIn && !viewRoot && !thread.locked}
+		<div class="mb-6">
+			<div class="bg-bg-surface border border-border rounded-md p-3 focus-within:border-accent-muted">
+			<textarea
+				bind:value={topLevelBody}
+				class="block w-full max-w-measure mx-auto min-h-24 bg-transparent text-text-primary font-prose text-prose field-sizing:content resize-none focus:outline-none placeholder:text-text-muted"
+				placeholder="Reply to thread..."
+			></textarea>
+			{#if topLevelError}
+				<div class="text-danger text-sm mt-1 max-w-measure mx-auto">{topLevelError}</div>
+			{/if}
+			<div class="mt-2 max-w-measure mx-auto flex justify-end gap-3 items-center">
+				<span class="text-xs text-text-muted mr-auto">Markdown supported</span>
+				{#if showTopLevelCounter}
+					<span
+						transition:slide={{ duration: 150, axis: 'x' }}
+						class="text-xs tabular-nums {topLevelRemaining < 0 ? 'text-danger font-medium' : topLevelRemaining < 2000 ? 'text-text-secondary' : 'text-text-muted'}"
+					>
+						{topLevelRemaining.toLocaleString()} characters remaining
+					</span>
+				{/if}
+				{#if topLevelBody.trim() !== ''}
+					<button
+						transition:fade={{ duration: 150 }}
+						onclick={() => { topLevelBody = ''; topLevelError = null; }}
+						disabled={topLevelSaving}
+						class="font-sans text-sm px-4 py-2 rounded-md cursor-pointer border border-border bg-transparent text-text-secondary font-medium hover:bg-bg-hover hover:text-text-primary disabled:opacity-50"
+					>Cancel</button>
+				{/if}
+				<button
+					onclick={submitTopLevelReply}
+					disabled={topLevelSaving || topLevelBody.trim() === '' || topLevelBodyLen > MAX_REPLY_BODY}
+					class="font-sans text-sm px-4 py-2 rounded-md cursor-pointer border border-accent bg-accent text-bg font-medium hover:opacity-90 disabled:opacity-50 transition-opacity duration-150"
+				>{topLevelSaving ? 'Posting…' : 'Post reply'}</button>
+			</div>
+			</div>
+		</div>
+		{/if}
+
 		{#if !session.isLoggedIn}
 			<div class="text-center py-8">
 				<a href="/login" class="text-link hover:text-link-hover">Sign in</a> to see replies and join the discussion.
@@ -564,46 +615,6 @@
 			{:else}
 				<div class="text-center text-text-muted py-8">No replies yet.</div>
 			{/if}
-		{/if}
-
-		<!-- Bottom reply form -->
-		{#if session.isLoggedIn && !viewRoot && !thread.locked}
-		<div class="pt-8">
-			<div class="bg-bg-surface border border-border rounded-md p-3 focus-within:border-accent-muted">
-			<textarea
-				bind:value={topLevelBody}
-				class="block w-full max-w-measure mx-auto min-h-24 bg-transparent text-text-primary font-prose text-prose field-sizing:content resize-none focus:outline-none placeholder:text-text-muted"
-				placeholder="Reply to thread..."
-			></textarea>
-			{#if topLevelError}
-				<div class="text-danger text-sm mt-1 max-w-measure mx-auto">{topLevelError}</div>
-			{/if}
-			<div class="mt-2 max-w-measure mx-auto flex justify-end gap-3 items-center">
-				<span class="text-xs text-text-muted mr-auto">Markdown supported</span>
-				{#if showTopLevelCounter}
-					<span
-						transition:slide={{ duration: 150, axis: 'x' }}
-						class="text-xs tabular-nums {topLevelRemaining < 0 ? 'text-danger font-medium' : topLevelRemaining < 2000 ? 'text-text-secondary' : 'text-text-muted'}"
-					>
-						{topLevelRemaining.toLocaleString()} characters remaining
-					</span>
-				{/if}
-				{#if topLevelBody.trim() !== ''}
-					<button
-						transition:fade={{ duration: 150 }}
-						onclick={() => { topLevelBody = ''; topLevelError = null; }}
-						disabled={topLevelSaving}
-						class="font-sans text-sm px-4 py-2 rounded-md cursor-pointer border border-border bg-transparent text-text-secondary font-medium hover:bg-bg-hover hover:text-text-primary disabled:opacity-50"
-					>Cancel</button>
-				{/if}
-				<button
-					onclick={submitTopLevelReply}
-					disabled={topLevelSaving || topLevelBody.trim() === '' || topLevelBodyLen > MAX_REPLY_BODY}
-					class="font-sans text-sm px-4 py-2 rounded-md cursor-pointer border border-accent bg-accent text-bg font-medium hover:opacity-90 disabled:opacity-50 transition-opacity duration-150"
-				>{topLevelSaving ? 'Posting…' : 'Post reply'}</button>
-			</div>
-			</div>
-		</div>
 		{/if}
 </div>
 

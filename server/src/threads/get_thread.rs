@@ -280,9 +280,14 @@ impl TreeCtx<'_> {
                     .partial_cmp(&sort_key(b))
                     .unwrap_or(std::cmp::Ordering::Equal)
                     .then_with(|| {
+                        // Within a trust tier, newer first — matches the "New"
+                        // sort's direction so the two modes agree on recency,
+                        // and keeps the reader's own newest reply at the top
+                        // of their own block instead of buried below older
+                        // self-replies.
                         let ts_a = self.tree.metas[a].created_at.as_str();
                         let ts_b = self.tree.metas[b].created_at.as_str();
-                        ts_a.cmp(ts_b)
+                        ts_b.cmp(ts_a)
                     })
             });
         }
