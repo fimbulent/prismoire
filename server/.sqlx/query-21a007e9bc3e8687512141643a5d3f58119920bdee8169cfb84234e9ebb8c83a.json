@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT t.id AS \"id!: String\",\n                  t.title AS \"title!: String\",\n                  t.author AS \"author_id!: String\",\n                  u.display_name AS \"author_name!: String\",\n                  u.status AS \"author_status!: String\",\n                  u.deleted_at AS \"author_deleted_at?: String\",\n                  t.created_at AS \"created_at!: String\",\n                  t.locked AS \"locked!: bool\",\n                  r.id AS \"room_id!: String\",\n                  r.slug AS \"room_slug!: String\",\n                  (r.slug = 'announcements') AS \"is_announcement!: bool\",\n                  t.reply_count AS \"reply_count!: i64\",\n                  t.last_activity AS \"last_activity?: String\",\n                  t.link_url AS \"link_url?: String\"\n           FROM threads t\n           JOIN users u ON u.id = t.author\n           JOIN rooms r ON r.id = t.room\n           WHERE t.link_url IS NOT NULL\n             AND LOWER(t.link_url) LIKE ? ESCAPE '\\'\n             AND r.merged_into IS NULL\n             AND r.deleted_at IS NULL\n           ORDER BY COALESCE(t.last_activity, t.created_at) DESC\n           LIMIT ?",
+  "query": "SELECT t.id AS \"id!: String\",\n                      t.title AS \"title!: String\",\n                      t.author AS \"author_id!: String\",\n                      u.display_name AS \"author_name!: String\",\n                      u.status AS \"author_status!: String\",\n                      u.deleted_at AS \"author_deleted_at?: String\",\n                      t.created_at AS \"created_at!: String\",\n                      t.locked AS \"locked!: bool\",\n                      r.id AS \"room_id!: String\",\n                      r.slug AS \"room_slug!: String\",\n                      (r.slug = 'announcements') AS \"is_announcement!: bool\",\n                      t.reply_count AS \"reply_count!: i64\",\n                      t.last_activity AS \"last_activity?: String\",\n                      t.link_url AS \"link_url?: String\",\n                      bm25(threads_fts, 4.0, 1.0, 1.0) AS \"bm25!: f64\"\n               FROM threads_fts\n               JOIN threads t ON t.rowid = threads_fts.rowid\n               JOIN users u ON u.id = t.author\n               JOIN rooms r ON r.id = t.room\n               WHERE threads_fts MATCH ?\n                 AND r.merged_into IS NULL\n                 AND r.deleted_at IS NULL\n               ORDER BY bm25(threads_fts, 4.0, 1.0, 1.0)\n               LIMIT ?",
   "describe": {
     "columns": [
       {
@@ -72,6 +72,11 @@
         "name": "link_url?: String",
         "ordinal": 13,
         "type_info": "Text"
+      },
+      {
+        "name": "bm25!: f64",
+        "ordinal": 14,
+        "type_info": "Null"
       }
     ],
     "parameters": {
@@ -91,8 +96,9 @@
       false,
       false,
       true,
-      true
+      true,
+      null
     ]
   },
-  "hash": "b2c8707f15f8b7d7e2d9cfd615b3d67918d6c1d8a7a57daadd427b4414993b36"
+  "hash": "21a007e9bc3e8687512141643a5d3f58119920bdee8169cfb84234e9ebb8c83a"
 }

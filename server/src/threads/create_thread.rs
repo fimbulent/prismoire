@@ -13,7 +13,8 @@ use crate::state::AppState;
 use crate::trust::UserViewerInfo;
 
 use super::common::{
-    MAX_BODY_LEN, PostResponse, ThreadDetailResponse, validate_body, validate_link, validate_title,
+    MAX_BODY_LEN, PostResponse, ThreadDetailResponse, normalize_url_for_fts, validate_body,
+    validate_link, validate_title,
 };
 
 /// Wire request for `POST /api/threads`.
@@ -84,9 +85,14 @@ pub async fn create_thread(
     let post_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
+    // Normalized form drops scheme + leading `www.` so those near-
+    // universal tokens never enter `threads_fts`. Raw `link_url` is
+    // preserved for display.
+    let link_url_normalized = link_url.as_deref().map(normalize_url_for_fts);
+
     sqlx::query!(
-        "INSERT INTO threads (id, title, author, room, created_at, last_activity, link_url) \
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO threads (id, title, author, room, created_at, last_activity, link_url, link_url_normalized) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         thread_id,
         title,
         user.user_id,
@@ -94,6 +100,7 @@ pub async fn create_thread(
         now,
         now,
         link_url,
+        link_url_normalized,
     )
     .execute(&state.db)
     .await?;

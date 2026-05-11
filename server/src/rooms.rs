@@ -1216,16 +1216,25 @@ async fn search_rooms_core(
     // Substring oversample: pull a fixed-size pool, then page in
     // memory. Keeps cursor semantics simple (offset within the pool)
     // and avoids leaking the underlying ordering into the wire format.
+    //
+    // The substring `LIKE` runs against `rooms_fts.slug` (trigram FTS5)
+    // so it's index-bound regardless of room count — see
+    // `docs/search_efficiency.md`. The `merged_into IS NULL AND
+    // deleted_at IS NULL` filter on `rooms` is defensive: triggers
+    // already keep merged / soft-deleted rooms out of `rooms_fts`, but
+    // the redundant guard ensures a missed transition can't leak a
+    // stale row.
     let rows = sqlx::query!(
-        r#"SELECT id
-           FROM rooms
-           WHERE merged_into IS NULL
-             AND deleted_at IS NULL
-             AND LOWER(slug) LIKE ? ESCAPE '\'
-           ORDER BY (LOWER(slug) = ?) DESC,
-                    (LOWER(slug) LIKE ? ESCAPE '\') DESC,
-                    LENGTH(slug),
-                    slug
+        r#"SELECT r.id
+           FROM rooms_fts
+           JOIN rooms r ON r.rowid = rooms_fts.rowid
+           WHERE rooms_fts.slug LIKE ? ESCAPE '\'
+             AND r.merged_into IS NULL
+             AND r.deleted_at IS NULL
+           ORDER BY (LOWER(r.slug) = ?) DESC,
+                    (LOWER(r.slug) LIKE ? ESCAPE '\') DESC,
+                    LENGTH(r.slug),
+                    r.slug
            LIMIT ?"#,
         substring_pattern,
         lower,

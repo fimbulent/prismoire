@@ -113,7 +113,7 @@ CREATE TABLE threads (
     locked INTEGER NOT NULL DEFAULT 0,
     last_activity TEXT,
     reply_count INTEGER NOT NULL DEFAULT 0
-, link_url TEXT);
+, link_url TEXT, link_url_normalized TEXT);
 CREATE TABLE posts (
     id TEXT PRIMARY KEY NOT NULL,
     author TEXT NOT NULL REFERENCES users(id),
@@ -232,29 +232,21 @@ CREATE INDEX idx_user_tags_viewer ON user_tags(viewer_id);
 CREATE VIRTUAL TABLE threads_fts USING fts5(
     title,
     op_body,
+    link_url,
     content='',
+    contentless_delete=1,
     tokenize = "unicode61 remove_diacritics 2"
 )
-/* threads_fts(title,op_body) */;
+/* threads_fts(title,op_body,link_url) */;
 CREATE TABLE IF NOT EXISTS 'threads_fts_data'(id INTEGER PRIMARY KEY, block BLOB);
 CREATE TABLE IF NOT EXISTS 'threads_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS 'threads_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB);
+CREATE TABLE IF NOT EXISTS 'threads_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB, origin INTEGER);
 CREATE TABLE IF NOT EXISTS 'threads_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID;
-CREATE VIRTUAL TABLE posts_fts USING fts5(
-    body,
-    content='',
-    tokenize = "unicode61 remove_diacritics 2"
-)
-/* posts_fts(body) */;
-CREATE TABLE IF NOT EXISTS 'posts_fts_data'(id INTEGER PRIMARY KEY, block BLOB);
-CREATE TABLE IF NOT EXISTS 'posts_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS 'posts_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB);
-CREATE TABLE IF NOT EXISTS 'posts_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID;
 CREATE TRIGGER threads_fts_after_insert
 AFTER INSERT ON threads
 BEGIN
-    INSERT INTO threads_fts (rowid, title, op_body)
-    VALUES (NEW.rowid, NEW.title, '');
+    INSERT INTO threads_fts (rowid, title, op_body, link_url)
+    VALUES (NEW.rowid, NEW.title, '', COALESCE(NEW.link_url_normalized, ''));
 END;
 CREATE TRIGGER threads_fts_after_delete
 AFTER DELETE ON threads
@@ -264,21 +256,35 @@ END;
 CREATE TRIGGER threads_fts_after_update_title
 AFTER UPDATE OF title ON threads
 BEGIN
-    UPDATE threads_fts
-    SET title = NEW.title
-    WHERE rowid = NEW.rowid;
+    INSERT OR REPLACE INTO threads_fts (rowid, title, op_body, link_url)
+    VALUES (
+        NEW.rowid,
+        NEW.title,
+        COALESCE(
+            (
+                SELECT pr.body
+                FROM post_revisions pr
+                JOIN posts p ON p.id = pr.post_id
+                WHERE p.thread = NEW.id
+                  AND p.parent IS NULL
+                  AND p.retracted_at IS NULL
+                ORDER BY pr.revision DESC
+                LIMIT 1
+            ),
+            ''
+        ),
+        COALESCE(NEW.link_url_normalized, '')
+    );
 END;
 CREATE TRIGGER threads_fts_op_body_after_revision
 AFTER INSERT ON post_revisions
 WHEN (SELECT parent FROM posts WHERE id = NEW.post_id) IS NULL
  AND NEW.revision = (SELECT MAX(revision) FROM post_revisions WHERE post_id = NEW.post_id)
 BEGIN
-    UPDATE threads_fts
-    SET op_body = NEW.body
-    WHERE rowid = (
-        SELECT t.rowid FROM threads t
-        WHERE t.id = (SELECT thread FROM posts WHERE id = NEW.post_id)
-    );
+    INSERT OR REPLACE INTO threads_fts (rowid, title, op_body, link_url)
+    SELECT t.rowid, t.title, NEW.body, COALESCE(t.link_url_normalized, '')
+    FROM threads t
+    WHERE t.id = (SELECT thread FROM posts WHERE id = NEW.post_id);
 END;
 CREATE TRIGGER threads_fts_op_after_retract
 AFTER UPDATE OF retracted_at ON posts
@@ -286,19 +292,28 @@ WHEN OLD.retracted_at IS NULL
  AND NEW.retracted_at IS NOT NULL
  AND NEW.parent IS NULL
 BEGIN
-    UPDATE threads_fts
-    SET op_body = ''
-    WHERE rowid = (SELECT rowid FROM threads WHERE id = NEW.thread);
+    INSERT OR REPLACE INTO threads_fts (rowid, title, op_body, link_url)
+    SELECT t.rowid, t.title, '', COALESCE(t.link_url_normalized, '')
+    FROM threads t
+    WHERE t.id = NEW.thread;
 END;
+CREATE VIRTUAL TABLE posts_fts USING fts5(
+    body,
+    content='',
+    contentless_delete=1,
+    tokenize = "unicode61 remove_diacritics 2"
+)
+/* posts_fts(body) */;
+CREATE TABLE IF NOT EXISTS 'posts_fts_data'(id INTEGER PRIMARY KEY, block BLOB);
+CREATE TABLE IF NOT EXISTS 'posts_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS 'posts_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB, origin INTEGER);
+CREATE TABLE IF NOT EXISTS 'posts_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID;
 CREATE TRIGGER posts_fts_after_revision
 AFTER INSERT ON post_revisions
 WHEN (SELECT retracted_at FROM posts WHERE id = NEW.post_id) IS NULL
  AND NEW.revision = (SELECT MAX(revision) FROM post_revisions WHERE post_id = NEW.post_id)
 BEGIN
-    DELETE FROM posts_fts
-    WHERE rowid = (SELECT rowid FROM posts WHERE id = NEW.post_id);
-
-    INSERT INTO posts_fts (rowid, body)
+    INSERT OR REPLACE INTO posts_fts (rowid, body)
     VALUES (
         (SELECT rowid FROM posts WHERE id = NEW.post_id),
         NEW.body
@@ -315,4 +330,44 @@ CREATE TRIGGER posts_fts_after_delete
 AFTER DELETE ON posts
 BEGIN
     DELETE FROM posts_fts WHERE rowid = OLD.rowid;
+END;
+CREATE VIRTUAL TABLE rooms_fts USING fts5(
+    slug,
+    content='',
+    contentless_delete=1,
+    tokenize='trigram'
+)
+/* rooms_fts(slug) */;
+CREATE TABLE IF NOT EXISTS 'rooms_fts_data'(id INTEGER PRIMARY KEY, block BLOB);
+CREATE TABLE IF NOT EXISTS 'rooms_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS 'rooms_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB, origin INTEGER);
+CREATE TABLE IF NOT EXISTS 'rooms_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID;
+CREATE TRIGGER rooms_fts_after_insert
+AFTER INSERT ON rooms
+WHEN NEW.deleted_at IS NULL AND NEW.merged_into IS NULL
+BEGIN
+    INSERT INTO rooms_fts (rowid, slug) VALUES (NEW.rowid, NEW.slug);
+END;
+CREATE TRIGGER rooms_fts_after_update_slug
+AFTER UPDATE OF slug ON rooms
+WHEN NEW.deleted_at IS NULL AND NEW.merged_into IS NULL
+BEGIN
+    INSERT OR REPLACE INTO rooms_fts (rowid, slug) VALUES (NEW.rowid, NEW.slug);
+END;
+CREATE TRIGGER rooms_fts_after_soft_delete
+AFTER UPDATE OF deleted_at ON rooms
+WHEN OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL
+BEGIN
+    DELETE FROM rooms_fts WHERE rowid = NEW.rowid;
+END;
+CREATE TRIGGER rooms_fts_after_merge
+AFTER UPDATE OF merged_into ON rooms
+WHEN OLD.merged_into IS NULL AND NEW.merged_into IS NOT NULL
+BEGIN
+    DELETE FROM rooms_fts WHERE rowid = NEW.rowid;
+END;
+CREATE TRIGGER rooms_fts_after_delete
+AFTER DELETE ON rooms
+BEGIN
+    DELETE FROM rooms_fts WHERE rowid = OLD.rowid;
 END;

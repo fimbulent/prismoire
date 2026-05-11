@@ -26,7 +26,8 @@ use crate::trust::{
     MINIMUM_TRUST_THRESHOLD, UserStatus, UserViewerInfo, load_distrust_set, load_tag_map,
 };
 
-use super::{ALPHA, HALFLIFE_RANK, build_fts_query, escape_like};
+use super::threads::THREAD_FIELDS;
+use super::{ALPHA, HALFLIFE_RANK, build_fts_query_with_fields, escape_like};
 
 // ---------------------------------------------------------------------------
 // Tunables (dropdown-specific; shared knobs live in `super`)
@@ -168,16 +169,21 @@ async fn search_rooms_section(
     let substring_pattern = format!("%{escaped}%");
     let prefix_pattern = format!("{escaped}%");
 
+    // Substring `LIKE` runs against `rooms_fts.slug` (trigram FTS5)
+    // so the per-keystroke cost is index-bound regardless of room
+    // count. The active-room filter on `rooms` is defensive — triggers
+    // keep deleted / merged rooms out of `rooms_fts` already.
     let rows = sqlx::query!(
-        r#"SELECT id, slug
-           FROM rooms
-           WHERE merged_into IS NULL
-             AND deleted_at IS NULL
-             AND LOWER(slug) LIKE ? ESCAPE '\'
-           ORDER BY (LOWER(slug) = ?) DESC,
-                    (LOWER(slug) LIKE ? ESCAPE '\') DESC,
-                    LENGTH(slug),
-                    slug
+        r#"SELECT r.id, r.slug
+           FROM rooms_fts
+           JOIN rooms r ON r.rowid = rooms_fts.rowid
+           WHERE rooms_fts.slug LIKE ? ESCAPE '\'
+             AND r.merged_into IS NULL
+             AND r.deleted_at IS NULL
+           ORDER BY (LOWER(r.slug) = ?) DESC,
+                    (LOWER(r.slug) LIKE ? ESCAPE '\') DESC,
+                    LENGTH(r.slug),
+                    r.slug
            LIMIT ?"#,
         substring_pattern,
         lower,
@@ -316,17 +322,17 @@ async fn search_threads_section(
     distrust_set: &std::collections::HashSet<String>,
     tag_map: &std::collections::HashMap<String, String>,
 ) -> Result<Vec<ThreadHit>, AppError> {
-    let Some(fts_query) = build_fts_query(query) else {
+    let Some(fts_query) = build_fts_query_with_fields(query, THREAD_FIELDS) else {
         return Ok(Vec::new());
     };
 
-    // BM25 weights: title 4.0, op_body 1.0. A title hit dominates, but
-    // an OP-body match still surfaces with lower relevance.
+    // BM25 weights: title 4.0, op_body 1.0, link_url 1.0. A title hit
+    // dominates, but URL and OP-body matches still surface with lower
+    // relevance.
     //
     // FTS5 returns `bm25` as a negative value where smaller = better
-    // match (it's a cost-style metric). `ORDER BY rank` with the
-    // `rank` alias yields the FTS5-canonical ordering. We project the
-    // bm25 value too so we can compute `bm25_norm` in Rust.
+    // match (it's a cost-style metric). We project the bm25 value too
+    // so we can compute `bm25_norm` in Rust.
     let rows = sqlx::query_as!(
         ThreadFtsRow,
         r#"SELECT t.id AS "id!",
@@ -340,7 +346,7 @@ async fn search_threads_section(
                   r.slug AS "room_slug!",
                   (r.slug = 'announcements') AS "is_announcement!: bool",
                   t.last_activity AS "last_activity?",
-                  bm25(threads_fts, 4.0, 1.0) AS "bm25!: f64"
+                  bm25(threads_fts, 4.0, 1.0, 1.0) AS "bm25!: f64"
            FROM threads_fts
            JOIN threads t ON t.rowid = threads_fts.rowid
            JOIN users u ON u.id = t.author
@@ -348,7 +354,7 @@ async fn search_threads_section(
            WHERE threads_fts MATCH ?
              AND r.merged_into IS NULL
              AND r.deleted_at IS NULL
-           ORDER BY bm25(threads_fts, 4.0, 1.0)
+           ORDER BY bm25(threads_fts, 4.0, 1.0, 1.0)
            LIMIT ?"#,
         fts_query,
         DROPDOWN_THREAD_CANDIDATES,

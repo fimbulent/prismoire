@@ -191,45 +191,145 @@ pub(crate) fn escape_like(s: &str) -> String {
         .replace('_', "\\_")
 }
 
+/// One parsed clause produced by [`build_fts_query_with_fields`]: an
+/// optional column filter plus the list of sub-tokens that make up the
+/// clause body. Empty `terms` means the clause carried no usable
+/// content and is dropped before rendering.
+struct Clause<'a> {
+    /// FTS5 column name if the user wrote `<alias>:term` with a known
+    /// alias; `None` for unscoped (free) text.
+    column: Option<&'a str>,
+    /// Already-sub-split, non-empty tokens to emit inside this clause.
+    terms: Vec<String>,
+}
+
+/// Split a single content chunk on non-alphanumeric chars (keeping
+/// `'` and `-` which legitimately occur inside words like `don't` and
+/// `state-of-the-art`). Empty pieces are dropped.
+fn sub_split(s: &str) -> Vec<String> {
+    s.split(|c: char| !(c.is_alphanumeric() || c == '\'' || c == '-'))
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_string())
+        .collect()
+}
+
+/// Render one sub-token. Last-term-of-last-clause gets the FTS5
+/// prefix marker `*` (only valid as a bareword on ASCII-alphanumeric
+/// tokens); everything else is quoted so FTS5 metacharacters can't
+/// escape into the parser.
+fn render_term(term: &str, is_query_tail: bool) -> String {
+    if is_query_tail && term.chars().all(|c| c.is_ascii_alphanumeric()) {
+        format!("{term}*")
+    } else {
+        let escaped = term.replace('"', "\"\"");
+        format!("\"{escaped}\"")
+    }
+}
+
 /// Build an FTS5 MATCH expression from raw user input.
 ///
-/// Splits on whitespace, drops non-alphanumeric punctuation per token,
-/// quotes each token to neutralise FTS5 metacharacters, and appends a
-/// `*` prefix marker to the last token so as-you-type queries match
-/// partially-typed words. Returns `None` if no usable tokens remain.
+/// Convenience wrapper for callers that don't expose `field:term`
+/// syntax (e.g. `posts_fts`, which indexes a single column). All input
+/// is treated as free text.
 pub(crate) fn build_fts_query(input: &str) -> Option<String> {
-    let tokens: Vec<String> = input
-        .split_whitespace()
-        .map(|t| {
-            t.chars()
-                .filter(|c| c.is_alphanumeric() || *c == '\'' || *c == '-')
-                .collect::<String>()
-        })
-        .filter(|t| !t.is_empty())
-        .collect();
-    if tokens.is_empty() {
+    build_fts_query_with_fields(input, &[])
+}
+
+/// Build an FTS5 MATCH expression from raw user input, with optional
+/// `field:term` column-filter support.
+///
+/// Whitespace separates clauses. Within each clause:
+///
+/// - If the chunk starts with `<alias>:` where `<alias>` matches one of
+///   `allowed_fields` (case-sensitive), the rest becomes a column-
+///   filtered clause against the mapped FTS5 column. Example with
+///   `allowed_fields = [("title", "title"), ("url", "link_url")]`:
+///   `url:github axum` → `link_url:(github) axum*`.
+/// - Otherwise the chunk is treated as free text and sub-split on
+///   non-alphanumeric characters (preserving `'` and `-`).
+///
+/// The very last sub-token of the very last non-empty clause gets the
+/// FTS5 prefix marker `*` (and only if it's ASCII alphanumeric, since
+/// the bareword + `*` form is the only one FTS5 accepts as a prefix
+/// expression). Everything else is quoted to neutralise FTS5
+/// metacharacters.
+///
+/// Returns `None` when no usable tokens survive sub-splitting — empty
+/// input, all-punctuation, or `field:!!!` where the term yields zero
+/// sub-tokens.
+pub(crate) fn build_fts_query_with_fields(
+    input: &str,
+    allowed_fields: &[(&str, &str)],
+) -> Option<String> {
+    let mut clauses: Vec<Clause<'_>> = Vec::new();
+
+    for chunk in input.split_whitespace() {
+        // Try to interpret the chunk as a `field:term` filter. We only
+        // commit to that interpretation if the alias is in the
+        // allow-list — otherwise stray colons (e.g. in pasted URLs)
+        // would be silently dropped by `sub_split`, which is the
+        // correct fallback.
+        let parsed: Option<(&str, &str)> = chunk.split_once(':').and_then(|(alias, rest)| {
+            if alias.is_empty() || rest.is_empty() {
+                return None;
+            }
+            allowed_fields
+                .iter()
+                .find(|(a, _)| *a == alias)
+                .map(|(_, col)| (*col, rest))
+        });
+
+        let (column, body) = match parsed {
+            Some((col, rest)) => (Some(col), rest),
+            None => (None, chunk),
+        };
+
+        let terms = sub_split(body);
+        if terms.is_empty() {
+            continue;
+        }
+        clauses.push(Clause { column, terms });
+    }
+
+    if clauses.is_empty() {
         return None;
     }
 
-    let mut parts: Vec<String> = Vec::with_capacity(tokens.len());
-    let last_idx = tokens.len() - 1;
-    for (i, tok) in tokens.iter().enumerate() {
-        let escaped = tok.replace('"', "\"\"");
-        if i == last_idx && tok.chars().all(|c| c.is_ascii_alphanumeric()) {
-            // Bareword + `*` for prefix matching. Only safe when the
-            // token is purely ASCII alphanumeric — anything else has
-            // to go through the quoted form.
-            parts.push(format!("{tok}*"));
+    let last_clause_idx = clauses.len() - 1;
+    let mut parts: Vec<String> = Vec::with_capacity(clauses.len());
+
+    for (ci, clause) in clauses.iter().enumerate() {
+        let last_term_idx = clause.terms.len() - 1;
+        let mut term_strs: Vec<String> = Vec::with_capacity(clause.terms.len());
+        for (ti, term) in clause.terms.iter().enumerate() {
+            let is_query_tail = ci == last_clause_idx && ti == last_term_idx;
+            term_strs.push(render_term(term, is_query_tail));
+        }
+        let joined = term_strs.join(" ");
+        if let Some(col) = clause.column {
+            // Always parenthesise the column-filtered body: FTS5 only
+            // accepts a *phrase* directly after `col:`, not arbitrary
+            // expressions (prefix queries, multi-term groups). Parens
+            // let us reuse the same render for single and multi-term
+            // cases.
+            parts.push(format!("{col}:({joined})"));
         } else {
-            parts.push(format!("\"{escaped}\""));
+            parts.push(joined);
         }
     }
+
     Some(parts.join(" "))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Threads' field-filter aliases, mirrored from
+    /// `crate::search::threads`. Defined here so the tests don't have
+    /// to reach into the submodule.
+    const TEST_THREAD_FIELDS: &[(&str, &str)] =
+        &[("title", "title"), ("body", "op_body"), ("url", "link_url")];
 
     #[test]
     fn fts_query_empty() {
@@ -264,6 +364,85 @@ mod tests {
         // Non-ASCII word: cannot use bareword prefix form.
         let out = build_fts_query("café").unwrap();
         assert!(out.starts_with('\"') && out.ends_with('\"'));
+    }
+
+    #[test]
+    fn fts_query_sub_splits_url_like_token() {
+        // Pasted URL splits on non-alphanumeric so each path segment
+        // becomes its own searchable token. The previous char-strip
+        // implementation would have produced one merged blob like
+        // `httpsfoobarcom` — useless against the new FTS index.
+        assert_eq!(
+            build_fts_query("https://foo.bar/baz"),
+            Some("\"https\" \"foo\" \"bar\" baz*".to_string())
+        );
+    }
+
+    #[test]
+    fn fts_query_field_single_term() {
+        assert_eq!(
+            build_fts_query_with_fields("url:github", TEST_THREAD_FIELDS),
+            Some("link_url:(github*)".to_string())
+        );
+    }
+
+    #[test]
+    fn fts_query_field_term_with_free_term() {
+        // `url:github` is a sealed clause; `axum` is the as-you-type
+        // tail and gets the prefix marker.
+        assert_eq!(
+            build_fts_query_with_fields("url:github axum", TEST_THREAD_FIELDS),
+            Some("link_url:(\"github\") axum*".to_string())
+        );
+    }
+
+    #[test]
+    fn fts_query_field_multi_term_uses_parens() {
+        // A pasted dotted URL after `url:` becomes multiple sub-tokens
+        // — they share the column filter via FTS5's `col:(...)` form.
+        assert_eq!(
+            build_fts_query_with_fields("url:github.com/anthropics", TEST_THREAD_FIELDS),
+            Some("link_url:(\"github\" \"com\" anthropics*)".to_string())
+        );
+    }
+
+    #[test]
+    fn fts_query_unknown_field_falls_back_to_text() {
+        // `weird:` isn't in the allow-list; the colon is just
+        // punctuation and the chunk sub-splits like any other.
+        assert_eq!(
+            build_fts_query_with_fields("weird:thing", TEST_THREAD_FIELDS),
+            Some("\"weird\" thing*".to_string())
+        );
+    }
+
+    #[test]
+    fn fts_query_field_alias_maps_to_column() {
+        // `body` aliases to `op_body` (the actual FTS5 column).
+        assert_eq!(
+            build_fts_query_with_fields("body:hello", TEST_THREAD_FIELDS),
+            Some("op_body:(hello*)".to_string())
+        );
+    }
+
+    #[test]
+    fn fts_query_empty_field_value_drops_clause() {
+        // `url:` with no body, or with only punctuation, produces zero
+        // sub-tokens and is dropped. The remaining clause carries on.
+        assert_eq!(
+            build_fts_query_with_fields("url:!!! github", TEST_THREAD_FIELDS),
+            Some("github*".to_string())
+        );
+    }
+
+    #[test]
+    fn fts_query_no_allowed_fields_treats_colon_as_punctuation() {
+        // Backstop for posts search and other callers that pass an
+        // empty allow-list.
+        assert_eq!(
+            build_fts_query_with_fields("body:foo bar", &[]),
+            Some("\"body\" \"foo\" bar*".to_string())
+        );
     }
 
     #[test]

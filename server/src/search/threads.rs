@@ -1,18 +1,18 @@
 //! `GET /api/search/threads?q=…&cursor=…` — paginated threads.
 //!
-//! Two candidate sources, merged into a single ranked list:
+//! A single FTS5 MATCH on `threads_fts` (title, op_body, link_url) —
+//! BM25 weights `title × 4.0`, `op_body × 1.0`, `link_url × 1.0`.
+//! Candidates are visibility-filtered through `is_thread_visible`,
+//! then re-ranked by `bm25_norm × trust × recency_decay`.
 //!
-//! 1. **FTS5 MATCH** on `threads_fts` (title weighted 4×, op_body 1×) —
-//!    primary signal for substantive title / body matches.
-//! 2. **`link_url LIKE`** substring match — surfaces link-post threads
-//!    when the user pastes (or partially types) a URL fragment that
-//!    happens to live in the linked URL but not in the title or OP body.
+//! `link_url` is indexed via `threads.link_url_normalized`, which has
+//! the scheme and a leading `www.` stripped so those near-universal
+//! tokens never appear in the index (`docs/search_efficiency.md`).
 //!
-//! Both pools are visibility-filtered through `is_thread_visible`, then
-//! re-ranked by `bm25_norm × trust × recency_decay`. URL-only hits
-//! (rows in the LIKE pool that the FTS query did not match) get a
-//! fixed `bm25_norm` below typical title hits, so a strong title match
-//! still wins against a URL substring match all else equal.
+//! Field-filter syntax: users can write `title:foo`, `body:foo`, or
+//! `url:foo` to scope a term to a specific column; `axum url:github`
+//! finds threads matching "axum" anywhere AND "github" in the URL.
+//! See `THREAD_FIELDS` and [`build_fts_query_with_fields`].
 //!
 //! No body snippets are returned — the threads tab on `/search` only
 //! shows titles, matching the room-listing UX.
@@ -32,16 +32,20 @@ use crate::threads::is_thread_visible;
 use crate::trust::{UserStatus, UserViewerInfo, load_distrust_set, load_tag_map};
 
 use super::{
-    ALPHA, FTS_OVERSAMPLE, HALFLIFE_RANK, MoreSearchRequest, PAGE_SIZE, build_fts_query,
-    decode_offset_cursor, encode_offset_cursor, escape_like, validate_query_length,
+    ALPHA, FTS_OVERSAMPLE, HALFLIFE_RANK, MoreSearchRequest, PAGE_SIZE,
+    build_fts_query_with_fields, decode_offset_cursor, encode_offset_cursor, validate_query_length,
     validate_seen_ids,
 };
 
-/// Synthetic `bm25_norm` assigned to threads that match only on
-/// `link_url` (no FTS hit). Chosen to sit below the typical normalized
-/// score of a title hit so URL-only hits surface but don't crowd out
-/// substantive title/body matches when both are present.
-const URL_ONLY_BM25_NORM: f64 = 0.6;
+/// User-facing field aliases for `threads_fts` column filters. Maps
+/// the shorter, user-friendly name to the actual FTS5 column. Shared
+/// with the dropdown's thread section.
+///
+/// `body` aliases to `op_body` because the OP body is the only post
+/// body indexed at the thread level (reply bodies live in `posts_fts`,
+/// not here).
+pub(crate) const THREAD_FIELDS: &[(&str, &str)] =
+    &[("title", "title"), ("body", "op_body"), ("url", "link_url")];
 
 #[derive(Deserialize)]
 pub struct ThreadSearchQuery {
@@ -94,10 +98,9 @@ struct ThreadCandidate {
     reply_count: i64,
     last_activity: Option<String>,
     link_url: Option<String>,
-    /// `Some` for FTS-matched rows (raw `bm25(threads_fts, …)` value);
-    /// `None` for URL-only matches, which are scored at
-    /// [`URL_ONLY_BM25_NORM`].
-    bm25: Option<f64>,
+    /// Raw `bm25(threads_fts, …)` value (FTS5 convention: non-positive,
+    /// smaller = better match). Normalised in the scoring pass.
+    bm25: f64,
 }
 
 /// `GET /api/search/threads?q=…&cursor=…` — page-1 (and SSR) entry
@@ -152,18 +155,15 @@ async fn search_threads_core(
     let tag_map = load_tag_map(&state.db, &user.user_id).await?;
 
     let mut candidates: Vec<ThreadCandidate> = Vec::new();
-    // Tracks IDs already pulled in by the FTS pool, so the URL-LIKE
-    // pool below skips them rather than producing duplicate candidates
-    // (the FTS hit's bm25 score wins). Distinct from the request's
-    // `seen_ids` parameter, which is the cross-page client dedup set.
-    let mut pool_dedup: HashSet<String> = HashSet::new();
 
-    // ---- Pool 1: FTS-matched rows ----------------------------------
+    // ---- FTS-matched rows ------------------------------------------
     //
-    // BM25 weights: title 4.0, op_body 1.0. We deliberately do not
-    // pull `op_body` into the result row — the threads tab renders
-    // titles only — so no body snippet generation is needed.
-    if let Some(fts_query) = build_fts_query(trimmed) {
+    // BM25 weights: title 4.0, op_body 1.0, link_url 1.0. URL matches
+    // and OP-body matches both sit a tier below title matches but
+    // still surface. We do not pull `op_body` into the result row —
+    // the threads tab renders titles only — so no body snippet
+    // generation is needed.
+    if let Some(fts_query) = build_fts_query_with_fields(trimmed, THREAD_FIELDS) {
         let rows = sqlx::query!(
             r#"SELECT t.id AS "id!: String",
                       t.title AS "title!: String",
@@ -179,7 +179,7 @@ async fn search_threads_core(
                       t.reply_count AS "reply_count!: i64",
                       t.last_activity AS "last_activity?: String",
                       t.link_url AS "link_url?: String",
-                      bm25(threads_fts, 4.0, 1.0) AS "bm25!: f64"
+                      bm25(threads_fts, 4.0, 1.0, 1.0) AS "bm25!: f64"
                FROM threads_fts
                JOIN threads t ON t.rowid = threads_fts.rowid
                JOIN users u ON u.id = t.author
@@ -187,7 +187,7 @@ async fn search_threads_core(
                WHERE threads_fts MATCH ?
                  AND r.merged_into IS NULL
                  AND r.deleted_at IS NULL
-               ORDER BY bm25(threads_fts, 4.0, 1.0)
+               ORDER BY bm25(threads_fts, 4.0, 1.0, 1.0)
                LIMIT ?"#,
             fts_query,
             FTS_OVERSAMPLE,
@@ -196,7 +196,6 @@ async fn search_threads_core(
         .await?;
 
         for row in rows {
-            pool_dedup.insert(row.id.clone());
             candidates.push(ThreadCandidate {
                 id: row.id,
                 title: row.title,
@@ -212,72 +211,9 @@ async fn search_threads_core(
                 reply_count: row.reply_count,
                 last_activity: row.last_activity,
                 link_url: row.link_url,
-                bm25: Some(row.bm25),
+                bm25: row.bm25,
             });
         }
-    }
-
-    // ---- Pool 2: URL substring matches -----------------------------
-    //
-    // Substring match against `link_url`. SQLite does the LIKE
-    // case-insensitively because the column is BLOB-or-TEXT and we
-    // lowercase both sides explicitly. Bounded by `FTS_OVERSAMPLE`
-    // (same envelope as the FTS pool) and ordered by recency so
-    // recent URL matches survive truncation.
-    let lowered = trimmed.to_lowercase();
-    let url_pattern = format!("%{}%", escape_like(&lowered));
-    let url_rows = sqlx::query!(
-        r#"SELECT t.id AS "id!: String",
-                  t.title AS "title!: String",
-                  t.author AS "author_id!: String",
-                  u.display_name AS "author_name!: String",
-                  u.status AS "author_status!: String",
-                  u.deleted_at AS "author_deleted_at?: String",
-                  t.created_at AS "created_at!: String",
-                  t.locked AS "locked!: bool",
-                  r.id AS "room_id!: String",
-                  r.slug AS "room_slug!: String",
-                  (r.slug = 'announcements') AS "is_announcement!: bool",
-                  t.reply_count AS "reply_count!: i64",
-                  t.last_activity AS "last_activity?: String",
-                  t.link_url AS "link_url?: String"
-           FROM threads t
-           JOIN users u ON u.id = t.author
-           JOIN rooms r ON r.id = t.room
-           WHERE t.link_url IS NOT NULL
-             AND LOWER(t.link_url) LIKE ? ESCAPE '\'
-             AND r.merged_into IS NULL
-             AND r.deleted_at IS NULL
-           ORDER BY COALESCE(t.last_activity, t.created_at) DESC
-           LIMIT ?"#,
-        url_pattern,
-        FTS_OVERSAMPLE,
-    )
-    .fetch_all(&state.db)
-    .await?;
-
-    for row in url_rows {
-        if !pool_dedup.insert(row.id.clone()) {
-            // Already in the FTS pool — its (better) bm25 score wins.
-            continue;
-        }
-        candidates.push(ThreadCandidate {
-            id: row.id,
-            title: row.title,
-            author_id: row.author_id,
-            author_name: row.author_name,
-            author_status: row.author_status,
-            author_deleted_at: row.author_deleted_at,
-            created_at: row.created_at,
-            locked: row.locked,
-            room_id: row.room_id,
-            room_slug: row.room_slug,
-            is_announcement: row.is_announcement,
-            reply_count: row.reply_count,
-            last_activity: row.last_activity,
-            link_url: row.link_url,
-            bm25: None,
-        });
     }
 
     if candidates.is_empty() {
@@ -324,10 +260,8 @@ async fn search_threads_core(
         .iter()
         .enumerate()
         .map(|(i, row)| {
-            let bm25_norm = match row.bm25 {
-                Some(raw) => 1.0 / (1.0 + (-raw).max(0.0)),
-                None => URL_ONLY_BM25_NORM,
-            };
+            // bm25 is non-positive (FTS5 convention). Map to (0, 1].
+            let bm25_norm = 1.0 / (1.0 + (-row.bm25).max(0.0));
             let trust_op = if row.author_id == user.user_id {
                 1.0
             } else {

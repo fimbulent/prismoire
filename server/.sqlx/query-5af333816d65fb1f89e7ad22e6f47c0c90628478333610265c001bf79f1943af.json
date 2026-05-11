@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT r.id, r.slug\n           FROM rooms_fts\n           JOIN rooms r ON r.rowid = rooms_fts.rowid\n           WHERE rooms_fts.slug LIKE ? ESCAPE '\\'\n             AND r.merged_into IS NULL\n             AND r.deleted_at IS NULL\n           ORDER BY (LOWER(r.slug) = ?) DESC,\n                    (LOWER(r.slug) LIKE ? ESCAPE '\\') DESC,\n                    LENGTH(r.slug),\n                    r.slug\n           LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "slug",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "5af333816d65fb1f89e7ad22e6f47c0c90628478333610265c001bf79f1943af"
+}

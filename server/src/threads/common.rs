@@ -240,6 +240,59 @@ pub fn validate_link(url_str: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
+/// Normalize a link URL for FTS5 indexing.
+///
+/// Strips the scheme (`http://` / `https://`) and a leading `www.` from
+/// the host so those near-universal tokens never enter `threads_fts`.
+/// Without this, a search for "https" or "www" would return every
+/// link-bearing thread (every URL contains both), filling the candidate
+/// pool with noise. The original `threads.link_url` is preserved for
+/// display and click-through; only the indexed form goes through here.
+///
+/// The input is expected to have already passed [`validate_link`], so
+/// it's a well-formed http(s) URL. If parsing somehow fails (e.g. for a
+/// legacy row predating validation), we fall back to a case-insensitive
+/// prefix-strip — never returns an error.
+///
+/// Case handling: scheme + host are case-insensitive per RFC 3986, but
+/// the path is case-sensitive. We strip prefixes case-insensitively
+/// while leaving the rest untouched. The FTS5 `unicode61` tokenizer
+/// case-folds at index time, so we don't need to lowercase here.
+pub fn normalize_url_for_fts(url_str: &str) -> String {
+    let trimmed = url_str.trim();
+
+    // Fast path: try to parse with the `url` crate (same parser
+    // `validate_link` uses), then reconstruct without scheme/www.
+    if let Ok(parsed) = url::Url::parse(trimmed) {
+        let host = parsed.host_str().unwrap_or("");
+        let host_stripped = host.strip_prefix("www.").unwrap_or(host);
+        let path = parsed.path();
+        let query = parsed.query().map(|q| format!("?{q}")).unwrap_or_default();
+        let fragment = parsed
+            .fragment()
+            .map(|f| format!("#{f}"))
+            .unwrap_or_default();
+        return format!("{host_stripped}{path}{query}{fragment}");
+    }
+
+    // Fallback: case-insensitive prefix strip. Reached only if a
+    // pre-validation row sneaks through; keeps the function total.
+    let lower = trimmed.to_ascii_lowercase();
+    let after_scheme = if let Some(rest) = lower.strip_prefix("https://") {
+        &trimmed[trimmed.len() - rest.len()..]
+    } else if let Some(rest) = lower.strip_prefix("http://") {
+        &trimmed[trimmed.len() - rest.len()..]
+    } else {
+        trimmed
+    };
+    let after_www_lower = after_scheme.to_ascii_lowercase();
+    if let Some(rest) = after_www_lower.strip_prefix("www.") {
+        after_scheme[after_scheme.len() - rest.len()..].to_string()
+    } else {
+        after_scheme.to_string()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
@@ -571,5 +624,80 @@ pub fn score_trusted_recent(
         if let Some(thread) = old[idx].take() {
             threads.push(thread);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_url_strips_https_and_www() {
+        assert_eq!(
+            normalize_url_for_fts("https://www.github.com/anthropics/foo"),
+            "github.com/anthropics/foo"
+        );
+    }
+
+    #[test]
+    fn normalize_url_strips_http_only() {
+        assert_eq!(
+            normalize_url_for_fts("http://example.com/path"),
+            "example.com/path"
+        );
+    }
+
+    #[test]
+    fn normalize_url_strips_www_without_scheme_via_fallback() {
+        // `url::Url::parse` rejects scheme-less inputs, exercising the
+        // fallback prefix-strip path.
+        assert_eq!(normalize_url_for_fts("www.example.com/x"), "example.com/x");
+    }
+
+    #[test]
+    fn normalize_url_preserves_path_case() {
+        // Path is case-sensitive; only scheme + leading www are stripped.
+        assert_eq!(
+            normalize_url_for_fts("https://example.com/MixedCase/Path"),
+            "example.com/MixedCase/Path"
+        );
+    }
+
+    #[test]
+    fn normalize_url_keeps_inner_www() {
+        // Only a *leading* www. is stripped; internal occurrences stay.
+        assert_eq!(
+            normalize_url_for_fts("https://example.com/www.foo"),
+            "example.com/www.foo"
+        );
+    }
+
+    #[test]
+    fn normalize_url_handles_uppercase_scheme() {
+        // RFC 3986: scheme is case-insensitive. The `url` crate folds
+        // scheme and host to lowercase during parse.
+        assert_eq!(
+            normalize_url_for_fts("HTTPS://WWW.EXAMPLE.COM/path"),
+            "example.com/path"
+        );
+    }
+
+    #[test]
+    fn normalize_url_keeps_query_and_fragment() {
+        assert_eq!(
+            normalize_url_for_fts("https://example.com/a?b=c#d"),
+            "example.com/a?b=c#d"
+        );
+    }
+
+    #[test]
+    fn normalize_url_keeps_inner_https() {
+        // Archive-style URLs embed another URL in the path. Only the
+        // leading scheme is stripped; the embedded one stays as path
+        // content and tokenizes normally.
+        assert_eq!(
+            normalize_url_for_fts("https://web.archive.org/web/2024/https://foo.com/"),
+            "web.archive.org/web/2024/https://foo.com/"
+        );
     }
 }

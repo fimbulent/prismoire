@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT t.id AS \"id!\",\n                  t.title AS \"title!\",\n                  t.author AS \"author_id!\",\n                  u.display_name AS \"author_name!\",\n                  u.status AS \"author_status!\",\n                  u.deleted_at AS \"author_deleted_at?\",\n                  t.created_at AS \"created_at!\",\n                  r.id AS \"room_id!\",\n                  r.slug AS \"room_slug!\",\n                  (r.slug = 'announcements') AS \"is_announcement!: bool\",\n                  t.last_activity AS \"last_activity?\",\n                  bm25(threads_fts, 4.0, 1.0) AS \"bm25!: f64\"\n           FROM threads_fts\n           JOIN threads t ON t.rowid = threads_fts.rowid\n           JOIN users u ON u.id = t.author\n           JOIN rooms r ON r.id = t.room\n           WHERE threads_fts MATCH ?\n             AND r.merged_into IS NULL\n             AND r.deleted_at IS NULL\n           ORDER BY bm25(threads_fts, 4.0, 1.0)\n           LIMIT ?",
+  "query": "SELECT t.id AS \"id!\",\n                  t.title AS \"title!\",\n                  t.author AS \"author_id!\",\n                  u.display_name AS \"author_name!\",\n                  u.status AS \"author_status!\",\n                  u.deleted_at AS \"author_deleted_at?\",\n                  t.created_at AS \"created_at!\",\n                  r.id AS \"room_id!\",\n                  r.slug AS \"room_slug!\",\n                  (r.slug = 'announcements') AS \"is_announcement!: bool\",\n                  t.last_activity AS \"last_activity?\",\n                  bm25(threads_fts, 4.0, 1.0, 1.0) AS \"bm25!: f64\"\n           FROM threads_fts\n           JOIN threads t ON t.rowid = threads_fts.rowid\n           JOIN users u ON u.id = t.author\n           JOIN rooms r ON r.id = t.room\n           WHERE threads_fts MATCH ?\n             AND r.merged_into IS NULL\n             AND r.deleted_at IS NULL\n           ORDER BY bm25(threads_fts, 4.0, 1.0, 1.0)\n           LIMIT ?",
   "describe": {
     "columns": [
       {
@@ -82,5 +82,5 @@
       null
     ]
   },
-  "hash": "c14aa08146a8eb79f9337da6022e75c6f50cf98553966437b35f21dda0bdd961"
+  "hash": "9342e0013acc0ea1abad85f886c4b62397e99293a61498c5caf32b70d83d0180"
 }
