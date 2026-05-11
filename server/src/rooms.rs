@@ -866,10 +866,12 @@ pub async fn build_favorites_response(
 
     let mut out = Vec::with_capacity(ordered.len());
     for (room_id, _) in ordered {
-        // Favorites that point at a soft-deleted or merged room are
-        // silently skipped. The `room_favorites` row remains until the
-        // next cleanup sweep, but rendering it with no metadata would
-        // confuse the client.
+        // Defensive skip for favorites pointing at a soft-deleted or
+        // merged room. `admin::delete_room` reaps `room_favorites` in
+        // the same transaction it stamps `deleted_at`, so this branch
+        // should not be hit in normal operation — it's a guard against
+        // a soft-delete racing with an in-flight `list_favorites` read
+        // that loaded `room_favorites` before the delete committed.
         let Some(room) = rooms_by_id.remove(&room_id) else {
             continue;
         };

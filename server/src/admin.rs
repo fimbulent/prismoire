@@ -1092,6 +1092,17 @@ pub async fn delete_room(
         .execute(&mut *tx)
         .await?;
 
+    // Reap favorites pointing at this room. `room_favorites.room_id`
+    // has ON DELETE CASCADE for hard deletes, but soft-deleting via
+    // `deleted_at` doesn't fire that cascade. Without this, the row
+    // lingers and diverges the listing endpoint (which skips invisible
+    // rooms) from the reorder endpoint (which validates against the
+    // raw `room_favorites` table) — breaking favorite reordering for
+    // any user who had favorited the deleted room.
+    sqlx::query!("DELETE FROM room_favorites WHERE room_id = ?", rid)
+        .execute(&mut *tx)
+        .await?;
+
     // 3. Tombstone the room.
     sqlx::query!(
         "UPDATE rooms SET deleted_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
