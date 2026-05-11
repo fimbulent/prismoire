@@ -1,4 +1,5 @@
 import { throwApiError, type FetchFn } from './auth';
+import type { UserViewerInfo } from './users';
 
 export interface InviteUser {
 	display_name: string;
@@ -71,6 +72,7 @@ export async function validateInvite(
 export interface InvitedUser {
 	display_name: string;
 	created_at: string;
+	viewer: UserViewerInfo;
 }
 
 export async function listInvitedUsers(opts: FetchOpts = {}): Promise<InvitedUser[]> {

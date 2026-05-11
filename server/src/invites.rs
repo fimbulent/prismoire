@@ -8,9 +8,12 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use std::collections::HashMap;
+
 use crate::error::{AppError, ErrorCode};
 use crate::session::AuthUser;
 use crate::state::AppState;
+use crate::trust::{UserStatus, UserViewerInfo, load_distrust_set, load_tag_map};
 
 const INVITE_CODE_BYTES: usize = 16;
 
@@ -57,6 +60,7 @@ pub struct InviteValidationResponse {
 pub struct InvitedUserResponse {
     pub display_name: String,
     pub created_at: String,
+    pub viewer: UserViewerInfo,
 }
 
 #[derive(Serialize)]
@@ -257,7 +261,7 @@ pub async fn list_invited_users(
     user: AuthUser,
 ) -> Result<impl IntoResponse, AppError> {
     let rows = sqlx::query!(
-        "SELECT u.display_name, u.created_at FROM users u \
+        "SELECT u.id, u.display_name, u.created_at, u.status, u.deleted_at FROM users u \
          JOIN invites i ON i.id = u.invite_id \
          WHERE i.created_by = ? ORDER BY u.created_at DESC",
         user.user_id,
@@ -265,11 +269,30 @@ pub async fn list_invited_users(
     .fetch_all(&state.db)
     .await?;
 
+    // Build the viewer's distance map (forward BFS from the viewer) plus the
+    // distrust set and tag map, so each invited user gets a fully populated
+    // `UserViewerInfo` envelope — same pattern as `get_trust_edges`.
+    let graph = state.get_trust_graph()?;
+    let viewer_uuid = user.uuid();
+    let viewer_delta = state.pending_deltas.get(viewer_uuid);
+    let cached_dm = graph.distance_map_with_delta(viewer_uuid, &viewer_delta);
+    let mut distance_map = HashMap::clone(&cached_dm);
+    distance_map.insert(user.user_id.clone(), 0.0);
+    let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
+    let tag_map = load_tag_map(&state.db, &user.user_id).await?;
+
     let users = rows
         .into_iter()
-        .map(|r| InvitedUserResponse {
-            display_name: r.display_name,
-            created_at: r.created_at,
+        .map(|r| {
+            let raw = UserStatus::try_from(r.status.as_str()).unwrap_or(UserStatus::Active);
+            let status = UserStatus::effective(raw, r.deleted_at.as_deref());
+            let viewer =
+                UserViewerInfo::build(&r.id, &distance_map, &distrust_set, &tag_map, status);
+            InvitedUserResponse {
+                display_name: r.display_name,
+                created_at: r.created_at,
+                viewer,
+            }
         })
         .collect();
 

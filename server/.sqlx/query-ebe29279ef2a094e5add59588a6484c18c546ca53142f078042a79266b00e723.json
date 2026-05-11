@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT u.id, u.display_name, u.created_at, u.status, u.deleted_at FROM users u JOIN invites i ON i.id = u.invite_id WHERE i.created_by = ? ORDER BY u.created_at DESC",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "display_name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "status",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "deleted_at",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "ebe29279ef2a094e5add59588a6484c18c546ca53142f078042a79266b00e723"
+}
