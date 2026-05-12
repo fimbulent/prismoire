@@ -130,6 +130,7 @@ pub fn build_app(
             get(threads::list_all_threads).post(threads::create_thread),
         )
         .route("/api/threads/more", post(threads::load_more_all_threads))
+        .route("/api/threads/by-link", get(threads::get_threads_by_link))
         .route(
             "/api/rooms/{id}/threads/more",
             post(threads::load_more_room_threads),

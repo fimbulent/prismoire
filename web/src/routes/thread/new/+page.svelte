@@ -1,7 +1,8 @@
 <script lang="ts">
-	import { createThread } from '$lib/api/threads';
+	import { createThread, getThreadsByLink, type ThreadSummary } from '$lib/api/threads';
 	import { searchRooms, type RoomChip } from '$lib/api/rooms';
 	import Autocomplete from '$lib/components/ui/Autocomplete.svelte';
+	import ThreadListRow from '$lib/components/post/ThreadListRow.svelte';
 	import { validateRoomSlug } from '$lib/validation/room-name';
 	import { errorMessage } from '$lib/i18n/errors';
 	import { goto } from '$app/navigation';
@@ -25,6 +26,61 @@
 	let kind = $state<PostKind>('text');
 	let error = $state<string | null>(null);
 	let submitting = $state(false);
+
+	/**
+	 * Dupe-suggestion state. Populated when the URL field blurs with a
+	 * valid, non-empty link. Cached by trimmed URL so toggling kind or
+	 * re-focusing without changing the URL doesn't re-fetch. The
+	 * AbortController guards against a fast typist whose earlier blur
+	 * response would otherwise overwrite a fresher one.
+	 *
+	 * `suggestionsForUrl` keys the visible suggestions to the URL they
+	 * were fetched for, so as soon as the user edits the URL the panel
+	 * disappears — re-blurring repopulates it.
+	 */
+	let linkSuggestions = $state<ThreadSummary[]>([]);
+	let suggestionsForUrl = $state<string | null>(null);
+	const suggestionCache = new Map<string, ThreadSummary[]>();
+	let suggestionController: AbortController | null = null;
+
+	let visibleSuggestions = $derived(
+		kind === 'link' && link.trim() === suggestionsForUrl ? linkSuggestions : []
+	);
+
+	async function loadLinkSuggestions(url: string) {
+		const cached = suggestionCache.get(url);
+		if (cached) {
+			linkSuggestions = cached;
+			suggestionsForUrl = url;
+			return;
+		}
+		suggestionController?.abort();
+		const controller = new AbortController();
+		suggestionController = controller;
+		try {
+			const res = await getThreadsByLink(url, { signal: controller.signal });
+			if (controller.signal.aborted) return;
+			suggestionCache.set(url, res.threads);
+			linkSuggestions = res.threads;
+			suggestionsForUrl = url;
+		} catch (e) {
+			if (e instanceof DOMException && e.name === 'AbortError') return;
+			// Suggestions are a hint — swallow other errors so a flaky
+			// network doesn't block the user from posting.
+			linkSuggestions = [];
+			suggestionsForUrl = null;
+		}
+	}
+
+	function handleLinkBlur() {
+		if (kind !== 'link') return;
+		const trimmed = link.trim();
+		if (!trimmed || linkError) {
+			suggestionController?.abort();
+			return;
+		}
+		loadLinkSuggestions(trimmed);
+	}
 
 	let roomError = $derived(room.trim() ? validateRoomSlug(room) : null);
 	let titleLen = $derived(title.trim().length);
@@ -219,6 +275,7 @@
 						id="thread-link"
 						type="url"
 						bind:value={link}
+						onblur={handleLinkBlur}
 						maxlength={MAX_LINK}
 						required
 						autocomplete="off"
@@ -295,6 +352,24 @@
 				{/if}
 			</div>
 		</div>
+
+		{#if visibleSuggestions.length > 0}
+			<!--
+				Suggestions are informational only — clicking a row
+				navigates away, but the user can ignore them and submit
+				anyway. `visibleSuggestions` is keyed to the URL they were
+				fetched for, so editing the URL hides the panel until the
+				next blur repopulates it.
+			-->
+			<div transition:slide={{ duration: 150 }} class="space-y-2">
+				<p class="text-xs text-text-muted">
+					This link has been posted before in the following threads:
+				</p>
+				{#each visibleSuggestions as suggestion (suggestion.id)}
+					<ThreadListRow thread={suggestion} variant="card" showRoomSlug />
+				{/each}
+			</div>
+		{/if}
 
 		<div class="flex items-center gap-3">
 			<button

@@ -286,6 +286,34 @@ export async function replyToThread(
 	return res.json();
 }
 
+export interface ByLinkResponse {
+	threads: ThreadSummary[];
+}
+
+/**
+ * Look up existing threads that share a normalized form of the given URL,
+ * for the "is this a dupe?" suggestion panel on the new-thread page.
+ *
+ * The server normalizes both the input URL and the indexed
+ * `link_url_normalized` column via the same function, so scheme (http/https)
+ * and a leading `www.` collapse; deeper differences (path, query, fragment)
+ * do not. Results are visibility-filtered against the caller's trust state,
+ * so a thread the caller couldn't read elsewhere will not surface here.
+ *
+ * Empty / malformed / over-long URLs return an empty list rather than an
+ * error — the panel is a hint, not a validator.
+ */
+export async function getThreadsByLink(
+	url: string,
+	opts: FetchOpts & { signal?: AbortSignal } = {}
+): Promise<ByLinkResponse> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const params = new URLSearchParams({ url });
+	const res = await f(`/api/threads/by-link?${params.toString()}`, { signal: opts.signal });
+	if (!res.ok) await throwApiError(res);
+	return res.json();
+}
+
 export async function createThread(
 	req: CreateThreadRequest,
 	opts: FetchOpts = {}

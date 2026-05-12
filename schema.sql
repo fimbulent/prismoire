@@ -371,3 +371,6 @@ AFTER DELETE ON rooms
 BEGIN
     DELETE FROM rooms_fts WHERE rowid = OLD.rowid;
 END;
+CREATE INDEX threads_link_url_normalized_idx
+    ON threads(link_url_normalized)
+    WHERE link_url_normalized IS NOT NULL;

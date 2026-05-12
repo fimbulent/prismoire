@@ -1,9 +1,11 @@
+mod by_link;
 mod common;
 mod create_reply;
 mod create_thread;
 mod get_thread;
 mod list_threads;
 
+pub use by_link::get_threads_by_link;
 pub use common::{PostResponse, is_thread_visible, parse_cursor, validate_body};
 pub use create_reply::create_reply;
 pub use create_thread::create_thread;
