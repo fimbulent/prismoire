@@ -70,7 +70,7 @@
 	let collapsed = $derived(collapsedIds.has(parentId));
 </script>
 
-<div class="ml-6 relative reply-nesting">
+<div class="ml-3 sm:ml-4 md:ml-6 relative reply-nesting">
 	<button
 		onclick={() => toggleCollapse(parentId)}
 		class="collapse-line {collapsed ? 'collapsed' : ''}"

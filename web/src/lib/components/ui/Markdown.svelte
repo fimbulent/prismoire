@@ -127,11 +127,44 @@
 		color: var(--link-hover);
 	}
 
+	/* Blockquote: oversized hanging left-double-quotation-mark in the
+	   margin, in the prose font. The reply tree already uses a left bar
+	   as the nesting gutter, so a bar-on-bar blockquote read as "deeper
+	   nesting" rather than "this is a quote". A large typographic “
+	   sits clearly outside the gutter convention and looks editorial
+	   alongside the serif prose options (Vollkorn, Literata). Single
+	   glyph at the top-left — design mark, not per-line prefix. */
 	.markdown :global(blockquote) {
-		border-left: 3px solid var(--border);
-		padding-left: 1em;
+		position: relative;
+		padding-left: 1.75em;
 		margin-bottom: 0.75em;
 		color: var(--text-secondary);
+		font-style: italic;
+	}
+
+	.markdown :global(blockquote)::before {
+		/* U+201C LEFT DOUBLE QUOTATION MARK. */
+		content: '\201C';
+		position: absolute;
+		left: 0;
+		top: 0;
+		color: var(--text-muted);
+		font-size: 2em;
+		line-height: 1;
+		font-style: normal;
+	}
+
+	/* Cap visible blockquote nesting at depth 3. A pathological
+	   `>>>>>> hi` would otherwise compound indent and glyphs at every
+	   level, pushing content off the right edge of narrow viewports.
+	   Past depth 3 we flatten: no further padding, no further hanging
+	   quote mark. Text is preserved; only the visual nesting stops. */
+	.markdown :global(blockquote blockquote blockquote blockquote) {
+		padding-left: 0;
+	}
+
+	.markdown :global(blockquote blockquote blockquote blockquote::before) {
+		display: none;
 	}
 
 	.markdown :global(code) {
