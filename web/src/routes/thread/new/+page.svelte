@@ -83,6 +83,32 @@
 	}
 
 	let roomError = $derived(room.trim() ? validateRoomSlug(room) : null);
+	let normalizedRoom = $derived(room.trim().toLowerCase());
+
+	/**
+	 * Whether the typed room slug exactly matches an existing room.
+	 * `null` means "unknown" — either the slug is empty/invalid, or the
+	 * Autocomplete's debounced fetch for this query hasn't settled yet.
+	 *
+	 * The backend auto-creates a room on thread submit if no room with
+	 * the slug exists, so surfacing this lets users notice when they
+	 * are about to spawn a new room instead of posting into one they
+	 * intended to target. We piggy-back on the Autocomplete's existing
+	 * `searchRooms` call (via `onResults`) rather than issuing a second
+	 * round-trip.
+	 */
+	let roomExists = $state<boolean | null>(null);
+
+	$effect(() => {
+		// Reset to "unknown" whenever the normalized slug or its
+		// validity changes. The Autocomplete's onResults callback (or
+		// onSelect) re-populates this once a verdict is available;
+		// until then we never want to display a stale answer for a
+		// freshly-edited slug.
+		normalizedRoom;
+		roomError;
+		roomExists = null;
+	});
 	let titleLen = $derived(title.trim().length);
 	let bodyLen = $derived(body.trim().length);
 	let showBodyCounter = $derived(bodyLen >= BODY_COUNTER_THRESHOLD);
@@ -182,6 +208,21 @@
 				fetcher={(q) => searchRooms(q)}
 				formatLabel={(r: RoomChip) => r.slug}
 				itemKey={(r: RoomChip) => r.id}
+				onSelect={() => {
+					// Picking from the dropdown is definitionally an
+					// existing room — bypass the wait for onResults.
+					roomExists = true;
+				}}
+				onResults={(q, items: RoomChip[]) => {
+					// Reuse the Autocomplete's settled fetch to detect
+					// whether the current input exactly matches an
+					// existing room. Guard against a stale callback
+					// whose query no longer reflects what the user has
+					// typed (or whose validity has since changed).
+					const slug = q.toLowerCase();
+					if (roomError || slug !== normalizedRoom) return;
+					roomExists = items.some((r) => r.slug === slug);
+				}}
 				onCreate={() => {
 					/* closing the dropdown is the only action needed;
 					   the backend auto-creates a room on thread submit
@@ -212,6 +253,9 @@
 					/r/<span class="text-text-secondary"
 						>{room.trim().toLowerCase().replace(/[^a-z0-9_]/g, '')}</span
 					>
+					{#if roomExists === false}
+						<span class="text-accent">· New room — will be created when you submit</span>
+					{/if}
 				</p>
 			{/if}
 		</div>

@@ -86,6 +86,15 @@
 		onSelect?: (item: T) => void;
 		onClear?: () => void;
 		onCreate?: (query: string) => void;
+		/**
+		 * Fires after a successful fetch commits its results to the
+		 * dropdown. Lets the parent piggy-back on the same request the
+		 * autocomplete already issued (e.g. to detect whether the typed
+		 * value exactly matches an existing row) without a duplicate
+		 * round-trip. Not called on fetch errors — the parent should
+		 * treat absence of a callback as "unknown".
+		 */
+		onResults?: (query: string, items: T[]) => void;
 		createLabel?: (query: string) => string;
 		debounceMs?: number;
 		minQueryLength?: number;
@@ -112,6 +121,7 @@
 		onSelect,
 		onClear,
 		onCreate,
+		onResults,
 		createLabel = (q: string) => `Create ${q}`,
 		debounceMs = 200,
 		minQueryLength = 1,
@@ -174,6 +184,7 @@
 			committedQuery = query;
 			open = true;
 			highlightIdx = items.length > 0 ? 0 : -1;
+			onResults?.(query, items);
 		} catch {
 			// Swallow errors quietly — autocomplete suggestions aren't
 			// worth showing an error banner over. The caller will hear
