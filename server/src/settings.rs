@@ -15,13 +15,6 @@ const VALID_THEMES: &[&str] = &[
     "rose-pine-dawn",
     "gruvbox-dark",
     "gruvbox-light",
-    "tokyo-night",
-    "tokyo-night-storm",
-    "tokyo-night-day",
-    "catppuccin-mocha",
-    "catppuccin-macchiato",
-    "catppuccin-frappe",
-    "catppuccin-latte",
     "kanagawa-wave",
     "kanagawa-dragon",
     "kanagawa-lotus",
@@ -32,7 +25,7 @@ const VALID_THEMES: &[&str] = &[
     "iceberg",
 ];
 
-pub const DEFAULT_THEME: &str = "rose-pine";
+pub const DEFAULT_THEME: &str = "rose-pine-moon";
 
 /// Allow-list of prose-font slugs. Mirrors the catalogue in
 /// `web/src/lib/fonts.ts` and the `@font-face` declarations in
@@ -40,16 +33,9 @@ pub const DEFAULT_THEME: &str = "rose-pine";
 /// .woff2 files in `web/static/fonts/<slug>/`, an entry here, and an
 /// entry in the frontend catalogue (verified at compile time by the
 /// `font_slugs_exist_in_frontend` test below).
-const VALID_FONTS: &[&str] = &[
-    "inter",
-    "ibm-plex-sans",
-    "source-sans-3",
-    "literata",
-    "source-serif-4",
-    "vollkorn",
-];
+const VALID_FONTS: &[&str] = &["ibm-plex-sans", "literata", "vollkorn"];
 
-pub const DEFAULT_FONT: &str = "vollkorn";
+pub const DEFAULT_FONT: &str = "literata";
 
 // ---------------------------------------------------------------------------
 // Response types

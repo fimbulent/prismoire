@@ -41,21 +41,6 @@
 }
 
 @font-face {
-	font-family: 'Source Sans 3';
-	src: url('/fonts/source-sans-3/source-sans-3.woff2') format('woff2-variations');
-	font-weight: 200 900;
-	font-style: normal;
-	font-display: swap;
-}
-@font-face {
-	font-family: 'Source Sans 3';
-	src: url('/fonts/source-sans-3/source-sans-3-italic.woff2') format('woff2-variations');
-	font-weight: 200 900;
-	font-style: italic;
-	font-display: swap;
-}
-
-@font-face {
 	font-family: 'Literata';
 	src: url('/fonts/literata/literata.woff2') format('woff2-variations');
 	font-weight: 200 900;
@@ -65,21 +50,6 @@
 @font-face {
 	font-family: 'Literata';
 	src: url('/fonts/literata/literata-italic.woff2') format('woff2-variations');
-	font-weight: 200 900;
-	font-style: italic;
-	font-display: swap;
-}
-
-@font-face {
-	font-family: 'Source Serif 4';
-	src: url('/fonts/source-serif-4/source-serif-4.woff2') format('woff2-variations');
-	font-weight: 200 900;
-	font-style: normal;
-	font-display: swap;
-}
-@font-face {
-	font-family: 'Source Serif 4';
-	src: url('/fonts/source-serif-4/source-serif-4-italic.woff2') format('woff2-variations');
 	font-weight: 200 900;
 	font-style: italic;
 	font-display: swap;
@@ -139,24 +109,15 @@
    `transformPageChunk` and flipped client-side by `applyFont` in
    `src/lib/fonts.ts`). Each block only sets `--font-prose`; UI
    chrome keeps using `--font-sans`. Each fallback stack matches the
-   family's category (sans-serif vs serif). The `inter` block is
+   family's category (sans-serif vs serif). The `literata` block is
    redundant with the default declared in `@theme` below, but is
    listed here for symmetry — operators reading this file can see the
    complete switch table without having to cross-reference. */
-[data-font='inter'] {
-	--font-prose: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-}
 [data-font='ibm-plex-sans'] {
 	--font-prose: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }
-[data-font='source-sans-3'] {
-	--font-prose: 'Source Sans 3', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-}
 [data-font='literata'] {
 	--font-prose: 'Literata', Georgia, 'Times New Roman', serif;
-}
-[data-font='source-serif-4'] {
-	--font-prose: 'Source Serif 4', Georgia, 'Times New Roman', serif;
 }
 [data-font='vollkorn'] {
 	--font-prose: 'Vollkorn', Georgia, 'Times New Roman', serif;
@@ -193,7 +154,7 @@
 	   per-user override comes from the `[data-font="…"]` blocks above
 	   (higher specificity than `:root`), so the same utility resolves
 	   to whatever face the viewer chose. */
-	--font-prose: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+	--font-prose: 'Literata', Georgia, 'Times New Roman', serif;
 
 	/* Long-form body type token — 17px / 1.65 line-height per the
 	   `docs/typography.md` §3 sweet spot. Tailwind v4 emits both
@@ -351,167 +312,6 @@
 	--link-hover: #3c3836;        /* fg1 — matches text-primary */
 	--danger: #9d0006;            /* red-dark */
 	--success: #595300; /* was #79740e: darkened for 4.5:1 on 5 bg slots (was 2.83) */
-}
-
-[data-theme='tokyo-night'] {
-	--bg: #16161e;
-	--bg-surface-dim: #181923;
-	--bg-surface: #1a1b26;
-	--bg-surface-raised: #292e42;
-	--bg-hover: #2b3350; /* darkened from #313856 for a subtler hover */
-	--text-primary: #a9b1d6;
-	--text-secondary: #9aa5ce;
-	--text-muted: #838dba; /* was #565f89: lightened for 3:1 on 5 bg slots (was 1.59) */
-	--border: #414868;
-	--border-subtle: #292e42;
-	--accent: #7aa2f7;
-	--accent-muted: #6382ce; /* was #3d59a1: lightened for 3:1 on bg-hover (was 1.72) */
-	--trust-direct: #9ece6a;
-	--trust-2hop: #e0af68;
-	--trust-3hop: #ff9e64;
-	--trust-untrusted: #7882ae; /* was #565f89: lightened for 3:1 on bg-hover (was 1.85) */
-	--link: #7aa2f7;
-	--link-hover: #c0caf5;
-	--danger: #fb7a92; /* was #f7768e: lightened for 4.5:1 on bg-hover (was 4.34) */
-	--success: #9ece6a;
-}
-
-[data-theme='tokyo-night-storm'] {
-	--bg: #1f2335;
-	--bg-surface-dim: #21263a;
-	--bg-surface: #24283b;
-	--bg-surface-raised: #292e42;
-	--bg-hover: #313856; /* was #3b4261: darkened to resolve 2 pair(s) on bg-hover (worst was accent-muted at 1.47, need 3) */
-	--text-primary: #a9b1d6;
-	--text-secondary: #9aa5ce;
-	--text-muted: #838dba; /* was #565f89: lightened for 3:1 on 5 bg slots (was 1.59) */
-	--border: #414868;
-	--border-subtle: #292e42;
-	--accent: #7aa2f7;
-	--accent-muted: #6382ce; /* was #3d59a1: lightened for 3:1 on bg-hover (was 1.72) */
-	--trust-direct: #9ece6a;
-	--trust-2hop: #e0af68;
-	--trust-3hop: #ff9e64;
-	--trust-untrusted: #7882ae; /* was #565f89: lightened for 3:1 on bg-hover (was 1.85) */
-	--link: #7aa2f7;
-	--link-hover: #c0caf5;
-	--danger: #fb7a92; /* was #f7768e: lightened for 4.5:1 on bg-hover (was 4.34) */
-	--success: #9ece6a;
-}
-
-[data-theme='tokyo-night-day'] {
-	--bg: #f3f3f6;                /* fabricated, ~50% editor→white — softens stark white while keeping a clear step above editor */
-	--bg-surface-dim: #d6d8df;    /* sideBar.background — recessed code blocks */
-	--bg-surface: #e6e7ed;        /* editor — barely-indented cards */
-	--bg-surface-raised: #c6c8ce; /* ~50% input.border→bg-hover — deepest indent for modals, lightened from canonical input.border #c1c2c7 to soften the indent */
-	--bg-hover: #cbcdd3;          /* fabricated midpoint sideBar↔input.border */
-	--text-primary: #343b58;
-	--text-secondary: #40434f;
-	--text-muted: #686a71; /* was #6c6e75: darkened for 3:1 on bg-surface-raised (was 2.86) */
-	--border: #aeafb3;
-	--border-subtle: #c1c2c7;
-	--accent: #2959aa;
-	--accent-muted: #0f4b6e;
-	--trust-direct: #385f0d;
-	--trust-2hop: #8f5e15;
-	--trust-3hop: #965027;
-	--trust-untrusted: #6c6e75;
-	--link: #1c4c9c; /* was #2959aa: darkened for 4.5:1 on 2 bg slots (was 3.80) */
-	--link-hover: #343b58;        /* matches text-primary */
-	--danger: #803847; /* was #8c4351: darkened for 4.5:1 on 2 bg slots (was 3.89) */
-	--success: #335a04; /* was #385f0d: darkened for 4.5:1 on bg-surface-raised (was 4.20) */
-}
-
-[data-theme='catppuccin-mocha'] {
-	--bg: #11111b;
-	--bg-surface-dim: #181825;
-	--bg-surface: #1e1e2e;
-	--bg-surface-raised: #313244;
-	--bg-hover: #36384a; /* ~50% surface1→surface0 — darkened for a subtler hover */
-	--text-primary: #cdd6f4;
-	--text-secondary: #bac2de;
-	--text-muted: #a6adc8;
-	--border: #585b70;
-	--border-subtle: #313244;
-	--accent: #cba6f7;
-	--accent-muted: #977eb5; /* was #846ca1: lightened for 3:1 on bg-hover (was 2.36) */
-	--trust-direct: #a6e3a1;
-	--trust-2hop: #f9e2af;
-	--trust-3hop: #fab387;
-	--trust-untrusted: #84889f; /* was #6c7086: lightened for 3:1 on bg-hover (was 2.18) */
-	--link: #cba6f7;
-	--link-hover: #cdd6f4;
-	--danger: #f38ba8;
-	--success: #a6e3a1;
-}
-
-[data-theme='catppuccin-macchiato'] {
-	--bg: #181926;
-	--bg-surface-dim: #1e2030;
-	--bg-surface: #24273a;
-	--bg-surface-raised: #363a4f;
-	--bg-hover: #44485f; /* ~25% surface1→surface0 — darkened from canonical surface1 #494d64 for a subtler hover */
-	--text-primary: #cad3f5;
-	--text-secondary: #b8c0e0;
-	--text-muted: #a5adcb;
-	--border: #5b6078;
-	--border-subtle: #363a4f;
-	--accent: #c6a0f6;
-	--accent-muted: #ab91cc; /* was #8168a0: lightened for 3:1 on bg-hover (was 1.75) */
-	--trust-direct: #a6da95;
-	--trust-2hop: #eed49f;
-	--trust-3hop: #f5a97f;
-	--trust-untrusted: #979cb8; /* was #6e738d: lightened for 3:1 on bg-hover (was 1.78) */
-	--link: #d6b0ff; /* was #c6a0f6: lightened for 4.5:1 on bg-hover (was 3.86) */
-	--link-hover: #cad3f5;
-	--danger: #ffa7b5; /* was #ed8796: lightened for 4.5:1 on bg-hover (was 3.36) */
-	--success: #a6da95;
-}
-
-[data-theme='catppuccin-frappe'] {
-	--bg: #232634;
-	--bg-surface-dim: #292c3c;
-	--bg-surface: #303446;
-	--bg-surface-raised: #414559;
-	--bg-hover: #4a5066; /* was #51576d: darkened to resolve 1 pair(s) on bg-hover (worst was accent-muted at 1.48, need 3) */
-	--text-primary: #c6d0f5;
-	--text-secondary: #b5bfe2;
-	--text-muted: #a5adce;
-	--border: #626880;
-	--border-subtle: #414559;
-	--accent: #ca9ee6;
-	--accent-muted: #b194c5; /* was #836796: lightened for 3:1 on bg-hover (was 1.65) */
-	--trust-direct: #a6d189;
-	--trust-2hop: #e5c890;
-	--trust-3hop: #ef9f76;
-	--trust-untrusted: #989fbb; /* was #737994: lightened for 3:1 on bg-hover (was 1.86) */
-	--link: #ebbeff; /* was #ca9ee6: lightened for 4.5:1 on 2 bg slots (was 3.25) */
-	--link-hover: #c6d0f5;
-	--danger: #ffbebe; /* was #e78284: lightened for 4.5:1 on 2 bg slots (was 2.70) */
-	--success: #a6d189;
-}
-
-[data-theme='catppuccin-latte'] {
-	--bg: #eff1f5;                /* base — canonical Latte page bg */
-	--bg-surface-dim: #dce0e8;    /* crust — recessed code blocks */
-	--bg-surface: #e6e9ef;        /* mantle — barely-indented cards */
-	--bg-surface-raised: #c4c8d2; /* ~50% surface1→surface0 — lightened from canonical surface1 to soften the indent */
-	--bg-hover: #ccd0da;          /* surface0 */
-	--text-primary: #474a64; /* was #4c4f69: darkened for 4.5:1 on bg-surface-raised (was 4.49) */
-	--text-secondary: #5c5f77;    /* subtext1 */
-	--text-muted: #6c6f85;        /* subtext0 */
-	--border: #acb0be;            /* surface2 */
-	--border-subtle: #ccd0da;     /* surface0 */
-	--accent: #8839ef;            /* mauve */
-	--accent-muted: #58259b;      /* fabricated darker mauve */
-	--trust-direct: #228700; /* was #40a02b: darkened for 3:1 on bg-hover (was 2.17) */
-	--trust-2hop: #ad6000; /* was #df8e1d: darkened for 3:1 on bg-hover (was 1.70) */
-	--trust-3hop: #d53d00; /* was #fe640b: darkened for 3:1 on bg-hover (was 1.93) */
-	--trust-untrusted: #6f7382; /* was #9ca0b0: darkened for 3:1 on bg-hover (was 1.69) */
-	--link: #6e00ce; /* was #8839ef: darkened for 4.5:1 on 4 bg slots (was 2.98) */
-	--link-hover: #4a4d67; /* was #4c4f69: darkened for 4.5:1 on bg-surface-raised (was 4.49) */
-	--danger: #a20012; /* was #d20f39: darkened for 4.5:1 on 4 bg slots (was 2.99) */
-	--success: #005d00; /* was #40a02b: darkened for 4.5:1 on 5 bg slots (was 1.84) */
 }
 
 [data-theme='kanagawa-wave'] {

@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT\n            COALESCE((SELECT theme FROM user_settings WHERE user_id = ?), 'rose-pine') AS \"theme!: String\",\n            COALESCE((SELECT font FROM user_settings WHERE user_id = ?), 'inter') AS \"font!: String\"",
+  "query": "SELECT\n            COALESCE((SELECT theme FROM user_settings WHERE user_id = ?), 'rose-pine-moon') AS \"theme!: String\",\n            COALESCE((SELECT font FROM user_settings WHERE user_id = ?), 'literata') AS \"font!: String\"",
   "describe": {
     "columns": [
       {
@@ -22,5 +22,5 @@
       false
     ]
   },
-  "hash": "bf3aeeedb6b2e229bfcd16389e73df3e185ad36d9e1708b1fbf4cefdfcbaabd3"
+  "hash": "c74cc2412f324bc0c1b0471cfcc28084b2ecfe5fe75d15f27674cb707c1feb00"
 }

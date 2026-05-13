@@ -275,8 +275,8 @@ pub async fn export_my_data(
 
     let settings_row = sqlx::query!(
         r#"SELECT
-            COALESCE((SELECT theme FROM user_settings WHERE user_id = ?), 'rose-pine') AS "theme!: String",
-            COALESCE((SELECT font FROM user_settings WHERE user_id = ?), 'inter') AS "font!: String""#,
+            COALESCE((SELECT theme FROM user_settings WHERE user_id = ?), 'rose-pine-moon') AS "theme!: String",
+            COALESCE((SELECT font FROM user_settings WHERE user_id = ?), 'literata') AS "font!: String""#,
         user_id,
         user_id,
     )

@@ -65,10 +65,6 @@ CREATE TABLE signing_keys (
 CREATE INDEX idx_signing_keys_user_id ON signing_keys(user_id);
 CREATE UNIQUE INDEX idx_signing_keys_active ON signing_keys(user_id) WHERE active = 1;
 CREATE INDEX idx_users_invite_id ON users(invite_id);
-CREATE TABLE user_settings (
-    user_id TEXT PRIMARY KEY NOT NULL REFERENCES users(id),
-    theme TEXT NOT NULL DEFAULT 'rose-pine'
-, font TEXT NOT NULL DEFAULT 'inter');
 CREATE TABLE IF NOT EXISTS "trust_edges" (
     id TEXT PRIMARY KEY NOT NULL,
     source_user TEXT NOT NULL REFERENCES users(id),
@@ -385,3 +381,8 @@ CREATE INDEX idx_admin_log_target_user ON admin_log(target_user);
 CREATE INDEX idx_ban_trust_snapshots_target ON ban_trust_snapshots(target_user);
 CREATE INDEX idx_ban_trust_snapshots_trusting ON ban_trust_snapshots(trusting_user);
 CREATE INDEX idx_ban_trust_snapshots_admin_log ON ban_trust_snapshots(admin_log_id);
+CREATE TABLE IF NOT EXISTS "user_settings" (
+    user_id TEXT PRIMARY KEY NOT NULL REFERENCES users(id),
+    theme TEXT NOT NULL DEFAULT 'rose-pine-moon',
+    font TEXT NOT NULL DEFAULT 'literata'
+);

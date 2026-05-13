@@ -13,13 +13,6 @@ export type ThemeId =
 	| 'rose-pine-dawn'
 	| 'gruvbox-dark'
 	| 'gruvbox-light'
-	| 'tokyo-night'
-	| 'tokyo-night-storm'
-	| 'tokyo-night-day'
-	| 'catppuccin-mocha'
-	| 'catppuccin-macchiato'
-	| 'catppuccin-frappe'
-	| 'catppuccin-latte'
 	| 'kanagawa-wave'
 	| 'kanagawa-dragon'
 	| 'kanagawa-lotus'
@@ -40,13 +33,6 @@ export const themes: ThemeMeta[] = [
 	{ id: 'rose-pine-dawn', name: 'Rosé Pine Dawn' },
 	{ id: 'gruvbox-dark', name: 'Gruvbox Dark' },
 	{ id: 'gruvbox-light', name: 'Gruvbox Light' },
-	{ id: 'tokyo-night', name: 'Tokyo Night' },
-	{ id: 'tokyo-night-storm', name: 'Tokyo Night Storm' },
-	{ id: 'tokyo-night-day', name: 'Tokyo Night Day' },
-	{ id: 'catppuccin-mocha', name: 'Catppuccin Mocha' },
-	{ id: 'catppuccin-macchiato', name: 'Catppuccin Macchiato' },
-	{ id: 'catppuccin-frappe', name: 'Catppuccin Frappé' },
-	{ id: 'catppuccin-latte', name: 'Catppuccin Latte' },
 	{ id: 'kanagawa-wave', name: 'Kanagawa Wave' },
 	{ id: 'kanagawa-dragon', name: 'Kanagawa Dragon' },
 	{ id: 'kanagawa-lotus', name: 'Kanagawa Lotus' },
@@ -57,7 +43,7 @@ export const themes: ThemeMeta[] = [
 	{ id: 'iceberg', name: 'Iceberg' }
 ];
 
-export const DEFAULT_THEME: ThemeId = 'rose-pine';
+export const DEFAULT_THEME: ThemeId = 'rose-pine-moon';
 
 /**
  * Apply a theme in the browser by flipping the `data-theme` attribute on

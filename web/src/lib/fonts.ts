@@ -19,13 +19,7 @@
 // (italic). Subsets and conversion live in the build steps documented
 // alongside the font directory.
 
-export type FontId =
-	| 'inter'
-	| 'ibm-plex-sans'
-	| 'source-sans-3'
-	| 'literata'
-	| 'source-serif-4'
-	| 'vollkorn';
+export type FontId = 'ibm-plex-sans' | 'literata' | 'vollkorn';
 
 export type FontCategory = 'sans' | 'serif';
 
@@ -36,15 +30,12 @@ export interface FontMeta {
 }
 
 export const fonts: FontMeta[] = [
-	{ id: 'inter', name: 'Inter', category: 'sans' },
 	{ id: 'ibm-plex-sans', name: 'IBM Plex Sans', category: 'sans' },
-	{ id: 'source-sans-3', name: 'Source Sans 3', category: 'sans' },
 	{ id: 'literata', name: 'Literata', category: 'serif' },
-	{ id: 'source-serif-4', name: 'Source Serif 4', category: 'serif' },
 	{ id: 'vollkorn', name: 'Vollkorn', category: 'serif' }
 ];
 
-export const DEFAULT_FONT: FontId = 'vollkorn';
+export const DEFAULT_FONT: FontId = 'literata';
 
 /**
  * Apply a prose font in the browser by flipping the `data-font`
