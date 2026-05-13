@@ -6,6 +6,7 @@
 import { redirect, error as kitError } from '@sveltejs/kit';
 import type { PageServerLoad } from './$types';
 import { listRooms, listFavorites } from '$lib/api/rooms';
+import { throwMappedLoadError } from '$lib/api/load-error';
 
 export const load: PageServerLoad = async ({ parent, fetch }) => {
 	const { session, sessionError } = await parent();
@@ -15,15 +16,19 @@ export const load: PageServerLoad = async ({ parent, fetch }) => {
 	if (!session) {
 		throw redirect(307, '/login');
 	}
-	// Run both fetches in parallel — the rooms listing and the
-	// favorites list have no dependency on each other.
-	const [page, favorites] = await Promise.all([
-		listRooms({ fetch }),
-		listFavorites({ fetch })
-	]);
-	return {
-		rooms: page.rooms,
-		nextCursor: page.next_cursor,
-		favorites
-	};
+	try {
+		// Run both fetches in parallel — the rooms listing and the
+		// favorites list have no dependency on each other.
+		const [page, favorites] = await Promise.all([
+			listRooms({ fetch }),
+			listFavorites({ fetch })
+		]);
+		return {
+			rooms: page.rooms,
+			nextCursor: page.next_cursor,
+			favorites
+		};
+	} catch (e) {
+		throwMappedLoadError(e, { fallback: 'Failed to load rooms', unauthRedirect: '/login' });
+	}
 };

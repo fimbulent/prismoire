@@ -6,15 +6,20 @@
 import { redirect } from '@sveltejs/kit';
 import type { PageServerLoad } from './$types';
 import { listPublicThreads } from '$lib/api/threads';
+import { throwMappedLoadError } from '$lib/api/load-error';
 
 export const load: PageServerLoad = async ({ parent, fetch }) => {
 	const { session } = await parent();
 	if (session) {
 		throw redirect(307, '/r/all');
 	}
-	const res = await listPublicThreads(undefined, { fetch });
-	return {
-		threads: res.threads,
-		nextCursor: res.next_cursor
-	};
+	try {
+		const res = await listPublicThreads(undefined, { fetch });
+		return {
+			threads: res.threads,
+			nextCursor: res.next_cursor
+		};
+	} catch (e) {
+		throwMappedLoadError(e, { fallback: 'Failed to load public threads' });
+	}
 };

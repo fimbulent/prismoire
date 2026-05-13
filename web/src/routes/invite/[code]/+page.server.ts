@@ -5,8 +5,13 @@
 
 import type { PageServerLoad } from './$types';
 import { validateInvite } from '$lib/api/invites';
+import { throwMappedLoadError } from '$lib/api/load-error';
 
 export const load: PageServerLoad = async ({ fetch, params }) => {
-	const validation = await validateInvite(params.code, { fetch });
-	return { validation, code: params.code };
+	try {
+		const validation = await validateInvite(params.code, { fetch });
+		return { validation, code: params.code };
+	} catch (e) {
+		throwMappedLoadError(e, { fallback: 'Failed to validate invite' });
+	}
 };
