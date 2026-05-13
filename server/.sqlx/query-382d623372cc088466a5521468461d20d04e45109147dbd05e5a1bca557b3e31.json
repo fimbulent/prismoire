@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO admin_log (id, admin, action, reason) VALUES (?, ?, 'edit_config', ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "382d623372cc088466a5521468461d20d04e45109147dbd05e5a1bca557b3e31"
+}

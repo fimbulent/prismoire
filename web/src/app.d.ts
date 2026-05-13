@@ -56,6 +56,13 @@ declare global {
 			 */
 			sessionError: boolean;
 			needsSetup: boolean;
+			/**
+			 * Public URL to this instance's source code (AGPL §13).
+			 * Rendered as a footer link by the root layout. `null`
+			 * only between fresh install and the moment the initial
+			 * setup flow completes.
+			 */
+			sourceRepoUrl: string | null;
 		}
 		interface PageState {
 			viewRootStack?: string[];

@@ -147,6 +147,8 @@ pub async fn test_app() -> (Router, Arc<AppState>) {
     let trust_graph = Arc::new(RwLock::new(Arc::new(TrustGraph::empty())));
     let app_metrics = Arc::new(metrics::Metrics::new());
     let pending_deltas = Arc::new(trust::PendingDeltas::new(Some(app_metrics.clone())));
+    let rebuild_schedule = Arc::new(RwLock::new(RebuildSchedule::default()));
+    let source_repo_url = Arc::new(RwLock::new(None));
 
     let state = Arc::new(AppState {
         db: pool,
@@ -161,6 +163,8 @@ pub async fn test_app() -> (Router, Arc<AppState>) {
         trust_graph,
         metrics: app_metrics,
         pending_deltas,
+        rebuild_schedule,
+        source_repo_url,
     });
 
     let layers = rate_limit::build_layers(&test_rate_limit_config(), false);

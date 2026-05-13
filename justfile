@@ -55,9 +55,14 @@ nix-hash:
     nix build .#packages.x86_64-linux.web.pnpmDeps 2>&1 || true
     @echo "If the hash above changed, update pnpmDeps.hash in flake.nix"
 
-# Create the SQLite database
+# Create the SQLite database.
+# Also creates a workspace-root symlink so sqlx-macros (which resolve
+# relative sqlite paths from the workspace root) and the running server
+# (which `just dev` invokes from the workspace root) both see the same
+# file as `cargo sqlx ...` invocations from inside `server/`.
 db-create:
     cd server && cargo sqlx database create
+    ln -sf server/prismoire.db prismoire.db
 
 # Run pending database migrations
 db-migrate:
@@ -79,10 +84,15 @@ db-schema:
     DATABASE_URL="sqlite://$tmp" cargo sqlx migrate run --source server/migrations
     sqlite3 "$tmp" .schema > schema.sql
 
-# Delete the database and recreate from scratch
+# Delete the database and recreate from scratch.
+# Also removes the workspace-root symlink + any stray WAL/SHM sidecars
+# the server may have left at the workspace root, then re-creates the
+# symlink (see `db-create` for the rationale).
 db-reset:
     rm -f server/prismoire.db server/prismoire.db-wal server/prismoire.db-shm
+    rm -f prismoire.db prismoire.db-wal prismoire.db-shm
     cd server && cargo sqlx database create && cargo sqlx migrate run
+    ln -sf server/prismoire.db prismoire.db
 
 # Point git at the versioned pre-commit hook (one-time, per clone)
 install-hooks:

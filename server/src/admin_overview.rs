@@ -57,6 +57,12 @@ pub struct TrustGraphStats {
     pub bfs_cache_hit_rate: Option<f64>,
     /// Total BFS lookups recorded since the last rebuild.
     pub bfs_total_lookups: u64,
+    /// Sum of bytes currently held across the forward, reverse, and
+    /// delta BFS caches. Compare against
+    /// `instance_config.rebuild_bfs_cache_bytes` to gauge how full the
+    /// cache is — usage well below budget with a low hit rate means
+    /// raising the budget won't help.
+    pub bfs_cache_used_bytes: u64,
     /// p50 graph-build duration (ms) over the recent sample window,
     /// or `None` if no builds have completed yet.
     pub graph_load_ms_p50: Option<f64>,
@@ -279,6 +285,10 @@ pub async fn get_overview(
 
     // --- In-process metrics ---------------------------------------------
     let m = state.metrics.snapshot();
+    // Live cache-weight reading from the current trust graph. Quick
+    // read-lock acquire (`get_trust_graph` clones the inner Arc and
+    // releases immediately).
+    let bfs_cache_used_bytes = state.get_trust_graph()?.bfs_cache_weight();
 
     Ok(Json(AdminOverviewResponse {
         total_users,
@@ -301,6 +311,7 @@ pub async fn get_overview(
             last_rebuild_at: m.last_rebuild_at.map(|t| t.to_rfc3339()),
             bfs_cache_hit_rate: m.bfs_hit_rate,
             bfs_total_lookups: m.bfs_total_lookups,
+            bfs_cache_used_bytes,
             graph_load_ms_p50: m.graph_load_ms_p50,
             graph_load_ms_p95: m.graph_load_ms_p95,
             graph_load_ms_p99: m.graph_load_ms_p99,

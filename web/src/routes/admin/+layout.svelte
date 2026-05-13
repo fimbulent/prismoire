@@ -11,6 +11,7 @@
 		if (seg === 'watchlists') return 'watchlists';
 		if (seg === 'actions') return 'actions';
 		if (seg === 'routes') return 'routes';
+		if (seg === 'config') return 'config';
 		return 'overview';
 	});
 
@@ -22,6 +23,7 @@
 		if (tab === 'watchlists') return 'Watchlists';
 		if (tab === 'actions') return 'Actions';
 		if (tab === 'routes') return 'Routes';
+		if (tab === 'config') return 'Config';
 		return 'Dashboard';
 	});
 
@@ -54,6 +56,7 @@
 		<a href="/admin/watchlists" class={tabClass(tab === 'watchlists')}>Watchlists</a>
 		<a href="/admin/actions" class={tabClass(tab === 'actions')}>Actions</a>
 		<a href="/admin/routes" class={tabClass(tab === 'routes')}>Routes</a>
+		<a href="/admin/config" class={tabClass(tab === 'config')}>Config</a>
 	</div>
 </div>
 

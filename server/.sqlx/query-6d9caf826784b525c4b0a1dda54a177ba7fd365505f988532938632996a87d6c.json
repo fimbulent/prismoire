@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE instance_config SET source_repo_url = ? WHERE id = 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "6d9caf826784b525c4b0a1dda54a177ba7fd365505f988532938632996a87d6c"
+}

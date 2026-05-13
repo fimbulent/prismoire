@@ -23,6 +23,13 @@ pub const MINIMUM_TRUST_THRESHOLD: f64 = 0.45;
 /// Default total BFS cache budget (in bytes). Carved 7/16 to the
 /// per-viewer forward cache, 1/16 to the delta-keyed forward cache (only
 /// active mutators populate it), and 8/16 to the reverse cache.
+///
+/// This value is mirrored in the seed `INSERT` of the
+/// `instance_config` migration. If you change it, write a new
+/// migration that updates the seeded default — otherwise existing
+/// deployments stay on the old value (the migration's `INSERT OR
+/// IGNORE` is a no-op once the row exists) while new deployments
+/// pick up the new one.
 const DEFAULT_BFS_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Fraction (in sixteenths) of the total BFS cache budget reserved for
@@ -1130,6 +1137,18 @@ impl TrustGraph {
         }
     }
 
+    /// Total weight (in bytes) currently held across all three BFS
+    /// caches. Surfaced to the admin overview so operators can see
+    /// how close to the configured budget the cache is actually
+    /// running — a low hit rate with usage well below budget means
+    /// the working set is too spread out for caching to help, not
+    /// that the budget is too small.
+    pub fn bfs_cache_weight(&self) -> u64 {
+        self.forward_cache.weight()
+            + self.reverse_cache.weight()
+            + self.delta_forward_cache.weight()
+    }
+
     /// Split the total BFS cache budget across forward, delta, and
     /// reverse caches. The reverse cache always gets half; the
     /// forward half is sliced into the stable per-viewer cache and the
@@ -1643,6 +1662,7 @@ impl TrustGraph {
 ///   thrashing under sustained mutation load.
 /// - `max_interval`: maximum staleness — if dirty, rebuild after this long
 ///   even if mutations are still arriving.
+#[derive(Debug, Clone, Copy)]
 pub struct RebuildSchedule {
     pub debounce: Duration,
     pub min_interval: Duration,
@@ -1655,6 +1675,14 @@ pub struct RebuildSchedule {
 
 impl Default for RebuildSchedule {
     fn default() -> Self {
+        // Values here are mirrored in the seed `INSERT` of the
+        // `instance_config` migration (and in DB-level CHECK
+        // constraints for the valid range). If you change any of
+        // these defaults, write a new migration that updates the
+        // seeded default — otherwise existing deployments stay on
+        // the old value (the migration's `INSERT OR IGNORE` is a
+        // no-op once the row exists) while new deployments pick up
+        // the new one.
         Self {
             debounce: Duration::from_secs(5),
             min_interval: Duration::from_secs(30),
@@ -1699,21 +1727,50 @@ pub async fn rebuild_trust_graph(
 /// Run the debounced trust graph rebuild loop.
 ///
 /// Waits for notifications from mutation sites, then rebuilds the graph
-/// subject to the timing constraints in `schedule`. The loop ensures:
+/// subject to the timing constraints in the live `schedule`. The loop
+/// ensures:
 /// - At least `min_interval` between rebuilds (prevents thrashing).
 /// - At least `debounce` of quiet time after the last mutation (coalesces bursts).
 /// - At most `max_interval` of staleness when mutations are continuous.
 /// - No rebuild if the graph hasn't changed (dirty flag is false).
+///
+/// The schedule lives behind a [`std::sync::RwLock`] so admin edits via
+/// `/api/admin/config` are picked up on the *next* scheduling window
+/// without a server restart. We snapshot the schedule once per window
+/// (after the first mutation notification arrives) so a config change
+/// can't perturb timing decisions mid-window; a change made during an
+/// active wait will apply to the wait that follows. The
+/// `bfs_cache_bytes` value is also snapshotted at the moment of each
+/// rebuild call — so growing or shrinking the cache takes effect on the
+/// next rebuild, not retroactively against the in-flight one.
 // TODO: Accept a CancellationToken for graceful shutdown.
 pub async fn rebuild_loop(
     db: SqlitePool,
     graph: Arc<std::sync::RwLock<Arc<TrustGraph>>>,
     notify: Arc<Notify>,
-    schedule: RebuildSchedule,
+    schedule: Arc<std::sync::RwLock<RebuildSchedule>>,
     metrics: Arc<Metrics>,
     pending_deltas: Arc<PendingDeltas>,
 ) {
     use tokio::time::{Instant, sleep_until};
+
+    /// Snapshot the shared schedule. `RebuildSchedule` is `Copy`, so
+    /// the lock is held only long enough to read four fields. On
+    /// poisoning we fall back to the compile-time defaults so the
+    /// loop keeps making forward progress and surface the breakage
+    /// in the log — losing trust-graph rebuilds is worse than running
+    /// on stale-but-sensible parameters.
+    fn snapshot(schedule: &std::sync::RwLock<RebuildSchedule>) -> RebuildSchedule {
+        match schedule.read() {
+            Ok(guard) => *guard,
+            Err(poisoned) => {
+                tracing::error!("rebuild_loop: schedule RwLock poisoned; using defaults");
+                // Recover the poisoned guard to keep using the last
+                // good value instead of dropping it.
+                *poisoned.into_inner()
+            }
+        }
+    }
 
     // Run an initial build immediately (graph starts empty).
     // TODO: Retry with backoff if the initial build fails, rather than
@@ -1725,9 +1782,8 @@ pub async fn rebuild_loop(
     // before this load, so any delta with a lower seq is fully reflected
     // in the new graph.
     let initial_high_water = pending_deltas.current_seq();
-    if let Err(e) =
-        rebuild_trust_graph(&db, &graph, schedule.bfs_cache_bytes, Some(metrics.clone())).await
-    {
+    let initial_bytes = snapshot(&schedule).bfs_cache_bytes;
+    if let Err(e) = rebuild_trust_graph(&db, &graph, initial_bytes, Some(metrics.clone())).await {
         tracing::error!(error = %e, "trust graph initial build failed");
     } else {
         pending_deltas.purge_below(initial_high_water);
@@ -1739,13 +1795,16 @@ pub async fn rebuild_loop(
         // Wait for the first mutation notification.
         notify.notified().await;
 
-        // Mutation received — enter the scheduling window.
+        // Mutation received — enter the scheduling window. Snapshot
+        // the schedule once here so an admin edit can't reshape the
+        // window mid-wait (it will instead apply to the next window).
+        let window = snapshot(&schedule);
         let mut last_mutation = Instant::now();
-        let earliest_rebuild = last_rebuild + schedule.min_interval;
-        let deadline = last_mutation + schedule.max_interval;
+        let earliest_rebuild = last_rebuild + window.min_interval;
+        let deadline = last_mutation + window.max_interval;
 
         loop {
-            let debounce_at = last_mutation + schedule.debounce;
+            let debounce_at = last_mutation + window.debounce;
             // Next rebuild attempt: respect both debounce and min_interval,
             // but never exceed the max_interval deadline.
             let target = debounce_at.max(earliest_rebuild).min(deadline);
@@ -1761,11 +1820,13 @@ pub async fn rebuild_loop(
             }
         }
 
+        // Re-snapshot just `bfs_cache_bytes` so a config change applied
+        // during the debounce wait takes effect on this rebuild rather
+        // than waiting another full window.
+        let bytes = snapshot(&schedule).bfs_cache_bytes;
         // See the initial-build comment above for the ordering rationale.
         let high_water = pending_deltas.current_seq();
-        match rebuild_trust_graph(&db, &graph, schedule.bfs_cache_bytes, Some(metrics.clone()))
-            .await
-        {
+        match rebuild_trust_graph(&db, &graph, bytes, Some(metrics.clone())).await {
             Ok(()) => {
                 pending_deltas.purge_below(high_water);
             }

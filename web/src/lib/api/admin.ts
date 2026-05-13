@@ -75,6 +75,47 @@ export async function removePost(
 }
 
 // ---------------------------------------------------------------------------
+// Instance config (Config tab)
+// ---------------------------------------------------------------------------
+
+export interface AdminConfig {
+	rebuild_debounce_ms: number;
+	rebuild_min_interval_ms: number;
+	rebuild_max_interval_ms: number;
+	rebuild_bfs_cache_bytes: number;
+	source_repo_url: string | null;
+}
+
+export type AdminConfigUpdate = Partial<{
+	rebuild_debounce_ms: number;
+	rebuild_min_interval_ms: number;
+	rebuild_max_interval_ms: number;
+	rebuild_bfs_cache_bytes: number;
+	source_repo_url: string;
+}>;
+
+export async function getAdminConfig(opts: FetchOpts = {}): Promise<AdminConfig> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f('/api/admin/config');
+	if (!res.ok) await throwApiError(res);
+	return res.json();
+}
+
+export async function updateAdminConfig(
+	patch: AdminConfigUpdate,
+	opts: FetchOpts = {}
+): Promise<AdminConfig> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f('/api/admin/config', {
+		method: 'PATCH',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(patch)
+	});
+	if (!res.ok) await throwApiError(res);
+	return res.json();
+}
+
+// ---------------------------------------------------------------------------
 // Reports
 // ---------------------------------------------------------------------------
 
@@ -318,6 +359,7 @@ export interface TrustGraphStats {
 	last_rebuild_at: string | null;
 	bfs_cache_hit_rate: number | null;
 	bfs_total_lookups: number;
+	bfs_cache_used_bytes: number;
 	graph_load_ms_p50: number | null;
 	graph_load_ms_p95: number | null;
 	graph_load_ms_p99: number | null;

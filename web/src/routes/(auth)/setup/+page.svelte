@@ -9,6 +9,7 @@
 
 	let token = $state('');
 	let displayName = $state('');
+	let sourceRepoUrl = $state('https://codeberg.org/fimbulent/prismoire');
 	let error = $state<string | null>(null);
 	let nameError = $derived(displayName.trim() ? validateDisplayName(displayName) : null);
 	let submitting = $state(false);
@@ -23,13 +24,17 @@
 			error = validationError;
 			return;
 		}
+		if (!sourceRepoUrl.trim()) {
+			error = 'Source code URL is required';
+			return;
+		}
 		error = null;
 		submitting = true;
 
 		try {
 			const { challenge_id, ...options } = await setupBegin(token.trim(), displayName);
 			const credential = await createPasskey(options.publicKey as never);
-			await setupComplete(challenge_id, credential);
+			await setupComplete(challenge_id, credential, sourceRepoUrl.trim());
 			await session.refresh();
 			await goto('/');
 		} catch (e) {
@@ -88,13 +93,40 @@
 			{/if}
 		</div>
 
+		<div>
+			<label for="source-repo-url" class="block text-text-secondary text-sm mb-1"
+				>Source Code URL</label
+			>
+			<input
+				id="source-repo-url"
+				type="url"
+				bind:value={sourceRepoUrl}
+				required
+				disabled={submitting}
+				class="w-full bg-bg-surface-raised border border-border-subtle rounded-md px-3 py-2 text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent"
+				placeholder="https://example.com/prismoire"
+			/>
+			<p class="text-text-muted text-xs mt-1">
+				Public URL to this instance's source code. If you modified Prismoire, you <em>must</em> link to your
+				modified source code here according to the terms of the
+				<a class="text-link hover:text-link-hover" target="_blank" rel="nofollow ugc noopener noreferrer" href="https://www.gnu.org/licenses/agpl-3.0.en.html">AGPL license</a>.
+				If you did not modify Prismoire's source code, link to Prismoire's
+				<a class="text-link hover:text-link-hover" target="_blank" rel="nofollow ugc noopener noreferrer" href="https://codeberg.org/fimbulent/prismoire">public repository</a>.
+				This link will appear in the site footer for all users.
+			</p>
+		</div>
+
 		{#if error}
 			<p transition:slide={{ duration: 150 }} class="text-danger text-sm">{error}</p>
 		{/if}
 
 		<button
 			type="submit"
-			disabled={submitting || !token.trim() || !displayName.trim() || !!nameError}
+			disabled={submitting ||
+				!token.trim() ||
+				!displayName.trim() ||
+				!!nameError ||
+				!sourceRepoUrl.trim()}
 			class="w-full bg-accent text-bg font-semibold rounded-md px-4 py-2 hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-opacity"
 		>
 			{submitting ? 'Creating passkey…' : 'Create Admin Account'}

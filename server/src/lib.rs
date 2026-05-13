@@ -17,6 +17,7 @@ use axum::Router;
 use axum::routing::{delete, get, post, put};
 
 pub mod admin;
+pub mod admin_config;
 pub mod admin_overview;
 pub mod admin_routes;
 pub mod admin_watchlists;
@@ -25,6 +26,7 @@ pub mod csp_report;
 pub mod display_name;
 pub mod error;
 pub mod favorites;
+pub mod instance_config;
 pub mod invites;
 pub mod metrics;
 pub mod middleware;
@@ -198,6 +200,10 @@ pub fn build_app(
         )
         .route("/api/admin/dashboard", get(reports::get_dashboard))
         .route("/api/admin/overview", get(admin_overview::get_overview))
+        .route(
+            "/api/admin/config",
+            get(admin_config::get_config).patch(admin_config::update_config),
+        )
         .route("/api/admin/routes", get(admin_routes::list_routes))
         .route(
             "/api/admin/watchlists",

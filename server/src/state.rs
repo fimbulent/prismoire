@@ -7,7 +7,7 @@ use webauthn_rs::Webauthn;
 
 use crate::error::{AppError, ErrorCode};
 use crate::metrics::Metrics;
-use crate::trust::{PendingDeltas, TrustGraph};
+use crate::trust::{PendingDeltas, RebuildSchedule, TrustGraph};
 
 /// Shared application state available to all request handlers.
 pub struct AppState {
@@ -39,6 +39,17 @@ pub struct AppState {
     /// graph so trust badges respond instantly to button clicks
     /// instead of waiting for the next debounced rebuild.
     pub pending_deltas: Arc<PendingDeltas>,
+    /// Live mirror of the rebuild-schedule columns from `instance_config`.
+    /// Shared with the trust-graph rebuild loop, which snapshots it once
+    /// per scheduling window (and re-reads `bfs_cache_bytes` at rebuild
+    /// time). Admin edits via `/api/admin/config` overwrite the value
+    /// here and persist to the DB row in the same handler.
+    pub rebuild_schedule: Arc<std::sync::RwLock<RebuildSchedule>>,
+    /// Live mirror of the `source_repo_url` column from `instance_config`.
+    /// Read by `/api/setup/status` so the SvelteKit root layout can
+    /// render the AGPL source link in the footer without a DB roundtrip
+    /// per request. `None` only before the initial setup flow completes.
+    pub source_repo_url: Arc<std::sync::RwLock<Option<String>>>,
 }
 
 impl AppState {

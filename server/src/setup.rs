@@ -14,6 +14,7 @@ use webauthn_rs::prelude::*;
 use crate::auth::{AuthBeginResponse, SessionResponse};
 use crate::display_name::{display_name_skeleton, validate_display_name};
 use crate::error::{AppError, ErrorCode};
+use crate::instance_config::{save_source_repo_url, validate_source_repo_url};
 use crate::session::{create_session, session_cookie};
 use crate::signing;
 use crate::state::AppState;
@@ -25,6 +26,12 @@ use crate::state::AppState;
 #[derive(Serialize)]
 pub struct SetupStatusResponse {
     pub needs_setup: bool,
+    /// Public URL to this instance's source code (AGPL §13). The
+    /// SvelteKit root layout renders this as a footer link visible to
+    /// all users. `None` only between fresh-install and the moment
+    /// `setup_complete` succeeds — every other path in the admin
+    /// config requires a non-empty value.
+    pub source_repo_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -37,16 +44,37 @@ pub struct SetupBeginRequest {
 pub struct SetupCompleteRequest {
     pub challenge_id: String,
     pub credential: RegisterPublicKeyCredential,
+    /// Admin-supplied source code URL captured by the initial setup
+    /// page. Required at setup time so a freshly installed instance
+    /// never serves the app without AGPL §13 source-availability
+    /// being satisfied.
+    pub source_repo_url: String,
 }
 
 // ---------------------------------------------------------------------------
 // GET /api/setup/status
 // ---------------------------------------------------------------------------
 
-/// Return whether the instance needs initial admin setup.
+/// Return whether the instance needs initial admin setup, plus the
+/// configured source-code URL (for the AGPL footer link).
+///
+/// Read from the in-memory mirror on `AppState` rather than the DB so
+/// this endpoint stays cheap: the SvelteKit root layout hits it on
+/// every SSR. The mirror is updated whenever an admin edits the URL
+/// from the Config tab. A poisoned RwLock falls back to `None` and
+/// logs — losing the footer link is preferable to 500-ing every page
+/// load.
 pub async fn setup_status(State(state): State<Arc<AppState>>) -> Json<SetupStatusResponse> {
+    let source_repo_url = match state.source_repo_url.read() {
+        Ok(guard) => guard.clone(),
+        Err(_) => {
+            tracing::error!("setup_status: source_repo_url RwLock poisoned");
+            None
+        }
+    };
     Json(SetupStatusResponse {
         needs_setup: state.needs_setup.load(Ordering::Relaxed),
+        source_repo_url,
     })
 }
 
@@ -140,6 +168,12 @@ pub async fn setup_complete(
         return Err(AppError::code(ErrorCode::SetupAlreadyComplete));
     }
 
+    // Validate the source URL before doing any WebAuthn / DB work. A
+    // malformed URL here means we'd start the instance without a
+    // valid AGPL §13 link, which is exactly what this field exists to
+    // prevent.
+    let source_repo_url = validate_source_repo_url(&req.source_repo_url)?;
+
     let challenge = sqlx::query!(
         "SELECT state, display_name, user_id FROM auth_challenges \
          WHERE id = ? AND challenge_type = 'registration'",
@@ -211,6 +245,17 @@ pub async fn setup_complete(
     .await?;
 
     signing::create_signing_key(&state.db, &user_id).await?;
+
+    // Persist the source URL to `instance_config` and update the
+    // in-memory mirror so `/api/setup/status` and the SvelteKit footer
+    // pick it up without a roundtrip. A failure here is logged via
+    // `AppError`'s `From<sqlx::Error>` impl; the row update is an
+    // ordinary UPDATE on a known-existing single row.
+    save_source_repo_url(&state.db, &source_repo_url).await?;
+    match state.source_repo_url.write() {
+        Ok(mut guard) => *guard = Some(source_repo_url),
+        Err(_) => tracing::error!("setup_complete: source_repo_url RwLock poisoned"),
+    }
 
     state.needs_setup.store(false, Ordering::Relaxed);
 

@@ -49,7 +49,10 @@ export const load: LayoutServerLoad = async ({ fetch, cookies, locals, url, setH
 	// their own load.
 	setHeaders({ 'cache-control': 'no-store' });
 
-	const setupStatus = await getSetupStatus({ fetch }).catch(() => ({ needs_setup: false }));
+	const setupStatus = await getSetupStatus({ fetch }).catch(() => ({
+		needs_setup: false,
+		source_repo_url: null
+	}));
 
 	// Instance-level bootstrap: if no admin exists yet, every page must
 	// funnel to /setup. Done here (not in +layout.svelte) so the redirect
@@ -119,6 +122,7 @@ export const load: LayoutServerLoad = async ({ fetch, cookies, locals, url, setH
 	return {
 		session,
 		sessionError,
-		needsSetup: setupStatus.needs_setup
+		needsSetup: setupStatus.needs_setup,
+		sourceRepoUrl: setupStatus.source_repo_url
 	};
 };

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE instance_config\n            SET rebuild_debounce_ms = ?,\n                rebuild_min_interval_ms = ?,\n                rebuild_max_interval_ms = ?,\n                rebuild_bfs_cache_bytes = ?\n          WHERE id = 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "d9479847d5f04e7a1b8a4c0495419522932926428b13502aeea7e15181ebc012"
+}

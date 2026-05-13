@@ -293,6 +293,10 @@ export async function logout(opts: FetchOpts = {}): Promise<void> {
 
 export interface SetupStatus {
 	needs_setup: boolean;
+	/** Public URL of this instance's source code (AGPL §13). Rendered
+	 * as a footer link by the root layout. `null` only between fresh
+	 * install and the moment `setup_complete` succeeds. */
+	source_repo_url: string | null;
 }
 
 export async function getSetupStatus(opts: FetchOpts = {}): Promise<SetupStatus> {
@@ -319,13 +323,15 @@ export async function setupBegin(
 export async function setupComplete(
 	challengeId: string,
 	credential: Credential,
+	sourceRepoUrl: string,
 	opts: FetchOpts = {}
 ): Promise<SessionInfo> {
 	return apiPost(
 		'/api/setup/complete',
 		{
 			challenge_id: challengeId,
-			credential
+			credential,
+			source_repo_url: sourceRepoUrl
 		},
 		opts.fetch
 	);

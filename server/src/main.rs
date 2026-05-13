@@ -7,7 +7,9 @@ use tokio::sync::Notify;
 use prismoire_config::Config;
 use prismoire_server::middleware::csrf::AllowedOrigin;
 use prismoire_server::middleware::security_headers::HttpsEnabled;
-use prismoire_server::{AppState, build_app, csp_report, metrics, rate_limit, session, trust};
+use prismoire_server::{
+    AppState, build_app, csp_report, instance_config, metrics, rate_limit, session, trust,
+};
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqlitePoolOptions;
 use url::Url;
@@ -117,6 +119,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app_metrics = Arc::new(metrics::Metrics::new());
     let pending_deltas = Arc::new(trust::PendingDeltas::new(Some(app_metrics.clone())));
 
+    // Load the admin-editable runtime config (rebuild schedule, source
+    // repo URL). The single-row `instance_config` table is seeded by
+    // the migration, so this always succeeds against a properly
+    // migrated DB. Both fields are wrapped in `Arc<RwLock<…>>` so the
+    // rebuild loop and the `/api/setup/status` handler can pick up
+    // admin edits without a server restart.
+    let loaded_config = instance_config::load_from_db(&pool).await?;
+    let rebuild_schedule = Arc::new(RwLock::new(loaded_config.rebuild_schedule));
+    let source_repo_url = Arc::new(RwLock::new(loaded_config.source_repo_url));
+
     let shared_state = Arc::new(AppState {
         db: pool.clone(),
         webauthn,
@@ -126,16 +138,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         trust_graph: trust_graph.clone(),
         metrics: app_metrics.clone(),
         pending_deltas: pending_deltas.clone(),
+        rebuild_schedule: rebuild_schedule.clone(),
+        source_repo_url: source_repo_url.clone(),
     });
 
     // Spawn the debounced trust graph rebuild background task.
     // Performs an initial build immediately, then waits for mutation
     // notifications and rebuilds subject to debounce / min / max timing.
+    // The schedule is shared (not owned) so admin edits via the Config
+    // tab take effect on the next scheduling window without a restart.
     tokio::spawn(trust::rebuild_loop(
         pool,
         trust_graph,
         trust_graph_notify,
-        trust::RebuildSchedule::default(),
+        rebuild_schedule,
         app_metrics,
         pending_deltas,
     ));

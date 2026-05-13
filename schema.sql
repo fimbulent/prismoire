@@ -176,41 +176,6 @@ CREATE INDEX idx_reports_status ON reports(status);
 CREATE INDEX idx_reports_created_at ON reports(created_at);
 CREATE INDEX idx_users_deleted_at ON users(deleted_at);
 CREATE INDEX idx_rooms_deleted_at ON rooms(deleted_at);
-CREATE TABLE admin_log (
-    id TEXT PRIMARY KEY NOT NULL,
-    admin TEXT NOT NULL REFERENCES users(id),
-    action TEXT NOT NULL CHECK (action IN (
-        'lock_thread', 'unlock_thread',
-        'remove_post',
-        'merge_room', 'delete_room',
-        'ban_user', 'unban_user',
-        'suspend_user', 'unsuspend_user',
-        'revoke_invites', 'grant_invites',
-        'delete_user',
-        'remove_bio'
-    )),
-    target_user TEXT REFERENCES users(id),
-    thread_id TEXT REFERENCES threads(id),
-    post_id TEXT REFERENCES posts(id),
-    room_id TEXT REFERENCES rooms(id),
-    merged_into TEXT REFERENCES rooms(id),
-    reason TEXT,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-);
-CREATE TABLE ban_trust_snapshots (
-    id TEXT PRIMARY KEY NOT NULL,
-    admin_log_id TEXT NOT NULL REFERENCES admin_log(id),
-    target_user TEXT NOT NULL REFERENCES users(id),
-    trusting_user TEXT NOT NULL REFERENCES users(id),
-    edge_created_at TEXT NOT NULL,
-    snapshot_at TEXT NOT NULL,
-    action_type TEXT NOT NULL CHECK (action_type IN ('ban', 'suspend'))
-);
-CREATE INDEX idx_admin_log_created_at ON admin_log(created_at);
-CREATE INDEX idx_admin_log_target_user ON admin_log(target_user);
-CREATE INDEX idx_ban_trust_snapshots_target ON ban_trust_snapshots(target_user);
-CREATE INDEX idx_ban_trust_snapshots_trusting ON ban_trust_snapshots(trusting_user);
-CREATE INDEX idx_ban_trust_snapshots_admin_log ON ban_trust_snapshots(admin_log_id);
 CREATE TABLE room_favorites (
     user_id    TEXT    NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     room_id    TEXT    NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
@@ -374,3 +339,49 @@ END;
 CREATE INDEX threads_link_url_normalized_idx
     ON threads(link_url_normalized)
     WHERE link_url_normalized IS NOT NULL;
+CREATE TABLE instance_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    rebuild_debounce_ms INTEGER NOT NULL CHECK (rebuild_debounce_ms BETWEEN 1000 AND 60000),
+    rebuild_min_interval_ms INTEGER NOT NULL CHECK (rebuild_min_interval_ms BETWEEN 1000 AND 3600000),
+    rebuild_max_interval_ms INTEGER NOT NULL CHECK (rebuild_max_interval_ms BETWEEN 1000 AND 3600000),
+    rebuild_bfs_cache_bytes INTEGER NOT NULL CHECK (rebuild_bfs_cache_bytes BETWEEN 1048576 AND 4294967296),
+    source_repo_url TEXT,
+    CHECK (rebuild_debounce_ms <= rebuild_min_interval_ms),
+    CHECK (rebuild_min_interval_ms <= rebuild_max_interval_ms)
+);
+CREATE TABLE admin_log (
+    id TEXT PRIMARY KEY NOT NULL,
+    admin TEXT NOT NULL REFERENCES users(id),
+    action TEXT NOT NULL CHECK (action IN (
+        'lock_thread', 'unlock_thread',
+        'remove_post',
+        'merge_room', 'delete_room',
+        'ban_user', 'unban_user',
+        'suspend_user', 'unsuspend_user',
+        'revoke_invites', 'grant_invites',
+        'delete_user',
+        'remove_bio',
+        'edit_config'
+    )),
+    target_user TEXT REFERENCES users(id),
+    thread_id TEXT REFERENCES threads(id),
+    post_id TEXT REFERENCES posts(id),
+    room_id TEXT REFERENCES rooms(id),
+    merged_into TEXT REFERENCES rooms(id),
+    reason TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE TABLE ban_trust_snapshots (
+    id TEXT PRIMARY KEY NOT NULL,
+    admin_log_id TEXT NOT NULL REFERENCES admin_log(id),
+    target_user TEXT NOT NULL REFERENCES users(id),
+    trusting_user TEXT NOT NULL REFERENCES users(id),
+    edge_created_at TEXT NOT NULL,
+    snapshot_at TEXT NOT NULL,
+    action_type TEXT NOT NULL CHECK (action_type IN ('ban', 'suspend'))
+);
+CREATE INDEX idx_admin_log_created_at ON admin_log(created_at);
+CREATE INDEX idx_admin_log_target_user ON admin_log(target_user);
+CREATE INDEX idx_ban_trust_snapshots_target ON ban_trust_snapshots(target_user);
+CREATE INDEX idx_ban_trust_snapshots_trusting ON ban_trust_snapshots(trusting_user);
+CREATE INDEX idx_ban_trust_snapshots_admin_log ON ban_trust_snapshots(admin_log_id);

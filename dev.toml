@@ -1,2 +1,5 @@
 [webauthn]
 rp_origin = "https://localhost:5173"
+
+#[server]
+#setup_token_file = "setup-token"
