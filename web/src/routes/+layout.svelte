@@ -138,25 +138,23 @@
 {@render children()}
 </div>
 
-{#if (session.isLoggedIn && !session.isRestricted) || page.data.sourceRepoUrl}
-	<footer class="h-[var(--footer-height)] flex items-center justify-center gap-2 text-xs text-text-muted mt-auto">
-		{#if session.isLoggedIn && !session.isRestricted}
-			<a href="/log" class="hover:text-text-secondary transition-colors">Admin log</a>
-		{/if}
-		{#if session.isLoggedIn && !session.isRestricted && page.data.sourceRepoUrl}
-			<span aria-hidden="true" class="select-none">·</span>
-		{/if}
-		{#if page.data.sourceRepoUrl}
-			<a
-				href={page.data.sourceRepoUrl}
-				rel="nofollow ugc noopener noreferrer"
-				class="hover:text-text-secondary transition-colors"
-			>
-				Source code
-			</a>
-		{/if}
-	</footer>
-{/if}
+<footer class="h-[var(--footer-height)] flex items-center justify-center gap-2 text-xs text-text-muted mt-auto">
+	<a href="/help" class="hover:text-text-secondary transition-colors">Help</a>
+	{#if session.isLoggedIn && !session.isRestricted}
+		<span aria-hidden="true" class="select-none">·</span>
+		<a href="/log" class="hover:text-text-secondary transition-colors">Admin log</a>
+	{/if}
+	{#if page.data.sourceRepoUrl}
+		<span aria-hidden="true" class="select-none">·</span>
+		<a
+			href={page.data.sourceRepoUrl}
+			rel="nofollow ugc noopener noreferrer"
+			class="hover:text-text-secondary transition-colors"
+		>
+			Source code
+		</a>
+	{/if}
+</footer>
 
 <Toasts />
 </div>
