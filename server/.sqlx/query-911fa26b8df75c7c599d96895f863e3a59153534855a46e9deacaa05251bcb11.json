@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 1 AS \"present!: i64\" FROM current_trust_edges WHERE source_user = ? AND target_user = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "present!: i64",
+        "ordinal": 0,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "911fa26b8df75c7c599d96895f863e3a59153534855a46e9deacaa05251bcb11"
+}

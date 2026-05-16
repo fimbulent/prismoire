@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT target_user FROM trust_edges WHERE source_user = ? AND trust_type = 'distrust'",
+  "query": "SELECT target_user FROM current_trust_edges WHERE source_user = ? AND trust_type = 'distrust'",
   "describe": {
     "columns": [
       {
@@ -16,5 +16,5 @@
       false
     ]
   },
-  "hash": "4d890d9bfd66280aee59e2d440396717636467873504114e1fafc7c73f87f587"
+  "hash": "836150cb3511c433a61a6ea5a05fcb2dd5b1656798e672f56a4b3a16878ca61d"
 }

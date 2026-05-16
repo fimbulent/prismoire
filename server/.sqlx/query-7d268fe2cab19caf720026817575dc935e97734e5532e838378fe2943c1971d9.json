@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n              te.id AS \"id!: String\",\n              te.canonical_hash AS \"canonical_hash!: Vec<u8>\"\n           FROM trust_edges te\n           WHERE te.source_user = ?\n             AND te.target_user = ?\n             AND te.canonical_hash IS NOT NULL\n             AND te.created_at = (\n                 SELECT MAX(created_at) FROM trust_edges\n                 WHERE source_user = ?\n                   AND target_user = ?\n                   AND canonical_hash IS NOT NULL\n             )",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "canonical_hash!: Vec<u8>",
+        "ordinal": 1,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "7d268fe2cab19caf720026817575dc935e97734e5532e838378fe2943c1971d9"
+}

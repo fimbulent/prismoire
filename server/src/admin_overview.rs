@@ -235,14 +235,14 @@ pub async fn get_overview(
 
     // --- Trust graph -----------------------------------------------------
     let trust_edges = sqlx::query!(
-        r#"SELECT COUNT(*) AS "n!: i64" FROM trust_edges WHERE trust_type = 'trust'"#,
+        r#"SELECT COUNT(*) AS "n!: i64" FROM current_trust_edges WHERE trust_type = 'trust'"#,
     )
     .fetch_one(db)
     .await?
     .n;
 
     let distrust_edges = sqlx::query!(
-        r#"SELECT COUNT(*) AS "n!: i64" FROM trust_edges WHERE trust_type = 'distrust'"#,
+        r#"SELECT COUNT(*) AS "n!: i64" FROM current_trust_edges WHERE trust_type = 'distrust'"#,
     )
     .fetch_one(db)
     .await?

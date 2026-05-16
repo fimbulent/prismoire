@@ -1,0 +1,22 @@
+-- Add `canonical_hash` to `trust_edges`.
+--
+-- The append-only signed log (see
+-- 20260516051053_option_c_trust_edge_log.sql) chains each mutation
+-- via `prior_edge_hash = SHA-256(canonical bytes of prior signed
+-- object)`. Computing that hash for a prior row used to require
+-- reconstructing the prior canonical CBOR server-side, which joined
+-- `signing_keys` on `active = 1` — so any post-signing key rotation
+-- silently broke the chain (the reconstructed bytes used the new
+-- key, not the key that originally signed).
+--
+-- Fix: persist the canonical-payload hash on each signed row at
+-- insert time. Then `compute_prior_edge_hash` is a pure lookup and
+-- never needs to reconstruct or touch `signing_keys`.
+--
+-- Nullable because legacy unsigned rows (predating the
+-- 20260516010149 signing-column migration) carry no canonical hash;
+-- the new signing path treats unsigned priors as "no prior" — the
+-- chain begins at the first signed mutation for each pair. This is
+-- the same accepted-unsigned-boundary limitation already documented
+-- on `compute_prior_edge_hash`.
+ALTER TABLE trust_edges ADD COLUMN canonical_hash BLOB;

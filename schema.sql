@@ -65,17 +65,6 @@ CREATE TABLE signing_keys (
 CREATE INDEX idx_signing_keys_user_id ON signing_keys(user_id);
 CREATE UNIQUE INDEX idx_signing_keys_active ON signing_keys(user_id) WHERE active = 1;
 CREATE INDEX idx_users_invite_id ON users(invite_id);
-CREATE TABLE IF NOT EXISTS "trust_edges" (
-    id TEXT PRIMARY KEY NOT NULL,
-    source_user TEXT NOT NULL REFERENCES users(id),
-    target_user TEXT NOT NULL REFERENCES users(id),
-    trust_type TEXT NOT NULL CHECK (trust_type IN ('trust', 'distrust')),
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    reason TEXT,
-    UNIQUE(source_user, target_user)
-);
-CREATE INDEX idx_trust_edges_source ON trust_edges(source_user);
-CREATE INDEX idx_trust_edges_target ON trust_edges(target_user);
 CREATE TABLE csp_reports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     received_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
@@ -119,14 +108,14 @@ CREATE TABLE posts (
     retracted_at TEXT,
     retraction_signature BLOB,
     revision_count INTEGER NOT NULL DEFAULT 1
-);
+, retraction_format_version INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE post_revisions (
     post_id TEXT NOT NULL REFERENCES posts(id),
     revision INTEGER NOT NULL DEFAULT 0,
     body TEXT NOT NULL,
     signature BLOB NOT NULL,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    epoch INTEGER NOT NULL DEFAULT 0,
+    epoch INTEGER NOT NULL DEFAULT 0, format_version INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (post_id, revision)
 );
 CREATE TABLE thread_recent_repliers (
@@ -386,3 +375,30 @@ CREATE TABLE IF NOT EXISTS "user_settings" (
     theme TEXT NOT NULL DEFAULT 'rose-pine-moon',
     font TEXT NOT NULL DEFAULT 'literata'
 );
+CREATE TABLE IF NOT EXISTS "trust_edges" (
+    id TEXT PRIMARY KEY NOT NULL,
+    source_user TEXT NOT NULL REFERENCES users(id),
+    target_user TEXT NOT NULL REFERENCES users(id),
+    trust_type TEXT NOT NULL CHECK (trust_type IN ('trust', 'distrust', 'neutral')),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    reason TEXT,
+    signature BLOB,
+    prior_edge_hash BLOB,
+    format_version INTEGER NOT NULL DEFAULT 1
+, canonical_hash BLOB);
+CREATE INDEX idx_trust_edges_source ON trust_edges(source_user);
+CREATE INDEX idx_trust_edges_target ON trust_edges(target_user);
+CREATE INDEX idx_trust_edges_pair_recent
+    ON trust_edges(source_user, target_user, created_at DESC, id DESC);
+CREATE VIEW current_trust_edges AS
+SELECT id, source_user, target_user, trust_type, created_at, reason,
+       signature, prior_edge_hash, format_version
+FROM (
+    SELECT te.*, ROW_NUMBER() OVER (
+        PARTITION BY source_user, target_user
+        ORDER BY created_at DESC, id DESC
+    ) AS rn
+    FROM trust_edges te
+) ranked
+WHERE rn = 1 AND trust_type != 'neutral'
+/* current_trust_edges(id,source_user,target_user,trust_type,created_at,reason,signature,prior_edge_hash,format_version) */;

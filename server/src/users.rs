@@ -240,7 +240,7 @@ async fn get_trust_stance(
     target_user: &str,
 ) -> Result<String, AppError> {
     let row = sqlx::query!(
-        "SELECT trust_type FROM trust_edges WHERE source_user = ? AND target_user = ?",
+        "SELECT trust_type FROM current_trust_edges WHERE source_user = ? AND target_user = ?",
         source_user,
         target_user,
     )
@@ -381,7 +381,7 @@ pub async fn get_trust_detail(
 
     // Trust stats
     let trusts_given = sqlx::query!(
-        r#"SELECT COUNT(*) AS "n!: i64" FROM trust_edges WHERE source_user = ? AND trust_type = 'trust'"#,
+        r#"SELECT COUNT(*) AS "n!: i64" FROM current_trust_edges WHERE source_user = ? AND trust_type = 'trust'"#,
         target_id,
     )
     .fetch_one(&state.db)
@@ -389,7 +389,7 @@ pub async fn get_trust_detail(
     .n;
 
     let trusts_received = sqlx::query!(
-        r#"SELECT COUNT(*) AS "n!: i64" FROM trust_edges WHERE target_user = ? AND trust_type = 'trust'"#,
+        r#"SELECT COUNT(*) AS "n!: i64" FROM current_trust_edges WHERE target_user = ? AND trust_type = 'trust'"#,
         target_id,
     )
     .fetch_one(&state.db)
@@ -397,7 +397,7 @@ pub async fn get_trust_detail(
     .n;
 
     let distrusts_issued = sqlx::query!(
-        r#"SELECT COUNT(*) AS "n!: i64" FROM trust_edges WHERE source_user = ? AND trust_type = 'distrust'"#,
+        r#"SELECT COUNT(*) AS "n!: i64" FROM current_trust_edges WHERE source_user = ? AND trust_type = 'distrust'"#,
         target_id,
     )
     .fetch_one(&state.db)
@@ -529,10 +529,10 @@ pub async fn get_trust_detail(
             .collect();
 
         let reductions = sqlx::query!(
-            "SELECT u.display_name FROM trust_edges te \
+            "SELECT u.display_name FROM current_trust_edges te \
              JOIN users u ON u.id = te.target_user \
              WHERE te.source_user = ? AND te.trust_type = 'trust' \
-             AND te.target_user IN (SELECT target_user FROM trust_edges WHERE source_user = ? AND trust_type = 'distrust')",
+             AND te.target_user IN (SELECT target_user FROM current_trust_edges WHERE source_user = ? AND trust_type = 'distrust')",
             target_id,
             user.user_id,
         )
@@ -572,7 +572,7 @@ pub async fn get_trust_detail(
     };
 
     let trusts_batch = sqlx::query!(
-        "SELECT u.display_name, u.id, u.status, u.deleted_at FROM trust_edges te \
+        "SELECT u.display_name, u.id, u.status, u.deleted_at FROM current_trust_edges te \
          JOIN users u ON u.id = te.target_user \
          WHERE te.source_user = ? AND te.trust_type = 'trust' \
          ORDER BY te.created_at DESC LIMIT ?",
@@ -583,7 +583,7 @@ pub async fn get_trust_detail(
     .await?;
 
     let trusts_total = sqlx::query!(
-        r#"SELECT COUNT(*) AS "n!: i64" FROM trust_edges WHERE source_user = ? AND trust_type = 'trust'"#,
+        r#"SELECT COUNT(*) AS "n!: i64" FROM current_trust_edges WHERE source_user = ? AND trust_type = 'trust'"#,
         target_id,
     )
     .fetch_one(&state.db)
@@ -613,7 +613,7 @@ pub async fn get_trust_detail(
     .collect();
 
     let trusted_by_batch = sqlx::query!(
-        "SELECT u.display_name, u.id, u.status, u.deleted_at FROM trust_edges te \
+        "SELECT u.display_name, u.id, u.status, u.deleted_at FROM current_trust_edges te \
          JOIN users u ON u.id = te.source_user \
          WHERE te.target_user = ? AND te.trust_type = 'trust' \
          ORDER BY te.created_at DESC LIMIT ?",
@@ -624,7 +624,7 @@ pub async fn get_trust_detail(
     .await?;
 
     let trusted_by_total = sqlx::query!(
-        r#"SELECT COUNT(*) AS "n!: i64" FROM trust_edges WHERE target_user = ? AND trust_type = 'trust'"#,
+        r#"SELECT COUNT(*) AS "n!: i64" FROM current_trust_edges WHERE target_user = ? AND trust_type = 'trust'"#,
         target_id,
     )
     .fetch_one(&state.db)
@@ -880,7 +880,7 @@ pub async fn get_trust_edges(
 
     let rows: Vec<EdgeRow> = match query.direction.as_str() {
         "trusts" => sqlx::query!(
-            "SELECT u.display_name, u.id, u.status, u.deleted_at FROM trust_edges te \
+            "SELECT u.display_name, u.id, u.status, u.deleted_at FROM current_trust_edges te \
              JOIN users u ON u.id = te.target_user \
              WHERE te.source_user = ? AND te.trust_type = 'trust'",
             target_id,
@@ -896,7 +896,7 @@ pub async fn get_trust_edges(
         })
         .collect(),
         "trusted_by" => sqlx::query!(
-            "SELECT u.display_name, u.id, u.status, u.deleted_at FROM trust_edges te \
+            "SELECT u.display_name, u.id, u.status, u.deleted_at FROM current_trust_edges te \
              JOIN users u ON u.id = te.source_user \
              WHERE te.target_user = ? AND te.trust_type = 'trust'",
             target_id,
@@ -1007,9 +1007,17 @@ pub async fn set_trust_edge(
         return Err(AppError::code(ErrorCode::SelfTrustEdge));
     }
 
-    let (trust_type, new_stance) = match req.edge_type {
-        TrustEdgeType::Trust => ("trust", TrustStance::Trust),
-        TrustEdgeType::Distrust => ("distrust", TrustStance::Distrust),
+    let (trust_type, new_stance, signed_stance) = match req.edge_type {
+        TrustEdgeType::Trust => (
+            "trust",
+            TrustStance::Trust,
+            crate::signed::TrustStance::Trust,
+        ),
+        TrustEdgeType::Distrust => (
+            "distrust",
+            TrustStance::Distrust,
+            crate::signed::TrustStance::Distrust,
+        ),
     };
 
     // Snapshot the cached graph's current view of this edge before
@@ -1029,23 +1037,59 @@ pub async fn set_trust_edge(
         )
     };
 
-    let mut tx = state.db.begin().await?;
+    // Producer-side timestamp truncated to whole seconds so the signed
+    // millisecond value is reconstructable from the persisted ISO-second
+    // value. See create_thread.rs for the longer rationale.
+    let now_dt = chrono::Utc::now();
+    let now_iso = now_dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let created_at_ms = u64::try_from(now_dt.timestamp()).map_err(|_| {
+        tracing::error!(
+            ts = now_dt.timestamp(),
+            "system clock is pre-1970; cannot sign trust-edge"
+        );
+        AppError::code(ErrorCode::Internal)
+    })? * 1000;
 
-    sqlx::query!(
-        "DELETE FROM trust_edges WHERE source_user = ? AND target_user = ?",
-        user.user_id,
-        target_id,
+    // BEGIN IMMEDIATE: serializes concurrent set/delete on the same
+    // pair so the prior-hash lookup and the new INSERT see a
+    // consistent snapshot. Without this, two writers could both read
+    // the same prior_edge_hash and fork the signed chain — invisible
+    // until federation/audit replay (the latest-wins view hides the
+    // fork).
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+
+    // Append-only log (Option C): look up the prior signed object for
+    // this pair so the new mutation chains to it per §4.3. `None`
+    // when this is the first signed mutation for the pair (legacy
+    // unsigned priors are skipped — see `compute_prior_edge_hash`).
+    let prior_hash =
+        crate::signing::compute_prior_edge_hash(&mut *tx, &user.user_id, &target_id).await?;
+
+    let signed = crate::signing::sign_trust_edge(
+        &mut tx,
+        &user.user_id,
+        &target_id,
+        signed_stance,
+        created_at_ms,
+        prior_hash,
     )
-    .execute(&mut *tx)
     .await?;
+    let signature = signed.signature;
+    let prior_hash_db: Option<Vec<u8>> = prior_hash.map(|h| h.to_vec());
+    let canonical_hash_db: Vec<u8> = signed.canonical_hash.to_vec();
 
     let id = Uuid::new_v4().to_string();
     sqlx::query!(
-        "INSERT INTO trust_edges (id, source_user, target_user, trust_type) VALUES (?, ?, ?, ?)",
+        "INSERT INTO trust_edges (id, source_user, target_user, trust_type, created_at, signature, prior_edge_hash, canonical_hash) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         id,
         user.user_id,
         target_id,
         trust_type,
+        now_iso,
+        signature,
+        prior_hash_db,
+        canonical_hash_db,
     )
     .execute(&mut *tx)
     .await?;
@@ -1069,10 +1113,22 @@ pub async fn set_trust_edge(
 }
 
 // ---------------------------------------------------------------------------
-// DELETE /api/users/:username/trust-edge — Remove trust edge (go neutral)
+// DELETE /api/users/:username/trust-edge — Go neutral (signed tombstone)
 // ---------------------------------------------------------------------------
 
-/// Remove any trust/distrust edge from the viewer to this user.
+/// Move the viewer's stance toward this user to `neutral`.
+///
+/// Append-only log (Option C): instead of removing the row, append a
+/// signed `stance = "neutral"` row that chains via `prior_edge_hash`
+/// to the prior row for this pair. The `current_trust_edges` view
+/// filters out neutral rows, so the trust graph immediately sees no
+/// edge.
+///
+/// Rejects with `NoTrustEdge` if there's no active (non-neutral)
+/// edge to revoke — i.e., either no prior row exists or the latest
+/// row is already neutral. The semantic check happens against the
+/// `current_trust_edges` view, so latest-wins resolution agrees with
+/// what the user sees in the UI.
 pub async fn delete_trust_edge(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -1080,8 +1136,8 @@ pub async fn delete_trust_edge(
 ) -> Result<impl IntoResponse, AppError> {
     let (target_id, ..) = resolve_user(&state.db, &username).await?;
 
-    // Snapshot the cached graph's current view before the DELETE — see
-    // `set_trust_edge` for the rationale.
+    // Snapshot the cached graph's current view of this edge before
+    // committing. See `set_trust_edge` for the rationale.
     let viewer_uuid = user.uuid();
     let target_uuid = Uuid::parse_str(&target_id).map_err(|_| {
         tracing::error!(target_id = %target_id, "invalid target user id");
@@ -1095,17 +1151,78 @@ pub async fn delete_trust_edge(
         )
     };
 
-    let result = sqlx::query!(
-        "DELETE FROM trust_edges WHERE source_user = ? AND target_user = ?",
+    // Producer-side timestamp truncated to whole seconds so the
+    // signed millisecond value is reconstructable from the persisted
+    // ISO-second value. See create_thread.rs.
+    let now_dt = chrono::Utc::now();
+    let now_iso = now_dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let created_at_ms = u64::try_from(now_dt.timestamp()).map_err(|_| {
+        tracing::error!(
+            ts = now_dt.timestamp(),
+            "system clock is pre-1970; cannot sign trust-edge neutral"
+        );
+        AppError::code(ErrorCode::Internal)
+    })? * 1000;
+
+    // BEGIN IMMEDIATE — see `set_trust_edge` for rationale. The
+    // active-edge check, prior-hash lookup, and INSERT all need to
+    // see the same snapshot so two concurrent deletes can't both
+    // issue tombstones chained to the same prior.
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+
+    // Refuse to issue a neutral tombstone when nothing is active —
+    // surfaces as a 404-ish to the client and avoids growing the log
+    // with no-op rows. Checks the view, not the underlying table, so
+    // a `neutral`-then-`neutral` sequence rejects the second one.
+    let active = sqlx::query!(
+        "SELECT 1 AS \"present!: i64\" FROM current_trust_edges \
+         WHERE source_user = ? AND target_user = ?",
         user.user_id,
         target_id,
     )
-    .execute(&state.db)
+    .fetch_optional(&mut *tx)
     .await?;
-
-    if result.rows_affected() == 0 {
+    if active.is_none() {
         return Err(AppError::code(ErrorCode::NoTrustEdge));
     }
+
+    // Chain to the prior signed object for this pair. The active
+    // check above already established at least one prior row exists,
+    // so `compute_prior_edge_hash` will return `Some` whenever that
+    // prior row was signed; a legacy unsigned prior (rare and dev-
+    // only) yields `None` and starts a fresh chain.
+    let prior_hash =
+        crate::signing::compute_prior_edge_hash(&mut *tx, &user.user_id, &target_id).await?;
+
+    let signed = crate::signing::sign_trust_edge(
+        &mut tx,
+        &user.user_id,
+        &target_id,
+        crate::signed::TrustStance::Neutral,
+        created_at_ms,
+        prior_hash,
+    )
+    .await?;
+    let signature = signed.signature;
+    let prior_hash_db: Option<Vec<u8>> = prior_hash.map(|h| h.to_vec());
+    let canonical_hash_db: Vec<u8> = signed.canonical_hash.to_vec();
+
+    let id = Uuid::new_v4().to_string();
+    sqlx::query!(
+        "INSERT INTO trust_edges (id, source_user, target_user, trust_type, created_at, signature, prior_edge_hash, canonical_hash) \
+         VALUES (?, ?, ?, 'neutral', ?, ?, ?, ?)",
+        id,
+        user.user_id,
+        target_id,
+        now_iso,
+        signature,
+        prior_hash_db,
+        canonical_hash_db,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
 
     state.pending_deltas.apply(
         viewer_uuid,

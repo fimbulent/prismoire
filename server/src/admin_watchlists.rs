@@ -190,7 +190,7 @@ async fn load_most_distrusted(db: &sqlx::SqlitePool) -> Result<Vec<DistrustedUse
             COALESCE(t.trusts, 0) AS "inbound_trusts!: i64"
         FROM (
             SELECT target_user, COUNT(*) AS distrusts
-            FROM trust_edges
+            FROM current_trust_edges
             WHERE trust_type = 'distrust'
             GROUP BY target_user
             HAVING COUNT(*) >= ?1
@@ -198,7 +198,7 @@ async fn load_most_distrusted(db: &sqlx::SqlitePool) -> Result<Vec<DistrustedUse
         JOIN users u ON u.id = d.target_user
         LEFT JOIN (
             SELECT target_user, COUNT(*) AS trusts
-            FROM trust_edges
+            FROM current_trust_edges
             WHERE trust_type = 'trust'
             GROUP BY target_user
         ) t ON t.target_user = d.target_user
@@ -243,7 +243,7 @@ async fn load_distrust_trust_ratio(db: &sqlx::SqlitePool) -> Result<Vec<RatioRow
                 target_user,
                 SUM(CASE WHEN trust_type = 'distrust' THEN 1 ELSE 0 END) AS distrusts,
                 SUM(CASE WHEN trust_type = 'trust' THEN 1 ELSE 0 END) AS trusts
-            FROM trust_edges
+            FROM current_trust_edges
             GROUP BY target_user
         )
         SELECT
@@ -314,7 +314,7 @@ async fn load_ban_adjacent_trusters(
         ),
         totals AS (
             SELECT source_user, COUNT(*) AS total_trusts
-            FROM trust_edges
+            FROM current_trust_edges
             WHERE trust_type = 'trust'
             GROUP BY source_user
         )

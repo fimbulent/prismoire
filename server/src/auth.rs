@@ -320,25 +320,78 @@ pub async fn signup_complete(
     let trust1_id = Uuid::new_v4().to_string();
     let trust2_id = Uuid::new_v4().to_string();
 
+    // Sign both reciprocal trust edges per docs/signed-payload-format.md §4.3.
+    // Producer-side timestamp truncated to whole seconds so the signed
+    // millisecond value is reconstructable from the persisted ISO-second
+    // value. See create_thread.rs for the longer rationale.
+    let now_dt = chrono::Utc::now();
+    let now_iso = now_dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let created_at_ms = u64::try_from(now_dt.timestamp()).map_err(|_| {
+        tracing::error!(
+            ts = now_dt.timestamp(),
+            "system clock is pre-1970; cannot sign signup trust edges"
+        );
+        AppError::code(ErrorCode::Internal)
+    })? * 1000;
+
+    // BEGIN IMMEDIATE: keep both reciprocal trust-edge inserts inside
+    // one transaction so a partial-failure scenario can't leave an
+    // asymmetric graph (one direction signed, the other missing).
+    // The signing-key lookups in `sign_trust_edge` also run inside
+    // this tx so a concurrent key rotation can't be observed mid-
+    // way through.
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+
+    let signed_inviter_to_user = signing::sign_trust_edge(
+        &mut tx,
+        &inviter_id,
+        &user_id,
+        crate::signed::TrustStance::Trust,
+        created_at_ms,
+        None,
+    )
+    .await?;
+    let signed_user_to_inviter = signing::sign_trust_edge(
+        &mut tx,
+        &user_id,
+        &inviter_id,
+        crate::signed::TrustStance::Trust,
+        created_at_ms,
+        None,
+    )
+    .await?;
+    let inviter_to_user_sig = signed_inviter_to_user.signature;
+    let user_to_inviter_sig = signed_user_to_inviter.signature;
+    let inviter_to_user_hash: Vec<u8> = signed_inviter_to_user.canonical_hash.to_vec();
+    let user_to_inviter_hash: Vec<u8> = signed_user_to_inviter.canonical_hash.to_vec();
+
     sqlx::query!(
-        "INSERT INTO trust_edges (id, source_user, target_user, trust_type) \
-         VALUES (?, ?, ?, 'trust')",
+        "INSERT INTO trust_edges (id, source_user, target_user, trust_type, created_at, signature, canonical_hash) \
+         VALUES (?, ?, ?, 'trust', ?, ?, ?)",
         trust1_id,
         inviter_id,
         user_id,
+        now_iso,
+        inviter_to_user_sig,
+        inviter_to_user_hash,
     )
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
 
     sqlx::query!(
-        "INSERT INTO trust_edges (id, source_user, target_user, trust_type) \
-         VALUES (?, ?, ?, 'trust')",
+        "INSERT INTO trust_edges (id, source_user, target_user, trust_type, created_at, signature, canonical_hash) \
+         VALUES (?, ?, ?, 'trust', ?, ?, ?)",
         trust2_id,
         user_id,
         inviter_id,
+        now_iso,
+        user_to_inviter_sig,
+        user_to_inviter_hash,
     )
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     state.trust_graph_notify.notify_one();
 

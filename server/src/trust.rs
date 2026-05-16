@@ -917,7 +917,7 @@ pub async fn load_distrust_set(
     viewer_id: &str,
 ) -> Result<HashSet<String>, sqlx::Error> {
     let rows = sqlx::query!(
-        "SELECT target_user FROM trust_edges WHERE source_user = ? AND trust_type = 'distrust'",
+        "SELECT target_user FROM current_trust_edges WHERE source_user = ? AND trust_type = 'distrust'",
         viewer_id,
     )
     .fetch_all(db)
@@ -1040,7 +1040,7 @@ impl TrustGraph {
         // at banned users are kept (loaded separately below) so that
         // existing distrust relationships remain visible.
         let rows = sqlx::query!(
-            "SELECT te.source_user, te.target_user FROM trust_edges te \
+            "SELECT te.source_user, te.target_user FROM current_trust_edges te \
              JOIN users u1 ON u1.id = te.source_user \
              JOIN users u2 ON u2.id = te.target_user \
              WHERE te.trust_type = 'trust' \
@@ -1082,7 +1082,7 @@ impl TrustGraph {
 
         // Load distrust edges into per-user distrust sets (not into the CSR graph).
         let distrust_rows = sqlx::query!(
-            "SELECT source_user, target_user FROM trust_edges WHERE trust_type = 'distrust'",
+            "SELECT source_user, target_user FROM current_trust_edges WHERE trust_type = 'distrust'",
         )
         .fetch_all(db)
         .await?;

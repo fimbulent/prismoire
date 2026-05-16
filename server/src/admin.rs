@@ -447,7 +447,7 @@ async fn snapshot_trust_edges(
     let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
     let edges = sqlx::query!(
-        "SELECT source_user, created_at FROM trust_edges \
+        "SELECT source_user, created_at FROM current_trust_edges \
          WHERE target_user = ? AND trust_type = 'trust'",
         target_user_id,
     )

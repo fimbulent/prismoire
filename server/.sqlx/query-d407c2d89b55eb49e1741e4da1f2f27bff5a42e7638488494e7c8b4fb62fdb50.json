@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT u.display_name FROM current_trust_edges te JOIN users u ON u.id = te.target_user WHERE te.source_user = ? AND te.trust_type = 'trust' AND te.target_user IN (SELECT target_user FROM current_trust_edges WHERE source_user = ? AND trust_type = 'distrust')",
+  "describe": {
+    "columns": [
+      {
+        "name": "display_name",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d407c2d89b55eb49e1741e4da1f2f27bff5a42e7638488494e7c8b4fb62fdb50"
+}

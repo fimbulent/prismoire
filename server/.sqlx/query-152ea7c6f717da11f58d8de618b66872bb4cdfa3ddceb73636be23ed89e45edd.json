@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT COUNT(*) AS \"n!: i64\" FROM trust_edges WHERE source_user = ? AND trust_type = 'distrust'",
+  "query": "SELECT COUNT(*) AS \"n!: i64\" FROM current_trust_edges WHERE trust_type = 'distrust'",
   "describe": {
     "columns": [
       {
@@ -10,11 +10,11 @@
       }
     ],
     "parameters": {
-      "Right": 1
+      "Right": 0
     },
     "nullable": [
       false
     ]
   },
-  "hash": "80c5501d5dff8bdad8edd795f0bd7585afc2a67373c4542226df14523804c075"
+  "hash": "152ea7c6f717da11f58d8de618b66872bb4cdfa3ddceb73636be23ed89e45edd"
 }
