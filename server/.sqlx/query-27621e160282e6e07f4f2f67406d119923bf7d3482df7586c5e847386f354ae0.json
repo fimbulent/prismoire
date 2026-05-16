@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE posts SET retracted_at = ?, retraction_signature = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "27621e160282e6e07f4f2f67406d119923bf7d3482df7586c5e847386f354ae0"
+}

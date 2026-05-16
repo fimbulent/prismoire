@@ -79,11 +79,34 @@ pub async fn create_thread(
 
     let room_id = get_or_create_room(&state, &slug, &user.user_id).await?;
 
-    let signature = signing::sign_message(&state.db, &user.user_id, body.as_bytes()).await?;
+    // Producer-side timestamp. The canonical-CBOR signature binds
+    // `created_at` in milliseconds (signed-payload-format.md §4.1),
+    // but the DB column stores ISO seconds — so we truncate to whole
+    // seconds at sign time. That lets a future re-verifier reconstruct
+    // the exact bound value from the persisted ISO timestamp. When
+    // §9.3 adds a millisecond-precision column or stored payload bytes,
+    // producers can stop truncating.
+    let now_dt = chrono::Utc::now();
+    let now = now_dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let created_at_ms = (now_dt.timestamp() as u64) * 1000;
 
-    let thread_id = uuid::Uuid::new_v4().to_string();
-    let post_id = uuid::Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let thread_uuid = uuid::Uuid::new_v4();
+    let post_uuid = uuid::Uuid::new_v4();
+    let thread_id = thread_uuid.to_string();
+    let post_id = post_uuid.to_string();
+
+    let signed = signing::sign_post_revision(
+        &state.db,
+        &user.user_id,
+        &post_uuid,
+        &thread_uuid,
+        None,
+        0,
+        &body,
+        created_at_ms,
+    )
+    .await?;
+    let signature = signed.signature;
 
     // Normalized form drops scheme + leading `www.` so those near-
     // universal tokens never enter `threads_fts`. Raw `link_url` is

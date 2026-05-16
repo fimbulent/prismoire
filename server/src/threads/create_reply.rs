@@ -60,36 +60,61 @@ pub async fn create_reply(
     }
     let parent_id = parent.id;
 
-    let signature = signing::sign_message(&state.db, &user.user_id, body.as_bytes()).await?;
+    // Parse incoming UUID strings so the canonical CBOR payload can
+    // bind them as 16-byte values. Both come from rows we just read,
+    // so a parse failure is a corruption signal — treat as Internal.
+    let thread_uuid = uuid::Uuid::parse_str(&thread_id).map_err(|e| {
+        tracing::error!(thread_id = %thread_id, error = %e, "invalid thread UUID in row");
+        AppError::code(ErrorCode::Internal)
+    })?;
+    let parent_uuid = uuid::Uuid::parse_str(&parent_id).map_err(|e| {
+        tracing::error!(parent_id = %parent_id, error = %e, "invalid parent UUID in row");
+        AppError::code(ErrorCode::Internal)
+    })?;
 
-    let post_id = uuid::Uuid::new_v4().to_string();
+    // Producer-side timestamp, truncated to whole seconds so the
+    // signed millisecond value is reconstructable from the ISO-second
+    // value we persist. See create_thread.rs for the longer rationale.
+    let now_dt = chrono::Utc::now();
+    let post_created_at = now_dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let created_at_ms = (now_dt.timestamp() as u64) * 1000;
+
+    let post_uuid = uuid::Uuid::new_v4();
+    let post_id = post_uuid.to_string();
+
+    let signed = signing::sign_post_revision(
+        &state.db,
+        &user.user_id,
+        &post_uuid,
+        &thread_uuid,
+        Some(&parent_uuid),
+        0,
+        &body,
+        created_at_ms,
+    )
+    .await?;
+    let signature = signed.signature;
 
     sqlx::query!(
-        "INSERT INTO posts (id, author, thread, parent) VALUES (?, ?, ?, ?)",
+        "INSERT INTO posts (id, author, thread, parent, created_at) VALUES (?, ?, ?, ?, ?)",
         post_id,
         user.user_id,
         thread_id,
         parent_id,
+        post_created_at,
     )
     .execute(&state.db)
     .await?;
 
     sqlx::query!(
-        "INSERT INTO post_revisions (post_id, revision, body, signature) VALUES (?, 0, ?, ?)",
+        "INSERT INTO post_revisions (post_id, revision, body, signature, created_at) VALUES (?, 0, ?, ?, ?)",
         post_id,
         body,
         signature,
+        post_created_at,
     )
     .execute(&state.db)
     .await?;
-
-    let post_created_at = sqlx::query!(
-        "SELECT created_at FROM post_revisions WHERE post_id = ? AND revision = 0",
-        post_id,
-    )
-    .fetch_one(&state.db)
-    .await?
-    .created_at;
 
     sqlx::query!(
         "UPDATE threads SET reply_count = reply_count + 1, last_activity = ? WHERE id = ?",

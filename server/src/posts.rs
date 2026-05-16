@@ -55,7 +55,7 @@ pub async fn edit_post(
     Json(req): Json<EditPostRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let post = sqlx::query!(
-        "SELECT author, retracted_at, parent FROM posts WHERE id = ?",
+        "SELECT author, retracted_at, parent, thread FROM posts WHERE id = ?",
         post_id,
     )
     .fetch_optional(&state.db)
@@ -78,7 +78,30 @@ pub async fn edit_post(
         return Err(AppError::code(ErrorCode::PostRetracted));
     }
 
-    let signature = signing::sign_message(&state.db, &user.user_id, body.as_bytes()).await?;
+    let post_uuid = uuid::Uuid::parse_str(&post_id).map_err(|e| {
+        tracing::error!(post_id = %post_id, error = %e, "invalid post UUID");
+        AppError::code(ErrorCode::Internal)
+    })?;
+    let thread_uuid = uuid::Uuid::parse_str(&post.thread).map_err(|e| {
+        tracing::error!(thread_id = %post.thread, error = %e, "invalid thread UUID in row");
+        AppError::code(ErrorCode::Internal)
+    })?;
+    let parent_uuid = post
+        .parent
+        .as_deref()
+        .map(uuid::Uuid::parse_str)
+        .transpose()
+        .map_err(|e| {
+            tracing::error!(error = %e, "invalid parent UUID in row");
+            AppError::code(ErrorCode::Internal)
+        })?;
+
+    // Producer-side timestamp, truncated to whole seconds so the
+    // signed millisecond value is reconstructable from the ISO-second
+    // value we persist. See create_thread.rs for the longer rationale.
+    let now_dt = chrono::Utc::now();
+    let revision_created_at = now_dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let created_at_ms = (now_dt.timestamp() as u64) * 1000;
 
     let mut tx = state.db.begin().await?;
 
@@ -89,14 +112,35 @@ pub async fn edit_post(
     .fetch_one(&mut *tx)
     .await?;
 
+    // `revision_count` is INTEGER NOT NULL DEFAULT 1 and we only ever
+    // increment it, but try_from guards against a corrupted negative
+    // row rather than wrapping silently into a giant u64.
     let new_revision = rc_row.revision_count;
+    let revision_u64 = u64::try_from(new_revision).map_err(|_| {
+        tracing::error!(post_id = %post_id, revision_count = new_revision, "negative revision_count");
+        AppError::code(ErrorCode::Internal)
+    })?;
+
+    let signed = signing::sign_post_revision(
+        &state.db,
+        &user.user_id,
+        &post_uuid,
+        &thread_uuid,
+        parent_uuid.as_ref(),
+        revision_u64,
+        &body,
+        created_at_ms,
+    )
+    .await?;
+    let signature = signed.signature;
 
     sqlx::query!(
-        "INSERT INTO post_revisions (post_id, revision, body, signature) VALUES (?, ?, ?, ?)",
+        "INSERT INTO post_revisions (post_id, revision, body, signature, created_at) VALUES (?, ?, ?, ?, ?)",
         post_id,
         new_revision,
         body,
         signature,
+        revision_created_at,
     )
     .execute(&mut *tx)
     .await?;
@@ -175,25 +219,43 @@ pub async fn retract_post(
         return Err(AppError::code(ErrorCode::PostAlreadyRetracted));
     }
 
-    let retraction_message = format!("retract:{post_id}");
-    let retraction_signature =
-        signing::sign_message(&state.db, &user.user_id, retraction_message.as_bytes()).await?;
+    let post_uuid = uuid::Uuid::parse_str(&post_id).map_err(|e| {
+        tracing::error!(post_id = %post_id, error = %e, "invalid post UUID");
+        AppError::code(ErrorCode::Internal)
+    })?;
 
+    // Producer-side timestamp, truncated to whole seconds so the
+    // signed millisecond value is reconstructable from the ISO-second
+    // value we persist. See create_thread.rs for the longer rationale.
+    let now_dt = chrono::Utc::now();
+    let retracted_at = now_dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let created_at_ms = (now_dt.timestamp() as u64) * 1000;
+
+    let signed =
+        signing::sign_retraction(&state.db, &user.user_id, &post_uuid, created_at_ms).await?;
+    let retraction_signature = signed.signature;
+
+    // Wrap the two UPDATEs in a transaction. Without it, a crash
+    // between them leaves a post marked retracted but with revision
+    // bodies still populated — a visible-content / signed-retraction
+    // inconsistency.
+    let mut tx = state.db.begin().await?;
     sqlx::query!(
-        "UPDATE posts SET retracted_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), \
-         retraction_signature = ? WHERE id = ?",
+        "UPDATE posts SET retracted_at = ?, retraction_signature = ? WHERE id = ?",
+        retracted_at,
         retraction_signature,
         post_id,
     )
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
 
     sqlx::query!(
         "UPDATE post_revisions SET body = '' WHERE post_id = ?",
         post_id,
     )
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }

@@ -40,6 +40,7 @@ pub mod search;
 pub mod session;
 pub mod settings;
 pub mod setup;
+pub mod signed;
 pub mod signing;
 pub mod state;
 pub mod threads;

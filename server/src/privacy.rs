@@ -55,13 +55,14 @@ use axum::http::header::SET_COOKIE;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use base64::Engine;
-use ed25519_dalek::{Signer, SigningKey};
+use ed25519_dalek::SigningKey;
 use serde::Serialize;
 use uuid::Uuid;
 
 use crate::display_name::display_name_skeleton;
 use crate::error::{AppError, ErrorCode};
 use crate::session::{RestrictedAuthUser, clear_session_cookie};
+use crate::signing::sign_retraction_with_key;
 use crate::state::AppState;
 
 /// Wire version of the export payload. Bump whenever the shape changes so
@@ -688,6 +689,16 @@ pub(crate) async fn soft_delete_user(
     .fetch_all(&mut **tx)
     .await?;
 
+    // One producer-side timestamp shared across all of this user's
+    // retractions: bulk deletion is atomic as far as the user is
+    // concerned, and binding the same instant in every signed
+    // retraction is fine. Truncated to whole seconds for the same
+    // reason as the per-handler retract path — see
+    // posts.rs::retract_post.
+    let now_dt = chrono::Utc::now();
+    let retracted_at = now_dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let created_at_ms = (now_dt.timestamp() as u64) * 1000;
+
     // Pre-compute retraction signatures in memory so the subsequent
     // UPDATEs are pure DB work (signing is CPU-only and does not touch
     // the pool, so doing it inside the tx is fine).
@@ -695,11 +706,14 @@ pub(crate) async fn soft_delete_user(
         posts_to_retract
             .into_iter()
             .map(|r| {
-                let msg = format!("retract:{}", r.id);
-                let sig = key.sign(msg.as_bytes()).to_bytes().to_vec();
-                (r.id, sig)
+                let post_uuid = Uuid::parse_str(&r.id).map_err(|e| {
+                    tracing::error!(post_id = %r.id, error = %e, "invalid post UUID in row");
+                    AppError::code(ErrorCode::Internal)
+                })?;
+                let out = sign_retraction_with_key(key, &post_uuid, created_at_ms);
+                Ok::<_, AppError>((r.id, out.signature))
             })
-            .collect()
+            .collect::<Result<_, _>>()?
     } else {
         // No active signing key (edge case: user was created before
         // signing was introduced, or a previous delete attempt already
@@ -717,8 +731,8 @@ pub(crate) async fn soft_delete_user(
     //    interactive delete.
     for (post_id, sig) in &retractions {
         sqlx::query!(
-            "UPDATE posts SET retracted_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), \
-             retraction_signature = ? WHERE id = ?",
+            "UPDATE posts SET retracted_at = ?, retraction_signature = ? WHERE id = ?",
+            retracted_at,
             sig,
             post_id,
         )
