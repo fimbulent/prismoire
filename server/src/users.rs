@@ -416,13 +416,13 @@ pub async fn get_trust_detail(
     // Single forward BFS from viewer — used for trust_between, distance_map, and path enrichment.
     let viewer_scores = graph.forward_scores_with_delta(viewer_uuid, &viewer_delta);
 
-    let mut distance_map: HashMap<String, f64> = viewer_scores
+    let mut distance_map: HashMap<Uuid, f32> = viewer_scores
         .into_iter()
-        .map(|s| (s.target_user.to_string(), s.distance))
+        .map(|s| (s.target_user, s.distance as f32))
         .collect();
     // The viewer isn't included in their own distance map; pin them at 0 so
     // they sort first rather than falling through to f64::MAX (untrusted).
-    distance_map.insert(user.user_id.clone(), 0.0);
+    distance_map.insert(viewer_uuid, 0.0);
 
     let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
     let tag_map = load_tag_map(&state.db, &user.user_id).await?;
@@ -738,9 +738,8 @@ pub async fn get_activity(
         let viewer_uuid = user.uuid();
         let graph = state.get_trust_graph()?;
         let reverse_map = graph.reverse_score_map(viewer_uuid);
-        reverse_map
-            .get(&target_id)
-            .is_some_and(|s| *s >= MINIMUM_TRUST_THRESHOLD)
+        crate::trust::lookup_score(&reverse_map, &target_id)
+            .is_some_and(|s| s >= MINIMUM_TRUST_THRESHOLD)
     };
     let admin_override = !reverse_trust_ok && !is_self && user.is_admin();
     let full_visibility = reverse_trust_ok || admin_override;
@@ -869,7 +868,7 @@ pub async fn get_trust_edges(
     // TODO: Avoid cloning the entire cached map just to insert one entry.
     //  Check for the viewer's own ID inline at lookup sites instead.
     let mut distance_map = HashMap::clone(&cached_dm);
-    distance_map.insert(user.user_id.clone(), 0.0);
+    distance_map.insert(viewer_uuid, 0.0);
 
     struct EdgeRow {
         display_name: String,
@@ -1631,8 +1630,8 @@ async fn search_users_core(
 fn is_paginated_search_user_visible(
     candidate_id: &str,
     reader_id: &str,
-    trust_map: &HashMap<String, f64>,
-    reverse_map: &HashMap<String, f64>,
+    trust_map: &HashMap<Uuid, f32>,
+    reverse_map: &HashMap<Uuid, f32>,
     distrust_set: &HashSet<String>,
 ) -> bool {
     if candidate_id == reader_id {
@@ -1641,9 +1640,12 @@ fn is_paginated_search_user_visible(
     if distrust_set.contains(candidate_id) {
         return false;
     }
-    let viewer_trusts_them = trust_map.contains_key(candidate_id);
+    let Ok(candidate_uuid) = Uuid::parse_str(candidate_id) else {
+        return false;
+    };
+    let viewer_trusts_them = trust_map.contains_key(&candidate_uuid);
     let they_trust_viewer = reverse_map
-        .get(candidate_id)
-        .is_some_and(|&s| s >= MINIMUM_TRUST_THRESHOLD);
+        .get(&candidate_uuid)
+        .is_some_and(|&s| s as f64 >= MINIMUM_TRUST_THRESHOLD);
     viewer_trusts_them || they_trust_viewer
 }

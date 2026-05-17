@@ -29,7 +29,7 @@ use crate::error::AppError;
 use crate::session::AuthUser;
 use crate::state::AppState;
 use crate::threads::is_thread_visible;
-use crate::trust::{UserStatus, UserViewerInfo, load_distrust_set, load_tag_map};
+use crate::trust::{UserStatus, UserViewerInfo, load_distrust_set, load_tag_map, lookup_score};
 
 use super::{
     ALPHA, FTS_OVERSAMPLE, HALFLIFE_RANK, MoreSearchRequest, PAGE_SIZE,
@@ -265,7 +265,7 @@ async fn search_threads_core(
             let trust_op = if row.author_id == user.user_id {
                 1.0
             } else {
-                trust_map.get(&row.author_id).copied().unwrap_or(0.0)
+                lookup_score(&trust_map, &row.author_id).unwrap_or(0.0)
             };
             let r = recency_rank[i];
             let recency = 1.0 / (1.0 + (r as f64) / HALFLIFE_RANK);

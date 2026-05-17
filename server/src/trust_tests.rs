@@ -498,16 +498,16 @@ fn test_delta_trust_removed_drops_target() {
     let g = graph_from_edges(&[(A, B), (A, C)]);
     // Cached: both B and C are direct.
     let cached_map = g.distance_map(A);
-    assert!(cached_map.contains_key(&B.to_string()));
-    assert!(cached_map.contains_key(&C.to_string()));
+    assert!(cached_map.contains_key(&B));
+    assert!(cached_map.contains_key(&C));
 
     let mut delta = ViewerDelta::default();
     delta.trust_removed.insert(C);
     delta.seq = 1;
 
     let dm = g.distance_map_with_delta(A, &delta);
-    assert!(dm.contains_key(&B.to_string()));
-    assert!(!dm.contains_key(&C.to_string()));
+    assert!(dm.contains_key(&B));
+    assert!(!dm.contains_key(&C));
 }
 
 /// Adding a distrust to the delta should both zero the direct score
@@ -550,10 +550,7 @@ fn test_delta_flip_trust_to_distrust_drops_unreachable_target() {
     // No path remains, so trust_between returns None.
     assert!(g.trust_between_with_delta(A, B, &delta).is_none());
     // distance_map should not contain B either.
-    assert!(
-        !g.distance_map_with_delta(A, &delta)
-            .contains_key(&B.to_string())
-    );
+    assert!(!g.distance_map_with_delta(A, &delta).contains_key(&B));
 }
 
 /// When the viewer distrusts a target reachable via an intermediary,
@@ -918,4 +915,132 @@ fn test_hub_dampening_reverse_bfs_symmetric() {
         rev[&truster]
     );
     assert!(rev[&truster] < 0.6, "reverse score should also be dampened");
+}
+
+// ---------------------------------------------------------------------------
+// f32 storage preserves ranking — property test
+// ---------------------------------------------------------------------------
+//
+// The cache stores `HashMap<Uuid, f32>` even though BFS computes scores in
+// f64. The narrowing is safe as long as it does not change the *order* of
+// users by trust distance — every consumer that ranks users (warm/trusted
+// thread sort, post search, dropdown re-rank) reads the cached value and
+// compares pairs. A spurious inversion would silently scramble those
+// rankings.
+//
+// This is a sweep over many random graphs (seeded RNG, deterministic). For
+// each viewer we compare:
+//   - reference f64 distances from `forward_scores`
+//   - stored f32 distances from `distance_map`
+// and assert two invariants:
+//   1. Every stored f32 equals `f64 as f32` of the reference.
+//   2. For every pair (u, v) sorted by the f64 reference, the f32 stored
+//      values are *non-inverted*: f32(u) <= f32(v) when f64(u) <= f64(v).
+//      Ties in f32 are allowed (two close f64s rounding to the same f32),
+//      strict inversions are not.
+
+use rand::SeedableRng;
+use rand::rngs::StdRng;
+use rand::seq::SliceRandom;
+use rand::{Rng, RngCore};
+
+/// Generate a random directed trust graph using a seeded RNG.
+///
+/// Each potential ordered pair (i, j) with i != j is included with
+/// probability `density`. Returns the user UUIDs (so callers can pick a
+/// viewer) and the trust edges.
+fn random_graph(
+    rng: &mut impl RngCore,
+    num_users: usize,
+    density: f64,
+) -> (Vec<Uuid>, Vec<(Uuid, Uuid)>) {
+    let users: Vec<Uuid> = (0..num_users)
+        .map(|_| Uuid::from_u128(rng.next_u64() as u128 | ((rng.next_u64() as u128) << 64)))
+        .collect();
+    let mut edges = Vec::new();
+    for i in 0..num_users {
+        for j in 0..num_users {
+            if i == j {
+                continue;
+            }
+            if rng.gen_bool(density) {
+                edges.push((users[i], users[j]));
+            }
+        }
+    }
+    (users, edges)
+}
+
+#[test]
+fn f32_storage_preserves_ranking() {
+    // Deterministic seed so failures are reproducible.
+    let mut rng = StdRng::seed_from_u64(0x5f32_0ade_b007_1234);
+
+    // Sweep: vary graph size and density to exercise sparse trees, dense
+    // cliques, and the in-between regime where the bottleneck-group
+    // combine produces many close scores (the most adversarial input for
+    // an order-preservation check).
+    let trials: &[(usize, f64)] = &[
+        (8, 0.15),
+        (8, 0.5),
+        (16, 0.1),
+        (16, 0.25),
+        (24, 0.05),
+        (24, 0.15),
+        (32, 0.05),
+        (32, 0.1),
+    ];
+
+    for &(num_users, density) in trials {
+        for trial in 0..6 {
+            let (users, edges) = random_graph(&mut rng, num_users, density);
+            if edges.is_empty() {
+                continue;
+            }
+            let graph = graph_from_edges(&edges);
+
+            // Pick a viewer at random — restricted to users that appear in
+            // at least one edge so `forward_scores` has something to chew on.
+            let viewer = *users.choose(&mut rng).unwrap();
+
+            let reference: HashMap<Uuid, f64> = graph
+                .forward_scores(viewer)
+                .into_iter()
+                .map(|s| (s.target_user, s.distance))
+                .collect();
+            let stored = graph.distance_map(viewer);
+
+            // Invariant 1: keys agree, and every f32 value equals the
+            // reference f64 narrowed to f32.
+            assert_eq!(
+                stored.len(),
+                reference.len(),
+                "trial=({num_users},{density},#{trial}): key sets differ",
+            );
+            for (uuid, &f64_dist) in &reference {
+                let stored_f32 = *stored
+                    .get(uuid)
+                    .unwrap_or_else(|| panic!("missing {uuid} in stored map"));
+                assert_eq!(
+                    stored_f32, f64_dist as f32,
+                    "trial=({num_users},{density},#{trial}): stored value for {uuid} differs from narrowed reference",
+                );
+            }
+
+            // Invariant 2: no rank inversions. Sort by the f64 reference,
+            // then walk the list and assert the f32 sequence is
+            // monotonically non-decreasing.
+            let mut pairs: Vec<(Uuid, f64)> = reference.into_iter().collect();
+            pairs.sort_by(|a, b| a.1.total_cmp(&b.1));
+            let mut prev_f32 = f32::NEG_INFINITY;
+            for (uuid, _) in &pairs {
+                let v = stored[uuid];
+                assert!(
+                    v >= prev_f32,
+                    "trial=({num_users},{density},#{trial}): f32 inversion at {uuid} — got {v}, previous {prev_f32}",
+                );
+                prev_f32 = v;
+            }
+        }
+    }
 }

@@ -8,7 +8,8 @@ use axum::response::IntoResponse;
 use crate::error::{AppError, ErrorCode};
 use crate::session::AuthUser;
 use crate::state::AppState;
-use crate::trust::{UserStatus, UserViewerInfo, load_distrust_set, load_tag_map};
+use crate::trust::{UserStatus, UserViewerInfo, load_distrust_set, load_tag_map, lookup_score};
+use uuid::Uuid;
 
 use super::common::{
     MAX_SEEN_IDS, PAGE_SIZE, PaginationParams, RecentReplier, ThreadListResponse, ThreadSort,
@@ -80,7 +81,7 @@ struct RoomThreadsRow {
 
 fn all_threads_to_summary(
     row: AllThreadsRow,
-    trust_map: &HashMap<String, f64>,
+    trust_map: &HashMap<Uuid, f32>,
     distrust_set: &HashSet<String>,
     tag_map: &HashMap<String, String>,
 ) -> ThreadSummary {
@@ -109,7 +110,7 @@ fn room_threads_to_summary(
     room_id: &str,
     room_slug: &str,
     is_announcement: bool,
-    trust_map: &HashMap<String, f64>,
+    trust_map: &HashMap<Uuid, f32>,
     distrust_set: &HashSet<String>,
     tag_map: &HashMap<String, String>,
 ) -> ThreadSummary {
@@ -193,7 +194,7 @@ async fn fetch_repliers(
 async fn apply_visible_reply_counts(
     db: &sqlx::SqlitePool,
     threads: &mut [ThreadSummary],
-    reverse_map: &HashMap<String, f64>,
+    reverse_map: &HashMap<Uuid, f32>,
     distrust_set: &HashSet<String>,
     reader_id: &str,
 ) -> Result<(), AppError> {
@@ -227,9 +228,7 @@ async fn apply_visible_reply_counts(
             continue;
         }
         let visible = row.author == reader_id
-            || reverse_map
-                .get(&row.author)
-                .is_some_and(|&s| s >= MINIMUM_TRUST_THRESHOLD)
+            || lookup_score(reverse_map, &row.author).is_some_and(|s| s >= MINIMUM_TRUST_THRESHOLD)
             || row.parent_author == reader_id;
         if visible {
             *counts.entry(row.thread.clone()).or_default() += 1;
@@ -1058,8 +1057,8 @@ async fn build_score_fn(
     sort: ThreadSort,
     candidates: &[ThreadSummary],
     seen_ids: Option<&HashSet<String>>,
-    trust_map: &Arc<HashMap<String, f64>>,
-    reverse_map: &Arc<HashMap<String, f64>>,
+    trust_map: &Arc<HashMap<Uuid, f32>>,
+    reverse_map: &Arc<HashMap<Uuid, f32>>,
     reader_id: &str,
     rank_offset: usize,
 ) -> Result<ScoreFn, AppError> {
@@ -1100,7 +1099,7 @@ async fn build_score_fn(
 async fn score_and_paginate(
     db: &sqlx::SqlitePool,
     batch: CandidateBatch,
-    reverse_map: Arc<HashMap<String, f64>>,
+    reverse_map: Arc<HashMap<Uuid, f32>>,
     distrust_set: HashSet<String>,
     reader_id: String,
     seen_ids: Option<&HashSet<String>>,
@@ -1294,9 +1293,9 @@ fn compute_fetch_limit(visibility_rate: f64, seen_count: usize) -> i64 {
 #[allow(clippy::too_many_arguments)]
 async fn fetch_warm_candidates_all(
     db: &sqlx::SqlitePool,
-    trust_map: &HashMap<String, f64>,
+    trust_map: &HashMap<Uuid, f32>,
     distrust_set: &HashSet<String>,
-    reverse_map: &HashMap<String, f64>,
+    reverse_map: &HashMap<Uuid, f32>,
     tag_map: &HashMap<String, String>,
     reader_id: &str,
     limit: i64,
@@ -1409,9 +1408,9 @@ async fn fetch_warm_candidates_all(
 #[allow(clippy::too_many_arguments)]
 async fn fetch_warm_candidates_room(
     db: &sqlx::SqlitePool,
-    trust_map: &HashMap<String, f64>,
+    trust_map: &HashMap<Uuid, f32>,
     distrust_set: &HashSet<String>,
-    reverse_map: &HashMap<String, f64>,
+    reverse_map: &HashMap<Uuid, f32>,
     tag_map: &HashMap<String, String>,
     reader_id: &str,
     room_id: &str,

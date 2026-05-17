@@ -277,7 +277,7 @@ pub async fn list_invited_users(
     let viewer_delta = state.pending_deltas.get(viewer_uuid);
     let cached_dm = graph.distance_map_with_delta(viewer_uuid, &viewer_delta);
     let mut distance_map = HashMap::clone(&cached_dm);
-    distance_map.insert(user.user_id.clone(), 0.0);
+    distance_map.insert(viewer_uuid, 0.0);
     let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
     let tag_map = load_tag_map(&state.db, &user.user_id).await?;
 

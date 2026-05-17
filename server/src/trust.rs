@@ -54,10 +54,10 @@ const DEFAULT_BFS_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 /// so a small share is sufficient.
 const DELTA_CACHE_BUDGET_SIXTEENTHS: u64 = 1;
 
-/// Approximate bytes per entry in a `HashMap<String, f64>` BFS result map.
-/// Accounts for: 36-byte UUID string + 24-byte String overhead + 8-byte f64
-/// value + ~16 bytes HashMap per-bucket overhead.
-const BYTES_PER_MAP_ENTRY: u64 = 84;
+/// Approximate bytes per entry in a `HashMap<Uuid, f32>` BFS result map.
+/// Accounts for: 16-byte UUID + 4-byte f32 value + ~8 bytes HashMap
+/// per-bucket overhead (load factor and control bytes amortised).
+const BYTES_PER_MAP_ENTRY: u64 = 28;
 
 /// Base overhead per cached BFS result (Arc + HashMap allocation).
 const MAP_BASE_OVERHEAD: u64 = 48;
@@ -68,23 +68,29 @@ const MAP_BASE_OVERHEAD: u64 = 48;
 /// stable forward/reverse caches and the per-viewer-per-seq key
 /// (`(Uuid, u64)`) used by the delta-keyed forward cache. The weight
 /// ignores the key — only the map size matters for the byte budget.
+///
+/// The cached value type is `HashMap<Uuid, f32>`: BFS scores are
+/// computed in f64 inside `PathGroups::combined_score` and narrowed to
+/// f32 only when materialising the cache. Ranking quality is invariant
+/// under the narrowing — see the `f32_storage_preserves_ranking`
+/// property test.
 #[derive(Clone)]
 struct BfsWeighter;
 
-impl Weighter<Uuid, Arc<HashMap<String, f64>>> for BfsWeighter {
-    fn weight(&self, _key: &Uuid, val: &Arc<HashMap<String, f64>>) -> u64 {
+impl Weighter<Uuid, Arc<HashMap<Uuid, f32>>> for BfsWeighter {
+    fn weight(&self, _key: &Uuid, val: &Arc<HashMap<Uuid, f32>>) -> u64 {
         MAP_BASE_OVERHEAD + (val.len() as u64 * BYTES_PER_MAP_ENTRY)
     }
 }
 
-impl Weighter<(Uuid, u64), Arc<HashMap<String, f64>>> for BfsWeighter {
-    fn weight(&self, _key: &(Uuid, u64), val: &Arc<HashMap<String, f64>>) -> u64 {
+impl Weighter<(Uuid, u64), Arc<HashMap<Uuid, f32>>> for BfsWeighter {
+    fn weight(&self, _key: &(Uuid, u64), val: &Arc<HashMap<Uuid, f32>>) -> u64 {
         MAP_BASE_OVERHEAD + (val.len() as u64 * BYTES_PER_MAP_ENTRY)
     }
 }
 
-type BfsCache = Cache<Uuid, Arc<HashMap<String, f64>>, BfsWeighter>;
-type DeltaBfsCache = Cache<(Uuid, u64), Arc<HashMap<String, f64>>, BfsWeighter>;
+type BfsCache = Cache<Uuid, Arc<HashMap<Uuid, f32>>, BfsWeighter>;
+type DeltaBfsCache = Cache<(Uuid, u64), Arc<HashMap<Uuid, f32>>, BfsWeighter>;
 
 /// Per-distrusted-target penalty for reliability computation.
 const DISTRUST_PENALTY: f64 = 0.25;
@@ -962,7 +968,7 @@ impl UserViewerInfo {
     /// value (see UserName.svelte's deleted-user branch).
     pub fn build(
         user_id: &str,
-        distance_map: &HashMap<String, f64>,
+        distance_map: &HashMap<Uuid, f32>,
         distrust_set: &HashSet<String>,
         tag_map: &HashMap<String, String>,
         status: UserStatus,
@@ -972,8 +978,16 @@ impl UserViewerInfo {
         } else {
             tag_map.get(user_id).cloned()
         };
+        // distance_map is keyed by Uuid (the cache storage type). Parsing
+        // the &str user_id here is the bridge from sqlx-returned strings
+        // to the typed map. A parse failure is treated as "not present"
+        // (same as a UUID that doesn't appear in the map).
+        let distance = Uuid::parse_str(user_id)
+            .ok()
+            .and_then(|u| distance_map.get(&u))
+            .map(|&v| v as f64);
         Self {
-            distance: distance_map.get(user_id).copied(),
+            distance,
             distrusted: distrust_set.contains(user_id),
             status,
             tag,
@@ -990,6 +1004,22 @@ impl UserViewerInfo {
             tag: None,
         }
     }
+}
+
+/// Look up a UUID-as-string key in a `Uuid`-keyed BFS score map,
+/// widening f32 storage to f64 for arithmetic at the call site.
+///
+/// Bridges the gap between sqlx — which still returns user IDs as
+/// `String` — and the cached BFS maps, which key by `Uuid` to halve
+/// the per-entry memory footprint. Returns `None` if the string is not
+/// a valid UUID or not present in the map (both indistinguishable from
+/// "no trust info" at the caller).
+#[inline]
+pub fn lookup_score(map: &HashMap<Uuid, f32>, user_id: &str) -> Option<f64> {
+    Uuid::parse_str(user_id)
+        .ok()
+        .and_then(|u| map.get(&u))
+        .map(|&v| v as f64)
 }
 
 /// Load the set of user IDs that the viewer has distrusted.
@@ -1328,15 +1358,16 @@ impl TrustGraph {
         scores
     }
 
-    /// Build a lookup map from user UUID string to trust distance for the given reader.
+    /// Build a lookup map from user UUID to trust distance for the given reader.
     ///
     /// Results are cached per reader for the lifetime of this `TrustGraph`
     /// instance. Returns a shared `Arc` — callers should clone if they need
     /// to mutate (e.g., inserting the reader's own entry).
-    // TODO: Use HashMap<Uuid, f64> once we migrate to typed sqlx::query!() macros
-    //  so author IDs are already Uuid instead of String. When we do this, we need to update
-    //  BfsWeighter impl (BYTES_PER_MAP_ENTRY would drop from 84 to ~32 bytes)
-    pub fn distance_map(&self, reader: Uuid) -> Arc<HashMap<String, f64>> {
+    ///
+    /// Values are stored at f32 precision (computed in f64; narrowed at
+    /// the cache boundary). See `BfsWeighter` for the rationale and the
+    /// `f32_storage_preserves_ranking` property test for the safety check.
+    pub fn distance_map(&self, reader: Uuid) -> Arc<HashMap<Uuid, f32>> {
         // Probe the cache first so we can record hit vs. miss. Between
         // the probe and the `get_or_insert_with` call another thread may
         // insert, turning a would-be miss into an effective hit. The
@@ -1357,21 +1388,22 @@ impl TrustGraph {
                 let map = self
                     .forward_scores(reader)
                     .into_iter()
-                    .map(|s| (s.target_user.to_string(), s.distance))
+                    .map(|s| (s.target_user, s.distance as f32))
                     .collect();
                 Ok::<_, ()>(Arc::new(map))
             })
             .unwrap()
     }
 
-    /// Build a lookup map from author UUID string to their trust-in-reader score.
+    /// Build a lookup map from author UUID to their trust-in-reader score.
     ///
     /// Used for visibility filtering: a post is visible if the author's score
     /// for the reader meets the author's threshold (default 0.45).
     ///
     /// Results are cached per reader for the lifetime of this `TrustGraph`
-    /// instance. Returns a shared `Arc`.
-    pub fn reverse_score_map(&self, reader: Uuid) -> Arc<HashMap<String, f64>> {
+    /// instance. Returns a shared `Arc`. Values are stored at f32
+    /// precision; see `distance_map` for the f64→f32 narrowing rationale.
+    pub fn reverse_score_map(&self, reader: Uuid) -> Arc<HashMap<Uuid, f32>> {
         // See `distance_map` for the hit/miss accounting note.
         if let Some(cached) = self.reverse_cache.get(&reader) {
             if let Some(m) = &self.metrics {
@@ -1403,7 +1435,7 @@ impl TrustGraph {
                         } else {
                             score
                         };
-                        (uuid.to_string(), effective)
+                        (uuid, effective as f32)
                     })
                     .collect();
                 Ok(Arc::new(map))
@@ -1598,7 +1630,7 @@ impl TrustGraph {
         &self,
         reader: Uuid,
         delta: &ViewerDelta,
-    ) -> Arc<HashMap<String, f64>> {
+    ) -> Arc<HashMap<Uuid, f32>> {
         if delta.is_empty() {
             return self.distance_map(reader);
         }
@@ -1618,10 +1650,10 @@ impl TrustGraph {
         }
         self.delta_forward_cache
             .get_or_insert_with(&key, || {
-                let map: HashMap<String, f64> = self
+                let map: HashMap<Uuid, f32> = self
                     .forward_scores_with_delta(reader, delta)
                     .into_iter()
-                    .map(|s| (s.target_user.to_string(), s.distance))
+                    .map(|s| (s.target_user, s.distance as f32))
                     .collect();
                 Ok::<_, ()>(Arc::new(map))
             })

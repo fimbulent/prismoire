@@ -11,7 +11,9 @@ use crate::session::OptionalAuthUser;
 use crate::state::AppState;
 use crate::trust::{
     MINIMUM_TRUST_THRESHOLD, UserStatus, UserViewerInfo, load_distrust_set, load_tag_map,
+    lookup_score,
 };
+use uuid::Uuid;
 
 use super::common::{PostResponse, RepliesPageResponse, SubtreeResponse, ThreadDetailResponse};
 
@@ -91,8 +93,8 @@ struct ThreadInfo {
 
 /// All the viewer-specific context needed for visibility and sorting.
 struct ViewerCtx {
-    trust_map: Arc<HashMap<String, f64>>,
-    reverse_map: Arc<HashMap<String, f64>>,
+    trust_map: Arc<HashMap<Uuid, f32>>,
+    reverse_map: Arc<HashMap<Uuid, f32>>,
     distrust_set: HashSet<String>,
     tag_map: HashMap<String, String>,
     reader_id: Option<String>,
@@ -241,8 +243,8 @@ impl TreeCtx<'_> {
         if is_root && self.is_announcement {
             return true;
         }
-        if let Some(&score) = self.viewer.reverse_map.get(author)
-            && score >= MINIMUM_TRUST_THRESHOLD
+        if lookup_score(&self.viewer.reverse_map, author)
+            .is_some_and(|score| score >= MINIMUM_TRUST_THRESHOLD)
         {
             return true;
         }
@@ -268,11 +270,7 @@ impl TreeCtx<'_> {
                 if self.viewer.reader_id.as_ref().is_some_and(|r| r == author) {
                     0.0
                 } else {
-                    self.viewer
-                        .trust_map
-                        .get(author)
-                        .copied()
-                        .unwrap_or(f64::MAX)
+                    lookup_score(&self.viewer.trust_map, author).unwrap_or(f64::MAX)
                 }
             };
             children.sort_by(|&a, &b| {

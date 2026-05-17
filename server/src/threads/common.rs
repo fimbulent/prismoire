@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::error::{AppError, ErrorCode};
 use crate::trust::UserViewerInfo;
@@ -404,10 +405,10 @@ pub fn is_thread_visible(
     author_id: &str,
     is_announcement: bool,
     reader_id: &str,
-    reverse_map: &HashMap<String, f64>,
+    reverse_map: &HashMap<Uuid, f32>,
     distrust_set: &HashSet<String>,
 ) -> bool {
-    use crate::trust::MINIMUM_TRUST_THRESHOLD;
+    use crate::trust::{MINIMUM_TRUST_THRESHOLD, lookup_score};
 
     if author_id == reader_id {
         return true;
@@ -418,7 +419,7 @@ pub fn is_thread_visible(
     if is_announcement {
         return true;
     }
-    if let Some(&score) = reverse_map.get(author_id)
+    if let Some(score) = lookup_score(reverse_map, author_id)
         && score >= MINIMUM_TRUST_THRESHOLD
     {
         return true;
@@ -467,12 +468,12 @@ pub struct RecentReplier {
 pub fn score_warm(
     threads: &mut Vec<ThreadSummary>,
     repliers: &[RecentReplier],
-    trust_map: &HashMap<String, f64>,
-    reverse_map: &HashMap<String, f64>,
+    trust_map: &HashMap<Uuid, f32>,
+    reverse_map: &HashMap<Uuid, f32>,
     reader_id: &str,
     rank_offset: usize,
 ) {
-    use crate::trust::MINIMUM_TRUST_THRESHOLD;
+    use crate::trust::{MINIMUM_TRUST_THRESHOLD, lookup_score};
     use std::collections::HashMap as Map;
 
     let mut repliers_by_thread: Map<&str, Vec<&RecentReplier>> = Map::new();
@@ -498,9 +499,8 @@ pub fn score_warm(
         if let Some(thread_repliers) = repliers_by_thread.get(thread.id.as_str()) {
             for r in thread_repliers {
                 let is_visible = r.replier_id == reader_id
-                    || reverse_map
-                        .get(&r.replier_id)
-                        .is_some_and(|&s| s >= MINIMUM_TRUST_THRESHOLD);
+                    || lookup_score(reverse_map, &r.replier_id)
+                        .is_some_and(|s| s >= MINIMUM_TRUST_THRESHOLD);
                 if !is_visible {
                     continue;
                 }
@@ -514,7 +514,7 @@ pub fn score_warm(
                 let fwd_trust = if r.replier_id == reader_id {
                     1.0
                 } else {
-                    trust_map.get(&r.replier_id).copied().unwrap_or(0.0)
+                    lookup_score(trust_map, &r.replier_id).unwrap_or(0.0)
                 };
                 let signal = fwd_trust * reply_decay(visible_rank);
                 if signal > best_signal {
@@ -554,7 +554,7 @@ pub fn score_warm(
         let trust_op = if thread.author_id == reader_id {
             1.0
         } else {
-            trust_map.get(&thread.author_id).copied().unwrap_or(0.0)
+            lookup_score(trust_map, &thread.author_id).unwrap_or(0.0)
         };
         let score = thread_decay(rank) * (WARM_BETA * trust_op + (1.0 - WARM_BETA) * trust_signal);
         warm_scores.push((i, score));
@@ -589,10 +589,12 @@ pub fn score_warm(
 /// Returns threads sorted by score descending, truncated to `PAGE_SIZE`.
 pub fn score_trusted_recent(
     threads: &mut Vec<ThreadSummary>,
-    trust_map: &HashMap<String, f64>,
+    trust_map: &HashMap<Uuid, f32>,
     reader_id: &str,
     rank_offset: usize,
 ) {
+    use crate::trust::lookup_score;
+
     threads.sort_by(|a, b| {
         let ta = a.last_activity.as_deref().unwrap_or(&a.created_at);
         let tb = b.last_activity.as_deref().unwrap_or(&b.created_at);
@@ -606,7 +608,7 @@ pub fn score_trusted_recent(
         let trust_op = if thread.author_id == reader_id {
             1.0
         } else {
-            trust_map.get(&thread.author_id).copied().unwrap_or(0.0)
+            lookup_score(trust_map, &thread.author_id).unwrap_or(0.0)
         };
         scores.push((i, thread_decay(rank) * trust_op));
     }

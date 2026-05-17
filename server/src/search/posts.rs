@@ -20,6 +20,7 @@ use crate::session::AuthUser;
 use crate::state::AppState;
 use crate::trust::{
     MINIMUM_TRUST_THRESHOLD, UserStatus, UserViewerInfo, load_distrust_set, load_tag_map,
+    lookup_score,
 };
 
 use super::{
@@ -227,9 +228,7 @@ async fn search_posts_core(
             if distrust_set.contains(&row.author_id) {
                 return false;
             }
-            reverse_map
-                .get(&row.author_id)
-                .is_some_and(|&s| s >= MINIMUM_TRUST_THRESHOLD)
+            lookup_score(&reverse_map, &row.author_id).is_some_and(|s| s >= MINIMUM_TRUST_THRESHOLD)
         })
         .collect();
 
@@ -252,7 +251,7 @@ async fn search_posts_core(
             let trust_author = if row.author_id == user.user_id {
                 1.0
             } else {
-                reverse_map.get(&row.author_id).copied().unwrap_or(0.0)
+                lookup_score(&reverse_map, &row.author_id).unwrap_or(0.0)
             };
             let r = recency_rank[i];
             let recency = 1.0 / (1.0 + (r as f64) / HALFLIFE_RANK);

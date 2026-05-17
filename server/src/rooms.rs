@@ -26,6 +26,7 @@ use axum::extract::{Path, Query, State};
 use axum::response::IntoResponse;
 use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::error::{AppError, ErrorCode};
 use crate::room_name::is_announcements;
@@ -407,7 +408,7 @@ fn bucket_for(last_activity: &str, day_starts: &[NaiveDate]) -> Option<usize> {
 async fn discover_active_rooms(
     db: &sqlx::SqlitePool,
     reader_id: &str,
-    reverse_map: &HashMap<String, f64>,
+    reverse_map: &HashMap<Uuid, f32>,
     distrust_set: &HashSet<String>,
 ) -> Result<Vec<String>, AppError> {
     let rows = sqlx::query!(
@@ -464,7 +465,7 @@ async fn discover_active_rooms(
 async fn compute_scoped_activity(
     db: &sqlx::SqlitePool,
     reader_id: &str,
-    reverse_map: &HashMap<String, f64>,
+    reverse_map: &HashMap<Uuid, f32>,
     distrust_set: &HashSet<String>,
     scope: &[String],
 ) -> Result<ActivityResult, AppError> {
@@ -801,7 +802,7 @@ async fn render_room_page(
 async fn build_room_responses_for_ids(
     db: &sqlx::SqlitePool,
     user_id: &str,
-    reverse_map: &HashMap<String, f64>,
+    reverse_map: &HashMap<Uuid, f32>,
     distrust_set: &HashSet<String>,
     ordered_ids: &[String],
 ) -> Result<Vec<RoomResponse>, AppError> {
@@ -846,7 +847,7 @@ async fn build_room_responses_for_ids(
 pub async fn build_favorites_response(
     db: &sqlx::SqlitePool,
     user_id: &str,
-    reverse_map: &HashMap<String, f64>,
+    reverse_map: &HashMap<Uuid, f32>,
     distrust_set: &HashSet<String>,
 ) -> Result<Vec<RoomResponse>, AppError> {
     let rooms = fetch_all_rooms(db).await?;

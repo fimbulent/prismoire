@@ -24,7 +24,9 @@ use crate::state::AppState;
 use crate::threads::is_thread_visible;
 use crate::trust::{
     MINIMUM_TRUST_THRESHOLD, UserStatus, UserViewerInfo, load_distrust_set, load_tag_map,
+    lookup_score,
 };
+use uuid::Uuid;
 
 use super::threads::THREAD_FIELDS;
 use super::{ALPHA, HALFLIFE_RANK, build_fts_query_with_fields, escape_like};
@@ -224,8 +226,8 @@ async fn search_users_section(
     db: &sqlx::SqlitePool,
     query: &str,
     reader_id: &str,
-    trust_map: &std::collections::HashMap<String, f64>,
-    reverse_map: &std::collections::HashMap<String, f64>,
+    trust_map: &std::collections::HashMap<Uuid, f32>,
+    reverse_map: &std::collections::HashMap<Uuid, f32>,
     distrust_set: &std::collections::HashSet<String>,
     tag_map: &std::collections::HashMap<String, String>,
 ) -> Result<Vec<UserHit>, AppError> {
@@ -268,10 +270,9 @@ async fn search_users_section(
             if distrust_set.contains(&r.id) {
                 continue;
             }
-            let viewer_trusts_them = trust_map.contains_key(&r.id);
-            let they_trust_viewer = reverse_map
-                .get(&r.id)
-                .is_some_and(|&s| s >= MINIMUM_TRUST_THRESHOLD);
+            let viewer_trusts_them = lookup_score(trust_map, &r.id).is_some();
+            let they_trust_viewer =
+                lookup_score(reverse_map, &r.id).is_some_and(|s| s >= MINIMUM_TRUST_THRESHOLD);
             if !viewer_trusts_them && !they_trust_viewer {
                 continue;
             }
@@ -317,8 +318,8 @@ async fn search_threads_section(
     db: &sqlx::SqlitePool,
     query: &str,
     reader_id: &str,
-    trust_map: &std::collections::HashMap<String, f64>,
-    reverse_map: &std::collections::HashMap<String, f64>,
+    trust_map: &std::collections::HashMap<Uuid, f32>,
+    reverse_map: &std::collections::HashMap<Uuid, f32>,
     distrust_set: &std::collections::HashSet<String>,
     tag_map: &std::collections::HashMap<String, String>,
 ) -> Result<Vec<ThreadHit>, AppError> {
@@ -406,7 +407,7 @@ async fn search_threads_section(
             let trust_op = if row.author_id == reader_id {
                 1.0
             } else {
-                trust_map.get(&row.author_id).copied().unwrap_or(0.0)
+                lookup_score(trust_map, &row.author_id).unwrap_or(0.0)
             };
             let r = recency_rank.get(&row.id).copied().unwrap_or(0);
             let recency = 1.0 / (1.0 + (r as f64) / HALFLIFE_RANK);
