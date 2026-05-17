@@ -21,12 +21,24 @@ Both produce identical trust scores for any (source, target) pair — verified b
 ## Usage
 
 ```sh
-cargo run -p prismoire-bench --release                # both benchmarks
-cargo run -p prismoire-bench --release -- single      # single-instance (10K users)
-cargo run -p prismoire-bench --release -- federation  # federation (10K instances, 1.1M nodes)
-cargo run -p prismoire-bench --release -- test        # verbose correctness tests
-cargo test -p prismoire-bench                         # cargo test suite (13 tests)
+cargo run -p prismoire-bench --release                              # all four benchmarks
+cargo run -p prismoire-bench --release -- single                    # single-instance (10K users, homogeneous)
+cargo run -p prismoire-bench --release -- federation                # federation (10K instances, 1.1M nodes)
+cargo run -p prismoire-bench --release -- power-law                 # single-instance (50K users, power-law)
+cargo run -p prismoire-bench --release -- fed-power-law             # federated power-law (50K local, ~100M conceptual)
+cargo run -p prismoire-bench --release -- fed-power-law --local-users 100000   # custom local user count
+cargo run -p prismoire-bench --release -- sweep                     # scaling sweep across local_users
+cargo run -p prismoire-bench --release -- sweep 10000 50000 250000  # custom sweep grid
+cargo run -p prismoire-bench --release -- size 4GB                  # sizing helper: max local_users for memory budget
+cargo run -p prismoire-bench --release -- test                      # verbose correctness tests
+cargo test -p prismoire-bench                                       # cargo test suite (22 tests)
 ```
+
+## Source layout
+
+- `src/algo.rs` — the BFS algorithm itself (CSR, dual CSR, forward/reverse BFS, distrust handling, hub dampening, the `HashMapGraph` reference oracle). The `*_with_threshold` BFS variants accept a configurable hub-dampening threshold so the harness can A/B with dampening on vs off without forking the algorithm.
+- `src/graph.rs` — synthetic graph generators: homogeneous (`generate_graph` / `GraphConfig`) and power-law (`generate_power_law_graph` / `PowerLawConfig`).
+- `src/main.rs` — CLI, timing harness, measurement helpers (degree distribution, variance multiplier κ, friendship-paradox branching, hub-dampening A/B), and the verbose correctness test suite.
 
 Cross-compile for Raspberry Pi via the flake:
 
@@ -36,7 +48,9 @@ nix build .#packages.aarch64-linux.bench
 
 ## Synthetic Graph Topology
 
-Both scenarios assume **each user trusts 10 other users** on average. Trust edges are binary (present or absent) and directional. The decay constant is 0.7 per hop, with a maximum traversal depth of 3 hops.
+Trust edges are binary (present or absent) and directional. The decay constant is 0.7 per hop, with a maximum traversal depth of 3 hops. Hub dampening kicks in for in-degrees above 5000 (`HUB_DAMPEN_THRESHOLD`).
+
+The single-instance and federation scenarios assume **each user trusts 10 other users** on average; the power-law scenario uses a three-tier out-degree distribution described below.
 
 ### Single instance
 
@@ -60,6 +74,36 @@ The federation model only stores edges needed for 3-hop traversal from local use
 
 This is a **pessimistic scenario for performance**: a 10K-user instance connected to all 10K federated instances maximizes the frontier size (1.1M nodes) that must be held in memory and potentially traversed. In practice, most instances would be connected to far fewer remote instances, with significant overlap in remote clusters, resulting in a smaller frontier and faster BFS.
 
+### Power-law single instance
+
+Instead of every user vouching for ~10 others, users fall into three out-degree tiers:
+
+- **Power users** (top 1%): vouch for 200 others
+- **Active users** (next 9%): vouch for 50 others
+- **Lurkers** (remaining 90%): vouch for 5 others
+
+Target selection is **preferentially attached**: each user's targets are sampled with weight `1/(rank+1)^α` where `α=0.8`. The in-degree rank order is shuffled independently of the out-degree tier, so being a "power user" does not force you to also be a "top celebrity" — the two power-law axes are decoupled. At 50K users this produces a top in-degree around 8K–15K, comfortably above `HUB_DAMPEN_THRESHOLD` (5000), so the dampening logic is actually exercised. The mean out-degree is ≈11 (matching the homogeneous scenarios), but the variance multiplier κ = E[d²]/E[d]² is ≈5× — matching the doc's prediction.
+
+The power-law harness also emits a hub-dampening A/B (`with dampening` vs `threshold=u32::MAX`, holding everything else fixed) so you can see how many would-be-visible paths the dampening actually attenuates below the visibility threshold.
+
+### Federated power-law
+
+Embeds the power-law home instance in a 10K-instance federation (~100M conceptual users by default).
+
+- **Home instance:** configurable `local_users` (50K default), same per-user shape as the standalone power-law scenario.
+- **`local_preference`** (0.5 default): fraction of each user's edges that target a local user. The rest are cross-instance. 0.7+ for niche/topical instances, 0.3–0.5 for generalist.
+- **Federation pool:** 10K instances × 10K mean users (Pareto-distributed sizes) ≈ 100M conceptual users. Only the 3-hop frontier reachable from local users is ever materialised — the conceptual 100M never hits memory.
+- **Cross-instance target selection:** instance picked weighted by size; rank within instance picked weighted by `1/rank^0.8` (preferential attachment to known hubs).
+- **Hub deduplication:** when N local users independently land on the same remote hub, the cluster is materialised once and edges from each local user point at the shared node. This is what keeps frontier growth sub-linear in `local_users`.
+
+The bench prints an **analytical pre-flight estimate** (cross-edges, unique remote hubs, projected frontier nodes, projected CSR memory) before generation, and an **estimator-vs-measurement comparison** afterwards. The estimator is intended as a "will this blow up?" gut check; expect ~30–50% error on frontier size, ~exact on cross-edges, and a tight bound on CSR memory once frontier is fixed.
+
+**Sweep mode** (`bench sweep`) runs the federated scenario across multiple `local_users` values and prints a one-row-per-config table. Directly answers "what userbase fits in N GB?" or "what userbase stays under M-ms p99?"
+
+**Sizing helper** (`bench size 4GB`) inverts the estimator analytically: binary-searches `local_users` for the largest value whose projected CSR memory fits the budget. Pure math, no generation — runs in milliseconds.
+
+> **Counter-intuitive finding:** at equal local-user count, the federated power-law has *less* hub concentration than the single-instance power-law. The 100M-user federation pool dilutes cross-vouches across many more potential targets than a 50K local pool concentrates intra-vouches. Single-instance power-law remains the more demanding stress test for `HUB_DAMPEN_THRESHOLD`.
+
 ## Example results
 
 These results are from a test run on a Raspberry Pi 4. Even on modest hardware, forward and backwards trust computations for 100 users (simulated page load) in the "federation" scenario takes only 1ms:
@@ -67,7 +111,7 @@ These results are from a test run on a Raspberry Pi 4. Even on modest hardware, 
 ```
 Prismoire Trust Graph Benchmark
 ===============================
-Algorithm: Bottleneck-Grouped Probabilistic (DECAY=0.7, MAX_DEPTH=3)
+Algorithm: Bottleneck-Grouped Probabilistic (DECAY=0.7, MAX_DEPTH=3, HUB_DAMPEN_THRESHOLD=5000)
 
 ============================================================
   Benchmark: Single Instance (10K users)

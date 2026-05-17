@@ -20,6 +20,23 @@ const MAX_DEPTH: u32 = 3;
 /// treated as untrusted (no trust relationship).
 pub const MINIMUM_TRUST_THRESHOLD: f64 = 0.45;
 
+/// In-degree (number of inbound trust edges) above which transitive
+/// propagation *through* a node is attenuated. See
+/// `docs/federation-bfs-analysis.md` ("Hub dampening for transitive
+/// propagation") for the design rationale.
+///
+/// Penalty is applied to traversal *through* a node — i.e. when BFS leaves
+/// the node to expand to its outgoing neighbours — not to arrival *at* the
+/// node. Direct trust into a hub is full strength; a hub's own outbound
+/// BFS as a source is unpenalised. What attenuates is the hub acting as a
+/// transitive bridge.
+///
+/// In-degree counts only inbound *trust* edges (not distrust). Measured
+/// against the locally-observed forward in-degree — under federation each
+/// instance dampens against its own view, consistent with "federate data,
+/// not computation."
+const HUB_DAMPEN_THRESHOLD: u32 = 5000;
+
 /// Default total BFS cache budget (in bytes). Carved 7/16 to the
 /// per-viewer forward cache, 1/16 to the delta-keyed forward cache (only
 /// active mutators populate it), and 8/16 to the reverse cache.
@@ -258,6 +275,32 @@ fn reliability(neighbors: &[u32], viewer_distrusts: &HashSet<u32>) -> f64 {
     (1.0 - DISTRUST_PENALTY).powi(count)
 }
 
+/// Hub-dampening multiplier applied to the per-hop decay when BFS traverses
+/// *through* a node with the given forward in-degree.
+///
+/// Returns `1.0` (no penalty) when `in_degree <= HUB_DAMPEN_THRESHOLD`, so
+/// the curve is continuous at the threshold. Above the threshold an extra
+/// logarithmic penalty is folded into the decay:
+///
+/// ```text
+/// effective_decay_through_C = DECAY ^ (1 + ln(d / k))
+/// ```
+///
+/// Applied as a multiplier on the existing `DECAY` term: the expanding
+/// edge's score becomes `path_score * DECAY * dampening_factor(d) * r`.
+///
+/// Natural-log shape matches the intuition that "meaningfully different
+/// in-degree" is logarithmic — 5K vs 50K matters more than 50K vs 51K.
+#[inline]
+fn hub_dampening_factor(in_degree: u32) -> f64 {
+    if in_degree <= HUB_DAMPEN_THRESHOLD {
+        1.0
+    } else {
+        let penalty = (in_degree as f64 / HUB_DAMPEN_THRESHOLD as f64).ln();
+        DECAY.powf(penalty)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Forward BFS: reader → authors (relevance)
 // ---------------------------------------------------------------------------
@@ -272,11 +315,21 @@ fn reliability(neighbors: &[u32], viewer_distrusts: &HashSet<u32>) -> f64 {
 /// Distrust propagation: each visited node's score is multiplied by a reliability
 /// factor based on how many of its trust targets the viewer has distrusted.
 /// After BFS, directly distrusted users are overridden to score 0.0.
-fn forward_bfs(source: u32, graph: &CsrGraph, distrust_sets: &DistrustSets) -> Vec<(u32, f64)> {
+///
+/// Hub dampening: when BFS leaves a high-in-degree node to expand to its
+/// outgoing neighbours, the per-hop decay is attenuated (see
+/// [`hub_dampening_factor`]). `reverse` supplies the in-degree by mirroring
+/// inbound trust edges.
+fn forward_bfs(
+    source: u32,
+    graph: &CsrGraph,
+    reverse: &CsrGraph,
+    distrust_sets: &DistrustSets,
+) -> Vec<(u32, f64)> {
     let empty = HashSet::new();
     let viewer_distrusts = distrust_sets.get(&source).unwrap_or(&empty);
     let source_neighbors: Vec<u32> = graph.neighbors(source).to_vec();
-    forward_bfs_inner(source, graph, &source_neighbors, viewer_distrusts)
+    forward_bfs_inner(source, graph, reverse, &source_neighbors, viewer_distrusts)
 }
 
 /// Inner BFS that operates on caller-provided seed neighbors and distrust set.
@@ -291,9 +344,15 @@ fn forward_bfs(source: u32, graph: &CsrGraph, distrust_sets: &DistrustSets) -> V
 /// `viewer_distrusts` is the effective distrust set with the same overlay
 /// semantics. Only the source's outgoing edges are overlaid — every other
 /// node's neighbors come from the cached `graph` directly.
+///
+/// `reverse` is the transposed graph, used to look up each intermediate
+/// node's forward in-degree for hub dampening. Note that the source's own
+/// effective in-degree under a delta overlay is not recomputed — dampening
+/// applies to nodes the BFS traverses *through*, never to the source.
 fn forward_bfs_inner(
     source: u32,
     graph: &CsrGraph,
+    reverse: &CsrGraph,
     source_neighbors: &[u32],
     viewer_distrusts: &HashSet<u32>,
 ) -> Vec<(u32, f64)> {
@@ -332,6 +391,18 @@ fn forward_bfs_inner(
             continue;
         }
 
+        // Hub dampening: traversal *through* `current` attenuates by an
+        // extra factor proportional to `current`'s forward in-degree.
+        // Forward in-degree of a node equals its reverse out-degree, which
+        // is exactly `reverse.neighbors(current).len()`. The penalty is
+        // computed once per pop (it only depends on `current`) and applied
+        // to every outgoing expansion below.
+        //
+        // Not applied at first-hop arrival — the seeding loop above adds
+        // first-hop neighbours at full strength, consistent with "direct
+        // trust into a hub stays full strength."
+        let dampening = hub_dampening_factor(reverse.neighbors(current).len() as u32);
+
         for &next in graph.neighbors(current) {
             if next == source {
                 continue;
@@ -344,7 +415,7 @@ fn forward_bfs_inner(
             visited.insert(next);
 
             let r = reliability(graph.neighbors(next), viewer_distrusts);
-            let next_score = path_score * DECAY * r;
+            let next_score = path_score * DECAY * dampening * r;
 
             target_groups
                 .entry(next)
@@ -749,7 +820,17 @@ fn reverse_bfs(reader: u32, reverse_graph: &CsrGraph) -> Vec<(u32, f64)> {
             continue;
         }
 
-        let next_score = path_score * DECAY;
+        // Hub dampening: traversal *through* `current` attenuates by an
+        // extra factor proportional to `current`'s forward in-degree.
+        // Forward in-degree of `current` is exactly its reverse out-degree
+        // — the neighbours we are about to iterate over.
+        //
+        // Applied symmetrically with forward BFS (same "through, not at"
+        // rule): seeding above attaches `reader`'s direct trusters at full
+        // strength; dampening only kicks in when we leave them to expand
+        // to *their* trusters.
+        let dampening = hub_dampening_factor(reverse_graph.neighbors(current).len() as u32);
+        let next_score = path_score * DECAY * dampening;
 
         // In the reverse graph, an edge current → next means next → current
         // in the forward graph. So `current` is `next`'s direct forward
@@ -1230,7 +1311,7 @@ impl TrustGraph {
         };
 
         let mut scores: Vec<TrustScore> =
-            forward_bfs(source_id, &self.forward, &self.distrust_sets)
+            forward_bfs(source_id, &self.forward, &self.reverse, &self.distrust_sets)
                 .into_iter()
                 .filter(|&(_, score)| score >= MINIMUM_TRUST_THRESHOLD)
                 .map(|(target_id, score)| {
@@ -1421,7 +1502,7 @@ impl TrustGraph {
         let Some(source_id) = self.index.get_id(&user) else {
             return 0;
         };
-        forward_bfs(source_id, &self.forward, &self.distrust_sets)
+        forward_bfs(source_id, &self.forward, &self.reverse, &self.distrust_sets)
             .into_iter()
             .filter(|&(_, score)| score >= threshold)
             .count() as u32
@@ -1448,7 +1529,9 @@ impl TrustGraph {
         let source_id = self.index.get_id(&source)?;
         let target_id = self.index.get_id(&target)?;
 
-        for (node, score) in forward_bfs(source_id, &self.forward, &self.distrust_sets) {
+        for (node, score) in
+            forward_bfs(source_id, &self.forward, &self.reverse, &self.distrust_sets)
+        {
             if node == target_id {
                 let distance = if score >= MINIMUM_TRUST_THRESHOLD {
                     Some(score_to_distance(score))
@@ -1481,6 +1564,7 @@ impl TrustGraph {
         let mut scores: Vec<TrustScore> = forward_bfs_inner(
             source_id,
             &self.forward,
+            &self.reverse,
             &source_neighbors,
             &viewer_distrusts,
         )
@@ -1565,6 +1649,7 @@ impl TrustGraph {
         for (node, score) in forward_bfs_inner(
             source_id,
             &self.forward,
+            &self.reverse,
             &source_neighbors,
             &viewer_distrusts,
         ) {

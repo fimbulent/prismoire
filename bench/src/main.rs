@@ -1,636 +1,33 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+//! Prismoire trust-graph benchmark binary.
+//!
+//! The algorithm under test lives in [`algo`]; the synthetic graph
+//! generators live in [`graph`]. This file owns the benchmark harness, the
+//! verbose test runner, the cargo-test module, and the CLI dispatcher.
+
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-/// Per-hop decay constant for trust propagation (matches server/src/trust.rs).
-const DECAY: f64 = 0.7;
-
-/// Maximum BFS depth for trust traversal.
-const MAX_DEPTH: u32 = 3;
-
-/// Per-distrusted-target penalty for reliability computation.
-const DISTRUST_PENALTY: f64 = 0.25;
-
-/// Maps distruster's dense node ID → set of distrusted dense node IDs.
-type DistrustSets = HashMap<u32, HashSet<u32>>;
-
-// ---------------------------------------------------------------------------
-// CSR graph representation
-// ---------------------------------------------------------------------------
-
-/// Compressed Sparse Row graph for cache-friendly BFS traversal.
-///
-/// Nodes are identified by dense u32 indices. Edge targets for node `i` are
-/// stored in `targets[offsets[i]..offsets[i+1]]`. This is ~3-5x more memory
-/// efficient than `HashMap<K, Vec<K>>` and yields sequential memory access
-/// during BFS.
-struct CsrGraph {
-    /// Per-node offset into `targets`. Length = num_nodes + 1.
-    /// Node i's neighbors are `targets[offsets[i]..offsets[i+1]]`.
-    offsets: Vec<u32>,
-    /// Flat array of all edge targets (dense node indices).
-    targets: Vec<u32>,
-    num_nodes: u32,
-}
-
-impl CsrGraph {
-    /// Build a CSR graph from an edge list over dense node indices.
-    ///
-    /// `num_nodes` is the total number of nodes (indices 0..num_nodes).
-    /// `edges` is a list of (source, target) pairs using dense indices.
-    fn from_edges(num_nodes: u32, edges: &[(u32, u32)]) -> Self {
-        // Count outgoing edges per node.
-        let n = num_nodes as usize;
-        let mut degree = vec![0u32; n];
-        for &(src, _) in edges {
-            degree[src as usize] += 1;
-        }
-
-        // Build offset array (exclusive prefix sum).
-        let mut offsets = vec![0u32; n + 1];
-        for i in 0..n {
-            offsets[i + 1] = offsets[i] + degree[i];
-        }
-
-        // Fill targets using a write cursor per node.
-        let mut targets = vec![0u32; edges.len()];
-        let mut cursor = offsets[..n].to_vec();
-        for &(src, tgt) in edges {
-            let pos = cursor[src as usize] as usize;
-            targets[pos] = tgt;
-            cursor[src as usize] += 1;
-        }
-
-        Self {
-            offsets,
-            targets,
-            num_nodes,
-        }
-    }
-
-    /// Return the neighbors of node `i` as a slice.
-    #[inline]
-    fn neighbors(&self, i: u32) -> &[u32] {
-        let start = self.offsets[i as usize] as usize;
-        let end = self.offsets[i as usize + 1] as usize;
-        &self.targets[start..end]
-    }
-
-    /// Build the transpose (reverse) graph — same nodes, all edges flipped.
-    fn transpose(&self) -> Self {
-        let mut reverse_edges = Vec::with_capacity(self.targets.len());
-        for src in 0..self.num_nodes {
-            for &tgt in self.neighbors(src) {
-                reverse_edges.push((tgt, src));
-            }
-        }
-        Self::from_edges(self.num_nodes, &reverse_edges)
-    }
-
-    /// Approximate memory usage in bytes.
-    fn memory_bytes(&self) -> usize {
-        self.offsets.len() * size_of::<u32>() + self.targets.len() * size_of::<u32>()
-    }
-}
-
-/// Paired forward and reverse CSR graphs for dual BFS.
-struct DualCsrGraph {
-    forward: CsrGraph,
-    reverse: CsrGraph,
-    #[allow(dead_code)]
-    num_nodes: u32,
-}
-
-impl DualCsrGraph {
-    fn from_edges(num_nodes: u32, edges: &[(u32, u32)]) -> Self {
-        let forward = CsrGraph::from_edges(num_nodes, edges);
-        let reverse = forward.transpose();
-        Self {
-            forward,
-            reverse,
-            num_nodes,
-        }
-    }
-
-    fn memory_bytes(&self) -> usize {
-        self.forward.memory_bytes() + self.reverse.memory_bytes()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Path group combination (shared by forward and reverse BFS)
-// ---------------------------------------------------------------------------
-
-/// Per-target accumulator for bottleneck-grouped probabilistic scores.
-///
-/// Groups are keyed by u32 node index (the "evidence source" — first-hop
-/// neighbor in forward BFS, predecessor in reverse BFS). Within each group,
-/// only the maximum path score is kept. Across groups, scores combine via
-/// probabilistic independence: combined = 1 - ∏(1 - max_per_group).
-struct PathGroupsU32 {
-    /// (group_key, best_score) pairs. Small enough that linear scan beats
-    /// HashMap for typical group counts (≤ source out-degree, usually < 20).
-    groups: Vec<(u32, f64)>,
-}
-
-impl PathGroupsU32 {
-    fn new() -> Self {
-        Self { groups: Vec::new() }
-    }
-
-    /// Record a path contribution under the given group key.
-    #[inline]
-    fn add(&mut self, group: u32, score: f64) {
-        for entry in &mut self.groups {
-            if entry.0 == group {
-                if score > entry.1 {
-                    entry.1 = score;
-                }
-                return;
-            }
-        }
-        self.groups.push((group, score));
-    }
-
-    /// Combine group maxima via probabilistic independence.
-    fn combined_score(&self) -> f64 {
-        if self.groups.is_empty() {
-            return 0.0;
-        }
-        let product: f64 = self.groups.iter().map(|&(_, s)| 1.0 - s).product();
-        1.0 - product
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Distrust reliability
-// ---------------------------------------------------------------------------
-
-/// Compute the reliability factor for a node given its outgoing neighbors and
-/// the viewer's distrust set. Each neighbor that appears in `viewer_distrusts`
-/// contributes an independent multiplicative penalty.
-#[inline]
-fn reliability(neighbors: &[u32], viewer_distrusts: &HashSet<u32>) -> f64 {
-    let count = neighbors
-        .iter()
-        .filter(|n| viewer_distrusts.contains(n))
-        .count() as i32;
-    (1.0 - DISTRUST_PENALTY).powi(count)
-}
-
-// ---------------------------------------------------------------------------
-// Forward BFS: reader → authors (relevance)
-// ---------------------------------------------------------------------------
-
-/// Compute trust scores from a single source using bottleneck-grouped BFS
-/// on the forward CSR graph with distrust propagation.
-///
-/// Paths are grouped by the source's direct (first-hop) neighbor. Within each
-/// group, only the max path score is kept. Across groups, scores combine via
-/// probabilistic independence.
-///
-/// Distrust propagation: each visited node's score is multiplied by a reliability
-/// factor based on how many of its trust targets the viewer has distrusted.
-/// After BFS, directly distrusted users are overridden to score 0.0.
-///
-/// Returns a vec of (target_node, combined_score) for all reachable nodes.
-fn forward_bfs(source: u32, graph: &CsrGraph, distrust_sets: &DistrustSets) -> Vec<(u32, f64)> {
-    let empty = HashSet::new();
-    let viewer_distrusts = distrust_sets.get(&source).unwrap_or(&empty);
-
-    // BFS state: (current_node, depth, first_hop, path_score)
-    let mut queue: VecDeque<(u32, u32, u32, f64)> = VecDeque::new();
-    let mut target_groups: HashMap<u32, PathGroupsU32> = HashMap::new();
-
-    // Per-first-hop visited sets prevent cycles within a group while allowing
-    // the same node to be reached via different first-hop neighbors (those
-    // represent independent evidence sources).
-    let mut visited_per_group: HashMap<u32, HashSet<u32>> = HashMap::new();
-
-    for &neighbor in graph.neighbors(source) {
-        if neighbor == source {
-            continue;
-        }
-        let penalized = reliability(graph.neighbors(neighbor), viewer_distrusts);
-        queue.push_back((neighbor, 1, neighbor, penalized));
-        target_groups
-            .entry(neighbor)
-            .or_insert_with(PathGroupsU32::new)
-            .add(neighbor, penalized);
-        visited_per_group
-            .entry(neighbor)
-            .or_default()
-            .insert(neighbor);
-    }
-
-    while let Some((current, depth, first_hop, path_score)) = queue.pop_front() {
-        if depth >= MAX_DEPTH {
-            continue;
-        }
-
-        for &next in graph.neighbors(current) {
-            if next == source {
-                continue;
-            }
-
-            let visited = visited_per_group.entry(first_hop).or_default();
-            if visited.contains(&next) {
-                continue;
-            }
-            visited.insert(next);
-
-            let r = reliability(graph.neighbors(next), viewer_distrusts);
-            let next_score = path_score * DECAY * r;
-
-            target_groups
-                .entry(next)
-                .or_insert_with(PathGroupsU32::new)
-                .add(first_hop, next_score);
-
-            queue.push_back((next, depth + 1, first_hop, next_score));
-        }
-    }
-
-    let mut results: Vec<(u32, f64)> = target_groups
-        .into_iter()
-        .map(|(target, groups)| (target, groups.combined_score()))
-        .collect();
-
-    // Direct distrust override: distrusted users get effective trust 0.0.
-    if !viewer_distrusts.is_empty() {
-        for entry in &mut results {
-            if viewer_distrusts.contains(&entry.0) {
-                entry.1 = 0.0;
-            }
-        }
-    }
-
-    results
-}
-
-// ---------------------------------------------------------------------------
-// Reverse BFS: who trusts the reader (visibility)
-// ---------------------------------------------------------------------------
-
-/// Compute trust-in-reader for all users who can reach `reader` within
-/// MAX_DEPTH hops, using the reverse (transposed) graph.
-///
-/// For each discovered node A, computes trust(A, reader) using bottleneck-
-/// grouped probabilistic combination. The group key for A is the
-/// **predecessor** in the reverse traversal — which equals A's direct
-/// forward-graph neighbor on the path toward `reader`. This correctly
-/// implements the same "group by source's first-hop" semantics as the
-/// forward BFS, but from every discovered source's perspective simultaneously.
-///
-/// Visited set semantics differ from forward BFS:
-/// - A **global** visited set controls expansion (each node expanded at most
-///   once, at its shallowest depth — BFS guarantees this is the highest
-///   path_score).
-/// - Group contributions are still recorded from later arrivals (different
-///   predecessors at greater depths) without re-expanding the node. This is
-///   safe because re-expansion would only produce lower scores downstream
-///   (deeper paths have strictly lower path_score due to multiplicative decay).
-///
-/// NOTE: This function does NOT apply distrust propagation. Distrust penalties are
-/// viewer-specific (each source A has its own distrust set), so they cannot be
-/// folded into the shared path_score of a single reverse pass. The scores
-/// returned here are an approximation that ignores distrusts. For exact
-/// distrust-penalized trust(A, reader), use forward_bfs from A directly.
-fn reverse_bfs(reader: u32, reverse_graph: &CsrGraph) -> Vec<(u32, f64)> {
-    // BFS state: (current_node, depth, path_score)
-    // No first_hop tag — the group key is determined by expansion context.
-    let mut queue: VecDeque<(u32, u32, f64)> = VecDeque::new();
-    let mut target_groups: HashMap<u32, PathGroupsU32> = HashMap::new();
-
-    // Global visited set: controls which nodes get expanded (enqueued).
-    // A node is expanded only on its first visit (shallowest depth).
-    let mut visited: HashSet<u32> = HashSet::new();
-
-    // Seed: reader's in-neighbors in forward graph = reader's out-neighbors
-    // in the reverse graph. Each such node N has a direct forward edge to
-    // reader, so trust(N, reader) has group key = reader itself, score 1.0.
-    for &neighbor in reverse_graph.neighbors(reader) {
-        if neighbor == reader {
-            continue;
-        }
-        target_groups
-            .entry(neighbor)
-            .or_insert_with(PathGroupsU32::new)
-            .add(reader, 1.0);
-        if visited.insert(neighbor) {
-            queue.push_back((neighbor, 1, 1.0));
-        }
-    }
-
-    while let Some((current, depth, path_score)) = queue.pop_front() {
-        if depth >= MAX_DEPTH {
-            continue;
-        }
-
-        let next_score = path_score * DECAY;
-
-        // In the reverse graph, an edge current → next means next → current
-        // in the forward graph. So `current` is `next`'s direct forward
-        // neighbor on this path toward reader. The group key for `next` on
-        // this path is therefore `current`.
-        for &next in reverse_graph.neighbors(current) {
-            if next == reader {
-                continue;
-            }
-
-            // Always record the group contribution, even if `next` was
-            // already visited — different predecessors represent different
-            // groups for `next`'s trust calculation.
-            target_groups
-                .entry(next)
-                .or_insert_with(PathGroupsU32::new)
-                .add(current, next_score);
-
-            // Only expand (enqueue) on first visit. Re-expansion is
-            // unnecessary: BFS visits shallowest-first, so the first
-            // expansion produces the highest path_score downstream.
-            // Later arrivals at greater depth contribute lower scores
-            // that are only relevant for the arrived node's own groups,
-            // not for anything further downstream.
-            if visited.insert(next) {
-                queue.push_back((next, depth + 1, next_score));
-            }
-        }
-    }
-
-    target_groups
-        .into_iter()
-        .map(|(target, groups)| (target, groups.combined_score()))
-        .collect()
-}
-
-// ---------------------------------------------------------------------------
-// Synthetic graph generation
-// ---------------------------------------------------------------------------
-
-/// Configuration for synthetic federated graph generation.
-struct GraphConfig {
-    /// Number of local users (the "home instance").
-    local_users: u32,
-    /// Number of remote instances.
-    remote_instances: u32,
-    /// Average intra-instance vouches per user.
-    avg_intra_vouches: u32,
-    /// Number of cross-instance vouches from local users (one per remote
-    /// instance for a well-connected instance).
-    cross_instance_vouches: u32,
-}
-
-impl GraphConfig {
-    fn single_instance() -> Self {
-        Self {
-            local_users: 10_000,
-            remote_instances: 0,
-            avg_intra_vouches: 10,
-            cross_instance_vouches: 0,
-        }
-    }
-
-    fn federation() -> Self {
-        Self {
-            local_users: 10_000,
-            remote_instances: 10_000,
-            avg_intra_vouches: 10,
-            cross_instance_vouches: 10_000,
-        }
-    }
-}
-
-/// Generated graph with metadata about node ranges.
-struct SyntheticGraph {
-    edges: Vec<(u32, u32)>,
-    distrust_edges: Vec<(u32, u32)>,
-    num_nodes: u32,
-    /// Range of local user node indices.
-    local_range: std::ops::Range<u32>,
-}
-
-/// Generate a synthetic federated trust graph with clustered topology.
-///
-/// Creates a "home instance" with `local_users` densely connected users,
-/// then `remote_instances` remote clusters each with a small number of
-/// reachable users (following the 3-hop frontier model from
-/// federation-bfs-analysis.md).
-fn generate_graph(config: &GraphConfig, rng: &mut ChaCha8Rng) -> SyntheticGraph {
-    let mut edges: Vec<(u32, u32)> = Vec::new();
-    let mut next_node: u32 = 0;
-
-    // --- Local instance ---
-    let local_start = next_node;
-    let local_end = local_start + config.local_users;
-    next_node = local_end;
-
-    // Intra-instance vouches: each local user vouches for `avg_intra_vouches`
-    // random other local users.
-    for user in local_start..local_end {
-        let mut targets: HashSet<u32> = HashSet::new();
-        while targets.len() < config.avg_intra_vouches as usize {
-            let target = rng.gen_range(local_start..local_end);
-            if target != user {
-                targets.insert(target);
-            }
-        }
-        for target in targets {
-            edges.push((user, target));
-        }
-    }
-
-    // --- Distrust edges ---
-    // ~10% of local users distrust 1-2 random local users.
-    let num_distrusters = (config.local_users / 10).max(1);
-    let mut distrust_edges: Vec<(u32, u32)> = Vec::new();
-    for i in 0..num_distrusters {
-        let distruster = local_start + i;
-        let num_distrusts = rng.gen_range(1..=2u32);
-        for _ in 0..num_distrusts {
-            let target = rng.gen_range(local_start..local_end);
-            if target != distruster {
-                distrust_edges.push((distruster, target));
-            }
-        }
-    }
-
-    if config.remote_instances == 0 {
-        return SyntheticGraph {
-            num_nodes: next_node,
-            edges,
-            distrust_edges,
-            local_range: local_start..local_end,
-        };
-    }
-
-    // --- Remote instances ---
-    // For each remote instance, create a small cluster reachable from one
-    // local user's cross-instance vouch. The cluster follows the 3-hop
-    // frontier model:
-    //   hop 1: 1 user (the cross-instance vouch target)
-    //   hop 2: ~avg_intra_vouches users (hop-1's local neighbors)
-    //   hop 3: ~avg_intra_vouches² users (hop-2's local neighbors)
-    // Only edges from hops 1-2 are stored (hop-3 users are leaf nodes).
-    let num_cross = config.cross_instance_vouches.min(config.remote_instances);
-    let cross_sources: Vec<u32> = (0..num_cross)
-        .map(|i| local_start + (i % config.local_users))
-        .collect();
-
-    for (i, &cross_src) in cross_sources.iter().enumerate() {
-        let _instance_id = i;
-
-        // Hop-1 user: the cross-instance vouch target.
-        let hop1 = next_node;
-        next_node += 1;
-        edges.push((cross_src, hop1));
-
-        // Hop-2 users: hop-1's local neighbors on the remote instance.
-        let hop2_count = config.avg_intra_vouches;
-        let hop2_start = next_node;
-        let hop2_end = hop2_start + hop2_count;
-        next_node = hop2_end;
-
-        for h2 in hop2_start..hop2_end {
-            edges.push((hop1, h2));
-        }
-
-        // Hop-3 users: each hop-2 user has ~avg_intra_vouches local neighbors.
-        // These are leaf nodes — we store the edges from hop-2 to them but
-        // don't store their outgoing edges.
-        let hop3_per_h2 = config.avg_intra_vouches;
-        for h2 in hop2_start..hop2_end {
-            let hop3_start = next_node;
-            let hop3_end = hop3_start + hop3_per_h2;
-            next_node = hop3_end;
-
-            for h3 in hop3_start..hop3_end {
-                edges.push((h2, h3));
-            }
-        }
-    }
-
-    SyntheticGraph {
-        num_nodes: next_node,
-        edges,
-        distrust_edges,
-        local_range: local_start..local_end,
-    }
-}
-
-/// Build a DistrustSets lookup from a list of (distruster, distrusted) pairs.
-fn build_distrust_sets(distrust_edges: &[(u32, u32)]) -> DistrustSets {
-    let mut sets: DistrustSets = HashMap::new();
-    for &(distruster, distrusted) in distrust_edges {
-        sets.entry(distruster).or_default().insert(distrusted);
-    }
-    sets
-}
-
-// ---------------------------------------------------------------------------
-// Reference (HashMap) implementation for correctness verification
-// ---------------------------------------------------------------------------
-
-/// HashMap-based adjacency list (same as server/src/trust.rs, using u32).
-struct HashMapGraph {
-    adj: HashMap<u32, Vec<u32>>,
-}
-
-impl HashMapGraph {
-    fn from_edges(edges: &[(u32, u32)]) -> Self {
-        let mut adj: HashMap<u32, Vec<u32>> = HashMap::new();
-        for &(src, tgt) in edges {
-            adj.entry(src).or_default().push(tgt);
-        }
-        Self { adj }
-    }
-}
-
-/// Reference forward BFS on HashMap graph (mirrors server/src/trust.rs logic)
-/// with distrust propagation.
-fn reference_forward_bfs(
-    source: u32,
-    graph: &HashMapGraph,
-    distrust_sets: &DistrustSets,
-) -> Vec<(u32, f64)> {
-    let empty_distrusts = HashSet::new();
-    let viewer_distrusts = distrust_sets.get(&source).unwrap_or(&empty_distrusts);
-    let empty_neighbors: Vec<u32> = Vec::new();
-
-    let mut queue: VecDeque<(u32, u32, u32, f64)> = VecDeque::new();
-    let mut target_groups: HashMap<u32, PathGroupsU32> = HashMap::new();
-    let mut visited_per_group: HashMap<u32, HashSet<u32>> = HashMap::new();
-
-    if let Some(neighbors) = graph.adj.get(&source) {
-        for &neighbor in neighbors {
-            if neighbor == source {
-                continue;
-            }
-            let nbr_targets = graph.adj.get(&neighbor).unwrap_or(&empty_neighbors);
-            let r = reliability(nbr_targets, viewer_distrusts);
-            let penalized = 1.0 * r;
-            queue.push_back((neighbor, 1, neighbor, penalized));
-            target_groups
-                .entry(neighbor)
-                .or_insert_with(PathGroupsU32::new)
-                .add(neighbor, penalized);
-            visited_per_group
-                .entry(neighbor)
-                .or_default()
-                .insert(neighbor);
-        }
-    }
-
-    while let Some((current, depth, first_hop, path_score)) = queue.pop_front() {
-        if depth >= MAX_DEPTH {
-            continue;
-        }
-
-        if let Some(neighbors) = graph.adj.get(&current) {
-            for &next in neighbors {
-                if next == source {
-                    continue;
-                }
-                let visited = visited_per_group.entry(first_hop).or_default();
-                if visited.contains(&next) {
-                    continue;
-                }
-                visited.insert(next);
-
-                let next_targets = graph.adj.get(&next).unwrap_or(&empty_neighbors);
-                let r = reliability(next_targets, viewer_distrusts);
-                let next_score = path_score * DECAY * r;
-                target_groups
-                    .entry(next)
-                    .or_insert_with(PathGroupsU32::new)
-                    .add(first_hop, next_score);
-                queue.push_back((next, depth + 1, first_hop, next_score));
-            }
-        }
-    }
-
-    let mut results: Vec<(u32, f64)> = target_groups
-        .into_iter()
-        .map(|(target, groups)| (target, groups.combined_score()))
-        .collect();
-
-    if !viewer_distrusts.is_empty() {
-        for entry in &mut results {
-            if viewer_distrusts.contains(&entry.0) {
-                entry.1 = 0.0;
-            }
-        }
-    }
-
-    results
-}
+mod algo;
+mod graph;
+
+use algo::{
+    DECAY, DistrustSets, DualCsrGraph, HUB_DAMPEN_THRESHOLD, HashMapGraph, MAX_DEPTH,
+    build_distrust_sets, forward_bfs, forward_bfs_with_threshold, reference_forward_bfs,
+    reverse_bfs,
+};
+use graph::{
+    FederationEnvironment, GraphConfig, HomeInstanceConfig, PowerLawConfig, SyntheticGraph,
+    estimate_frontier, generate_federated_power_law_graph, generate_graph,
+    generate_power_law_graph,
+};
+
+// Re-import inside cargo-test scope works because tests `use super::*`.
+// algo::CsrGraph is referenced by the inline test module.
+use algo::CsrGraph;
 
 // ---------------------------------------------------------------------------
 // Memory reporting (Linux /proc/self/status)
@@ -680,7 +77,30 @@ fn fmt_memory(kb: u64) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Benchmark runner
+// Shared timing helpers
+// ---------------------------------------------------------------------------
+
+/// Pick `num_samples` evenly-spaced source IDs from the local range.
+fn pick_sample_sources(local: &std::ops::Range<u32>, num_samples: usize) -> Vec<u32> {
+    let len = (local.end - local.start) as usize;
+    let num = num_samples.min(len);
+    let step = len / num.max(1);
+    (0..num).map(|i| local.start + (i * step) as u32).collect()
+}
+
+/// Compute (min, p50, p99, max, mean) over a sorted-ascending timing vec.
+fn timing_stats(sorted_times_ms: &[f64]) -> (f64, f64, f64, f64, f64) {
+    let len = sorted_times_ms.len();
+    let p50 = sorted_times_ms[len / 2];
+    let p99 = sorted_times_ms[(len as f64 * 0.99) as usize];
+    let min = sorted_times_ms[0];
+    let max = sorted_times_ms[len - 1];
+    let mean: f64 = sorted_times_ms.iter().sum::<f64>() / len as f64;
+    (min, p50, p99, max, mean)
+}
+
+// ---------------------------------------------------------------------------
+// Homogeneous benchmark runner
 // ---------------------------------------------------------------------------
 
 fn run_benchmark(name: &str, config: &GraphConfig) {
@@ -705,7 +125,23 @@ fn run_benchmark(name: &str, config: &GraphConfig) {
         synth.local_range.end - synth.local_range.start
     );
 
-    // --- CSR build ---
+    let dual = build_csr_and_report(&synth, rss_before);
+    let distrust_sets = build_distrust_sets(&synth.distrust_edges);
+    println!(
+        "  distrust edges: {}  distrusters: {}",
+        synth.distrust_edges.len(),
+        distrust_sets.len()
+    );
+
+    run_bfs_timings(&synth, &dual, &distrust_sets);
+
+    if let Some(peak) = peak_rss_kb() {
+        println!("\nPeak RSS: {}", fmt_memory(peak));
+    }
+}
+
+/// Build the dual CSR and print build timing, edge counts, memory.
+fn build_csr_and_report(synth: &SyntheticGraph, rss_before: Option<u64>) -> DualCsrGraph {
     let t1 = Instant::now();
     let dual = DualCsrGraph::from_edges(synth.num_nodes, &synth.edges);
     let csr_build_time = t1.elapsed();
@@ -738,40 +174,34 @@ fn run_benchmark(name: &str, config: &GraphConfig) {
         );
     }
 
-    // --- Forward BFS timing ---
-    // Sample local users spread across the range for representative latency.
-    let num_samples = 100.min((synth.local_range.end - synth.local_range.start) as usize);
-    let step = ((synth.local_range.end - synth.local_range.start) as usize) / num_samples;
-    let sample_sources: Vec<u32> = (0..num_samples)
-        .map(|i| synth.local_range.start + (i * step) as u32)
-        .collect();
+    dual
+}
 
-    let distrust_sets = build_distrust_sets(&synth.distrust_edges);
-    println!(
-        "  distrust edges: {}  distrusters: {}",
-        synth.distrust_edges.len(),
-        distrust_sets.len()
-    );
+/// Standard BFS timing block: forward, reverse, dual.
+fn run_bfs_timings(synth: &SyntheticGraph, dual: &DualCsrGraph, distrust_sets: &DistrustSets) {
+    let sample_sources = pick_sample_sources(&synth.local_range, 100);
+    let num_samples = sample_sources.len();
 
     // Warm up (one run to populate caches).
-    let _ = forward_bfs(sample_sources[0], &dual.forward, &distrust_sets);
+    let _ = forward_bfs(
+        sample_sources[0],
+        &dual.forward,
+        &dual.reverse,
+        distrust_sets,
+    );
     let _ = reverse_bfs(sample_sources[0], &dual.reverse);
 
+    // --- Forward BFS ---
     let mut forward_times = Vec::with_capacity(num_samples);
     let mut forward_result_counts = Vec::with_capacity(num_samples);
     for &src in &sample_sources {
         let t = Instant::now();
-        let results = forward_bfs(src, &dual.forward, &distrust_sets);
+        let results = forward_bfs(src, &dual.forward, &dual.reverse, distrust_sets);
         forward_times.push(t.elapsed().as_secs_f64() * 1000.0);
         forward_result_counts.push(results.len());
     }
-
     forward_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let fwd_p50 = forward_times[forward_times.len() / 2];
-    let fwd_p99 = forward_times[(forward_times.len() as f64 * 0.99) as usize];
-    let fwd_mean: f64 = forward_times.iter().sum::<f64>() / forward_times.len() as f64;
-    let fwd_min = forward_times[0];
-    let fwd_max = forward_times[forward_times.len() - 1];
+    let (fwd_min, fwd_p50, fwd_p99, fwd_max, fwd_mean) = timing_stats(&forward_times);
     let avg_results: f64 =
         forward_result_counts.iter().sum::<usize>() as f64 / forward_result_counts.len() as f64;
 
@@ -781,7 +211,7 @@ fn run_benchmark(name: &str, config: &GraphConfig) {
     );
     println!("  avg reachable targets: {avg_results:.0}");
 
-    // --- Reverse BFS timing ---
+    // --- Reverse BFS ---
     let mut reverse_times = Vec::with_capacity(num_samples);
     let mut reverse_result_counts = Vec::with_capacity(num_samples);
     for &src in &sample_sources {
@@ -790,13 +220,8 @@ fn run_benchmark(name: &str, config: &GraphConfig) {
         reverse_times.push(t.elapsed().as_secs_f64() * 1000.0);
         reverse_result_counts.push(results.len());
     }
-
     reverse_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let rev_p50 = reverse_times[reverse_times.len() / 2];
-    let rev_p99 = reverse_times[(reverse_times.len() as f64 * 0.99) as usize];
-    let rev_mean: f64 = reverse_times.iter().sum::<f64>() / reverse_times.len() as f64;
-    let rev_min = reverse_times[0];
-    let rev_max = reverse_times[reverse_times.len() - 1];
+    let (rev_min, rev_p50, rev_p99, rev_max, rev_mean) = timing_stats(&reverse_times);
     let avg_rev_results: f64 =
         reverse_result_counts.iter().sum::<usize>() as f64 / reverse_result_counts.len() as f64;
 
@@ -810,23 +235,564 @@ fn run_benchmark(name: &str, config: &GraphConfig) {
     let mut dual_times = Vec::with_capacity(num_samples);
     for &src in &sample_sources {
         let t = Instant::now();
-        let _fwd = forward_bfs(src, &dual.forward, &distrust_sets);
+        let _fwd = forward_bfs(src, &dual.forward, &dual.reverse, distrust_sets);
         let _rev = reverse_bfs(src, &dual.reverse);
         dual_times.push(t.elapsed().as_secs_f64() * 1000.0);
     }
-
     dual_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let dual_p50 = dual_times[dual_times.len() / 2];
-    let dual_p99 = dual_times[(dual_times.len() as f64 * 0.99) as usize];
-    let dual_mean: f64 = dual_times.iter().sum::<f64>() / dual_times.len() as f64;
+    let (_, dual_p50, dual_p99, _, dual_mean) = timing_stats(&dual_times);
 
     println!("\nDual BFS (simulated page load) — {num_samples} samples:");
     println!("  p50: {dual_p50:.3}ms  p99: {dual_p99:.3}ms  mean: {dual_mean:.3}ms");
+}
 
-    // --- Peak RSS ---
+// ---------------------------------------------------------------------------
+// Power-law benchmark runner
+// ---------------------------------------------------------------------------
+
+/// Same as [`run_benchmark`] for setup/timing, plus four power-law-specific
+/// measurements after CSR build:
+///
+/// 1. **Degree distribution.** Top-N + percentile dump of in/out degree.
+///    Validates the generator produced the expected heavy tail.
+/// 2. **Variance multiplier κ = E[d²] / E[d]².** Direct test of the doc's
+///    "every `n·d²` formula understates by a factor of ~5×" claim.
+/// 3. **Friendship-paradox effective branching.** `Σ d_in·d_out / Σ d_in`,
+///    which is the expected out-degree of a node reached by a random hop.
+///    Doc predicts ~59 vs ~11 for the modelled distribution.
+/// 4. **Hub-dampening A/B.** Runs forward BFS on each sample source with
+///    dampening on (threshold=`HUB_DAMPEN_THRESHOLD`) and off
+///    (threshold=`u32::MAX`); reports how many target-paths that would be
+///    visible without dampening fall below the 0.45 visibility threshold
+///    when dampening is on.
+fn run_power_law_benchmark(name: &str, config: &PowerLawConfig) {
+    println!("\n{}", "=".repeat(60));
+    println!("  Benchmark: {name}");
+    println!("{}", "=".repeat(60));
+
+    let rss_before = current_rss_kb();
+
+    let mut rng = ChaCha8Rng::seed_from_u64(42);
+    let t0 = Instant::now();
+    let synth = generate_power_law_graph(config, &mut rng);
+    let gen_time = t0.elapsed();
+    println!(
+        "\nGraph generation:  {:.1}ms",
+        gen_time.as_secs_f64() * 1000.0
+    );
+    println!("  nodes: {}  edges: {}", synth.num_nodes, synth.edges.len());
+    println!(
+        "  topology: power-law (α={}, tiers: lurker={}/active={}/power={})",
+        config.in_degree_alpha,
+        config.lurker_out_degree,
+        config.active_out_degree,
+        config.power_out_degree,
+    );
+
+    let dual = build_csr_and_report(&synth, rss_before);
+    let distrust_sets = build_distrust_sets(&synth.distrust_edges);
+    println!(
+        "  distrust edges: {}  distrusters: {}",
+        synth.distrust_edges.len(),
+        distrust_sets.len()
+    );
+
+    report_degree_distribution(&dual);
+    report_variance_multiplier(&dual);
+    report_effective_branching(&dual);
+
+    run_bfs_timings(&synth, &dual, &distrust_sets);
+
+    let sample_sources = pick_sample_sources(&synth.local_range, 100);
+    report_hub_dampening_impact(&dual, &sample_sources);
+
     if let Some(peak) = peak_rss_kb() {
         println!("\nPeak RSS: {}", fmt_memory(peak));
     }
+}
+
+/// Measurement 1: in/out degree distribution top-10 + percentiles.
+fn report_degree_distribution(dual: &DualCsrGraph) {
+    let n = dual.num_nodes;
+    let mut in_degrees: Vec<u32> = (0..n)
+        .map(|node| dual.reverse.neighbors(node).len() as u32)
+        .collect();
+    let mut out_degrees: Vec<u32> = (0..n)
+        .map(|node| dual.forward.neighbors(node).len() as u32)
+        .collect();
+    let total_in_edges: u64 = in_degrees.iter().map(|&d| d as u64).sum();
+
+    in_degrees.sort_unstable_by(|a: &u32, b: &u32| b.cmp(a));
+    out_degrees.sort_unstable_by(|a: &u32, b: &u32| b.cmp(a));
+
+    // Percentile helper — input sorted DESCENDING, so p99 = index near 0.
+    let pct =
+        |sorted: &[u32], p: f64| -> u32 { sorted[((1.0 - p) * sorted.len() as f64) as usize] };
+
+    println!("\nDegree distribution (power-law topology):");
+    println!(
+        "  in-degree:  max={}  p99={}  p90={}  p50={}",
+        in_degrees[0],
+        pct(&in_degrees, 0.99),
+        pct(&in_degrees, 0.90),
+        pct(&in_degrees, 0.50),
+    );
+    println!(
+        "  out-degree: max={}  p99={}  p90={}  p50={}",
+        out_degrees[0],
+        pct(&out_degrees, 0.99),
+        pct(&out_degrees, 0.90),
+        pct(&out_degrees, 0.50),
+    );
+
+    let top_n = 10.min(in_degrees.len());
+    let top_sum: u64 = in_degrees[..top_n].iter().map(|&d| d as u64).sum();
+    println!(
+        "  top-{top_n} in-degree share: {:.1}% ({} of {} total inbound edges)",
+        100.0 * top_sum as f64 / total_in_edges as f64,
+        top_sum,
+        total_in_edges,
+    );
+
+    let above_threshold = in_degrees
+        .iter()
+        .take_while(|&&d| d > HUB_DAMPEN_THRESHOLD)
+        .count();
+    println!(
+        "  nodes above HUB_DAMPEN_THRESHOLD ({}): {}",
+        HUB_DAMPEN_THRESHOLD, above_threshold,
+    );
+}
+
+/// Measurement 2: out-degree variance multiplier κ = E[d²] / E[d]².
+///
+/// The doc's claim is that every `n · d²` frontier formula understates by
+/// this factor under power law. Homogeneous baseline = 1.0.
+fn report_variance_multiplier(dual: &DualCsrGraph) {
+    let n = dual.num_nodes;
+    let mut sum_d = 0u64;
+    let mut sum_d_sq = 0u128;
+    for node in 0..n {
+        let d = dual.forward.neighbors(node).len() as u64;
+        sum_d += d;
+        sum_d_sq += (d as u128) * (d as u128);
+    }
+    let mean_d = sum_d as f64 / n as f64;
+    let mean_d_sq = sum_d_sq as f64 / n as f64;
+    let kappa = mean_d_sq / (mean_d * mean_d);
+    println!(
+        "\nVariance multiplier κ = E[d²]/E[d]² = {kappa:.2}× (E[d]={mean_d:.1}, E[d²]={mean_d_sq:.0})"
+    );
+    println!("  homogeneous baseline κ = 1.0; doc predicts ≈5× for the modelled distribution");
+}
+
+/// Measurement 3: friendship-paradox effective branching factor.
+///
+/// `E[d_out | node reached by random hop] = Σ d_in·d_out / Σ d_in`. Doc
+/// predicts ~59 vs mean out-degree of ~11 under the modelled distribution.
+fn report_effective_branching(dual: &DualCsrGraph) {
+    let n = dual.num_nodes;
+    let mut sum_in_times_out: u128 = 0;
+    let mut sum_in: u64 = 0;
+    for node in 0..n {
+        let d_in = dual.reverse.neighbors(node).len() as u64;
+        let d_out = dual.forward.neighbors(node).len() as u64;
+        sum_in_times_out += (d_in as u128) * (d_out as u128);
+        sum_in += d_in;
+    }
+    let eff_branching = sum_in_times_out as f64 / sum_in.max(1) as f64;
+    let mean_out = sum_in as f64 / n as f64; // Σ d_in = Σ d_out
+    println!(
+        "Friendship-paradox branching at hop 2/3: {eff_branching:.1} (mean out-degree = {mean_out:.1})"
+    );
+}
+
+/// Measurement 4: hub-dampening A/B vs visibility threshold.
+///
+/// For each sample source, runs forward BFS with dampening on
+/// (threshold=`HUB_DAMPEN_THRESHOLD`) and off (threshold=`u32::MAX`). Counts
+/// targets whose path crosses the 0.45 visibility threshold in each
+/// configuration. The "attenuated" bucket is exactly the set of paths that
+/// dampening cut off from the visible feed — its size answers the question
+/// "how much frontier does dampening actually save on a realistic graph?".
+fn report_hub_dampening_impact(dual: &DualCsrGraph, sample_sources: &[u32]) {
+    const VISIBILITY_THRESHOLD: f64 = 0.45;
+    let no_distrusts: DistrustSets = HashMap::new();
+
+    let mut visible_with_damp = 0usize;
+    let mut visible_without_damp = 0usize;
+    let mut attenuated = 0usize;
+    // Median/max per-source forward result counts under each config, to
+    // give a frontier-size sense not just a yes/no on visibility.
+    let mut frontier_with: Vec<usize> = Vec::with_capacity(sample_sources.len());
+    let mut frontier_without: Vec<usize> = Vec::with_capacity(sample_sources.len());
+
+    for &src in sample_sources {
+        let with_damp: HashMap<u32, f64> = forward_bfs_with_threshold(
+            src,
+            &dual.forward,
+            &dual.reverse,
+            &no_distrusts,
+            HUB_DAMPEN_THRESHOLD,
+        )
+        .into_iter()
+        .collect();
+        let no_damp: HashMap<u32, f64> =
+            forward_bfs_with_threshold(src, &dual.forward, &dual.reverse, &no_distrusts, u32::MAX)
+                .into_iter()
+                .collect();
+
+        frontier_with.push(with_damp.len());
+        frontier_without.push(no_damp.len());
+
+        for (target, &score_no) in &no_damp {
+            if score_no >= VISIBILITY_THRESHOLD {
+                visible_without_damp += 1;
+                let score_with = with_damp.get(target).copied().unwrap_or(0.0);
+                if score_with >= VISIBILITY_THRESHOLD {
+                    visible_with_damp += 1;
+                } else {
+                    attenuated += 1;
+                }
+            }
+        }
+    }
+
+    frontier_with.sort_unstable();
+    frontier_without.sort_unstable();
+    let median = |v: &[usize]| v[v.len() / 2];
+
+    let attenuation_rate = if visible_without_damp == 0 {
+        0.0
+    } else {
+        100.0 * attenuated as f64 / visible_without_damp as f64
+    };
+
+    println!(
+        "\nHub-dampening A/B (visibility threshold = {VISIBILITY_THRESHOLD}, {} samples):",
+        sample_sources.len()
+    );
+    println!(
+        "  frontier (reachable targets)  with dampening: median={}  max={}",
+        median(&frontier_with),
+        frontier_with.last().copied().unwrap_or(0),
+    );
+    println!(
+        "  frontier (reachable targets) without dampening: median={}  max={}",
+        median(&frontier_without),
+        frontier_without.last().copied().unwrap_or(0),
+    );
+    println!("  visible paths without dampening: {visible_without_damp}");
+    println!("  visible paths with    dampening: {visible_with_damp}");
+    println!(
+        "  attenuated below threshold:      {attenuated}  ({attenuation_rate:.1}% of would-be-visible)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Federated power-law benchmark runner
+// ---------------------------------------------------------------------------
+
+/// Format a byte count as `KB`/`MB`/`GB`.
+fn fmt_bytes(b: u64) -> String {
+    if b >= 1024 * 1024 * 1024 {
+        format!("{:.1} GB", b as f64 / (1024.0 * 1024.0 * 1024.0))
+    } else if b >= 1024 * 1024 {
+        format!("{:.1} MB", b as f64 / (1024.0 * 1024.0))
+    } else if b >= 1024 {
+        format!("{:.1} KB", b as f64 / 1024.0)
+    } else {
+        format!("{b} B")
+    }
+}
+
+/// Print the analytical pre-flight before generation so admins can ctrl-C
+/// out of a config that would blow past their memory budget.
+fn print_pre_flight(home: &HomeInstanceConfig, env: &FederationEnvironment) {
+    let est = estimate_frontier(home, env);
+    println!(
+        "  federation env: {} instances × {} mean users ≈ {} conceptual users (α_size={}, α_target={})",
+        env.num_remote_instances,
+        env.mean_remote_instance_size,
+        fmt_count(env.num_remote_instances as u64 * env.mean_remote_instance_size as u64),
+        env.instance_size_alpha,
+        env.target_hub_alpha,
+    );
+    println!(
+        "  home: {} local users, local_preference={}",
+        home.local_users, home.local_preference,
+    );
+    println!("\nProjected (analytical pre-flight):");
+    println!("  cross-edges from home:   {}", fmt_count(est.cross_edges));
+    println!(
+        "  unique remote hubs hit:  {}",
+        fmt_count(est.unique_remote_hubs)
+    );
+    println!(
+        "  materialised frontier:   {} nodes ({:.1}× local)",
+        fmt_count(est.frontier_nodes),
+        est.frontier_nodes as f64 / home.local_users.max(1) as f64,
+    );
+    println!(
+        "  total edges:             {}",
+        fmt_count(est.frontier_edges)
+    );
+    println!(
+        "  CSR memory (forward+reverse): {}",
+        fmt_bytes(est.csr_memory_bytes)
+    );
+}
+
+/// Format an integer with thousands separators (`1,234,567`).
+fn fmt_count(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out.chars().rev().collect()
+}
+
+/// One-shot federated power-law benchmark. Mirrors
+/// [`run_power_law_benchmark`] but with the federated generator and a
+/// pre-flight estimate printed before generation.
+fn run_federated_power_law_benchmark(
+    name: &str,
+    home: &HomeInstanceConfig,
+    env: &FederationEnvironment,
+) {
+    println!("\n{}", "=".repeat(60));
+    println!("  Benchmark: {name}");
+    println!("{}", "=".repeat(60));
+
+    print_pre_flight(home, env);
+
+    let rss_before = current_rss_kb();
+
+    let mut rng = ChaCha8Rng::seed_from_u64(42);
+    let t0 = Instant::now();
+    let synth = generate_federated_power_law_graph(home, env, &mut rng);
+    let gen_time = t0.elapsed();
+    println!(
+        "\nGraph generation:  {:.1}ms",
+        gen_time.as_secs_f64() * 1000.0
+    );
+    println!(
+        "  nodes: {}  edges: {}",
+        fmt_count(synth.num_nodes as u64),
+        fmt_count(synth.edges.len() as u64),
+    );
+    let local_n = synth.local_range.end - synth.local_range.start;
+    let remote_n = synth.num_nodes - local_n;
+    println!(
+        "  local users: {}   remote frontier: {} ({:.1}× local)",
+        fmt_count(local_n as u64),
+        fmt_count(remote_n as u64),
+        remote_n as f64 / local_n.max(1) as f64,
+    );
+
+    let dual = build_csr_and_report(&synth, rss_before);
+    let distrust_sets = build_distrust_sets(&synth.distrust_edges);
+    println!(
+        "  distrust edges: {}  distrusters: {}",
+        synth.distrust_edges.len(),
+        distrust_sets.len()
+    );
+
+    // Estimate-vs-measurement comparison so we can recalibrate the
+    // estimator over time as we sweep more configs.
+    let est = estimate_frontier(home, env);
+    println!("\nEstimator vs measurement:");
+    println!(
+        "  frontier nodes:  est {}  actual {}  ratio {:.2}×",
+        fmt_count(est.frontier_nodes),
+        fmt_count(synth.num_nodes as u64),
+        synth.num_nodes as f64 / est.frontier_nodes.max(1) as f64,
+    );
+    println!(
+        "  total edges:     est {}  actual {}  ratio {:.2}×",
+        fmt_count(est.frontier_edges),
+        fmt_count(synth.edges.len() as u64),
+        synth.edges.len() as f64 / est.frontier_edges.max(1) as f64,
+    );
+    println!(
+        "  CSR bytes:       est {}  actual {}",
+        fmt_bytes(est.csr_memory_bytes),
+        fmt_bytes(dual.memory_bytes() as u64),
+    );
+
+    report_degree_distribution(&dual);
+    report_variance_multiplier(&dual);
+    report_effective_branching(&dual);
+
+    run_bfs_timings(&synth, &dual, &distrust_sets);
+
+    let sample_sources = pick_sample_sources(&synth.local_range, 100);
+    report_hub_dampening_impact(&dual, &sample_sources);
+
+    if let Some(peak) = peak_rss_kb() {
+        println!("\nPeak RSS: {}", fmt_memory(peak));
+    }
+}
+
+/// Scaling-sweep mode: run the federated benchmark across a range of
+/// `local_users` values and emit a one-row-per-config table. Directly
+/// answers the admin question "what userbase size fits this hardware /
+/// stays under this latency SLO?"
+///
+/// Each row reports actual measured frontier, RSS delta, and BFS p99.
+/// Generation per row is independent (fresh CSR, fresh RNG seed) so the
+/// rows can't poison each other's allocator behaviour.
+fn run_federated_power_law_sweep(env: &FederationEnvironment, sizes: &[u32]) {
+    println!("\n{}", "=".repeat(60));
+    println!("  Federated Power-Law Scaling Sweep");
+    println!("{}", "=".repeat(60));
+    println!(
+        "  federation: {} instances × {} mean users ≈ {} conceptual users",
+        env.num_remote_instances,
+        env.mean_remote_instance_size,
+        fmt_count(env.num_remote_instances as u64 * env.mean_remote_instance_size as u64),
+    );
+    println!("  shape: PowerLawConfig::medium_instance(), local_preference=0.5");
+
+    // RSS column reports the static CSR cost (the long-lived cost during
+    // normal operation), not the generation working-set peak — the latter
+    // is allocator-retention-dependent and would be confusing to compare
+    // across rows. CSR cost is deterministic and is what an admin actually
+    // pays at runtime.
+    println!();
+    println!(
+        "  {:>12}  {:>12}  {:>8}  {:>9}  {:>10}  {:>10}",
+        "local_users", "frontier", "×local", "CSR", "fwd_p99", "dual_p99",
+    );
+    println!("  {}", "─".repeat(72));
+
+    for &n in sizes {
+        let home = HomeInstanceConfig {
+            local_users: n,
+            shape: PowerLawConfig::medium_instance(),
+            local_preference: 0.5,
+        };
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let synth = generate_federated_power_law_graph(&home, env, &mut rng);
+        let dual = DualCsrGraph::from_edges(synth.num_nodes, &synth.edges);
+        let distrust_sets = build_distrust_sets(&synth.distrust_edges);
+
+        let sample_sources = pick_sample_sources(&synth.local_range, 50);
+        let _ = forward_bfs(
+            sample_sources[0],
+            &dual.forward,
+            &dual.reverse,
+            &distrust_sets,
+        );
+
+        let mut fwd_times: Vec<f64> = Vec::with_capacity(sample_sources.len());
+        let mut dual_times: Vec<f64> = Vec::with_capacity(sample_sources.len());
+        for &src in &sample_sources {
+            let t = Instant::now();
+            let _ = forward_bfs(src, &dual.forward, &dual.reverse, &distrust_sets);
+            fwd_times.push(t.elapsed().as_secs_f64() * 1000.0);
+
+            let t = Instant::now();
+            let _ = forward_bfs(src, &dual.forward, &dual.reverse, &distrust_sets);
+            let _ = reverse_bfs(src, &dual.reverse);
+            dual_times.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        fwd_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        dual_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let p99 = |v: &[f64]| v[(v.len() as f64 * 0.99) as usize];
+
+        println!(
+            "  {:>12}  {:>12}  {:>7.1}×  {:>9}  {:>8.2}ms  {:>8.2}ms",
+            fmt_count(n as u64),
+            fmt_count(synth.num_nodes as u64),
+            synth.num_nodes as f64 / n.max(1) as f64,
+            fmt_memory(dual.memory_bytes() as u64 / 1024),
+            p99(&fwd_times),
+            p99(&dual_times),
+        );
+    }
+    println!(
+        "\n  Note: CSR column is the static cost. Generation working-set\n  peaks ~2-3× higher (dedup HashMap)."
+    );
+}
+
+/// Sizing helper: pure analytical inversion of [`estimate_frontier`] to
+/// find the largest `local_users` whose projected CSR memory fits the
+/// admin's budget. No generation — answers "can I host N users on H
+/// hardware?" in milliseconds.
+fn run_sizing_helper(max_memory_bytes: u64, env: &FederationEnvironment) {
+    println!("\n{}", "=".repeat(60));
+    println!("  Federated Power-Law Sizing Helper");
+    println!("{}", "=".repeat(60));
+    println!(
+        "  target CSR memory budget: {}",
+        fmt_bytes(max_memory_bytes)
+    );
+    println!(
+        "  federation: {} instances × {} mean users ≈ {} conceptual users",
+        env.num_remote_instances,
+        env.mean_remote_instance_size,
+        fmt_count(env.num_remote_instances as u64 * env.mean_remote_instance_size as u64),
+    );
+
+    // Binary search on local_users — estimator is monotone-increasing in
+    // local_users at fixed env, so this is well-defined.
+    let probe = |n: u32| -> u64 {
+        let home = HomeInstanceConfig {
+            local_users: n,
+            shape: PowerLawConfig::medium_instance(),
+            local_preference: 0.5,
+        };
+        estimate_frontier(&home, env).csr_memory_bytes
+    };
+    if probe(1_000) > max_memory_bytes {
+        println!(
+            "\n  Even 1K local users projects above budget ({}). \
+             Reduce local_preference, simplify federation, or increase budget.",
+            fmt_bytes(probe(1_000))
+        );
+        return;
+    }
+    let mut lo = 1_000u32;
+    let mut hi = 10_000_000u32;
+    while hi - lo > 1_000 {
+        let mid = lo + (hi - lo) / 2;
+        if probe(mid) > max_memory_bytes {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    let est = estimate_frontier(
+        &HomeInstanceConfig {
+            local_users: lo,
+            shape: PowerLawConfig::medium_instance(),
+            local_preference: 0.5,
+        },
+        env,
+    );
+    println!(
+        "\n  Largest local_users fitting budget: ~{}",
+        fmt_count(lo as u64)
+    );
+    println!(
+        "  Projected frontier:   {} nodes ({:.1}× local)",
+        fmt_count(est.frontier_nodes),
+        est.frontier_nodes as f64 / lo.max(1) as f64,
+    );
+    println!(
+        "  Projected CSR memory: {} (budget {})",
+        fmt_bytes(est.csr_memory_bytes),
+        fmt_bytes(max_memory_bytes),
+    );
+    println!(
+        "  Note: estimator is approximate (~30–50% error on frontier).\n  Run `bench fed-power-law --local-users {}` to measure for real.",
+        lo
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -836,7 +802,9 @@ fn run_benchmark(name: &str, config: &GraphConfig) {
 fn main() {
     println!("Prismoire Trust Graph Benchmark");
     println!("===============================");
-    println!("Algorithm: Bottleneck-Grouped Probabilistic (DECAY={DECAY}, MAX_DEPTH={MAX_DEPTH})");
+    println!(
+        "Algorithm: Bottleneck-Grouped Probabilistic (DECAY={DECAY}, MAX_DEPTH={MAX_DEPTH}, HUB_DAMPEN_THRESHOLD={HUB_DAMPEN_THRESHOLD})"
+    );
 
     let args: Vec<String> = std::env::args().collect();
     let mode = args.get(1).map(|s| s.as_str()).unwrap_or("all");
@@ -851,6 +819,55 @@ fn main() {
         "federation" => {
             run_benchmark("Federation (10K instances)", &GraphConfig::federation());
         }
+        "power-law" | "powerlaw" => {
+            run_power_law_benchmark(
+                "Power-Law Single Instance (50K users)",
+                &PowerLawConfig::medium_instance(),
+            );
+        }
+        "fed-power-law" | "federated-power-law" => {
+            // Optional `--local-users N` override; default = medium (50K).
+            let mut home = HomeInstanceConfig::medium();
+            if let Some(pos) = args.iter().position(|a| a == "--local-users")
+                && let Some(n) = args.get(pos + 1).and_then(|s| s.parse::<u32>().ok())
+            {
+                home.local_users = n;
+            }
+            let env = FederationEnvironment::realistic_10k();
+            let name = format!(
+                "Federated Power-Law ({}K local users, ~100M conceptual)",
+                home.local_users / 1000
+            );
+            run_federated_power_law_benchmark(&name, &home, &env);
+        }
+        "sweep" | "fed-sweep" => {
+            // Default sweep grid; covers the SLO-relevant range. Override
+            // by passing the desired sizes as positional args after `sweep`.
+            let default_sizes: &[u32] = &[10_000, 50_000, 100_000, 250_000, 500_000];
+            let sizes: Vec<u32> = args
+                .iter()
+                .skip(2)
+                .filter_map(|s| s.parse::<u32>().ok())
+                .collect();
+            let sizes = if sizes.is_empty() {
+                default_sizes.to_vec()
+            } else {
+                sizes
+            };
+            let env = FederationEnvironment::realistic_10k();
+            run_federated_power_law_sweep(&env, &sizes);
+        }
+        "size" | "sizing" => {
+            // `bench size 4GB` style. Accept a plain byte count or a
+            // suffixed value (KB/MB/GB). Default budget: 4 GB.
+            let default_budget = 4u64 * 1024 * 1024 * 1024;
+            let budget = args
+                .get(2)
+                .and_then(|s| parse_memory_budget(s))
+                .unwrap_or(default_budget);
+            let env = FederationEnvironment::realistic_10k();
+            run_sizing_helper(budget, &env);
+        }
         "test" => {
             run_tests();
         }
@@ -860,12 +877,36 @@ fn main() {
                 &GraphConfig::single_instance(),
             );
             run_benchmark("Federation (10K instances)", &GraphConfig::federation());
+            run_power_law_benchmark(
+                "Power-Law Single Instance (50K users)",
+                &PowerLawConfig::medium_instance(),
+            );
+            run_federated_power_law_benchmark(
+                "Federated Power-Law (50K local users, ~100M conceptual)",
+                &HomeInstanceConfig::medium(),
+                &FederationEnvironment::realistic_10k(),
+            );
         }
     }
 }
 
+/// Parse `"4GB"` / `"512MB"` / `"1024"` (bare = bytes) into a byte count.
+fn parse_memory_budget(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let (num_part, mult) = if let Some(n) = s.strip_suffix("GB").or_else(|| s.strip_suffix("gb")) {
+        (n, 1024 * 1024 * 1024u64)
+    } else if let Some(n) = s.strip_suffix("MB").or_else(|| s.strip_suffix("mb")) {
+        (n, 1024 * 1024u64)
+    } else if let Some(n) = s.strip_suffix("KB").or_else(|| s.strip_suffix("kb")) {
+        (n, 1024u64)
+    } else {
+        (s, 1u64)
+    };
+    num_part.trim().parse::<u64>().ok().map(|n| n * mult)
+}
+
 // ---------------------------------------------------------------------------
-// Tests
+// Verbose test runner ("cargo run -- test")
 // ---------------------------------------------------------------------------
 
 fn run_tests() {
@@ -906,9 +947,10 @@ fn run_tests() {
     {
         let edges = vec![(0, 1), (1, 2), (2, 3)]; // A=0, B=1, C=2, D=3
         let csr = CsrGraph::from_edges(4, &edges);
+        let csr_rev = csr.transpose();
         let href = HashMapGraph::from_edges(&edges);
 
-        let csr_scores = to_map(forward_bfs(0, &csr, &no_distrusts));
+        let csr_scores = to_map(forward_bfs(0, &csr, &csr_rev, &no_distrusts));
         let ref_scores = to_map(reference_forward_bfs(0, &href, &no_distrusts));
 
         assert_near!(csr_scores[&1], 1.0, 0.001, "linear chain: B=1.0 (CSR)");
@@ -938,9 +980,10 @@ fn run_tests() {
     {
         let edges = vec![(0, 1), (0, 2), (1, 3), (2, 3)]; // A=0,B=1,C=2,D=3
         let csr = CsrGraph::from_edges(4, &edges);
+        let csr_rev = csr.transpose();
         let href = HashMapGraph::from_edges(&edges);
 
-        let csr_scores = to_map(forward_bfs(0, &csr, &no_distrusts));
+        let csr_scores = to_map(forward_bfs(0, &csr, &csr_rev, &no_distrusts));
         let ref_scores = to_map(reference_forward_bfs(0, &href, &no_distrusts));
 
         // 1-(1-0.7)(1-0.7) = 0.91
@@ -959,7 +1002,8 @@ fn run_tests() {
         // A=0, H=1, M=2, S1=3, S2=4
         let edges = vec![(0, 1), (1, 2), (1, 3), (1, 4), (3, 2), (4, 2)];
         let csr = CsrGraph::from_edges(5, &edges);
-        let csr_scores = to_map(forward_bfs(0, &csr, &no_distrusts));
+        let csr_rev = csr.transpose();
+        let csr_scores = to_map(forward_bfs(0, &csr, &csr_rev, &no_distrusts));
 
         // All paths through H — max in group H is A→H→M = 0.7
         assert_near!(csr_scores[&2], 0.7, 0.001, "sybil: M=0.7 (collapsed)");
@@ -970,7 +1014,8 @@ fn run_tests() {
         // A→B→C→D→E (4 hops, E unreachable)
         let edges = vec![(0, 1), (1, 2), (2, 3), (3, 4)];
         let csr = CsrGraph::from_edges(5, &edges);
-        let csr_scores = to_map(forward_bfs(0, &csr, &no_distrusts));
+        let csr_rev = csr.transpose();
+        let csr_scores = to_map(forward_bfs(0, &csr, &csr_rev, &no_distrusts));
 
         assert_true!(csr_scores.contains_key(&3), "depth limit: D reachable");
         assert_true!(!csr_scores.contains_key(&4), "depth limit: E unreachable");
@@ -981,7 +1026,8 @@ fn run_tests() {
         // A→B→A
         let edges = vec![(0, 1), (1, 0)];
         let csr = CsrGraph::from_edges(2, &edges);
-        let csr_scores = to_map(forward_bfs(0, &csr, &no_distrusts));
+        let csr_rev = csr.transpose();
+        let csr_scores = to_map(forward_bfs(0, &csr, &csr_rev, &no_distrusts));
 
         assert_true!(
             !csr_scores.contains_key(&0),
@@ -1018,7 +1064,7 @@ fn run_tests() {
         let edges = vec![(0, 1), (0, 2), (1, 3), (2, 3)];
         let dual = DualCsrGraph::from_edges(4, &edges);
 
-        let fwd_scores = to_map(forward_bfs(0, &dual.forward, &no_distrusts));
+        let fwd_scores = to_map(forward_bfs(0, &dual.forward, &dual.reverse, &no_distrusts));
         let rev_scores = to_map(reverse_bfs(3, &dual.reverse));
 
         assert_near!(
@@ -1036,7 +1082,7 @@ fn run_tests() {
         let edges = vec![(0, 1), (1, 2), (1, 3), (1, 4), (3, 2), (4, 2)];
         let dual = DualCsrGraph::from_edges(5, &edges);
 
-        let fwd_scores = to_map(forward_bfs(0, &dual.forward, &no_distrusts));
+        let fwd_scores = to_map(forward_bfs(0, &dual.forward, &dual.reverse, &no_distrusts));
         let rev_scores = to_map(reverse_bfs(2, &dual.reverse));
 
         // Forward trust(A, R) = group H only, max = A→H→R = 0.7
@@ -1053,7 +1099,7 @@ fn run_tests() {
         let edges = vec![(0, 1), (0, 2), (1, 3), (2, 1)];
         let dual = DualCsrGraph::from_edges(4, &edges);
 
-        let fwd_scores = to_map(forward_bfs(0, &dual.forward, &no_distrusts));
+        let fwd_scores = to_map(forward_bfs(0, &dual.forward, &dual.reverse, &no_distrusts));
         let rev_scores = to_map(reverse_bfs(3, &dual.reverse));
 
         // Forward: group X = 0.7 (A→X→R), group Y = 0.49 (A→Y→X→R)
@@ -1102,7 +1148,12 @@ fn run_tests() {
         let mut mismatches = 0;
         let mut comparisons = 0;
         for src in 0..10u32 {
-            let fwd = to_map(forward_bfs(src, &dual.forward, &no_distrusts));
+            let fwd = to_map(forward_bfs(
+                src,
+                &dual.forward,
+                &dual.reverse,
+                &no_distrusts,
+            ));
             for tgt in 0..n {
                 if tgt == src {
                     continue;
@@ -1149,12 +1200,13 @@ fn run_tests() {
         }
 
         let csr = CsrGraph::from_edges(n, &edges);
+        let csr_rev = csr.transpose();
         let href = HashMapGraph::from_edges(&edges);
 
         let mut mismatches = 0;
         let mut comparisons = 0;
         for src in 0..n {
-            let csr_scores = to_map(forward_bfs(src, &csr, &no_distrusts));
+            let csr_scores = to_map(forward_bfs(src, &csr, &csr_rev, &no_distrusts));
             let ref_scores = to_map(reference_forward_bfs(src, &href, &no_distrusts));
 
             // Every target in either map should match.
@@ -1230,7 +1282,8 @@ fn run_tests() {
         let edges = vec![(0, 1), (1, 2), (1, 3)];
         let blocks = HashMap::from([(0u32, HashSet::from([3u32]))]);
         let csr = CsrGraph::from_edges(4, &edges);
-        let scores = to_map(forward_bfs(0, &csr, &blocks));
+        let csr_rev = csr.transpose();
+        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &blocks));
 
         // A trusts E (distrusted) → reliability = 0.75
         assert_near!(scores[&1], 0.75, 0.001, "distrust single: A=0.75");
@@ -1252,7 +1305,8 @@ fn run_tests() {
         let edges = vec![(0, 1), (1, 2), (1, 3)];
         let blocks = HashMap::from([(0u32, HashSet::from([2u32, 3u32]))]);
         let csr = CsrGraph::from_edges(4, &edges);
-        let scores = to_map(forward_bfs(0, &csr, &blocks));
+        let csr_rev = csr.transpose();
+        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &blocks));
 
         // A trusts 2 distrusted → reliability = 0.75^2 = 0.5625
         assert_near!(scores[&1], 0.5625, 0.001, "distrust multi: A=0.5625");
@@ -1265,7 +1319,8 @@ fn run_tests() {
         let edges = vec![(0, 1), (1, 2), (0, 3)];
         let blocks = HashMap::from([(0u32, HashSet::from([3u32]))]);
         let csr = CsrGraph::from_edges(4, &edges);
-        let scores = to_map(forward_bfs(0, &csr, &blocks));
+        let csr_rev = csr.transpose();
+        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &blocks));
 
         // A doesn't trust E → no penalty
         assert_near!(scores[&1], 1.0, 0.001, "distrust clean: A=1.0");
@@ -1279,7 +1334,8 @@ fn run_tests() {
         let edges = vec![(0, 1), (0, 2), (1, 3), (2, 3), (1, 4)];
         let blocks = HashMap::from([(0u32, HashSet::from([4u32]))]);
         let csr = CsrGraph::from_edges(5, &edges);
-        let scores = to_map(forward_bfs(0, &csr, &blocks));
+        let csr_rev = csr.transpose();
+        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &blocks));
 
         // Group A: A reliability=0.75, T via A = 0.75 * 0.7 = 0.525
         // Group C: C reliability=1.0, T via C = 1.0 * 0.7 = 0.7
@@ -1294,7 +1350,8 @@ fn run_tests() {
         let edges = vec![(0, 1), (1, 2), (2, 3), (1, 4), (2, 5)];
         let blocks = HashMap::from([(0u32, HashSet::from([4u32, 5u32]))]);
         let csr = CsrGraph::from_edges(6, &edges);
-        let scores = to_map(forward_bfs(0, &csr, &blocks));
+        let csr_rev = csr.transpose();
+        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &blocks));
 
         // A: reliability = 0.75 (trusts E1) → 0.75
         assert_near!(scores[&1], 0.75, 0.001, "distrust compound: A=0.75");
@@ -1311,7 +1368,8 @@ fn run_tests() {
         let edges = vec![(0, 1), (1, 2), (1, 3), (1, 4), (3, 2), (4, 2), (1, 5)];
         let blocks = HashMap::from([(0u32, HashSet::from([5u32]))]);
         let csr = CsrGraph::from_edges(6, &edges);
-        let scores = to_map(forward_bfs(0, &csr, &blocks));
+        let csr_rev = csr.transpose();
+        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &blocks));
 
         // All paths through first-hop H. H reliability = 0.75 (trusts E).
         // H score = 0.75. Best path to M in group H: H→M = 0.75 * 0.7 * r(M)
@@ -1331,9 +1389,10 @@ fn run_tests() {
         let edges = vec![(0, 1), (1, 2), (1, 3), (2, 4), (0, 5), (5, 4)];
         let blocks = HashMap::from([(0u32, HashSet::from([3u32]))]);
         let csr = CsrGraph::from_edges(6, &edges);
+        let csr_rev = csr.transpose();
         let href = HashMapGraph::from_edges(&edges);
 
-        let csr_scores = to_map(forward_bfs(0, &csr, &blocks));
+        let csr_scores = to_map(forward_bfs(0, &csr, &csr_rev, &blocks));
         let ref_scores = to_map(reference_forward_bfs(0, &href, &blocks));
 
         for &tgt in csr_scores
@@ -1374,7 +1433,8 @@ mod tests {
     fn test_csr_linear_chain() {
         let edges = vec![(0, 1), (1, 2), (2, 3)];
         let csr = CsrGraph::from_edges(4, &edges);
-        let scores = to_map(forward_bfs(0, &csr, &empty_distrusts()));
+        let csr_rev = csr.transpose();
+        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &empty_distrusts()));
 
         assert!((scores[&1] - 1.0).abs() < 0.001);
         assert!((scores[&2] - 0.7).abs() < 0.001);
@@ -1385,7 +1445,8 @@ mod tests {
     fn test_csr_two_independent_paths() {
         let edges = vec![(0, 1), (0, 2), (1, 3), (2, 3)];
         let csr = CsrGraph::from_edges(4, &edges);
-        let scores = to_map(forward_bfs(0, &csr, &empty_distrusts()));
+        let csr_rev = csr.transpose();
+        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &empty_distrusts()));
 
         assert!((scores[&3] - 0.91).abs() < 0.001);
     }
@@ -1394,7 +1455,8 @@ mod tests {
     fn test_csr_sybil_resistance() {
         let edges = vec![(0, 1), (1, 2), (1, 3), (1, 4), (3, 2), (4, 2)];
         let csr = CsrGraph::from_edges(5, &edges);
-        let scores = to_map(forward_bfs(0, &csr, &empty_distrusts()));
+        let csr_rev = csr.transpose();
+        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &empty_distrusts()));
 
         assert!((scores[&2] - 0.7).abs() < 0.001);
     }
@@ -1403,7 +1465,8 @@ mod tests {
     fn test_csr_depth_limit() {
         let edges = vec![(0, 1), (1, 2), (2, 3), (3, 4)];
         let csr = CsrGraph::from_edges(5, &edges);
-        let scores = to_map(forward_bfs(0, &csr, &empty_distrusts()));
+        let csr_rev = csr.transpose();
+        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &empty_distrusts()));
 
         assert!(scores.contains_key(&3));
         assert!(!scores.contains_key(&4));
@@ -1413,7 +1476,8 @@ mod tests {
     fn test_csr_no_self_loop() {
         let edges = vec![(0, 1), (1, 0)];
         let csr = CsrGraph::from_edges(2, &edges);
-        let scores = to_map(forward_bfs(0, &csr, &empty_distrusts()));
+        let csr_rev = csr.transpose();
+        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &empty_distrusts()));
 
         assert!(!scores.contains_key(&0));
         assert!(scores.contains_key(&1));
@@ -1435,7 +1499,12 @@ mod tests {
         let edges = vec![(0, 1), (0, 2), (1, 3), (2, 3)];
         let dual = DualCsrGraph::from_edges(4, &edges);
 
-        let fwd = to_map(forward_bfs(0, &dual.forward, &empty_distrusts()));
+        let fwd = to_map(forward_bfs(
+            0,
+            &dual.forward,
+            &dual.reverse,
+            &empty_distrusts(),
+        ));
         let rev = to_map(reverse_bfs(3, &dual.reverse));
 
         assert!((fwd[&3] - rev[&0]).abs() < 0.001);
@@ -1446,7 +1515,12 @@ mod tests {
         let edges = vec![(0, 1), (1, 2), (1, 3), (1, 4), (3, 2), (4, 2)];
         let dual = DualCsrGraph::from_edges(5, &edges);
 
-        let fwd = to_map(forward_bfs(0, &dual.forward, &empty_distrusts()));
+        let fwd = to_map(forward_bfs(
+            0,
+            &dual.forward,
+            &dual.reverse,
+            &empty_distrusts(),
+        ));
         let rev = to_map(reverse_bfs(2, &dual.reverse));
 
         assert!((fwd[&2] - 0.7).abs() < 0.001);
@@ -1459,7 +1533,12 @@ mod tests {
         let edges = vec![(0, 1), (0, 2), (1, 3), (2, 1)];
         let dual = DualCsrGraph::from_edges(4, &edges);
 
-        let fwd = to_map(forward_bfs(0, &dual.forward, &empty_distrusts()));
+        let fwd = to_map(forward_bfs(
+            0,
+            &dual.forward,
+            &dual.reverse,
+            &empty_distrusts(),
+        ));
         let rev = to_map(reverse_bfs(3, &dual.reverse));
 
         assert!((fwd[&3] - 0.847).abs() < 0.001);
@@ -1514,7 +1593,12 @@ mod tests {
         let dual = DualCsrGraph::from_edges(n, &edges);
 
         for src in 0..n {
-            let fwd = to_map(forward_bfs(src, &dual.forward, &empty_distrusts()));
+            let fwd = to_map(forward_bfs(
+                src,
+                &dual.forward,
+                &dual.reverse,
+                &empty_distrusts(),
+            ));
             for tgt in 0..n {
                 if tgt == src {
                     continue;
@@ -1553,10 +1637,11 @@ mod tests {
         }
 
         let csr = CsrGraph::from_edges(n, &edges);
+        let csr_rev = csr.transpose();
         let href = HashMapGraph::from_edges(&edges);
 
         for src in 0..n {
-            let csr_scores = to_map(forward_bfs(src, &csr, &empty_distrusts()));
+            let csr_scores = to_map(forward_bfs(src, &csr, &csr_rev, &empty_distrusts()));
             let ref_scores = to_map(reference_forward_bfs(src, &href, &empty_distrusts()));
 
             let all_targets: HashSet<u32> = csr_scores
@@ -1583,7 +1668,8 @@ mod tests {
         let edges = vec![(0, 1), (1, 2), (1, 3)];
         let blocks = HashMap::from([(0u32, HashSet::from([3u32]))]);
         let csr = CsrGraph::from_edges(4, &edges);
-        let scores = to_map(forward_bfs(0, &csr, &blocks));
+        let csr_rev = csr.transpose();
+        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &blocks));
 
         assert!((scores[&1] - 0.75).abs() < 0.001);
         assert!((scores[&2] - 0.525).abs() < 0.001);
@@ -1596,7 +1682,8 @@ mod tests {
         let edges = vec![(0, 1), (1, 2), (1, 3)];
         let blocks = HashMap::from([(0u32, HashSet::from([2u32, 3u32]))]);
         let csr = CsrGraph::from_edges(4, &edges);
-        let scores = to_map(forward_bfs(0, &csr, &blocks));
+        let csr_rev = csr.transpose();
+        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &blocks));
 
         assert!((scores[&1] - 0.5625).abs() < 0.001);
     }
@@ -1607,7 +1694,8 @@ mod tests {
         let edges = vec![(0, 1), (1, 2), (0, 3)];
         let blocks = HashMap::from([(0u32, HashSet::from([3u32]))]);
         let csr = CsrGraph::from_edges(4, &edges);
-        let scores = to_map(forward_bfs(0, &csr, &blocks));
+        let csr_rev = csr.transpose();
+        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &blocks));
 
         assert!((scores[&1] - 1.0).abs() < 0.001);
         assert!((scores[&2] - 0.7).abs() < 0.001);
@@ -1619,7 +1707,8 @@ mod tests {
         let edges = vec![(0, 1), (0, 2), (1, 3), (2, 3), (1, 4)];
         let blocks = HashMap::from([(0u32, HashSet::from([4u32]))]);
         let csr = CsrGraph::from_edges(5, &edges);
-        let scores = to_map(forward_bfs(0, &csr, &blocks));
+        let csr_rev = csr.transpose();
+        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &blocks));
 
         // Group A: 0.75*0.7=0.525, Group C: 1.0*0.7=0.7
         // Combined: 1-(0.475)(0.3)=0.8575
@@ -1633,7 +1722,8 @@ mod tests {
         let edges = vec![(0, 1), (1, 2), (2, 3), (1, 4), (2, 5)];
         let blocks = HashMap::from([(0u32, HashSet::from([4u32, 5u32]))]);
         let csr = CsrGraph::from_edges(6, &edges);
-        let scores = to_map(forward_bfs(0, &csr, &blocks));
+        let csr_rev = csr.transpose();
+        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &blocks));
 
         assert!((scores[&1] - 0.75).abs() < 0.001);
         assert!((scores[&2] - 0.39375).abs() < 0.001);
@@ -1647,7 +1737,8 @@ mod tests {
         let edges = vec![(0, 1), (1, 2), (1, 3), (1, 4), (3, 2), (4, 2), (1, 5)];
         let blocks = HashMap::from([(0u32, HashSet::from([5u32]))]);
         let csr = CsrGraph::from_edges(6, &edges);
-        let scores = to_map(forward_bfs(0, &csr, &blocks));
+        let csr_rev = csr.transpose();
+        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &blocks));
 
         // All via first-hop H. H reliability=0.75.
         // Best in group: H→M = 0.75*0.7 = 0.525
@@ -1659,9 +1750,10 @@ mod tests {
         let edges = vec![(0, 1), (1, 2), (1, 3), (2, 4), (0, 5), (5, 4)];
         let blocks = HashMap::from([(0u32, HashSet::from([3u32]))]);
         let csr = CsrGraph::from_edges(6, &edges);
+        let csr_rev = csr.transpose();
         let href = HashMapGraph::from_edges(&edges);
 
-        let csr_scores = to_map(forward_bfs(0, &csr, &blocks));
+        let csr_scores = to_map(forward_bfs(0, &csr, &csr_rev, &blocks));
         let ref_scores = to_map(reference_forward_bfs(0, &href, &blocks));
 
         let all_targets: HashSet<u32> = csr_scores
@@ -1677,5 +1769,53 @@ mod tests {
                 "target {tgt}: csr={cs:.6} ref={rs:.6}"
             );
         }
+    }
+
+    // -- Power-law generator sanity --
+
+    /// The power-law generator should produce a graph with at least one node
+    /// whose in-degree exceeds HUB_DAMPEN_THRESHOLD (otherwise the dampening
+    /// A/B in run_power_law_benchmark measures nothing).
+    #[test]
+    fn test_power_law_produces_hub_above_threshold() {
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let synth = generate_power_law_graph(&PowerLawConfig::medium_instance(), &mut rng);
+        let dual = DualCsrGraph::from_edges(synth.num_nodes, &synth.edges);
+        let max_in_degree = (0..synth.num_nodes)
+            .map(|n| dual.reverse.neighbors(n).len() as u32)
+            .max()
+            .unwrap_or(0);
+        assert!(
+            max_in_degree > HUB_DAMPEN_THRESHOLD,
+            "max in-degree {max_in_degree} did not exceed HUB_DAMPEN_THRESHOLD {HUB_DAMPEN_THRESHOLD} \
+             — generator parameters may need adjustment"
+        );
+    }
+
+    /// Variance multiplier κ on the power-law graph should be materially
+    /// above 1.0 — otherwise the topology isn't actually heavy-tailed.
+    /// Doc predicts ~5×; we assert a loose lower bound of 2× to allow for
+    /// randomness while still catching a generator that has accidentally
+    /// degenerated to uniform.
+    #[test]
+    fn test_power_law_variance_multiplier_above_one() {
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let synth = generate_power_law_graph(&PowerLawConfig::medium_instance(), &mut rng);
+        let dual = DualCsrGraph::from_edges(synth.num_nodes, &synth.edges);
+        let n = synth.num_nodes as f64;
+        let mut sum_d = 0u64;
+        let mut sum_d_sq = 0u128;
+        for node in 0..synth.num_nodes {
+            let d = dual.forward.neighbors(node).len() as u64;
+            sum_d += d;
+            sum_d_sq += (d as u128) * (d as u128);
+        }
+        let mean_d = sum_d as f64 / n;
+        let mean_d_sq = sum_d_sq as f64 / n;
+        let kappa = mean_d_sq / (mean_d * mean_d);
+        assert!(
+            kappa > 2.0,
+            "κ = {kappa:.2} is too close to 1.0 — generator may have degenerated to uniform"
+        );
     }
 }
