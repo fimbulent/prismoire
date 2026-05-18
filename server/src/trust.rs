@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::TryStreamExt;
 use quick_cache::Weighter;
 use quick_cache::sync::Cache;
 use sqlx::SqlitePool;
@@ -175,38 +176,42 @@ impl CsrGraph {
 ///
 /// Built during graph construction from trust_edges. Allows the CSR to work
 /// with compact u32 indices while the public API uses UUIDs.
+///
+/// Storage shape: forward lookup uses a sorted `Vec<(Uuid, u32)>` + binary
+/// search rather than a HashMap. Trades ~3× lookup latency (a
+/// binary-search miss is cache-cold at 4M entries) for ~47% less resident
+/// memory per entry (40 B vs 76 B). Acceptable because lookups are bounded
+/// per request (≤7 per BFS handler) and the trust graph's dominant cost is
+/// memory, not per-lookup CPU.
+///
+/// Build pattern: a transient `HashMap<Uuid, u32>` is used during
+/// `from_edges` because building the sorted Vec directly via sort+dedup
+/// peaks higher (a flat `Vec<Uuid>` of doubled-edge endpoints). The
+/// HashMap is dropped before the function returns; only the sorted Vec
+/// survives into steady state. The transient peak is folded into the
+/// rebuild-peak budget.
 struct NodeIndex {
-    uuid_to_id: HashMap<Uuid, u32>,
+    /// (Uuid, dense_id) pairs sorted by Uuid for binary-search lookup.
+    by_uuid: Vec<(Uuid, u32)>,
+    /// Reverse lookup: dense id → Uuid.
     id_to_uuid: Vec<Uuid>,
 }
 
 impl NodeIndex {
-    /// Build a node index from an edge list, assigning dense IDs in discovery
-    /// order.
+    /// Build a node index from an edge list, assigning dense IDs in
+    /// first-seen order. Convenience wrapper around [`NodeIndexBuilder`];
+    /// the streaming production build path uses the builder directly so
+    /// the full edge list never has to be materialised. Retained for
+    /// the inline `trust_tests` module which constructs graphs from
+    /// hand-written edge slices.
+    #[cfg(test)]
     fn from_edges(edges: &[(Uuid, Uuid)]) -> Self {
-        let mut uuid_to_id: HashMap<Uuid, u32> = HashMap::new();
-        let mut id_to_uuid: Vec<Uuid> = Vec::new();
-
-        let intern = |uuid: Uuid, map: &mut HashMap<Uuid, u32>, vec: &mut Vec<Uuid>| -> u32 {
-            if let Some(&id) = map.get(&uuid) {
-                id
-            } else {
-                let id = vec.len() as u32;
-                map.insert(uuid, id);
-                vec.push(uuid);
-                id
-            }
-        };
-
+        let mut builder = NodeIndexBuilder::new();
         for &(src, tgt) in edges {
-            intern(src, &mut uuid_to_id, &mut id_to_uuid);
-            intern(tgt, &mut uuid_to_id, &mut id_to_uuid);
+            builder.intern(src);
+            builder.intern(tgt);
         }
-
-        Self {
-            uuid_to_id,
-            id_to_uuid,
-        }
+        builder.freeze()
     }
 
     fn num_nodes(&self) -> u32 {
@@ -214,11 +219,78 @@ impl NodeIndex {
     }
 
     fn get_id(&self, uuid: &Uuid) -> Option<u32> {
-        self.uuid_to_id.get(uuid).copied()
+        self.by_uuid
+            .binary_search_by_key(uuid, |(u, _)| *u)
+            .ok()
+            .map(|idx| self.by_uuid[idx].1)
     }
 
     fn get_uuid(&self, id: u32) -> Uuid {
         self.id_to_uuid[id as usize]
+    }
+}
+
+/// In-progress [`NodeIndex`] used during graph construction. Holds a
+/// transient `HashMap<Uuid, u32>` for O(1) intern; [`Self::freeze`] drops
+/// the HashMap and produces the steady-state sorted-Vec NodeIndex.
+///
+/// The HashMap is the fastest dedup structure available given an
+/// unordered edge stream — building the sorted Vec directly via
+/// sort+dedup peaks higher (a flat `Vec<Uuid>` of all edge endpoints
+/// is larger than the HashMap it would replace). Used by both
+/// [`NodeIndex::from_edges`] and the streaming `TrustGraph::build`.
+struct NodeIndexBuilder {
+    uuid_to_id: HashMap<Uuid, u32>,
+    id_to_uuid: Vec<Uuid>,
+}
+
+impl NodeIndexBuilder {
+    fn new() -> Self {
+        Self {
+            uuid_to_id: HashMap::new(),
+            id_to_uuid: Vec::new(),
+        }
+    }
+
+    /// Intern a UUID, returning its dense ID. New UUIDs are assigned the
+    /// next sequential ID; previously-seen UUIDs return their existing
+    /// ID. This is the streaming intern path used by `TrustGraph::build`
+    /// — caller writes the returned `(src_id, tgt_id)` straight to a
+    /// dense edge list, so the intermediate `Vec<(Uuid, Uuid)>` from
+    /// the pre-D code is never materialised.
+    fn intern(&mut self, uuid: Uuid) -> u32 {
+        match self.uuid_to_id.entry(uuid) {
+            std::collections::hash_map::Entry::Occupied(e) => *e.get(),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                let id = self.id_to_uuid.len() as u32;
+                e.insert(id);
+                self.id_to_uuid.push(uuid);
+                id
+            }
+        }
+    }
+
+    fn num_nodes(&self) -> u32 {
+        self.id_to_uuid.len() as u32
+    }
+
+    /// Freeze into the steady-state [`NodeIndex`]: drain the HashMap into
+    /// a Vec sorted by Uuid, drop the HashMap, shrink both Vecs to fit.
+    ///
+    /// `sort_unstable_by_key` is fine because UUIDs are unique (each
+    /// appears at most once as a key) — no equal-key reordering can
+    /// matter. `shrink_to_fit` after sort means amortised vec overhead
+    /// is ~0, matching the per-entry budget in the spec.
+    fn freeze(self) -> NodeIndex {
+        let mut by_uuid: Vec<(Uuid, u32)> = self.uuid_to_id.into_iter().collect();
+        by_uuid.sort_unstable_by_key(|(u, _)| *u);
+        by_uuid.shrink_to_fit();
+        let mut id_to_uuid = self.id_to_uuid;
+        id_to_uuid.shrink_to_fit();
+        NodeIndex {
+            by_uuid,
+            id_to_uuid,
+        }
     }
 }
 
@@ -1150,45 +1222,44 @@ impl TrustGraph {
         // Banned users should not propagate trust. Distrust edges pointing
         // at banned users are kept (loaded separately below) so that
         // existing distrust relationships remain visible.
-        let rows = sqlx::query!(
+        //
+        // Stream rows via `fetch` + `try_next`: intern endpoints into the
+        // dense `(u32, u32)` edge list as they arrive, so the intermediate
+        // `Vec<(Uuid, Uuid)>` is never materialised.
+        //
+        // Invariant: `trust_edges.source_user` / `target_user` are only ever
+        // written as `Uuid::to_string()`. A parse failure here means the row
+        // was corrupted or edited externally — crash loudly at startup rather
+        // than silently dropping edges.
+        let mut builder = NodeIndexBuilder::new();
+        let mut dense_edges: Vec<(u32, u32)> = Vec::new();
+
+        let mut rows = sqlx::query!(
             "SELECT te.source_user, te.target_user FROM current_trust_edges te \
              JOIN users u1 ON u1.id = te.source_user \
              JOIN users u2 ON u2.id = te.target_user \
              WHERE te.trust_type = 'trust' \
              AND u1.status != 'banned' AND u2.status != 'banned'",
         )
-        .fetch_all(db)
-        .await?;
+        .fetch(db);
 
-        // Invariant: `trust_edges.source_user` / `target_user` are only ever
-        // written as `Uuid::to_string()`. A parse failure here means the row
-        // was corrupted or edited externally — crash loudly at startup rather
-        // than silently dropping edges.
-        let uuid_edges: Vec<(Uuid, Uuid)> = rows
-            .into_iter()
-            .map(|r| {
-                let src_uuid = Uuid::parse_str(&r.source_user)
-                    .expect("invalid UUID in trust_edges.source_user");
-                let tgt_uuid = Uuid::parse_str(&r.target_user)
-                    .expect("invalid UUID in trust_edges.target_user");
-                (src_uuid, tgt_uuid)
-            })
-            .collect();
+        while let Some(r) = rows.try_next().await? {
+            let src_uuid =
+                Uuid::parse_str(&r.source_user).expect("invalid UUID in trust_edges.source_user");
+            let tgt_uuid =
+                Uuid::parse_str(&r.target_user).expect("invalid UUID in trust_edges.target_user");
+            let src_id = builder.intern(src_uuid);
+            let tgt_id = builder.intern(tgt_uuid);
+            dense_edges.push((src_id, tgt_id));
+        }
+        // Release the row stream's borrow on `db` before issuing the
+        // distrust query below.
+        drop(rows);
 
-        let index = NodeIndex::from_edges(&uuid_edges);
+        let num_nodes = builder.num_nodes();
+        let index = builder.freeze();
 
-        // Safe: `index` was just built from `uuid_edges`, so every endpoint is present.
-        let dense_edges: Vec<(u32, u32)> = uuid_edges
-            .iter()
-            .map(|(src, tgt)| {
-                (
-                    index.get_id(src).expect("edge endpoint must be in index"),
-                    index.get_id(tgt).expect("edge endpoint must be in index"),
-                )
-            })
-            .collect();
-
-        let forward = CsrGraph::from_edges(index.num_nodes(), &dense_edges);
+        let forward = CsrGraph::from_edges(num_nodes, &dense_edges);
         let reverse = forward.transpose();
 
         // Load distrust edges into per-user distrust sets (not into the CSR graph).
@@ -1237,7 +1308,7 @@ impl TrustGraph {
             forward: CsrGraph::from_edges(0, &[]),
             reverse: CsrGraph::from_edges(0, &[]),
             index: NodeIndex {
-                uuid_to_id: HashMap::new(),
+                by_uuid: Vec::new(),
                 id_to_uuid: Vec::new(),
             },
             distrust_sets: HashMap::new(),

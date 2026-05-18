@@ -9,6 +9,7 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 ciborium = "0.2"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+futures = { version = "0.3", default-features = false, features = ["std"] }
 governor = "0.10"
 http = "1"
 prismoire-config = { workspace = true }

@@ -96,11 +96,11 @@ Embeds the power-law home instance in a 10K-instance federation (~100M conceptua
 - **Cross-instance target selection:** instance picked weighted by size; rank within instance picked weighted by `1/rank^0.8` (preferential attachment to known hubs).
 - **Hub deduplication:** when N local users independently land on the same remote hub, the cluster is materialised once and edges from each local user point at the shared node. This is what keeps frontier growth sub-linear in `local_users`.
 
-The bench prints an **analytical pre-flight estimate** (cross-edges, unique remote hubs, projected frontier nodes, projected CSR memory) before generation, and an **estimator-vs-measurement comparison** afterwards. The estimator is intended as a "will this blow up?" gut check; expect ~30–50% error on frontier size, ~exact on cross-edges, and a tight bound on CSR memory once frontier is fixed.
+The bench prints an **analytical pre-flight estimate** (cross-edges, unique remote hubs, projected frontier nodes, CSR memory, sorted-Vec NodeIndex memory, steady-state total, and rebuild peak) before generation, and an **estimator-vs-measurement comparison** afterwards. The estimator is intended as a "will this blow up?" gut check; expect ~30–50% error on frontier size, ~exact on cross-edges, and a tight bound on the memory terms once frontier is fixed.
 
-**Sweep mode** (`bench sweep`) runs the federated scenario across multiple `local_users` values and prints a one-row-per-config table. Directly answers "what userbase fits in N GB?" or "what userbase stays under M-ms p99?"
+**Sweep mode** (`bench sweep`) runs the federated scenario across multiple `local_users` values and prints a one-row-per-config table with `CSR`, `NIdx`, and `Peak` columns. Directly answers "what userbase fits in N GB of rebuild headroom?" or "what userbase stays under M-ms p99?"
 
-**Sizing helper** (`bench size 4GB`) inverts the estimator analytically: binary-searches `local_users` for the largest value whose projected CSR memory fits the budget. Pure math, no generation — runs in milliseconds.
+**Sizing helper** (`bench size 4GB`) inverts the estimator analytically: binary-searches `local_users` for the largest value whose projected **rebuild-peak** memory (not just steady-state CSR) fits the budget. Rebuild peak is what governs OOM risk on a tight host; see `docs/rebuild_peak_memory.md`. Pure math, no generation — runs in milliseconds.
 
 > **Counter-intuitive finding:** at equal local-user count, the federated power-law has *less* hub concentration than the single-instance power-law. The 100M-user federation pool dilutes cross-vouches across many more potential targets than a 50K local pool concentrates intra-vouches. Single-instance power-law remains the more demanding stress test for `HUB_DAMPEN_THRESHOLD`.
 

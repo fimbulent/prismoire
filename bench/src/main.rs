@@ -541,6 +541,22 @@ fn print_pre_flight(home: &HomeInstanceConfig, env: &FederationEnvironment) {
         "  CSR memory (forward+reverse): {}",
         fmt_bytes(est.csr_memory_bytes)
     );
+    println!(
+        "  NodeIndex memory:        {}",
+        fmt_bytes(est.nodeindex_bytes),
+    );
+    println!(
+        "  Steady-state memory:     {}",
+        fmt_bytes(est.csr_memory_bytes + est.nodeindex_bytes),
+    );
+    // Peak is the binding constraint for sizing — during snapshot
+    // rebuild the old graph stays resident while the new one is built
+    // (plus intermediate uuid_edges and dense_edges Vecs). Size
+    // against this number, not the steady-state line above.
+    println!(
+        "  Rebuild peak memory:     {} (size against this)",
+        fmt_bytes(est.peak_rebuild_bytes),
+    );
 }
 
 /// Format an integer with thousands separators (`1,234,567`).
@@ -623,6 +639,16 @@ fn run_federated_power_law_benchmark(
         fmt_bytes(est.csr_memory_bytes),
         fmt_bytes(dual.memory_bytes() as u64),
     );
+    // NodeIndex isn't materialised in this scenario (the bench BFS runs
+    // on u32 directly), so we only print the analytical projection here.
+    println!(
+        "  NodeIndex bytes: est {} (analytical — not materialised in this bench)",
+        fmt_bytes(est.nodeindex_bytes),
+    );
+    println!(
+        "  Rebuild peak:    est {} (production rebuild — uuid_edges + dense_edges + dual graphs)",
+        fmt_bytes(est.peak_rebuild_bytes),
+    );
 
     report_degree_distribution(&dual);
     report_variance_multiplier(&dual);
@@ -658,17 +684,23 @@ fn run_federated_power_law_sweep(env: &FederationEnvironment, sizes: &[u32]) {
     );
     println!("  shape: PowerLawConfig::medium_instance(), local_preference=0.5");
 
-    // RSS column reports the static CSR cost (the long-lived cost during
-    // normal operation), not the generation working-set peak — the latter
-    // is allocator-retention-dependent and would be confusing to compare
-    // across rows. CSR cost is deterministic and is what an admin actually
-    // pays at runtime.
+    // Memory columns:
+    //
+    // - CSR: forward + reverse compressed sparse row, measured.
+    // - NIdx: production-shape `sorted Vec<(Uuid, u32)> + Vec<Uuid>`,
+    //   analytical (this bench's BFS runs on u32 directly — the
+    //   NodeIndex isn't materialised here). Sized at 40 B/entry.
+    // - Peak: rebuild peak — `2 × CSR + NIdx + NIdx_build_HashMap + 40 B/edge`.
+    //   The OLD graph stays resident while the NEW one is built (via a
+    //   transient HashMap that's frozen to the sorted-Vec shape at the
+    //   end). This is the binding constraint for sizing — steady-state
+    //   (CSR + NIdx) underbudgets by 2–3×.
     println!();
     println!(
-        "  {:>12}  {:>12}  {:>8}  {:>9}  {:>10}  {:>10}",
-        "local_users", "frontier", "×local", "CSR", "fwd_p99", "dual_p99",
+        "  {:>12}  {:>12}  {:>8}  {:>9}  {:>9}  {:>9}  {:>10}  {:>10}",
+        "local_users", "frontier", "×local", "CSR", "NIdx", "Peak", "fwd_p99", "dual_p99",
     );
-    println!("  {}", "─".repeat(72));
+    println!("  {}", "─".repeat(95));
 
     for &n in sizes {
         let home = HomeInstanceConfig {
@@ -705,31 +737,53 @@ fn run_federated_power_law_sweep(env: &FederationEnvironment, sizes: &[u32]) {
         dual_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let p99 = |v: &[f64]| v[(v.len() as f64 * 0.99) as usize];
 
+        // NodeIndex (sorted-Vec, production shape) projected from
+        // frontier_nodes; analytical because this bench's BFS runs on
+        // u32 directly and doesn't materialise the index. See
+        // `estimate_frontier` for the per-entry constants.
+        let nidx_bytes = synth.num_nodes as u64 * 40; // NODEINDEX_BYTES_PER_NODE
+        let csr_bytes = dual.memory_bytes() as u64;
+        // Rebuild peak: old graph stays resident while new one is built.
+        // The new NodeIndex is built via a transient HashMap (~76 B/entry)
+        // and frozen to the sorted-Vec shape at the end; the intermediate
+        // `dense_edges` Vec (8 B/edge) also briefly co-exists. Matches
+        // the closed-form `peak_rebuild_bytes` in `estimate_frontier`.
+        let nidx_build_bytes = synth.num_nodes as u64 * 76;
+        let peak_bytes =
+            2 * csr_bytes + nidx_bytes + nidx_build_bytes + 8 * synth.edges.len() as u64;
         println!(
-            "  {:>12}  {:>12}  {:>7.1}×  {:>9}  {:>8.2}ms  {:>8.2}ms",
+            "  {:>12}  {:>12}  {:>7.1}×  {:>9}  {:>9}  {:>9}  {:>8.2}ms  {:>8.2}ms",
             fmt_count(n as u64),
             fmt_count(synth.num_nodes as u64),
             synth.num_nodes as f64 / n.max(1) as f64,
-            fmt_memory(dual.memory_bytes() as u64 / 1024),
+            fmt_memory(csr_bytes / 1024),
+            fmt_memory(nidx_bytes / 1024),
+            fmt_memory(peak_bytes / 1024),
             p99(&fwd_times),
             p99(&dual_times),
         );
     }
     println!(
-        "\n  Note: CSR column is the static cost. Generation working-set\n  peaks ~2-3× higher (dedup HashMap)."
+        "\n  Note: Peak is the binding sizing constraint — during snapshot\n  rebuild the old graph keeps serving reads while the new one is built\n  (≈ 2 × CSR + NIdx + NIdx_build_HashMap + 8 B/edge dense_edges).\n  Steady-state CSR + NIdx underbudgets by 2–3×. See\n  `docs/rebuild_peak_memory.md`."
     );
 }
 
 /// Sizing helper: pure analytical inversion of [`estimate_frontier`] to
-/// find the largest `local_users` whose projected CSR memory fits the
-/// admin's budget. No generation — answers "can I host N users on H
-/// hardware?" in milliseconds.
+/// find the largest `local_users` whose projected *rebuild peak* memory
+/// fits the admin's budget. No generation — answers "can I host N users
+/// on H hardware?" in milliseconds.
+///
+/// The budget is compared against rebuild peak (not steady-state)
+/// because that's the binding constraint: during snapshot rebuild the
+/// old graph keeps serving reads while the new one is built, so peak
+/// runs 2–3× steady-state. Sizing against steady-state OOMs on the
+/// first rebuild.
 fn run_sizing_helper(max_memory_bytes: u64, env: &FederationEnvironment) {
     println!("\n{}", "=".repeat(60));
     println!("  Federated Power-Law Sizing Helper");
     println!("{}", "=".repeat(60));
     println!(
-        "  target CSR memory budget: {}",
+        "  target memory budget: {} (rebuild peak)",
         fmt_bytes(max_memory_bytes)
     );
     println!(
@@ -747,11 +801,12 @@ fn run_sizing_helper(max_memory_bytes: u64, env: &FederationEnvironment) {
             shape: PowerLawConfig::medium_instance(),
             local_preference: 0.5,
         };
-        estimate_frontier(&home, env).csr_memory_bytes
+        let est = estimate_frontier(&home, env);
+        est.peak_rebuild_bytes
     };
     if probe(1_000) > max_memory_bytes {
         println!(
-            "\n  Even 1K local users projects above budget ({}). \
+            "\n  Even 1K local users projects above budget ({} peak). \
              Reduce local_preference, simplify federation, or increase budget.",
             fmt_bytes(probe(1_000))
         );
@@ -775,6 +830,7 @@ fn run_sizing_helper(max_memory_bytes: u64, env: &FederationEnvironment) {
         },
         env,
     );
+    let steady = est.csr_memory_bytes + est.nodeindex_bytes;
     println!(
         "\n  Largest local_users fitting budget: ~{}",
         fmt_count(lo as u64)
@@ -785,8 +841,14 @@ fn run_sizing_helper(max_memory_bytes: u64, env: &FederationEnvironment) {
         est.frontier_nodes as f64 / lo.max(1) as f64,
     );
     println!(
-        "  Projected CSR memory: {} (budget {})",
+        "  Projected CSR memory: {}",
         fmt_bytes(est.csr_memory_bytes),
+    );
+    println!("  Projected NodeIndex:  {}", fmt_bytes(est.nodeindex_bytes),);
+    println!("  Steady-state total:   {}", fmt_bytes(steady),);
+    println!(
+        "  Rebuild peak:         {}   (budget {})",
+        fmt_bytes(est.peak_rebuild_bytes),
         fmt_bytes(max_memory_bytes),
     );
     println!(

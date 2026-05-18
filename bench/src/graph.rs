@@ -408,6 +408,19 @@ pub struct FrontierEstimate {
     pub frontier_nodes: u64,
     pub frontier_edges: u64,
     pub csr_memory_bytes: u64,
+    /// Bytes the production NodeIndex (`sorted Vec<(Uuid, u32)> + Vec<Uuid>`)
+    /// occupies at this frontier size. ~40 B/entry: 24 B sorted entry
+    /// (16 B Uuid + 4 B id + 4 B alignment pad) + 16 B reverse vec slot.
+    pub nodeindex_bytes: u64,
+    /// Peak resident memory during a snapshot rebuild. The old graph
+    /// stays resident while the new one is built; the new NodeIndex is
+    /// built via a transient `HashMap<Uuid, u32>` (~76 B/entry) and
+    /// frozen to the sorted-Vec shape at the end, so peak ≈
+    /// `2 × CSR + NodeIndex(SortedVec, old) + NodeIndex(HashMap, building) + 8 B/edge`
+    /// (only the dense `Vec<(u32, u32)>` is materialised — we
+    /// stream sqlx rows so `uuid_edges` never exists as a Vec). This
+    /// is the value admins should size against.
+    pub peak_rebuild_bytes: u64,
 }
 
 /// Analytical pre-flight: project frontier size and memory from
@@ -477,12 +490,36 @@ pub fn estimate_frontier(
     // CSR memory: forward + reverse, each 8 bytes/offset × (N+1) + 4 bytes/target × E.
     let csr_memory_bytes = 2 * (8 * (frontier_nodes + 1) + 4 * frontier_edges);
 
+    // NodeIndex memory — the UUID ↔ u32 translation layer that sits
+    // alongside the CSR in production. ~40 B/entry validated against
+    // the historical `node-index` bench at 1.1M nodes. Build path
+    // transiently inflates this — see `peak_rebuild_bytes`.
+    const NODEINDEX_BYTES_PER_NODE: u64 = 40; // 24 B sorted entry + 16 B Vec<Uuid>
+    const NODEINDEX_BUILD_BYTES_PER_NODE: u64 = 76; // 60 B HashMap bucket + 16 B Vec<Uuid>
+    let nodeindex_bytes = frontier_nodes * NODEINDEX_BYTES_PER_NODE;
+
+    // Rebuild peak: the OLD graph (CSR + sorted-Vec NodeIndex) keeps
+    // serving reads while the NEW graph is constructed. The new
+    // NodeIndex is built via a transient HashMap (the cheapest dedup
+    // structure given an unordered edge stream) and frozen to the
+    // sorted-Vec shape at the end. The new graph also briefly holds
+    // `dense_edges: Vec<(u32, u32)>` (8 B/edge) until function end.
+    const DENSE_EDGES_BYTES_PER_EDGE: u64 = 8;
+    let intermediate_edge_bytes = DENSE_EDGES_BYTES_PER_EDGE * frontier_edges;
+    let nodeindex_build_bytes = frontier_nodes * NODEINDEX_BUILD_BYTES_PER_NODE;
+    let peak_rebuild_bytes = 2 * csr_memory_bytes
+        + nodeindex_bytes               // OLD NodeIndex (sorted Vec, steady-state)
+        + nodeindex_build_bytes         // NEW NodeIndex (HashMap, mid-build)
+        + intermediate_edge_bytes;
+
     FrontierEstimate {
         cross_edges,
         unique_remote_hubs,
         frontier_nodes,
         frontier_edges,
         csr_memory_bytes,
+        nodeindex_bytes,
+        peak_rebuild_bytes,
     }
 }
 
