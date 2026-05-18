@@ -8,5 +8,7 @@ name = "trust-bench"
 path = "src/main.rs"
 
 [dependencies]
+memmap2 = "0.9"
 rand = { workspace = true }
 rand_chacha = "0.3"
+uuid = { workspace = true }

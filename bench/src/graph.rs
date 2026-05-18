@@ -472,12 +472,32 @@ pub fn estimate_frontier(
     // Per-hub expansion: 1 (the hub) + mean_out (hop-2) + mean_out² (hop-3).
     // Each hop-2/3 selection is itself rank-weighted within the same
     // instance, so they collide heavily across hubs in that instance —
-    // empirically ≈2–3× compression. 2.5× is a calibrated guess; expect to
-    // refine after seeing measurements.
+    // empirically ≈2–3.3× compression depending on hub density.
+    //
+    // The dedup factor *grows* with `unique_remote_hubs` because more
+    // hubs picked per instance means more pairwise overlap in their
+    // (also rank-weighted) hop-2/3 fan-out — they're drawing from the
+    // same heavy-tailed distribution, so collisions compound.
+    //
+    // Calibrated against the 2026-05-18 Pi sweep at the medium-power-law
+    // config (mean_out=11, local_pref=0.5, 100M-user federation):
+    //
+    //   unique_hubs      DEDUP (measured)
+    //     387K            2.29
+    //     452K            2.44
+    //     537K            2.62
+    //     662K            2.89
+    //     867K            3.31
+    //
+    // Power-law fit `DEDUP ∝ unique_hubs^0.46` matches all five points
+    // within ±3%. The `max(2.0)` floor keeps the formula conservative
+    // at very small hub counts where we have no data — smaller DEDUP
+    // means larger projected frontier, which is the safe direction for
+    // a sizing helper to err.
     let naive_per_hub = 1.0 + mean_out + mean_out * mean_out;
-    const DEDUP_FACTOR: f64 = 2.5;
+    let dedup_factor = ((unique_remote_hubs as f64 / 68_000.0).powf(0.46)).max(2.0);
     let frontier_nodes_remote =
-        (unique_remote_hubs as f64 * naive_per_hub / DEDUP_FACTOR).round() as u64;
+        (unique_remote_hubs as f64 * naive_per_hub / dedup_factor).round() as u64;
 
     let frontier_nodes = home.local_users as u64 + frontier_nodes_remote;
 
@@ -487,8 +507,9 @@ pub fn estimate_frontier(
     let per_hub_extra_edges = (mean_out + mean_out * mean_out).round() as u64;
     let frontier_edges = local_intra_edges + cross_edges + unique_remote_hubs * per_hub_extra_edges;
 
-    // CSR memory: forward + reverse, each 8 bytes/offset × (N+1) + 4 bytes/target × E.
-    let csr_memory_bytes = 2 * (8 * (frontier_nodes + 1) + 4 * frontier_edges);
+    // CSR memory: forward + reverse, each 4 bytes/offset × (N+1) + 4 bytes/target × E.
+    // Both arrays are `Vec<u32>` in `CsrGraph`, so 4 B/entry on both sides.
+    let csr_memory_bytes = 2 * (4 * (frontier_nodes + 1) + 4 * frontier_edges);
 
     // NodeIndex memory — the UUID ↔ u32 translation layer that sits
     // alongside the CSR in production. ~40 B/entry validated against

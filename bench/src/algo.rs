@@ -62,6 +62,35 @@ pub struct CsrGraph {
     pub num_nodes: u32,
 }
 
+/// Minimal access surface needed by BFS over a CSR-shaped graph.
+///
+/// Implemented by the in-memory `CsrGraph` and by `MmapCsrGraph` in
+/// `mmap_csr.rs`. BFS bodies only ever need `neighbors(i) -> &[u32]`,
+/// so the trait is intentionally narrow — no transpose, no rebuild, no
+/// memory reporting. Implementations can keep their data in whatever
+/// representation they like as long as `neighbors` returns a slice of
+/// u32 dense IDs and the slice lives at least as long as `&self`.
+pub trait CsrAccess {
+    /// Neighbours of node `i`. The slice must live ≥ `&self`.
+    fn neighbors(&self, i: u32) -> &[u32];
+    /// Total node count (indices `0..num_nodes`). Not used by BFS itself
+    /// — kept on the trait so bench modes can sanity-check `&dyn`-style
+    /// graph references (e.g. mmap round-trip equals heap).
+    #[allow(dead_code)]
+    fn num_nodes(&self) -> u32;
+}
+
+impl CsrAccess for CsrGraph {
+    #[inline]
+    fn neighbors(&self, i: u32) -> &[u32] {
+        CsrGraph::neighbors(self, i)
+    }
+    #[inline]
+    fn num_nodes(&self) -> u32 {
+        self.num_nodes
+    }
+}
+
 impl CsrGraph {
     /// Build a CSR graph from an edge list over dense node indices.
     ///
@@ -241,10 +270,10 @@ fn hub_dampening_factor(in_degree: u32, threshold: u32) -> f64 {
 /// outgoing neighbours, the per-hop decay is attenuated (see
 /// [`hub_dampening_factor`]). `reverse` supplies forward in-degree via
 /// its outgoing-edge counts.
-pub fn forward_bfs(
+pub fn forward_bfs<G: CsrAccess>(
     source: u32,
-    graph: &CsrGraph,
-    reverse: &CsrGraph,
+    graph: &G,
+    reverse: &G,
     distrust_sets: &DistrustSets,
 ) -> Vec<(u32, f64)> {
     forward_bfs_with_threshold(source, graph, reverse, distrust_sets, HUB_DAMPEN_THRESHOLD)
@@ -255,10 +284,10 @@ pub fn forward_bfs(
 /// Pass `HUB_DAMPEN_THRESHOLD` for production-equivalent behaviour, or
 /// `u32::MAX` to disable dampening entirely (used by the bench's A/B
 /// measurement of dampening's frontier impact).
-pub fn forward_bfs_with_threshold(
+pub fn forward_bfs_with_threshold<G: CsrAccess>(
     source: u32,
-    graph: &CsrGraph,
-    reverse: &CsrGraph,
+    graph: &G,
+    reverse: &G,
     distrust_sets: &DistrustSets,
     dampen_threshold: u32,
 ) -> Vec<(u32, f64)> {
@@ -370,14 +399,14 @@ pub fn forward_bfs_with_threshold(
 /// folded into the shared path_score of a single reverse pass. The scores
 /// returned here are an approximation that ignores distrusts. For exact
 /// distrust-penalized trust(A, reader), use forward_bfs from A directly.
-pub fn reverse_bfs(reader: u32, reverse_graph: &CsrGraph) -> Vec<(u32, f64)> {
+pub fn reverse_bfs<G: CsrAccess>(reader: u32, reverse_graph: &G) -> Vec<(u32, f64)> {
     reverse_bfs_with_threshold(reader, reverse_graph, HUB_DAMPEN_THRESHOLD)
 }
 
 /// Same as [`reverse_bfs`] but with a configurable hub-dampening threshold.
-pub fn reverse_bfs_with_threshold(
+pub fn reverse_bfs_with_threshold<G: CsrAccess>(
     reader: u32,
-    reverse_graph: &CsrGraph,
+    reverse_graph: &G,
     dampen_threshold: u32,
 ) -> Vec<(u32, f64)> {
     // BFS state: (current_node, depth, path_score)

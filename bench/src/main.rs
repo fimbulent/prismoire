@@ -10,9 +10,11 @@ use std::time::Instant;
 use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
+use uuid::Uuid;
 
 mod algo;
 mod graph;
+mod mmap_csr;
 
 use algo::{
     DECAY, DistrustSets, DualCsrGraph, HUB_DAMPEN_THRESHOLD, HashMapGraph, MAX_DEPTH,
@@ -64,6 +66,116 @@ fn current_rss_kb() -> Option<u64> {
         }
     }
     None
+}
+
+// ---------------------------------------------------------------------------
+// Rebuild-peak allocator probe
+// ---------------------------------------------------------------------------
+
+/// Allocations that mirror the production rebuild-peak shape so the
+/// bench process's VmHWM matches what a real server would peak at
+/// during a snapshot rebuild.
+///
+/// The bench builds a single [`DualCsrGraph`] and runs BFS on `u32`
+/// directly, so without this probe its peak RSS misses three large
+/// production components:
+///
+/// - The *old* DualCsrGraph kept resident while the new one is built
+///   (simulated as a `Vec<u8>` of equivalent bytes — kernel doesn't
+///   care about contents, only that pages are faulted in).
+/// - The steady-state sorted-Vec NodeIndex (~40 B/entry: 24 B
+///   `Vec<(Uuid, u32)>` slot + 16 B `Vec<Uuid>` slot).
+/// - The transient HashMap-shape NodeIndex held during build
+///   (~76 B/entry: 60 B HashMap bucket + 16 B `Vec<Uuid>` slot).
+///
+/// `synth.edges: Vec<(u32, u32)>` is already alive throughout the
+/// existing bench flow (held by `SyntheticGraph`, borrowed into
+/// `DualCsrGraph::from_edges`), so the 8 B/edge dense_edges
+/// intermediate is already counted — no separate stand-in needed.
+///
+/// Hold this struct alive across the BFS measurement loop, then
+/// drop it. Pages back actual RSS because every slot is written
+/// during construction (sorted Vec via `collect+sort`, HashMap via
+/// `insert`, byte Vec via `vec![byte; N]` which calls `write_bytes`
+/// across the allocation).
+struct RebuildPeakProbe {
+    /// Stand-in for the *old* DualCsrGraph (2× CSR — forward + reverse)
+    /// kept resident during rebuild. Same byte count as the live
+    /// `DualCsrGraph`; contents don't matter to RSS accounting.
+    _old_csr_standin: Vec<u8>,
+    /// "Old" steady-state NodeIndex, sorted by Uuid for binary search.
+    /// Production: `NodeIndex::by_uuid`.
+    _old_nidx_by_uuid: Vec<(Uuid, u32)>,
+    /// "Old" steady-state NodeIndex reverse lookup: id → Uuid.
+    /// Production: `NodeIndex::id_to_uuid`.
+    _old_nidx_id_to_uuid: Vec<Uuid>,
+    /// "New" NodeIndex *during build*: the transient HashMap that
+    /// `NodeIndexBuilder` holds until `freeze` runs. Heaviest
+    /// allocation in the rebuild peak (~76 B/entry).
+    _new_nidx_hashmap: HashMap<Uuid, u32>,
+    /// "New" NodeIndex reverse lookup mid-build — `NodeIndexBuilder.id_to_uuid`.
+    _new_nidx_id_to_uuid: Vec<Uuid>,
+}
+
+/// Allocate the rebuild-peak probe. `num_nodes` and `csr_bytes` should
+/// match the live DualCsrGraph's `num_nodes` and `memory_bytes()`.
+///
+/// Synthesized Uuids are deterministic (`Uuid::from_u128(id as u128)`)
+/// so successive runs allocate the same shape, but the actual bit
+/// pattern doesn't matter — the production NodeIndex doesn't care
+/// either, it just stores whatever the DB hands it.
+fn allocate_rebuild_peak_probe(num_nodes: u32, csr_bytes: u64) -> RebuildPeakProbe {
+    // Old CSR stand-in. `vec![byte; N]` writes the byte to every slot
+    // via `write_bytes`, faulting the pages and putting them on RSS.
+    // Without the write the pages would stay COW-mapped to the kernel
+    // zero page on first read and not show up in RSS until first write.
+    let old_csr_standin: Vec<u8> = vec![1u8; csr_bytes as usize];
+
+    // Old sorted-Vec NodeIndex. Build in (uuid, id) order then sort
+    // by uuid, matching `NodeIndexBuilder::freeze`. `shrink_to_fit`
+    // matches production so per-entry overhead is the same.
+    let mut old_nidx_by_uuid: Vec<(Uuid, u32)> = (0..num_nodes)
+        .map(|id| (Uuid::from_u128(id as u128), id))
+        .collect();
+    old_nidx_by_uuid.sort_unstable_by_key(|(u, _)| *u);
+    old_nidx_by_uuid.shrink_to_fit();
+    let mut old_nidx_id_to_uuid: Vec<Uuid> = (0..num_nodes)
+        .map(|id| Uuid::from_u128(id as u128))
+        .collect();
+    old_nidx_id_to_uuid.shrink_to_fit();
+
+    // New mid-build NodeIndex. HashMap + Vec<Uuid> filled the same way
+    // `NodeIndexBuilder::intern` would populate it during a streaming
+    // rebuild — one insert per unique node.
+    let mut new_nidx_hashmap: HashMap<Uuid, u32> = HashMap::with_capacity(num_nodes as usize);
+    let mut new_nidx_id_to_uuid: Vec<Uuid> = Vec::with_capacity(num_nodes as usize);
+    for id in 0..num_nodes {
+        let u = Uuid::from_u128(id as u128);
+        new_nidx_hashmap.insert(u, id);
+        new_nidx_id_to_uuid.push(u);
+    }
+
+    RebuildPeakProbe {
+        _old_csr_standin: old_csr_standin,
+        _old_nidx_by_uuid: old_nidx_by_uuid,
+        _old_nidx_id_to_uuid: old_nidx_id_to_uuid,
+        _new_nidx_hashmap: new_nidx_hashmap,
+        _new_nidx_id_to_uuid: new_nidx_id_to_uuid,
+    }
+}
+
+/// Bytes the probe's allocations contribute, ignoring per-Vec/per-HashMap
+/// header overhead (which is ~24 B each — rounding error vs. the
+/// gigabyte-scale arrays). Matches the formula in
+/// `graph::estimate_frontier::peak_rebuild_bytes` minus the live CSR
+/// and the dense_edges intermediate that the bench already holds.
+fn rebuild_peak_probe_bytes(num_nodes: u32, csr_bytes: u64) -> u64 {
+    let n = num_nodes as u64;
+    csr_bytes              // old CSR stand-in
+        + n * 24           // old NodeIndex sorted Vec (16 B Uuid + 4 B id + 4 B pad)
+        + n * 16           // old NodeIndex id_to_uuid Vec<Uuid>
+        + n * 60           // new HashMap bucket (~60 B/entry for HashMap<Uuid, u32>)
+        + n * 16 // new id_to_uuid Vec<Uuid>
 }
 
 fn fmt_memory(kb: u64) -> String {
@@ -579,6 +691,7 @@ fn run_federated_power_law_benchmark(
     name: &str,
     home: &HomeInstanceConfig,
     env: &FederationEnvironment,
+    rebuild_peak_probe: bool,
 ) {
     println!("\n{}", "=".repeat(60));
     println!("  Benchmark: {name}");
@@ -654,6 +767,29 @@ fn run_federated_power_law_benchmark(
     report_variance_multiplier(&dual);
     report_effective_branching(&dual);
 
+    // Rebuild-peak probe: hold production-shape NodeIndex allocations
+    // (old sorted-Vec + new HashMap mid-build) and a stand-in for the
+    // old DualCsrGraph alive across the BFS measurement loop. Without
+    // this the bench's RSS undercounts production rebuild peak by 2–3×
+    // (bench BFS runs on u32 directly and never builds a NodeIndex,
+    // and only one DualCsrGraph is alive at a time).
+    let probe = if rebuild_peak_probe {
+        let bytes = rebuild_peak_probe_bytes(synth.num_nodes, dual.memory_bytes() as u64);
+        println!(
+            "\nRebuild-peak probe: allocating {} (old CSR stand-in + sorted-Vec NodeIndex + HashMap NodeIndex mid-build)",
+            fmt_bytes(bytes)
+        );
+        Some(allocate_rebuild_peak_probe(
+            synth.num_nodes,
+            dual.memory_bytes() as u64,
+        ))
+    } else {
+        println!(
+            "\nRebuild-peak probe: DISABLED (--no-rebuild-peak). RSS reflects bench process only, not production rebuild peak."
+        );
+        None
+    };
+
     run_bfs_timings(&synth, &dual, &distrust_sets);
 
     let sample_sources = pick_sample_sources(&synth.local_range, 100);
@@ -662,6 +798,9 @@ fn run_federated_power_law_benchmark(
     if let Some(peak) = peak_rss_kb() {
         println!("\nPeak RSS: {}", fmt_memory(peak));
     }
+    // Keep the probe alive through peak RSS read above. Explicit drop
+    // here both documents intent and silences "unused" warnings.
+    drop(probe);
 }
 
 /// Scaling-sweep mode: run the federated benchmark across a range of
@@ -768,6 +907,268 @@ fn run_federated_power_law_sweep(env: &FederationEnvironment, sizes: &[u32]) {
     );
 }
 
+/// Bench mode: A/B BFS perf on a heap `CsrGraph` vs an `MmapCsrGraph` backed by a tmpfs file.
+fn run_mmap_bench(
+    home: &HomeInstanceConfig,
+    env: &FederationEnvironment,
+    rebuild_peak_probe: bool,
+) {
+    use std::time::Instant;
+
+    use mmap_csr::{MmapCsrGraph, serialize_csr_to_file};
+
+    println!("\n{}", "=".repeat(60));
+    println!("  Mmap CSR Bench (Option C prototype)");
+    println!("{}", "=".repeat(60));
+    println!(
+        "  home: {} local users, local_preference={}",
+        fmt_count(home.local_users as u64),
+        home.local_preference
+    );
+    println!(
+        "  federation: {} instances × {} mean users ≈ {} conceptual users",
+        env.num_remote_instances,
+        env.mean_remote_instance_size,
+        fmt_count(env.num_remote_instances as u64 * env.mean_remote_instance_size as u64),
+    );
+
+    // --- [1] Generate ---
+    let rss_start = current_rss_kb().unwrap_or(0);
+    print!("\n  [1] Generating graph... ");
+    let t = Instant::now();
+    let mut rng = ChaCha8Rng::seed_from_u64(42);
+    let synth = generate_federated_power_law_graph(home, env, &mut rng);
+    println!(
+        "{:.1}s  nodes={}  edges={}",
+        t.elapsed().as_secs_f64(),
+        fmt_count(synth.num_nodes as u64),
+        fmt_count(synth.edges.len() as u64),
+    );
+
+    // --- [2] Heap dual CSR ---
+    print!("  [2] Building heap dual CSR... ");
+    let t = Instant::now();
+    let dual = DualCsrGraph::from_edges(synth.num_nodes, &synth.edges);
+    let distrust_sets = build_distrust_sets(&synth.distrust_edges);
+    let csr_bytes = dual.memory_bytes() as u64;
+    let rss_heap = current_rss_kb().unwrap_or(0);
+    println!(
+        "{:.1}s  CSR={}  RSS {}→{} (+{})",
+        t.elapsed().as_secs_f64(),
+        fmt_memory(csr_bytes / 1024),
+        fmt_memory(rss_start),
+        fmt_memory(rss_heap),
+        fmt_memory(rss_heap.saturating_sub(rss_start)),
+    );
+
+    // --- [2b] Rebuild-peak probe ---
+    // Hold production-shape NodeIndex allocations + an old-CSR
+    // stand-in alive through all subsequent measurements so the
+    // mmap-vs-heap RSS comparison reflects realistic process state.
+    // See `RebuildPeakProbe` for shape rationale.
+    let _probe = if rebuild_peak_probe {
+        let bytes = rebuild_peak_probe_bytes(synth.num_nodes, csr_bytes);
+        println!(
+            "  [2b] Rebuild-peak probe: allocating {} (old CSR stand-in + sorted-Vec NodeIndex + HashMap NodeIndex mid-build)",
+            fmt_bytes(bytes)
+        );
+        Some(allocate_rebuild_peak_probe(synth.num_nodes, csr_bytes))
+    } else {
+        println!(
+            "  [2b] Rebuild-peak probe: DISABLED (--no-rebuild-peak). RSS reflects bench process only."
+        );
+        None
+    };
+
+    // --- [3] Serialise to tmpfs ---
+    // /dev/shm is tmpfs on Linux — backing store is RAM, page-cache-able,
+    // and we don't pay any actual disk I/O. Matches the production
+    // deployment model the doc suggests for Option C.
+    let tmp_dir = std::env::temp_dir().join("prismoire-bench-mmap-csr");
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).expect("mkdir tmp_dir");
+    let fwd_path = tmp_dir.join("forward.csr");
+    let rev_path = tmp_dir.join("reverse.csr");
+    print!("  [3] Writing CSR files to {}... ", tmp_dir.display());
+    let t = Instant::now();
+    serialize_csr_to_file(&dual.forward, &fwd_path).expect("write forward csr");
+    serialize_csr_to_file(&dual.reverse, &rev_path).expect("write reverse csr");
+    let fwd_size = std::fs::metadata(&fwd_path).map(|m| m.len()).unwrap_or(0);
+    let rev_size = std::fs::metadata(&rev_path).map(|m| m.len()).unwrap_or(0);
+    println!(
+        "{:.1}s  forward={}  reverse={}",
+        t.elapsed().as_secs_f64(),
+        fmt_memory(fwd_size / 1024),
+        fmt_memory(rev_size / 1024),
+    );
+
+    // --- [4] Mmap back ---
+    print!("  [4] Mmapping back... ");
+    let t = Instant::now();
+    let mmap_forward = MmapCsrGraph::open(&fwd_path).expect("open forward mmap");
+    let mmap_reverse = MmapCsrGraph::open(&rev_path).expect("open reverse mmap");
+    let rss_after_mmap = current_rss_kb().unwrap_or(0);
+    println!(
+        "{:.1}s  mapped={}  RSS now {} (+{} vs heap-only — mmap pages not yet touched)",
+        t.elapsed().as_secs_f64(),
+        fmt_memory((mmap_forward.mapped_bytes() + mmap_reverse.mapped_bytes()) as u64 / 1024),
+        fmt_memory(rss_after_mmap),
+        fmt_memory(rss_after_mmap.saturating_sub(rss_heap)),
+    );
+
+    // --- [5] Pick sample sources up front (same set for all phases) ---
+    let sample_sources = pick_sample_sources(&synth.local_range, 100);
+
+    // --- Correctness check: heap and mmap must produce identical BFS results
+    // on the same source. Catches any silent corruption in the serialise →
+    // mmap → slice path (wrong endianness, off-by-one, misaligned cast).
+    let heap_sample = forward_bfs(
+        sample_sources[0],
+        &dual.forward,
+        &dual.reverse,
+        &distrust_sets,
+    );
+    let mmap_sample = forward_bfs(
+        sample_sources[0],
+        &mmap_forward,
+        &mmap_reverse,
+        &distrust_sets,
+    );
+    {
+        let mut h: Vec<(u32, f64)> = heap_sample.clone();
+        let mut m: Vec<(u32, f64)> = mmap_sample.clone();
+        h.sort_by_key(|&(n, _)| n);
+        m.sort_by_key(|&(n, _)| n);
+        assert_eq!(h.len(), m.len(), "heap/mmap BFS result size mismatch");
+        for (a, b) in h.iter().zip(m.iter()) {
+            assert_eq!(a.0, b.0, "heap/mmap node mismatch");
+            assert!(
+                (a.1 - b.1).abs() < 1e-9,
+                "heap/mmap score mismatch at {}: {} vs {}",
+                a.0,
+                a.1,
+                b.1
+            );
+        }
+        println!(
+            "  [5] Correctness: heap == mmap on {} reachable targets",
+            fmt_count(h.len() as u64)
+        );
+    }
+
+    // --- [6] Warm A/B: heap CSR vs mmap CSR (cache hot from build/serialize) ---
+    // The warm case is the steady-state question: once pages are in the
+    // cache, does mmap'd access match heap-resident access? Run one
+    // warm-up iteration on each to fault any not-yet-touched pages
+    // (heap was just built, mmap was just serialized — both should
+    // already be hot, but the warm-up makes the comparison fair).
+    let _ = forward_bfs(
+        sample_sources[0],
+        &dual.forward,
+        &dual.reverse,
+        &distrust_sets,
+    );
+    let _ = forward_bfs(
+        sample_sources[0],
+        &mmap_forward,
+        &mmap_reverse,
+        &distrust_sets,
+    );
+
+    let mut heap_times: Vec<f64> = Vec::with_capacity(sample_sources.len());
+    let mut mmap_warm_times: Vec<f64> = Vec::with_capacity(sample_sources.len());
+    for &src in &sample_sources {
+        let t = Instant::now();
+        let _ = forward_bfs(src, &dual.forward, &dual.reverse, &distrust_sets);
+        heap_times.push(t.elapsed().as_secs_f64() * 1000.0);
+
+        let t = Instant::now();
+        let _ = forward_bfs(src, &mmap_forward, &mmap_reverse, &distrust_sets);
+        mmap_warm_times.push(t.elapsed().as_secs_f64() * 1000.0);
+    }
+    heap_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    mmap_warm_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let p = |v: &[f64], q: f64| v[((v.len() as f64 - 1.0) * q) as usize];
+    println!(
+        "\n  [6] Warm forward BFS A/B ({} samples):",
+        sample_sources.len()
+    );
+    println!(
+        "      heap CSR  p50={:>6.3}ms  p90={:>6.3}ms  p99={:>6.3}ms",
+        p(&heap_times, 0.50),
+        p(&heap_times, 0.90),
+        p(&heap_times, 0.99),
+    );
+    println!(
+        "      mmap CSR  p50={:>6.3}ms  p90={:>6.3}ms  p99={:>6.3}ms  ({:>4.2}× / {:>4.2}× / {:>4.2}× vs heap)",
+        p(&mmap_warm_times, 0.50),
+        p(&mmap_warm_times, 0.90),
+        p(&mmap_warm_times, 0.99),
+        p(&mmap_warm_times, 0.50) / p(&heap_times, 0.50).max(1e-9),
+        p(&mmap_warm_times, 0.90) / p(&heap_times, 0.90).max(1e-9),
+        p(&mmap_warm_times, 0.99) / p(&heap_times, 0.99).max(1e-9),
+    );
+
+    // --- [7] Process-page-table eviction (TLB-cold, not cache-cold) ---
+    //
+    // `madvise(MADV_DONTNEED)` on a *shared file mapping* on Linux only
+    // discards the process's page-table entries — the underlying file
+    // pages stay in the OS page cache. The next access doesn't touch
+    // disk; it just re-maps. So this measures *TLB / page-table*
+    // warm-up cost, not the I/O cost of true cold start.
+    //
+    // For a real cold-start measurement on a disk-backed filesystem you
+    // need `posix_fadvise(POSIX_FADV_DONTNEED)` on the fd to drop the
+    // file from the page cache — but on tmpfs (the deployment model
+    // the doc suggests) even that's a no-op, because tmpfs *is* the
+    // page cache. Net: on tmpfs there is no cold-start penalty to
+    // measure. The numbers below show the per-access overhead of
+    // re-establishing process-side page-table entries only.
+    print!("  [7] madvise(MADV_DONTNEED) on both mappings... ");
+    mmap_forward
+        .madvise_dontneed()
+        .expect("madvise forward mmap");
+    mmap_reverse
+        .madvise_dontneed()
+        .expect("madvise reverse mmap");
+    let rss_after_madv = current_rss_kb().unwrap_or(0);
+    println!(
+        "RSS now {} ({:+} vs warm; tmpfs pages stay in page cache)",
+        fmt_memory(rss_after_madv),
+        rss_after_madv as i64 - rss_after_mmap as i64,
+    );
+
+    let mut mmap_unmapped_times: Vec<f64> = Vec::with_capacity(sample_sources.len());
+    for &src in &sample_sources {
+        let t = Instant::now();
+        let _ = forward_bfs(src, &mmap_forward, &mmap_reverse, &distrust_sets);
+        mmap_unmapped_times.push(t.elapsed().as_secs_f64() * 1000.0);
+    }
+    mmap_unmapped_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    println!(
+        "  [8] Unmapped mmap forward BFS ({} samples — page-table rebuild only, no I/O):",
+        sample_sources.len()
+    );
+    println!(
+        "      mmap CSR  p50={:>6.3}ms  p90={:>6.3}ms  p99={:>6.3}ms  ({:>4.2}× / {:>4.2}× / {:>4.2}× vs warm mmap)",
+        p(&mmap_unmapped_times, 0.50),
+        p(&mmap_unmapped_times, 0.90),
+        p(&mmap_unmapped_times, 0.99),
+        p(&mmap_unmapped_times, 0.50) / p(&mmap_warm_times, 0.50).max(1e-9),
+        p(&mmap_unmapped_times, 0.90) / p(&mmap_warm_times, 0.90).max(1e-9),
+        p(&mmap_unmapped_times, 0.99) / p(&mmap_warm_times, 0.99).max(1e-9),
+    );
+
+    // --- [9] Cleanup ---
+    drop(mmap_forward);
+    drop(mmap_reverse);
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    println!(
+        "\n  Read:\n  - Warm mmap ([6]) should match heap closely (same memory accesses,\n    same hot cache lines). A material gap here means the mmap\n    indirection has an inherent per-access cost.\n  - Unmapped mmap ([8]) measures process-page-table rebuild cost\n    only — on tmpfs there is no \"real\" cold start to measure\n    (tmpfs is the page cache).\n  - The Option C *RSS win* (cold pages eligible for eviction under\n    memory pressure) is not exercised by this bench, which runs alone\n    on the host with plenty of memory. The RSS line at [4] confirms\n    only that the mapping itself doesn't pre-fault."
+    );
+}
+
 /// Sizing helper: pure analytical inversion of [`estimate_frontier`] to
 /// find the largest `local_users` whose projected *rebuild peak* memory
 /// fits the admin's budget. No generation — answers "can I host N users
@@ -871,6 +1272,12 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mode = args.get(1).map(|s| s.as_str()).unwrap_or("all");
 
+    // Global opt-out for the rebuild-peak probe. Default ON: the probe
+    // makes bench-process RSS match production rebuild-peak RSS, which
+    // is what the sizing helper budgets against. Disable for the old
+    // "bench process only" RSS profile.
+    let rebuild_peak_probe = !args.iter().any(|a| a == "--no-rebuild-peak");
+
     match mode {
         "single" => {
             run_benchmark(
@@ -900,7 +1307,7 @@ fn main() {
                 "Federated Power-Law ({}K local users, ~100M conceptual)",
                 home.local_users / 1000
             );
-            run_federated_power_law_benchmark(&name, &home, &env);
+            run_federated_power_law_benchmark(&name, &home, &env, rebuild_peak_probe);
         }
         "sweep" | "fed-sweep" => {
             // Default sweep grid; covers the SLO-relevant range. Override
@@ -918,6 +1325,19 @@ fn main() {
             };
             let env = FederationEnvironment::realistic_10k();
             run_federated_power_law_sweep(&env, &sizes);
+        }
+        "mmap" => {
+            // Option C prototype. Same `--local-users N` override as
+            // `fed-power-law`; defaults to `medium` (50K local users)
+            // so a desktop dev box can run it in under a minute.
+            let mut home = HomeInstanceConfig::medium();
+            if let Some(pos) = args.iter().position(|a| a == "--local-users")
+                && let Some(n) = args.get(pos + 1).and_then(|s| s.parse::<u32>().ok())
+            {
+                home.local_users = n;
+            }
+            let env = FederationEnvironment::realistic_10k();
+            run_mmap_bench(&home, &env, rebuild_peak_probe);
         }
         "size" | "sizing" => {
             // `bench size 4GB` style. Accept a plain byte count or a
@@ -947,6 +1367,7 @@ fn main() {
                 "Federated Power-Law (50K local users, ~100M conceptual)",
                 &HomeInstanceConfig::medium(),
                 &FederationEnvironment::realistic_10k(),
+                rebuild_peak_probe,
             );
         }
     }

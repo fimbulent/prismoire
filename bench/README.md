@@ -30,14 +30,16 @@ cargo run -p prismoire-bench --release -- fed-power-law --local-users 100000   #
 cargo run -p prismoire-bench --release -- sweep                     # scaling sweep across local_users
 cargo run -p prismoire-bench --release -- sweep 10000 50000 250000  # custom sweep grid
 cargo run -p prismoire-bench --release -- size 4GB                  # sizing helper: max local_users for memory budget
+cargo run -p prismoire-bench --release -- mmap                      # A/B BFS perf: heap CSR vs mmap'd CSR (see below)
 cargo run -p prismoire-bench --release -- test                      # verbose correctness tests
 cargo test -p prismoire-bench                                       # cargo test suite (22 tests)
 ```
 
 ## Source layout
 
-- `src/algo.rs` — the BFS algorithm itself (CSR, dual CSR, forward/reverse BFS, distrust handling, hub dampening, the `HashMapGraph` reference oracle). The `*_with_threshold` BFS variants accept a configurable hub-dampening threshold so the harness can A/B with dampening on vs off without forking the algorithm.
+- `src/algo.rs` — the BFS algorithm itself (CSR, dual CSR, forward/reverse BFS, distrust handling, hub dampening, the `HashMapGraph` reference oracle). The `*_with_threshold` BFS variants accept a configurable hub-dampening threshold so the harness can A/B with dampening on vs off without forking the algorithm. Defines the `CsrAccess` trait so BFS bodies work generically over heap-resident `CsrGraph` and mmap-backed `MmapCsrGraph`.
 - `src/graph.rs` — synthetic graph generators: homogeneous (`generate_graph` / `GraphConfig`) and power-law (`generate_power_law_graph` / `PowerLawConfig`).
+- `src/mmap_csr.rs` — alternative CSR backed by an mmap'd tmpfs file (see the `mmap` bench mode below).
 - `src/main.rs` — CLI, timing harness, measurement helpers (degree distribution, variance multiplier κ, friendship-paradox branching, hub-dampening A/B), and the verbose correctness test suite.
 
 Cross-compile for Raspberry Pi via the flake:
@@ -104,68 +106,76 @@ The bench prints an **analytical pre-flight estimate** (cross-edges, unique remo
 
 > **Counter-intuitive finding:** at equal local-user count, the federated power-law has *less* hub concentration than the single-instance power-law. The 100M-user federation pool dilutes cross-vouches across many more potential targets than a 50K local pool concentrates intra-vouches. Single-instance power-law remains the more demanding stress test for `HUB_DAMPEN_THRESHOLD`.
 
+### mmap bench mode
+
+`bench mmap` A/B-compares BFS perf on two CSR backings: the regular heap-resident `CsrGraph` and an `MmapCsrGraph` whose `offsets` / `targets` arrays live in a tmpfs file the process mmaps back. Builds a heap CSR, serialises it to `/dev/shm`, mmaps the file, runs the same BFS body against both backings on the same 100 sample sources, and reports p50/p90/p99 timings side by side. Also runs a correctness check (heap and mmap must return identical trust scores) and a `madvise(MADV_DONTNEED)` pass that demonstrates the mmap pages stay in the page cache on tmpfs (the next access doesn't re-read the file — it just re-establishes the process's page-table entries). Same `--local-users N` override as `fed-power-law`.
+
 ## Example results
 
-These results are from a test run on a Raspberry Pi 4. Even on modest hardware, forward and backwards trust computations for 100 users (simulated page load) in the "federation" scenario takes only 1ms:
-
-```
-Prismoire Trust Graph Benchmark
-===============================
-Algorithm: Bottleneck-Grouped Probabilistic (DECAY=0.7, MAX_DEPTH=3, HUB_DAMPEN_THRESHOLD=5000)
+These results are from a test run on a Raspberry Pi 4. Even on modest hardware, forward and backwards trust computations for 100 users (simulated page load) in the "federation power law" scenario takes 1ms on average, <20ms p99:
 
 ============================================================
-  Benchmark: Single Instance (10K users)
+Benchmark: Federated Power-Law (50K local users, ~100M conceptual)
 ============================================================
+federation env: 10000 instances × 10000 mean users ≈ 100,000,000 conceptual users (α_size=1.2, α_target=0.8)
+home: 50000 local users, local_preference=0.5
 
-Graph generation:  19.9ms
-  nodes: 10000  edges: 100000
-  local users: 10000
+Projected (analytical pre-flight):
+cross-edges from home:   275,000
+unique remote hubs hit:  233,739
+materialised frontier:   12,484,915 nodes (249.7× local)
+total edges:             31,403,548
+CSR memory (forward+reverse): 334.8 MB
+NodeIndex memory:        476.3 MB
+Steady-state memory:     811.1 MB
+Rebuild peak memory:     2.2 GB (size against this)
 
-CSR build:         6.8ms
-  forward:  offsets=10001 targets=100000
-  reverse:  offsets=10001 targets=100000
-  memory:   859 KB (forward + reverse CSR, no index)
-  RSS delta: 1.8 MB → 3.6 MB (+1.8 MB)
-  distrust edges: 1532  distrusters: 1000
+Graph generation:  28319.2ms
+nodes: 16,250,781  edges: 29,570,165
+local users: 50,000   remote frontier: 16,200,781 (324.0× local)
+
+CSR build:         3888.3ms
+forward:  offsets=16250782 targets=29570165
+reverse:  offsets=16250782 targets=29570165
+memory:   349.6 MB (forward + reverse CSR, no index)
+RSS delta: 16.4 MB → 587.9 MB (+571.4 MB)
+distrust edges: 7511  distrusters: 5000
+
+Estimator vs measurement:
+frontier nodes:  est 12,484,915  actual 16,250,781  ratio 1.30×
+total edges:     est 31,403,548  actual 29,570,165  ratio 0.94×
+CSR bytes:       est 334.8 MB  actual 349.6 MB
+NodeIndex bytes: est 476.3 MB (analytical — not materialised in this bench)
+Rebuild peak:    est 2.2 GB (production rebuild — uuid_edges + dense_edges + dual graphs)
+
+Degree distribution (power-law topology):
+in-degree:  max=5432  p99=12  p90=3  p50=1
+out-degree: max=200  p99=50  p90=5  p50=0
+top-10 in-degree share: 0.1% (25936 of 29570165 total inbound edges)
+nodes above HUB_DAMPEN_THRESHOLD (5000): 1
+
+Variance multiplier κ = E[d²]/E[d]² = 32.52× (E[d]=1.8, E[d²]=108)
+homogeneous baseline κ = 1.0; doc predicts ≈5× for the modelled distribution
+Friendship-paradox branching at hop 2/3: 4.0 (mean out-degree = 1.8)
+
+Rebuild-peak probe: allocating 2.1 GB (old CSR stand-in + sorted-Vec NodeIndex + HashMap NodeIndex mid-build)
 
 Forward BFS (relevance) — 100 samples:
-  min: 0.474ms  p50: 0.488ms  p99: 1.124ms  max: 1.124ms  mean: 0.546ms
-  avg reachable targets: 1046
+min: 0.090ms  p50: 0.295ms  p99: 17.159ms  max: 17.159ms  mean: 1.034ms
+avg reachable targets: 1337
 
 Reverse BFS (visibility) — 100 samples:
-  min: 0.101ms  p50: 0.416ms  p99: 0.911ms  max: 0.911ms  mean: 0.414ms
-  avg reachable sources: 1082
+min: 0.000ms  p50: 0.020ms  p99: 0.488ms  max: 0.488ms  mean: 0.041ms
+avg reachable sources: 98
 
 Dual BFS (simulated page load) — 100 samples:
-  p50: 0.930ms  p99: 1.451ms  mean: 0.946ms
+p50: 0.348ms  p99: 17.259ms  mean: 1.084ms
 
-Peak RSS: 4.2 MB
+Hub-dampening A/B (visibility threshold = 0.45, 100 samples):
+frontier (reachable targets)  with dampening: median=559  max=14415
+frontier (reachable targets) without dampening: median=559  max=14415
+visible paths without dampening: 133668
+visible paths with    dampening: 133668
+attenuated below threshold:      0  (0.0% of would-be-visible)
 
-============================================================
-  Benchmark: Federation (10K instances)
-============================================================
-
-Graph generation:  30.1ms
-  nodes: 1120000  edges: 1210000
-  local users: 10000
-
-CSR build:         97.8ms
-  forward:  offsets=1120001 targets=1210000
-  reverse:  offsets=1120001 targets=1210000
-  memory:   17.8 MB (forward + reverse CSR, no index)
-  RSS delta: 2.6 MB → 37.8 MB (+35.2 MB)
-  distrust edges: 1532  distrusters: 1000
-
-Forward BFS (relevance) — 100 samples:
-  min: 0.634ms  p50: 0.654ms  p99: 1.133ms  max: 1.133ms  mean: 0.702ms
-  avg reachable targets: 1367
-
-Reverse BFS (visibility) — 100 samples:
-  min: 0.099ms  p50: 0.417ms  p99: 0.819ms  max: 0.819ms  mean: 0.406ms
-  avg reachable sources: 1082
-
-Dual BFS (simulated page load) — 100 samples:
-  p50: 1.106ms  p99: 1.754ms  mean: 1.126ms
-
-Peak RSS: 47.0 MB
-```
+Peak RSS: 2.4 GB
