@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO signed_objects (canonical_hash, inner_class, payload, signature) VALUES (?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "24527784186747d855e6cfc328581c4d888a6679202aa39c3033ce18607b5968"
+}

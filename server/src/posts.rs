@@ -132,17 +132,30 @@ pub async fn edit_post(
         created_at_ms,
     )
     .await?;
-    let signature = signed.signature;
+    let signature = signed.signature.clone();
+    let canonical_hash_db: Vec<u8> = signed.canonical_hash.to_vec();
 
     sqlx::query!(
-        "INSERT INTO post_revisions (post_id, revision, body, signature, created_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO post_revisions (post_id, revision, body, signature, canonical_hash, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?)",
         post_id,
         new_revision,
         body,
         signature,
+        canonical_hash_db,
         revision_created_at,
     )
     .execute(&mut *tx)
+    .await?;
+
+    // Dual-write the canonical bytes into `signed_objects`.
+    signing::store_signed_object(
+        &mut *tx,
+        "post-rev",
+        &signed.payload,
+        &signed.signature,
+        &signed.canonical_hash,
+    )
     .await?;
 
     let new_count = new_revision + 1;
@@ -233,7 +246,7 @@ pub async fn retract_post(
 
     let signed =
         signing::sign_retraction(&state.db, &user.user_id, &post_uuid, created_at_ms).await?;
-    let retraction_signature = signed.signature;
+    let retraction_signature = signed.signature.clone();
 
     // Wrap the two UPDATEs in a transaction. Without it, a crash
     // between them leaves a post marked retracted but with revision
@@ -255,6 +268,27 @@ pub async fn retract_post(
     )
     .execute(&mut *tx)
     .await?;
+
+    // Dual-write the canonical retraction bytes into `signed_objects`
+    // alongside the projection updates.
+    signing::store_signed_object(
+        &mut *tx,
+        "retract",
+        &signed.payload,
+        &signed.signature,
+        &signed.canonical_hash,
+    )
+    .await?;
+
+    // Erasure: a retract is an erasure authority over the post's
+    // signed `post-rev` history. NULL the canonical payload bytes of
+    // every prior revision so the body text only survives in places
+    // that a backfill is expected to return `410 Gone` for. The
+    // retract object itself is retained verbatim above; chain
+    // continuity is preserved via the canonical_hash that stays in
+    // place.
+    signing::erase_post_rev_payloads(&mut *tx, &post_id).await?;
+
     tx.commit().await?;
 
     Ok(axum::http::StatusCode::NO_CONTENT)

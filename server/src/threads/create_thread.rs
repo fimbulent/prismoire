@@ -106,12 +106,17 @@ pub async fn create_thread(
         created_at_ms,
     )
     .await?;
-    let signature = signed.signature;
+    let signature = signed.signature.clone();
+    let canonical_hash_db: Vec<u8> = signed.canonical_hash.to_vec();
 
     // Normalized form drops scheme + leading `www.` so those near-
     // universal tokens never enter `threads_fts`. Raw `link_url` is
     // preserved for display.
     let link_url_normalized = link_url.as_deref().map(normalize_url_for_fts);
+
+    // Wrap the thread / OP-post / revision / canonical-bytes inserts in
+    // a single transaction.
+    let mut tx = state.db.begin().await?;
 
     sqlx::query!(
         "INSERT INTO threads (id, title, author, room, created_at, last_activity, link_url, link_url_normalized) \
@@ -125,7 +130,7 @@ pub async fn create_thread(
         link_url,
         link_url_normalized,
     )
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
 
     sqlx::query!(
@@ -135,18 +140,34 @@ pub async fn create_thread(
         thread_id,
         now,
     )
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
 
     sqlx::query!(
-        "INSERT INTO post_revisions (post_id, revision, body, signature, created_at) VALUES (?, 0, ?, ?, ?)",
+        "INSERT INTO post_revisions (post_id, revision, body, signature, canonical_hash, created_at) \
+         VALUES (?, 0, ?, ?, ?, ?)",
         post_id,
         body,
         signature,
+        canonical_hash_db,
         now,
     )
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
+
+    // Dual-write the canonical bytes into the federation-shared store
+    // (`signed_objects`). The post_revisions row above is the local
+    // projection; this row is the protocol form.
+    signing::store_signed_object(
+        &mut *tx,
+        "post-rev",
+        &signed.payload,
+        &signed.signature,
+        &signed.canonical_hash,
+    )
+    .await?;
+
+    tx.commit().await?;
 
     Ok((
         axum::http::StatusCode::CREATED,

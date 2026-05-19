@@ -93,7 +93,14 @@ pub async fn create_reply(
         created_at_ms,
     )
     .await?;
-    let signature = signed.signature;
+    let signature = signed.signature.clone();
+    let canonical_hash_db: Vec<u8> = signed.canonical_hash.to_vec();
+
+    // Wrap the entire reply creation in a single transaction. Covers:
+    // posts INSERT, post_revisions INSERT, signed_objects INSERT (canonical
+    // bytes), threads UPDATE (reply_count + last_activity), and the
+    // recent-repliers rank rewrite below.
+    let mut tx = state.db.begin().await?;
 
     sqlx::query!(
         "INSERT INTO posts (id, author, thread, parent, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -103,17 +110,29 @@ pub async fn create_reply(
         parent_id,
         post_created_at,
     )
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
 
     sqlx::query!(
-        "INSERT INTO post_revisions (post_id, revision, body, signature, created_at) VALUES (?, 0, ?, ?, ?)",
+        "INSERT INTO post_revisions (post_id, revision, body, signature, canonical_hash, created_at) \
+         VALUES (?, 0, ?, ?, ?, ?)",
         post_id,
         body,
         signature,
+        canonical_hash_db,
         post_created_at,
     )
-    .execute(&state.db)
+    .execute(&mut *tx)
+    .await?;
+
+    // Dual-write the canonical bytes into `signed_objects`.
+    signing::store_signed_object(
+        &mut *tx,
+        "post-rev",
+        &signed.payload,
+        &signed.signature,
+        &signed.canonical_hash,
+    )
     .await?;
 
     sqlx::query!(
@@ -121,7 +140,7 @@ pub async fn create_reply(
         post_created_at,
         thread_id,
     )
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
 
     // Shift recent-repliers ranks up by 1 and insert the new reply at rank 0.
@@ -130,9 +149,6 @@ pub async fn create_reply(
     // processes rows in arbitrary order — bumping rank 0→1 can collide with
     // the existing rank 1 row (PK violation). The fix: use negative
     // intermediate values so no two rows ever share a rank during the UPDATE.
-    //
-    // All within a transaction to prevent concurrent interleaving.
-    let mut tx = state.db.begin().await?;
 
     // 1. Trim the tail to make room after the shift.
     sqlx::query!(

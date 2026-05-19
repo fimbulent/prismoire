@@ -210,10 +210,14 @@ async fn test_signup_as(
         None,
     )
     .await?;
+    let inviter_to_user_payload = signed_inviter_to_user.payload;
+    let user_to_inviter_payload = signed_user_to_inviter.payload;
     let inviter_to_user_sig = signed_inviter_to_user.signature;
     let user_to_inviter_sig = signed_user_to_inviter.signature;
-    let inviter_to_user_hash: Vec<u8> = signed_inviter_to_user.canonical_hash.to_vec();
-    let user_to_inviter_hash: Vec<u8> = signed_user_to_inviter.canonical_hash.to_vec();
+    let inviter_to_user_canonical = signed_inviter_to_user.canonical_hash;
+    let user_to_inviter_canonical = signed_user_to_inviter.canonical_hash;
+    let inviter_to_user_hash: Vec<u8> = inviter_to_user_canonical.to_vec();
+    let user_to_inviter_hash: Vec<u8> = user_to_inviter_canonical.to_vec();
 
     sqlx::query!(
         "INSERT INTO trust_edges (id, source_user, target_user, trust_type, created_at, signature, canonical_hash) \
@@ -239,6 +243,26 @@ async fn test_signup_as(
         user_to_inviter_hash,
     )
     .execute(&mut *tx)
+    .await?;
+
+    // Dual-write canonical bytes for both edges so fixtures match the
+    // shape of production-signed rows in `signed_objects` as well as
+    // `trust_edges`.
+    signing::store_signed_object(
+        &mut *tx,
+        "trust-edge",
+        &inviter_to_user_payload,
+        &inviter_to_user_sig,
+        &inviter_to_user_canonical,
+    )
+    .await?;
+    signing::store_signed_object(
+        &mut *tx,
+        "trust-edge",
+        &user_to_inviter_payload,
+        &user_to_inviter_sig,
+        &user_to_inviter_canonical,
+    )
     .await?;
 
     tx.commit().await?;

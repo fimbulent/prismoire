@@ -1073,9 +1073,11 @@ pub async fn set_trust_edge(
         prior_hash,
     )
     .await?;
+    let payload = signed.payload;
     let signature = signed.signature;
+    let canonical_hash = signed.canonical_hash;
     let prior_hash_db: Option<Vec<u8>> = prior_hash.map(|h| h.to_vec());
-    let canonical_hash_db: Vec<u8> = signed.canonical_hash.to_vec();
+    let canonical_hash_db: Vec<u8> = canonical_hash.to_vec();
 
     let id = Uuid::new_v4().to_string();
     sqlx::query!(
@@ -1091,6 +1093,17 @@ pub async fn set_trust_edge(
         canonical_hash_db,
     )
     .execute(&mut *tx)
+    .await?;
+
+    // Dual-write the canonical trust-edge bytes into `signed_objects`
+    // alongside the projection insert.
+    crate::signing::store_signed_object(
+        &mut *tx,
+        "trust-edge",
+        &payload,
+        &signature,
+        &canonical_hash,
+    )
     .await?;
 
     tx.commit().await?;
@@ -1202,9 +1215,11 @@ pub async fn delete_trust_edge(
         prior_hash,
     )
     .await?;
+    let payload = signed.payload;
     let signature = signed.signature;
+    let canonical_hash = signed.canonical_hash;
     let prior_hash_db: Option<Vec<u8>> = prior_hash.map(|h| h.to_vec());
-    let canonical_hash_db: Vec<u8> = signed.canonical_hash.to_vec();
+    let canonical_hash_db: Vec<u8> = canonical_hash.to_vec();
 
     let id = Uuid::new_v4().to_string();
     sqlx::query!(
@@ -1220,6 +1235,25 @@ pub async fn delete_trust_edge(
     )
     .execute(&mut *tx)
     .await?;
+
+    // Dual-write the canonical tombstone bytes into `signed_objects`
+    // alongside the projection insert.
+    crate::signing::store_signed_object(
+        &mut *tx,
+        "trust-edge",
+        &payload,
+        &signature,
+        &canonical_hash,
+    )
+    .await?;
+
+    // Erasure: a `neutral` trust-edge is an erasure authority over
+    // every prior signed object in the (source, target) chain. NULL
+    // their canonical payload bytes while retaining the canonical
+    // hashes so chain walks across the erased history still resolve.
+    // The neutral row we just wrote is excluded by canonical_hash.
+    crate::signing::erase_trust_edge_chain(&mut *tx, &user.user_id, &target_id, &canonical_hash)
+        .await?;
 
     tx.commit().await?;
 

@@ -727,8 +727,11 @@ pub(crate) async fn soft_delete_user(
 
     // Pre-compute retraction signatures in memory so the subsequent
     // UPDATEs are pure DB work (signing is CPU-only and does not touch
-    // the pool, so doing it inside the tx is fine).
-    let retractions: Vec<(String, Vec<u8>)> = if let Some(key) = signing_key.as_ref() {
+    // the pool, so doing it inside the tx is fine). The optional
+    // `signed_bytes` carries the canonical payload + hash for the
+    // dual-write into `signed_objects` (None when no active key).
+    type RetractionRow = (String, Vec<u8>, Option<(Vec<u8>, [u8; 32])>);
+    let retractions: Vec<RetractionRow> = if let Some(key) = signing_key.as_ref() {
         posts_to_retract
             .into_iter()
             .map(|r| {
@@ -737,17 +740,19 @@ pub(crate) async fn soft_delete_user(
                     AppError::code(ErrorCode::Internal)
                 })?;
                 let out = sign_retraction_with_key(key, &post_uuid, created_at_ms);
-                Ok::<_, AppError>((r.id, out.signature))
+                Ok::<_, AppError>((r.id, out.signature, Some((out.payload, out.canonical_hash))))
             })
             .collect::<Result<_, _>>()?
     } else {
         // No active signing key (edge case: user was created before
         // signing was introduced, or a previous delete attempt already
         // deactivated the key). Fall back to an empty signature — the
-        // retracted_at timestamp alone is still meaningful.
+        // retracted_at timestamp alone is still meaningful. With no
+        // canonical bytes, there is nothing to dual-write into
+        // `signed_objects` either.
         posts_to_retract
             .into_iter()
-            .map(|r| (r.id, Vec::new()))
+            .map(|r| (r.id, Vec::new(), None))
             .collect()
     };
 
@@ -755,7 +760,7 @@ pub(crate) async fn soft_delete_user(
     //    statement simple; the N is bounded by how many posts one user
     //    can make in an account lifetime, which is fine for an
     //    interactive delete.
-    for (post_id, sig) in &retractions {
+    for (post_id, sig, signed_bytes) in &retractions {
         sqlx::query!(
             "UPDATE posts SET retracted_at = ?, retraction_signature = ? WHERE id = ?",
             retracted_at,
@@ -771,6 +776,21 @@ pub(crate) async fn soft_delete_user(
         )
         .execute(&mut **tx)
         .await?;
+
+        // Dual-write the canonical retraction bytes into `signed_objects`
+        // alongside the projection updates.
+        if let Some((payload, canonical_hash)) = signed_bytes {
+            crate::signing::store_signed_object(&mut **tx, "retract", payload, sig, canonical_hash)
+                .await?;
+        }
+
+        // Per-post erasure: the retract is an erasure authority over
+        // the post's signed revisions. NULL the canonical payload bytes
+        // of every prior `post-rev` for this post; the retract itself
+        // is retained. This is the same erasure step that
+        // `posts::retract_post` performs on a single-post retract —
+        // bulk-delete just runs it per post.
+        crate::signing::erase_post_rev_payloads(&mut **tx, post_id).await?;
     }
 
     // 1b. Belt-and-suspenders FTS cleanup. The retraction triggers
@@ -849,6 +869,19 @@ pub(crate) async fn soft_delete_user(
     //    authenticate, can't post, and its existing posts are all
     //    retracted), so keeping them around would just mean latent
     //    noise in the trust graph with no behaviour to vouch for.
+    //
+    //    Erasure first: a self-delete is an account-wide erasure
+    //    authority over everything the user signed. We emit no
+    //    `deactivate` wire object yet, but the local payload-NULLing
+    //    effect is unconditional. NULL the canonical payload bytes
+    //    of every trust-edge the user authored *before* dropping the
+    //    projection rows — once the rows are gone, the canonical_hash
+    //    subquery has nothing to match against. Outbound only; inbound
+    //    edges were signed by *other* users and are not ours to erase.
+    //    TODO: emit a signed `deactivate` once §5.11 lands so peers
+    //    can mirror this erasure on receipt.
+    crate::signing::erase_user_trust_edge_payloads(&mut **tx, user_id).await?;
+
     sqlx::query!(
         "DELETE FROM trust_edges WHERE source_user = ? OR target_user = ?",
         user_id,

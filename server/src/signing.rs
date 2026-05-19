@@ -8,6 +8,9 @@ use crate::signed::{PostRevision, Retraction, SignedPayload, TrustEdge, TrustSta
 
 /// Output of signing a class-specific payload.
 pub struct SigningOutput {
+    /// Canonical CBOR bytes that were signed. These go into
+    /// `signed_objects.payload` verbatim (see `store_signed_object`).
+    pub payload: Vec<u8>,
     /// 64-byte Ed25519 signature over the canonical CBOR payload.
     pub signature: Vec<u8>,
     /// 32-byte Ed25519 public key of the active signing key.
@@ -26,8 +29,13 @@ pub struct SigningOutput {
 
 /// Generate an Ed25519 keypair and store it in the `signing_keys` table.
 ///
-/// Returns the signing key row ID. The private key is stored server-side
-/// in V1; in V2 it moves client-side (PRF-wrapped).
+/// Also writes the public key onto the user row (`users.public_key`),
+/// so the federation-identity lookup path can resolve `pubkey →
+/// user_id` without joining `signing_keys`. Both writes happen in one
+/// transaction: there is no window in which a `signing_keys` row
+/// exists but the matching `users.public_key` column is NULL.
+///
+/// Returns the signing key row ID.
 pub async fn create_signing_key(db: &SqlitePool, user_id: &str) -> Result<String, sqlx::Error> {
     let signing_key = SigningKey::generate(&mut OsRng);
     let verifying_key = signing_key.verifying_key();
@@ -37,6 +45,7 @@ pub async fn create_signing_key(db: &SqlitePool, user_id: &str) -> Result<String
     let private_key = signing_key.to_bytes();
     let private_key = private_key.as_slice();
 
+    let mut tx = db.begin().await?;
     sqlx::query!(
         "INSERT INTO signing_keys (id, user_id, public_key, private_key) VALUES (?, ?, ?, ?)",
         id,
@@ -44,10 +53,181 @@ pub async fn create_signing_key(db: &SqlitePool, user_id: &str) -> Result<String
         public_key,
         private_key,
     )
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+    // `public_key IS NULL` guard: the federation-identity column is
+    // write-once. A second `create_signing_key` call (resurrection,
+    // retry, or any future key-rotation path) MUST NOT silently
+    // rebind `users.public_key` — historical `canonical_hash` chains
+    // are bound to the original key, and a rebind would orphan their
+    // verifiability. Key rotation, when it lands, has to be an
+    // explicit, audited migration (new `signing_keys` row + spec'd
+    // wire object), not a side effect of this helper.
+    sqlx::query!(
+        "UPDATE users SET public_key = ? WHERE id = ? AND public_key IS NULL",
+        public_key,
+        user_id,
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
 
     Ok(id)
+}
+
+/// Persist a signed object's canonical bytes into `signed_objects`.
+///
+/// `INSERT OR IGNORE` is correct here: the table is keyed on
+/// `canonical_hash`, so re-storing the same payload (received twice
+/// from federation gossip, or backfilled twice during recovery) is a
+/// no-op rather than a constraint violation.
+///
+/// Callers must pass the *exact* bytes that were signed (typically
+/// `SigningOutput::payload`) — never re-encode here. The canonical-form
+/// invariant is that the bytes are stored verbatim and a peer that
+/// re-verifies the signature against `payload + signature` succeeds.
+///
+/// **`inner_class` and `canonical_hash` are co-bound.** The canonical
+/// CBOR payload includes a `t = "<class>"` field, so the same bytes
+/// can only have one valid class — the SHA-256 of those bytes is
+/// what we key on. A caller passing the wrong `inner_class` for given
+/// bytes is a programming bug whose `INSERT OR IGNORE` no-op is the
+/// *symptom*, not the *cause*: the row already exists with the
+/// correct class. (A new payload differing only in the wire class
+/// hashes differently and would not collide.)
+pub async fn store_signed_object<'e, E: SqliteExecutor<'e>>(
+    executor: E,
+    inner_class: &str,
+    payload: &[u8],
+    signature: &[u8],
+    canonical_hash: &[u8; 32],
+) -> Result<(), sqlx::Error> {
+    let canonical_hash_slice: &[u8] = canonical_hash.as_slice();
+    sqlx::query!(
+        "INSERT OR IGNORE INTO signed_objects (canonical_hash, inner_class, payload, signature) \
+         VALUES (?, ?, ?, ?)",
+        canonical_hash_slice,
+        inner_class,
+        payload,
+        signature,
+    )
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
+/// Erase the canonical payloads of every signed `post-rev` belonging to a post.
+///
+/// Implements the "payload erasure" effect of a `retract` (and the
+/// retract-side of `deactivate`). The row stays in `signed_objects` so
+/// hash-chain walks across the erased predecessor still work; only the
+/// `payload` bytes are NULLed and `erased_at` stamped.
+///
+/// `post_revisions.canonical_hash` is NOT NULL by schema, so the
+/// subquery is a clean join. The `payload IS NOT NULL` guard makes the
+/// helper idempotent across replay.
+///
+/// No `inner_class` narrowing: `signed_objects.canonical_hash` is the
+/// primary key, and each canonical_hash uniquely identifies one row
+/// across all classes (the class is bound into the canonical bytes —
+/// see `store_signed_object`).
+pub async fn erase_post_rev_payloads<'e, E: SqliteExecutor<'e>>(
+    executor: E,
+    post_id: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        "UPDATE signed_objects \
+         SET payload = NULL, erased_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+         WHERE payload IS NOT NULL \
+           AND canonical_hash IN ( \
+               SELECT canonical_hash FROM post_revisions WHERE post_id = ? \
+           )",
+        post_id,
+    )
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
+/// Erase the canonical payloads of every prior trust-edge between a pair.
+///
+/// Implements the "payload erasure" effect of a `neutral`
+/// trust-edge. The newly written neutral row is identified by
+/// `except_canonical_hash` and excluded so the chain-terminating
+/// erasure-authority object is itself retained verbatim.
+///
+/// Chain continuity is preserved: every erased row keeps its
+/// `canonical_hash` (the chain walk operates on hashes, not payload
+/// bytes).
+///
+/// `trust_edges` is the append-only signed log, so the subquery
+/// enumerates every historical mutation for the pair — not just the
+/// current one. `current_trust_edges` is a separate view; we
+/// deliberately query the table here.
+///
+/// No `inner_class` narrowing: `canonical_hash` is the primary key
+/// on `signed_objects` (one row per hash across all classes), and
+/// the class is bound into the canonical bytes — see
+/// `store_signed_object`.
+pub async fn erase_trust_edge_chain<'e, E: SqliteExecutor<'e>>(
+    executor: E,
+    source_user_id: &str,
+    target_user_id: &str,
+    except_canonical_hash: &[u8; 32],
+) -> Result<(), sqlx::Error> {
+    let except: &[u8] = except_canonical_hash.as_slice();
+    sqlx::query!(
+        "UPDATE signed_objects \
+         SET payload = NULL, erased_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+         WHERE payload IS NOT NULL \
+           AND canonical_hash != ? \
+           AND canonical_hash IN ( \
+               SELECT canonical_hash FROM trust_edges \
+               WHERE source_user = ? AND target_user = ? \
+                 AND canonical_hash IS NOT NULL \
+           )",
+        except,
+        source_user_id,
+        target_user_id,
+    )
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
+/// Erase the canonical payloads of every trust-edge the user signed.
+///
+/// Used by account deletion / deactivation (`privacy::soft_delete_user`).
+/// The neutral-trust-edge code path normally narrows erasure to one
+/// pair; here we erase across every pair the user authored. Caller is
+/// expected to invoke this *before* deleting the `trust_edges` rows —
+/// once the projection rows are gone the `canonical_hash IN (SELECT ...)`
+/// subquery returns nothing.
+///
+/// `trust_edges` is the append-only signed log, so this picks up every
+/// historical mutation the user authored across every counterparty —
+/// not just their currently-active outbound edges. See
+/// `erase_trust_edge_chain` for the same invariant in a per-pair context.
+///
+/// No `inner_class` narrowing — `canonical_hash` is the PK on
+/// `signed_objects` and uniquely identifies one row across all classes.
+pub async fn erase_user_trust_edge_payloads<'e, E: SqliteExecutor<'e>>(
+    executor: E,
+    user_id: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        "UPDATE signed_objects \
+         SET payload = NULL, erased_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+         WHERE payload IS NOT NULL \
+           AND canonical_hash IN ( \
+               SELECT canonical_hash FROM trust_edges \
+               WHERE source_user = ? AND canonical_hash IS NOT NULL \
+           )",
+        user_id,
+    )
+    .execute(executor)
+    .await?;
+    Ok(())
 }
 
 /// Load the user's active signing key from the `signing_keys` table.
@@ -117,6 +297,7 @@ pub fn sign_post_revision_with_key(
     let signature = key.sign(&payload_bytes).to_bytes().to_vec();
     let canonical_hash: [u8; 32] = sha2::Sha256::digest(&payload_bytes).into();
     SigningOutput {
+        payload: payload_bytes,
         signature,
         public_key,
         canonical_hash,
@@ -142,6 +323,7 @@ pub fn sign_retraction_with_key(
     let signature = key.sign(&payload_bytes).to_bytes().to_vec();
     let canonical_hash: [u8; 32] = sha2::Sha256::digest(&payload_bytes).into();
     SigningOutput {
+        payload: payload_bytes,
         signature,
         public_key,
         canonical_hash,
@@ -179,6 +361,7 @@ pub fn sign_trust_edge_with_key(
     let signature = key.sign(&payload_bytes).to_bytes().to_vec();
     let canonical_hash: [u8; 32] = sha2::Sha256::digest(&payload_bytes).into();
     SigningOutput {
+        payload: payload_bytes,
         signature,
         public_key,
         canonical_hash,

@@ -109,15 +109,6 @@ CREATE TABLE posts (
     retraction_signature BLOB,
     revision_count INTEGER NOT NULL DEFAULT 1
 , retraction_format_version INTEGER NOT NULL DEFAULT 1, home_instance BLOB);
-CREATE TABLE post_revisions (
-    post_id TEXT NOT NULL REFERENCES posts(id),
-    revision INTEGER NOT NULL DEFAULT 0,
-    body TEXT NOT NULL,
-    signature BLOB NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    epoch INTEGER NOT NULL DEFAULT 0, format_version INTEGER NOT NULL DEFAULT 1,
-    PRIMARY KEY (post_id, revision)
-);
 CREATE TABLE thread_recent_repliers (
     thread_id TEXT NOT NULL REFERENCES threads(id),
     reply_rank INTEGER NOT NULL,
@@ -203,39 +194,6 @@ AFTER DELETE ON threads
 BEGIN
     DELETE FROM threads_fts WHERE rowid = OLD.rowid;
 END;
-CREATE TRIGGER threads_fts_after_update_title
-AFTER UPDATE OF title ON threads
-BEGIN
-    INSERT OR REPLACE INTO threads_fts (rowid, title, op_body, link_url)
-    VALUES (
-        NEW.rowid,
-        NEW.title,
-        COALESCE(
-            (
-                SELECT pr.body
-                FROM post_revisions pr
-                JOIN posts p ON p.id = pr.post_id
-                WHERE p.thread = NEW.id
-                  AND p.parent IS NULL
-                  AND p.retracted_at IS NULL
-                ORDER BY pr.revision DESC
-                LIMIT 1
-            ),
-            ''
-        ),
-        COALESCE(NEW.link_url_normalized, '')
-    );
-END;
-CREATE TRIGGER threads_fts_op_body_after_revision
-AFTER INSERT ON post_revisions
-WHEN (SELECT parent FROM posts WHERE id = NEW.post_id) IS NULL
- AND NEW.revision = (SELECT MAX(revision) FROM post_revisions WHERE post_id = NEW.post_id)
-BEGIN
-    INSERT OR REPLACE INTO threads_fts (rowid, title, op_body, link_url)
-    SELECT t.rowid, t.title, NEW.body, COALESCE(t.link_url_normalized, '')
-    FROM threads t
-    WHERE t.id = (SELECT thread FROM posts WHERE id = NEW.post_id);
-END;
 CREATE TRIGGER threads_fts_op_after_retract
 AFTER UPDATE OF retracted_at ON posts
 WHEN OLD.retracted_at IS NULL
@@ -258,17 +216,6 @@ CREATE TABLE IF NOT EXISTS 'posts_fts_data'(id INTEGER PRIMARY KEY, block BLOB);
 CREATE TABLE IF NOT EXISTS 'posts_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS 'posts_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB, origin INTEGER);
 CREATE TABLE IF NOT EXISTS 'posts_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID;
-CREATE TRIGGER posts_fts_after_revision
-AFTER INSERT ON post_revisions
-WHEN (SELECT retracted_at FROM posts WHERE id = NEW.post_id) IS NULL
- AND NEW.revision = (SELECT MAX(revision) FROM post_revisions WHERE post_id = NEW.post_id)
-BEGIN
-    INSERT OR REPLACE INTO posts_fts (rowid, body)
-    VALUES (
-        (SELECT rowid FROM posts WHERE id = NEW.post_id),
-        NEW.body
-    );
-END;
 CREATE TRIGGER posts_fts_after_retract
 AFTER UPDATE OF retracted_at ON posts
 WHEN OLD.retracted_at IS NULL
@@ -402,19 +349,6 @@ FROM (
 ) ranked
 WHERE rn = 1 AND trust_type != 'neutral'
 /* current_trust_edges(id,source_user,target_user,trust_type,created_at,reason,signature,prior_edge_hash,format_version) */;
-CREATE TABLE signed_objects (
-    canonical_hash BLOB PRIMARY KEY NOT NULL,
-    inner_class    TEXT NOT NULL CHECK (inner_class IN (
-                       'post-rev', 'retract', 'admin-rm',
-                       'trust-edge', 'profile', 'thread-create',
-                       'thread-status', 'deactivate', 'move',
-                       'user-status'
-                   )),
-    payload        BLOB NOT NULL,
-    signature      BLOB NOT NULL,
-    received_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-);
-CREATE INDEX idx_signed_objects_class ON signed_objects(inner_class);
 CREATE TABLE peers (
     instance_pubkey BLOB PRIMARY KEY NOT NULL,
     instance_domain TEXT NOT NULL UNIQUE,
@@ -424,3 +358,73 @@ CREATE TABLE peers (
     last_handshake  TEXT
 );
 CREATE INDEX idx_peers_status ON peers(status);
+CREATE TABLE IF NOT EXISTS "post_revisions" (
+    post_id        TEXT NOT NULL REFERENCES posts(id),
+    revision       INTEGER NOT NULL DEFAULT 0,
+    body           TEXT NOT NULL,
+    signature      BLOB NOT NULL,
+    canonical_hash BLOB NOT NULL,
+    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    epoch          INTEGER NOT NULL DEFAULT 0,
+    format_version INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (post_id, revision)
+);
+CREATE TRIGGER posts_fts_after_revision
+AFTER INSERT ON post_revisions
+WHEN (SELECT retracted_at FROM posts WHERE id = NEW.post_id) IS NULL
+ AND NEW.revision = (SELECT MAX(revision) FROM post_revisions WHERE post_id = NEW.post_id)
+BEGIN
+    INSERT OR REPLACE INTO posts_fts (rowid, body)
+    VALUES (
+        (SELECT rowid FROM posts WHERE id = NEW.post_id),
+        NEW.body
+    );
+END;
+CREATE TRIGGER threads_fts_op_body_after_revision
+AFTER INSERT ON post_revisions
+WHEN (SELECT parent FROM posts WHERE id = NEW.post_id) IS NULL
+ AND NEW.revision = (SELECT MAX(revision) FROM post_revisions WHERE post_id = NEW.post_id)
+BEGIN
+    INSERT OR REPLACE INTO threads_fts (rowid, title, op_body, link_url)
+    SELECT t.rowid, t.title, NEW.body, COALESCE(t.link_url_normalized, '')
+    FROM threads t
+    WHERE t.id = (SELECT thread FROM posts WHERE id = NEW.post_id);
+END;
+CREATE TRIGGER threads_fts_after_update_title
+AFTER UPDATE OF title ON threads
+BEGIN
+    INSERT OR REPLACE INTO threads_fts (rowid, title, op_body, link_url)
+    VALUES (
+        NEW.rowid,
+        NEW.title,
+        COALESCE(
+            (
+                SELECT pr.body
+                FROM post_revisions pr
+                JOIN posts p ON p.id = pr.post_id
+                WHERE p.thread = NEW.id
+                  AND p.parent IS NULL
+                  AND p.retracted_at IS NULL
+                ORDER BY pr.revision DESC
+                LIMIT 1
+            ),
+            ''
+        ),
+        COALESCE(NEW.link_url_normalized, '')
+    );
+END;
+CREATE TABLE IF NOT EXISTS "signed_objects" (
+    canonical_hash BLOB PRIMARY KEY NOT NULL,
+    inner_class    TEXT NOT NULL CHECK (inner_class IN (
+                       'post-rev', 'retract', 'admin-rm',
+                       'trust-edge', 'profile', 'thread-create',
+                       'thread-status', 'deactivate', 'move',
+                       'user-status'
+                   )),
+    payload        BLOB,
+    signature      BLOB NOT NULL,
+    received_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    erased_at      TEXT,
+    CHECK (payload IS NOT NULL OR erased_at IS NOT NULL)
+);
+CREATE INDEX idx_signed_objects_class ON signed_objects(inner_class);
