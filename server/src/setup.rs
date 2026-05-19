@@ -219,19 +219,25 @@ pub async fn setup_complete(
         return Err(AppError::code(ErrorCode::SetupAlreadyComplete));
     }
 
-    sqlx::query!(
-        "INSERT INTO users (id, display_name, display_name_skeleton, signup_method, role) \
-         VALUES (?, ?, ?, 'admin', 'admin')",
-        user_id,
-        display_name,
-        skeleton,
-    )
-    .execute(&state.db)
-    .await?;
+    let signing_key = signing::generate_signing_key();
+    let verifying_bytes = signing_key.verifying_key().to_bytes();
+    let public_key: &[u8] = verifying_bytes.as_slice();
 
     let cred_id = Uuid::new_v4().to_string();
     let passkey_bytes = serde_json::to_vec(&passkey)?;
     let cred_id_bytes = passkey.cred_id().as_ref() as &[u8];
+
+    let mut tx = state.db.begin().await?;
+    sqlx::query!(
+        "INSERT INTO users (id, display_name, display_name_skeleton, signup_method, role, public_key) \
+         VALUES (?, ?, ?, 'admin', 'admin', ?)",
+        user_id,
+        display_name,
+        skeleton,
+        public_key,
+    )
+    .execute(&mut *tx)
+    .await?;
 
     sqlx::query!(
         "INSERT INTO credentials (id, user_id, credential_id, public_key, sign_count) \
@@ -241,10 +247,11 @@ pub async fn setup_complete(
         cred_id_bytes,
         passkey_bytes,
     )
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
 
-    signing::create_signing_key(&state.db, &user_id).await?;
+    signing::store_signing_key(&mut tx, &user_id, &signing_key).await?;
+    tx.commit().await?;
 
     // Persist the source URL to `instance_config` and update the
     // in-memory mirror so `/api/setup/status` and the SvelteKit footer

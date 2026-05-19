@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, public_key, private_key, created_at, active AS \"active!: bool\"\n         FROM signing_keys WHERE user_id = ? ORDER BY created_at ASC",
+  "query": "SELECT id, private_key, created_at, active AS \"active!: bool\"\n         FROM signing_keys WHERE user_id = ? ORDER BY created_at ASC",
   "describe": {
     "columns": [
       {
@@ -9,23 +9,18 @@
         "type_info": "Text"
       },
       {
-        "name": "public_key",
+        "name": "private_key",
         "ordinal": 1,
         "type_info": "Blob"
       },
       {
-        "name": "private_key",
-        "ordinal": 2,
-        "type_info": "Blob"
-      },
-      {
         "name": "created_at",
-        "ordinal": 3,
+        "ordinal": 2,
         "type_info": "Text"
       },
       {
         "name": "active!: bool",
-        "ordinal": 4,
+        "ordinal": 3,
         "type_info": "Integer"
       }
     ],
@@ -36,9 +31,8 @@
       false,
       false,
       false,
-      false,
       false
     ]
   },
-  "hash": "05511fb48764056513996ca7ae79528456b2c91f44267d879062e9d848eb161b"
+  "hash": "ae42616f93a9eb1233df8bd72acb629e270809f5d0d819dbcc68a772d8eacf70"
 }

@@ -107,17 +107,23 @@ async fn test_setup_admin(
     let user_id = Uuid::new_v4().to_string();
     let skeleton = display_name_skeleton(&display_name);
 
+    let signing_key = signing::generate_signing_key();
+    let verifying_bytes = signing_key.verifying_key().to_bytes();
+    let public_key: &[u8] = verifying_bytes.as_slice();
+
+    let mut tx = state.db.begin().await?;
     sqlx::query!(
-        "INSERT INTO users (id, display_name, display_name_skeleton, signup_method, role) \
-         VALUES (?, ?, ?, 'admin', 'admin')",
+        "INSERT INTO users (id, display_name, display_name_skeleton, signup_method, role, public_key) \
+         VALUES (?, ?, ?, 'admin', 'admin', ?)",
         user_id,
         display_name,
         skeleton,
+        public_key,
     )
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
-
-    signing::create_signing_key(&state.db, &user_id).await?;
+    signing::store_signing_key(&mut tx, &user_id, &signing_key).await?;
+    tx.commit().await?;
 
     state.needs_setup.store(false, Ordering::Relaxed);
 
@@ -161,17 +167,9 @@ async fn test_signup_as(
     let user_id = Uuid::new_v4().to_string();
     let skeleton = display_name_skeleton(&display_name);
 
-    sqlx::query!(
-        "INSERT INTO users (id, display_name, display_name_skeleton, signup_method) \
-         VALUES (?, ?, ?, 'invite')",
-        user_id,
-        display_name,
-        skeleton,
-    )
-    .execute(&state.db)
-    .await?;
-
-    signing::create_signing_key(&state.db, &user_id).await?;
+    let signing_key = signing::generate_signing_key();
+    let verifying_bytes = signing_key.verifying_key().to_bytes();
+    let public_key: &[u8] = verifying_bytes.as_slice();
 
     // Mirror `signup_complete` exactly: two `trust` edges, inviter→invitee
     // and invitee→inviter. Signed under V1 server-side keys so fixtures
@@ -191,6 +189,19 @@ async fn test_signup_as(
 
     // Mirror prod's transactional shape — see `signup_complete`.
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+
+    sqlx::query!(
+        "INSERT INTO users (id, display_name, display_name_skeleton, signup_method, public_key) \
+         VALUES (?, ?, ?, 'invite', ?)",
+        user_id,
+        display_name,
+        skeleton,
+        public_key,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    signing::store_signing_key(&mut tx, &user_id, &signing_key).await?;
 
     let signed_inviter_to_user = signing::sign_trust_edge(
         &mut tx,

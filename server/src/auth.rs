@@ -278,44 +278,13 @@ pub async fn signup_complete(
 
     let skeleton = display_name_skeleton(&display_name);
 
-    if let Err(err) = sqlx::query!(
-        "INSERT INTO users (id, display_name, display_name_skeleton, signup_method) \
-         VALUES (?, ?, ?, 'invite')",
-        user_id,
-        display_name,
-        skeleton,
-    )
-    .execute(&state.db)
-    .await
-    {
-        tracing::error!(display_name = %display_name, error = %err, "user creation constraint failure");
-        return Err(err.into());
-    }
+    let signing_key = signing::generate_signing_key();
+    let verifying_bytes = signing_key.verifying_key().to_bytes();
+    let public_key: &[u8] = verifying_bytes.as_slice();
 
     let cred_id = Uuid::new_v4().to_string();
     let passkey_bytes = serde_json::to_vec(&passkey)?;
     let cred_id_bytes: &[u8] = passkey.cred_id().as_ref();
-
-    sqlx::query!(
-        "INSERT INTO credentials (id, user_id, credential_id, public_key, sign_count) \
-         VALUES (?, ?, ?, ?, 0)",
-        cred_id,
-        user_id,
-        cred_id_bytes,
-        passkey_bytes,
-    )
-    .execute(&state.db)
-    .await?;
-
-    signing::create_signing_key(&state.db, &user_id).await?;
-
-    sqlx::query!(
-        "UPDATE users SET invite_id = ? WHERE id = ?",
-        invite_id,
-        user_id,
-    )
-    .execute(&state.db)
-    .await?;
 
     let trust1_id = Uuid::new_v4().to_string();
     let trust2_id = Uuid::new_v4().to_string();
@@ -334,13 +303,46 @@ pub async fn signup_complete(
         AppError::code(ErrorCode::Internal)
     })? * 1000;
 
-    // BEGIN IMMEDIATE: keep both reciprocal trust-edge inserts inside
-    // one transaction so a partial-failure scenario can't leave an
-    // asymmetric graph (one direction signed, the other missing).
-    // The signing-key lookups in `sign_trust_edge` also run inside
-    // this tx so a concurrent key rotation can't be observed mid-
-    // way through.
+    // BEGIN IMMEDIATE: wrap the entire signup write-set in a single
+    // transaction so a partial-failure scenario can't leave a half-
+    // built account.
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+
+    if let Err(err) = sqlx::query!(
+        "INSERT INTO users (id, display_name, display_name_skeleton, signup_method, public_key) \
+         VALUES (?, ?, ?, 'invite', ?)",
+        user_id,
+        display_name,
+        skeleton,
+        public_key,
+    )
+    .execute(&mut *tx)
+    .await
+    {
+        tracing::error!(display_name = %display_name, error = %err, "user creation constraint failure");
+        return Err(err.into());
+    }
+
+    sqlx::query!(
+        "INSERT INTO credentials (id, user_id, credential_id, public_key, sign_count) \
+         VALUES (?, ?, ?, ?, 0)",
+        cred_id,
+        user_id,
+        cred_id_bytes,
+        passkey_bytes,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    signing::store_signing_key(&mut tx, &user_id, &signing_key).await?;
+
+    sqlx::query!(
+        "UPDATE users SET invite_id = ? WHERE id = ?",
+        invite_id,
+        user_id,
+    )
+    .execute(&mut *tx)
+    .await?;
 
     let signed_inviter_to_user = signing::sign_trust_edge(
         &mut tx,

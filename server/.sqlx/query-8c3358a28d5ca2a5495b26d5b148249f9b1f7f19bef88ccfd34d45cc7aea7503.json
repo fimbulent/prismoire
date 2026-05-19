@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT public_key FROM signing_keys WHERE user_id = ? AND active = 1",
+  "query": "SELECT public_key FROM users WHERE id = ?",
   "describe": {
     "columns": [
       {
@@ -16,5 +16,5 @@
       false
     ]
   },
-  "hash": "7e716d027d717ccb9e20ab08330d1860dfa715d06a9f27471e5c245753adaacd"
+  "hash": "8c3358a28d5ca2a5495b26d5b148249f9b1f7f19bef88ccfd34d45cc7aea7503"
 }

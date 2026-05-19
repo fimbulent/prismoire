@@ -27,51 +27,93 @@ pub struct SigningOutput {
     pub canonical_hash: [u8; 32],
 }
 
-/// Generate an Ed25519 keypair and store it in the `signing_keys` table.
+/// Generate a fresh Ed25519 keypair without touching the database.
 ///
-/// Also writes the public key onto the user row (`users.public_key`),
-/// so the federation-identity lookup path can resolve `pubkey →
-/// user_id` without joining `signing_keys`. Both writes happen in one
-/// transaction: there is no window in which a `signing_keys` row
-/// exists but the matching `users.public_key` column is NULL.
+/// The verifying half is the canonical federation identity that the
+/// caller must persist into `users.public_key`. The signing half is
+/// stored separately via [`store_signing_key`] inside the same
+/// transaction that creates the user row.
 ///
-/// Returns the signing key row ID.
-pub async fn create_signing_key(db: &SqlitePool, user_id: &str) -> Result<String, sqlx::Error> {
-    let signing_key = SigningKey::generate(&mut OsRng);
-    let verifying_key = signing_key.verifying_key();
+/// Returned as a value (not a `Result`) because key generation is
+/// infallible — `rand::rngs::OsRng` panics on RNG failure, which is
+/// the correct response for a process that can no longer mint
+/// identities safely.
+pub fn generate_signing_key() -> SigningKey {
+    SigningKey::generate(&mut OsRng)
+}
+
+/// Persist a pre-generated [`SigningKey`] into the `signing_keys`
+/// table after verifying the identity-binding invariant.
+///
+/// The helper SELECTs `users.public_key` for `user_id` and compares
+/// it against the verifying half of `signing_key`. The pair
+/// `(users.public_key, signing_keys.private_key)` is the load-bearing
+/// federation identity: if these two ever disagree, every signed
+/// payload the user mints will fail external verification (peers
+/// re-verify against the public key carried in the canonical bytes,
+/// which the signer pulls from `users`). Catching the mismatch here
+/// turns a programming bug into a 500 instead of letting it persist
+/// silently and corrupt the user's chain.
+///
+/// Errors:
+/// - [`SignError::NoUser`] — no `users` row for `user_id` (caller
+///   forgot to INSERT users first, or the user_id is bogus).
+/// - [`SignError::IdentityMismatch`] — `users.public_key` doesn't
+///   match `signing_key.verifying_key()`. Caller mixed up keys.
+/// - [`SignError::Db`] — SQL error on either query.
+///
+/// The federation-identity column is write-once: a second invocation
+/// for the same user_id with the *same* key would create a second
+/// `signing_keys` row (with the per-user `active = 1` partial-unique
+/// index disallowing two active keys, so the INSERT fails) but would
+/// never silently rebind `users.public_key` — that can only happen
+/// via an explicit, audited key-rotation path (signed rotation
+/// object), not by re-calling this helper.
+///
+/// `signing_keys` is a pure private-key vault: the public half lives
+/// only on `users.public_key`. To recover the verifying key from a
+/// stored row, derive it from the private bytes via
+/// `SigningKey::verifying_key()`.
+///
+/// Takes `&mut SqliteConnection` so the SELECT and INSERT run on the
+/// same connection — callers pass `&mut *tx` from the surrounding
+/// signup transaction so the verification observes the just-inserted
+/// `users` row.
+///
+/// Returns the row ID of the new `signing_keys` row.
+pub async fn store_signing_key(
+    conn: &mut sqlx::SqliteConnection,
+    user_id: &str,
+    signing_key: &SigningKey,
+) -> Result<String, SignError> {
+    let derived_pub = signing_key.verifying_key().to_bytes();
+
+    let user_row = sqlx::query!("SELECT public_key FROM users WHERE id = ?", user_id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(SignError::Db)?
+        .ok_or(SignError::NoUser)?;
+
+    if user_row.public_key.as_slice() != derived_pub.as_slice() {
+        tracing::error!(
+            user_id = %user_id,
+            "store_signing_key: users.public_key does not match signing_key.verifying_key()"
+        );
+        return Err(SignError::IdentityMismatch);
+    }
 
     let id = Uuid::new_v4().to_string();
-    let public_key = verifying_key.as_bytes().as_slice();
-    let private_key = signing_key.to_bytes();
-    let private_key = private_key.as_slice();
-
-    let mut tx = db.begin().await?;
+    let private_bytes = signing_key.to_bytes();
+    let private_key: &[u8] = private_bytes.as_slice();
     sqlx::query!(
-        "INSERT INTO signing_keys (id, user_id, public_key, private_key) VALUES (?, ?, ?, ?)",
+        "INSERT INTO signing_keys (id, user_id, private_key) VALUES (?, ?, ?)",
         id,
         user_id,
-        public_key,
         private_key,
     )
-    .execute(&mut *tx)
-    .await?;
-    // `public_key IS NULL` guard: the federation-identity column is
-    // write-once. A second `create_signing_key` call (resurrection,
-    // retry, or any future key-rotation path) MUST NOT silently
-    // rebind `users.public_key` — historical `canonical_hash` chains
-    // are bound to the original key, and a rebind would orphan their
-    // verifiability. Key rotation, when it lands, has to be an
-    // explicit, audited migration (new `signing_keys` row + spec'd
-    // wire object), not a side effect of this helper.
-    sqlx::query!(
-        "UPDATE users SET public_key = ? WHERE id = ? AND public_key IS NULL",
-        public_key,
-        user_id,
-    )
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
-
+    .execute(&mut *conn)
+    .await
+    .map_err(SignError::Db)?;
     Ok(id)
 }
 
@@ -399,9 +441,26 @@ pub async fn sign_post_revision(
 /// Sign a `trust-edge` canonical payload for the given source user.
 ///
 /// DB-fetching wrapper around [`sign_trust_edge_with_key`] — looks up
-/// the source's private signing key and the target's public signing
-/// key from the `signing_keys` table, then signs. Returns
-/// [`SignError::NoKey`] if either user lacks an active signing key.
+/// the source's private signing key (from `signing_keys`) and the
+/// target's identity pubkey (from `users.public_key`, the canonical
+/// identity column since Phase C), then signs.
+///
+/// Errors:
+/// - [`SignError::NoKey`] — source user has no active row in
+///   `signing_keys`. `privacy::soft_delete_user` flips the source's
+///   `active` to 0, so this is the source-side soft-delete defense.
+/// - [`SignError::NoUser`] — no `users` row for `target_user_id`.
+///   (`users.public_key` is NOT NULL post-Phase-C, so the only way
+///   this can fire is the row being absent entirely, not the column
+///   being NULL.)
+/// - [`SignError::TargetDeleted`] — target user is soft-deleted
+///   (`users.deleted_at IS NOT NULL`). This is the target-side
+///   counterpart to the source-side `active = 0` defense.
+///   Handlers (`set_trust_edge`, `delete_trust_edge`) are responsible
+///   for rejecting deleted targets at the request layer (a deleted
+///   user's display_name is anonymized, so display_name lookups
+///   already 404); this check is defense-in-depth against a path that
+///   skips display_name resolution.
 ///
 /// Takes a `&mut SqliteConnection` (rather than a pool) so callers
 /// can run the key lookups inside an outer transaction together
@@ -419,18 +478,21 @@ pub async fn sign_trust_edge(
 ) -> Result<SigningOutput, SignError> {
     let key = load_active_signing_key(&mut *conn, source_user_id).await?;
     let target_row = sqlx::query!(
-        "SELECT public_key FROM signing_keys WHERE user_id = ? AND active = 1",
+        "SELECT public_key, deleted_at FROM users WHERE id = ?",
         target_user_id,
     )
     .fetch_optional(&mut *conn)
     .await
     .map_err(SignError::Db)?
-    .ok_or(SignError::NoKey)?;
+    .ok_or(SignError::NoUser)?;
+    if target_row.deleted_at.is_some() {
+        return Err(SignError::TargetDeleted);
+    }
     let to_key: [u8; 32] = target_row.public_key.try_into().map_err(|v: Vec<u8>| {
         tracing::error!(
             user_id = %target_user_id,
             length = v.len(),
-            "target signing key has invalid public-key length (expected 32 bytes)"
+            "target identity pubkey has invalid length (expected 32 bytes)"
         );
         SignError::InvalidKey
     })?;
@@ -546,8 +608,29 @@ pub async fn sign_retraction(
 #[derive(Debug)]
 pub enum SignError {
     Db(sqlx::Error),
+    /// User exists but has no `active = 1` row in `signing_keys`.
+    /// Indicates either a half-built account (signup tx rolled back
+    /// between users and signing_keys writes — shouldn't happen after
+    /// the signup-atomicity fix) or a legacy row predating server-side
+    /// signing.
     NoKey,
+    /// No `users` row for the supplied id. Semantically distinct from
+    /// [`SignError::NoKey`]: the user themselves is missing, not their
+    /// signing key. After Phase C `users.public_key` is NOT NULL, so
+    /// "user exists but no public key" is not representable — every
+    /// "can't find a pubkey for user X" case is in fact "user X
+    /// doesn't exist".
+    NoUser,
+    /// Target user exists but is soft-deleted (`deleted_at IS NOT
+    /// NULL`). Surfaced by [`sign_trust_edge`] as a defense-in-depth
+    /// refusal. Handlers should reject deleted targets earlier;
+    /// reaching this is a handler-layer slip.
+    TargetDeleted,
     InvalidKey,
+    /// `users.public_key` and `signing_key.verifying_key()` disagree.
+    /// Caller-side identity-binding bug surfaced by
+    /// [`store_signing_key`] before the private key is persisted.
+    IdentityMismatch,
     /// A persisted row had a malformed shape that the signing layer
     /// could not interpret (unrecognized enum string, wrong-length
     /// hash, unparseable timestamp, etc.). Distinct from
@@ -562,7 +645,12 @@ impl std::fmt::Display for SignError {
         match self {
             Self::Db(e) => write!(f, "database error: {e}"),
             Self::NoKey => write!(f, "no active signing key"),
+            Self::NoUser => write!(f, "no such user"),
+            Self::TargetDeleted => write!(f, "target user is soft-deleted"),
             Self::InvalidKey => write!(f, "invalid key format"),
+            Self::IdentityMismatch => {
+                write!(f, "users.public_key does not match signing key")
+            }
             Self::InvalidData => write!(f, "malformed persisted row"),
             Self::InvalidSignature => write!(f, "invalid signature"),
         }
@@ -578,8 +666,24 @@ impl From<SignError> for crate::error::AppError {
                 tracing::error!("signing error: no active signing key for user");
                 AppError::code(ErrorCode::Internal)
             }
+            SignError::NoUser => {
+                tracing::error!("signing error: referenced user does not exist");
+                AppError::code(ErrorCode::Internal)
+            }
+            SignError::TargetDeleted => {
+                tracing::error!(
+                    "signing error: trust-edge target is soft-deleted (handler should have rejected)"
+                );
+                AppError::code(ErrorCode::Internal)
+            }
             SignError::InvalidKey => {
                 tracing::error!("signing error: invalid signing key format");
+                AppError::code(ErrorCode::Internal)
+            }
+            SignError::IdentityMismatch => {
+                tracing::error!(
+                    "signing error: users.public_key does not match signing key (identity-binding violation)"
+                );
                 AppError::code(ErrorCode::Internal)
             }
             SignError::InvalidData => {

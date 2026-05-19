@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT public_key, deleted_at FROM users WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "public_key",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "deleted_at",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "0d6a832389ac14ce2847a57c10998c4c665bea9975d28f484ebb1ca090915fd9"
+}

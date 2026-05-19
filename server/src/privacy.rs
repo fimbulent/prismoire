@@ -116,12 +116,9 @@ pub struct UserExport {
     /// and deleted users can't log in), but included so the payload
     /// covers every user-owned column in `users`.
     pub deleted_at: Option<String>,
-    /// Ed25519 public key, base64url (no padding). Populated by Phase B
-    /// of the federation schema refactor; NULL for users who have not
-    /// yet been backfilled. Duplicates the active key under
-    /// `signing_keys` until `signing_keys.public_key` is dropped in
-    /// Phase D — at which point this is the only place the key lives.
-    pub public_key_b64: Option<String>,
+    /// Ed25519 public key, base64url (no padding). This is the
+    /// canonical federation-identity column for the user.
+    pub public_key_b64: String,
     /// Home-instance pubkey, base64url (no padding). NULL means homed
     /// at this instance; a remote instance pubkey would appear here
     /// for federated accounts. Always NULL for any user who can call
@@ -151,10 +148,11 @@ pub struct CredentialExport {
 #[derive(Serialize)]
 pub struct SigningKeyExport {
     pub id: String,
-    /// Ed25519 public key, base64url (no padding).
-    pub public_key_b64: String,
     /// Ed25519 private key, base64url (no padding). Sensitive — treat the
     /// export file as you would a private key on disk.
+    ///
+    /// The matching public key lives on `user.public_key_b64`(top-level
+    /// `UserExport`).
     pub private_key_b64: String,
     pub created_at: String,
     pub active: bool,
@@ -330,7 +328,7 @@ pub async fn export_my_data(
         .collect();
 
     let signing_key_rows = sqlx::query!(
-        r#"SELECT id, public_key, private_key, created_at, active AS "active!: bool"
+        r#"SELECT id, private_key, created_at, active AS "active!: bool"
          FROM signing_keys WHERE user_id = ? ORDER BY created_at ASC"#,
         user_id,
     )
@@ -341,7 +339,6 @@ pub async fn export_my_data(
         .into_iter()
         .map(|r| SigningKeyExport {
             id: r.id,
-            public_key_b64: b64(&r.public_key),
             private_key_b64: b64(&r.private_key),
             created_at: r.created_at,
             active: r.active,
@@ -561,7 +558,7 @@ pub async fn export_my_data(
             can_invite: user_row.can_invite,
             suspended_until: user_row.suspended_until,
             deleted_at: user_row.deleted_at,
-            public_key_b64: user_row.public_key.as_deref().map(b64),
+            public_key_b64: b64(&user_row.public_key),
             home_instance_b64: user_row.home_instance.as_deref().map(b64),
         },
         settings: SettingsExport { theme, font },

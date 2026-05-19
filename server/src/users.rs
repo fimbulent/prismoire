@@ -1000,7 +1000,20 @@ pub async fn set_trust_edge(
     Path(username): Path<String>,
     Json(req): Json<SetTrustEdgeRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let (target_id, ..) = resolve_user(&state.db, &username).await?;
+    let (target_id, .., status, _) = resolve_user(&state.db, &username).await?;
+
+    // Refuse trust-edge mutation toward a soft-deleted user. In practice
+    // `soft_delete_user` anonymizes the display_name so this path is
+    // hard to hit by username, but the check guarantees we never produce
+    // a signed edge toward a tombstoned identity (which the signing
+    // layer also refuses defensively — see `SignError::TargetDeleted`).
+    // Returns `UserNotFound` rather than a distinct code so we don't
+    // leak the prior existence of the deleted account. Banned and
+    // suspended users are *not* rejected: they can be unbanned/
+    // unsuspended, and the relationship should persist across that.
+    if status == UserStatus::Deleted {
+        return Err(AppError::code(ErrorCode::UserNotFound));
+    }
 
     if user.user_id == target_id {
         return Err(AppError::code(ErrorCode::SelfTrustEdge));
@@ -1146,7 +1159,15 @@ pub async fn delete_trust_edge(
     user: AuthUser,
     Path(username): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let (target_id, ..) = resolve_user(&state.db, &username).await?;
+    let (target_id, .., status, _) = resolve_user(&state.db, &username).await?;
+
+    // See `set_trust_edge` for the rationale. Deleted users can't be
+    // the target of any trust-edge mutation, including a neutral
+    // tombstone: their trust state is moot post-deletion and the
+    // signing layer would refuse anyway.
+    if status == UserStatus::Deleted {
+        return Err(AppError::code(ErrorCode::UserNotFound));
+    }
 
     // Snapshot the cached graph's current view of this edge before
     // committing. See `set_trust_edge` for the rationale.
