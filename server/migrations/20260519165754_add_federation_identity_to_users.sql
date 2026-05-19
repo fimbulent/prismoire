@@ -1,0 +1,22 @@
+-- Federation identity columns on `users`.
+--
+-- Part of Phase A of the federation schema refactor (see
+-- `docs/federation_planning.md` §1.9 (2)). The federation receive path
+-- needs to resolve `pubkey -> local user_id` on every incoming signed
+-- object. Once Phase B backfills `public_key` from `signing_keys` and
+-- Phase C tightens the column to UNIQUE NOT NULL, that lookup is a
+-- single index probe on the row downstream queries already want.
+--
+-- `home_instance` carries the remote instance's pubkey (32-byte BLOB)
+-- for federated users; NULL means the user is homed at this instance.
+-- Domain lookups go through the `peers` table; storing the pubkey
+-- rather than the domain is what makes a peer's domain rename a
+-- one-column update instead of a relationship-orphaning event.
+--
+-- Both columns are introduced nullable with no constraint and no
+-- index. Tightening (UNIQUE NOT NULL on `public_key`, the lookup
+-- indices, and the partial-unique index that scopes display_name
+-- uniqueness to local users) lands in Phase C, *after* Phase B has
+-- backfilled the column for every existing local user.
+ALTER TABLE users ADD COLUMN public_key BLOB;
+ALTER TABLE users ADD COLUMN home_instance BLOB;

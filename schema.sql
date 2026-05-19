@@ -14,7 +14,7 @@ CREATE TABLE users (
     steam_verified INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended', 'banned')),
     bio TEXT
-, display_name_skeleton TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'admin')), invite_id TEXT REFERENCES invites(id), suspended_until TEXT, can_invite INTEGER NOT NULL DEFAULT 1, deleted_at TEXT);
+, display_name_skeleton TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'admin')), invite_id TEXT REFERENCES invites(id), suspended_until TEXT, can_invite INTEGER NOT NULL DEFAULT 1, deleted_at TEXT, public_key BLOB, home_instance BLOB);
 CREATE TABLE credentials (
     id TEXT PRIMARY KEY NOT NULL,
     user_id TEXT NOT NULL REFERENCES users(id),
@@ -98,7 +98,7 @@ CREATE TABLE threads (
     locked INTEGER NOT NULL DEFAULT 0,
     last_activity TEXT,
     reply_count INTEGER NOT NULL DEFAULT 0
-, link_url TEXT, link_url_normalized TEXT);
+, link_url TEXT, link_url_normalized TEXT, home_instance BLOB);
 CREATE TABLE posts (
     id TEXT PRIMARY KEY NOT NULL,
     author TEXT NOT NULL REFERENCES users(id),
@@ -108,7 +108,7 @@ CREATE TABLE posts (
     retracted_at TEXT,
     retraction_signature BLOB,
     revision_count INTEGER NOT NULL DEFAULT 1
-, retraction_format_version INTEGER NOT NULL DEFAULT 1);
+, retraction_format_version INTEGER NOT NULL DEFAULT 1, home_instance BLOB);
 CREATE TABLE post_revisions (
     post_id TEXT NOT NULL REFERENCES posts(id),
     revision INTEGER NOT NULL DEFAULT 0,
@@ -402,3 +402,25 @@ FROM (
 ) ranked
 WHERE rn = 1 AND trust_type != 'neutral'
 /* current_trust_edges(id,source_user,target_user,trust_type,created_at,reason,signature,prior_edge_hash,format_version) */;
+CREATE TABLE signed_objects (
+    canonical_hash BLOB PRIMARY KEY NOT NULL,
+    inner_class    TEXT NOT NULL CHECK (inner_class IN (
+                       'post-rev', 'retract', 'admin-rm',
+                       'trust-edge', 'profile', 'thread-create',
+                       'thread-status', 'deactivate', 'move',
+                       'user-status'
+                   )),
+    payload        BLOB NOT NULL,
+    signature      BLOB NOT NULL,
+    received_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX idx_signed_objects_class ON signed_objects(inner_class);
+CREATE TABLE peers (
+    instance_pubkey BLOB PRIMARY KEY NOT NULL,
+    instance_domain TEXT NOT NULL UNIQUE,
+    status          TEXT NOT NULL CHECK (status IN ('pending', 'active', 'severed')),
+    capabilities    BLOB,
+    first_seen      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    last_handshake  TEXT
+);
+CREATE INDEX idx_peers_status ON peers(status);

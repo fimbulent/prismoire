@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT t.id, t.title, r.slug, t.created_at, t.locked AS \"locked!: bool\", t.reply_count, t.link_url\n         FROM threads t\n         JOIN rooms r ON r.id = t.room\n         WHERE t.author = ?\n         ORDER BY t.created_at ASC",
+  "query": "SELECT t.id, t.title, r.slug, t.created_at, t.locked AS \"locked!: bool\", t.reply_count, t.link_url, t.home_instance\n         FROM threads t\n         JOIN rooms r ON r.id = t.room\n         WHERE t.author = ?\n         ORDER BY t.created_at ASC",
   "describe": {
     "columns": [
       {
@@ -37,6 +37,11 @@
         "name": "link_url",
         "ordinal": 6,
         "type_info": "Text"
+      },
+      {
+        "name": "home_instance",
+        "ordinal": 7,
+        "type_info": "Blob"
       }
     ],
     "parameters": {
@@ -49,8 +54,9 @@
       false,
       false,
       false,
+      true,
       true
     ]
   },
-  "hash": "6cd023fd3c4e432aca10a5f5feaaf2d6f5e732eb61fad13ce565e32af93376c3"
+  "hash": "c4acab913a34663ab280abc80e01694382f1a5970a4840363add89f045ba6445"
 }

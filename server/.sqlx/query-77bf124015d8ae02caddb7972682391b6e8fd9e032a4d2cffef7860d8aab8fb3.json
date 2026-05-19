@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, display_name, display_name_skeleton, created_at, signup_method,\n           steam_verified AS \"steam_verified!: bool\", status, role, bio, invite_id,\n           can_invite AS \"can_invite!: bool\", suspended_until, deleted_at\n           FROM users WHERE id = ?",
+  "query": "SELECT id, display_name, display_name_skeleton, created_at, signup_method,\n           steam_verified AS \"steam_verified!: bool\", status, role, bio, invite_id,\n           can_invite AS \"can_invite!: bool\", suspended_until, deleted_at,\n           public_key, home_instance\n           FROM users WHERE id = ?",
   "describe": {
     "columns": [
       {
@@ -67,6 +67,16 @@
         "name": "deleted_at",
         "ordinal": 12,
         "type_info": "Text"
+      },
+      {
+        "name": "public_key",
+        "ordinal": 13,
+        "type_info": "Blob"
+      },
+      {
+        "name": "home_instance",
+        "ordinal": 14,
+        "type_info": "Blob"
       }
     ],
     "parameters": {
@@ -85,8 +95,10 @@
       true,
       false,
       true,
+      true,
+      true,
       true
     ]
   },
-  "hash": "faf1122a8aca55eb39660f0a1bc9bea652b37e5bbfa52cdfdd56df36d6b6b5e6"
+  "hash": "77bf124015d8ae02caddb7972682391b6e8fd9e032a4d2cffef7860d8aab8fb3"
 }

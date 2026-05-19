@@ -116,6 +116,17 @@ pub struct UserExport {
     /// and deleted users can't log in), but included so the payload
     /// covers every user-owned column in `users`.
     pub deleted_at: Option<String>,
+    /// Ed25519 public key, base64url (no padding). Populated by Phase B
+    /// of the federation schema refactor; NULL for users who have not
+    /// yet been backfilled. Duplicates the active key under
+    /// `signing_keys` until `signing_keys.public_key` is dropped in
+    /// Phase D — at which point this is the only place the key lives.
+    pub public_key_b64: Option<String>,
+    /// Home-instance pubkey, base64url (no padding). NULL means homed
+    /// at this instance; a remote instance pubkey would appear here
+    /// for federated accounts. Always NULL for any user who can call
+    /// this endpoint (federated users have no local session).
+    pub home_instance_b64: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -178,6 +189,11 @@ pub struct ThreadExport {
     pub locked: bool,
     pub reply_count: i64,
     pub link_url: Option<String>,
+    /// Home-instance pubkey, base64url (no padding). NULL for
+    /// locally-authored threads. Populated when the federation receive
+    /// path lands; included here so the export covers every
+    /// user-owned column in `threads`.
+    pub home_instance_b64: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -197,6 +213,11 @@ pub struct PostExport {
     pub created_at: String,
     pub retracted_at: Option<String>,
     pub revisions: Vec<PostRevisionExport>,
+    /// Home-instance pubkey, base64url (no padding). NULL for
+    /// locally-authored posts. Populated when the federation receive
+    /// path lands; included here so the export covers every
+    /// user-owned column in `posts`.
+    pub home_instance_b64: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -252,7 +273,8 @@ pub async fn export_my_data(
     let user_row = sqlx::query!(
         r#"SELECT id, display_name, display_name_skeleton, created_at, signup_method,
            steam_verified AS "steam_verified!: bool", status, role, bio, invite_id,
-           can_invite AS "can_invite!: bool", suspended_until, deleted_at
+           can_invite AS "can_invite!: bool", suspended_until, deleted_at,
+           public_key, home_instance
            FROM users WHERE id = ?"#,
         user_id,
     )
@@ -370,7 +392,7 @@ pub async fn export_my_data(
         .collect();
 
     let thread_rows = sqlx::query!(
-        r#"SELECT t.id, t.title, r.slug, t.created_at, t.locked AS "locked!: bool", t.reply_count, t.link_url
+        r#"SELECT t.id, t.title, r.slug, t.created_at, t.locked AS "locked!: bool", t.reply_count, t.link_url, t.home_instance
          FROM threads t
          JOIN rooms r ON r.id = t.room
          WHERE t.author = ?
@@ -390,11 +412,12 @@ pub async fn export_my_data(
             locked: r.locked,
             reply_count: r.reply_count,
             link_url: r.link_url,
+            home_instance_b64: r.home_instance.as_deref().map(b64),
         })
         .collect();
 
     let post_rows = sqlx::query!(
-        "SELECT id, thread, parent, created_at, retracted_at \
+        "SELECT id, thread, parent, created_at, retracted_at, home_instance \
          FROM posts WHERE author = ? ORDER BY created_at ASC",
         user_id,
     )
@@ -428,6 +451,7 @@ pub async fn export_my_data(
             created_at: post_row.created_at,
             retracted_at: post_row.retracted_at,
             revisions,
+            home_instance_b64: post_row.home_instance.as_deref().map(b64),
         });
     }
 
@@ -537,6 +561,8 @@ pub async fn export_my_data(
             can_invite: user_row.can_invite,
             suspended_until: user_row.suspended_until,
             deleted_at: user_row.deleted_at,
+            public_key_b64: user_row.public_key.as_deref().map(b64),
+            home_instance_b64: user_row.home_instance.as_deref().map(b64),
         },
         settings: SettingsExport { theme, font },
         credentials,

@@ -1,0 +1,27 @@
+-- `home_instance` snapshot on `posts` and `threads`.
+--
+-- Part of Phase A of the federation schema refactor (see
+-- `docs/federation_planning.md` §1.9 (4)). When a federated post or
+-- thread arrives, the receiving instance records *the remote home
+-- instance's pubkey at receive time*, not a derived field. A post
+-- authored before its author moves stays attributed to the old home
+-- for `admin-rm` advisory routing (`federation-protocol.md` §10.4 —
+-- "the post's recorded `home_instance` at receive time"). Deriving
+-- from `users.home_instance` at query time would silently lose this
+-- property the moment the author moves.
+--
+-- The column is introduced nullable on both tables, and stays NULL
+-- for every existing row — they were all locally authored, and that
+-- is the correct value. Inbound federation handlers (which set the
+-- snapshot to the remote pubkey) land alongside the federation
+-- receive path in a later phase.
+--
+-- `post_revisions` does NOT get its own `home_instance`: revision
+-- attribution follows the post (admin-rm advisory routing is
+-- per-post, not per-revision), and the canonical signed bytes already
+-- carry the authorial pubkey if the revision-level home is ever
+-- needed. `trust_edges` does NOT get one either — the edge's protocol
+-- identity is the `(source_pubkey, target_pubkey)` pair, and BFS
+-- treats all edges uniformly regardless of authorial home.
+ALTER TABLE posts ADD COLUMN home_instance BLOB;
+ALTER TABLE threads ADD COLUMN home_instance BLOB;

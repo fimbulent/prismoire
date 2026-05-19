@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, thread, parent, created_at, retracted_at FROM posts WHERE author = ? ORDER BY created_at ASC",
+  "query": "SELECT id, thread, parent, created_at, retracted_at, home_instance FROM posts WHERE author = ? ORDER BY created_at ASC",
   "describe": {
     "columns": [
       {
@@ -27,6 +27,11 @@
         "name": "retracted_at",
         "ordinal": 4,
         "type_info": "Text"
+      },
+      {
+        "name": "home_instance",
+        "ordinal": 5,
+        "type_info": "Blob"
       }
     ],
     "parameters": {
@@ -37,8 +42,9 @@
       false,
       true,
       false,
+      true,
       true
     ]
   },
-  "hash": "5c6fe8446dd71f3aca9d546fdc11aa85ad93c391481df2b52c060f4ddec33a5e"
+  "hash": "7304640b7d86b1c95929e65ceca1c03a12c1b8d4e662b331488b9d7629f96c6d"
 }
