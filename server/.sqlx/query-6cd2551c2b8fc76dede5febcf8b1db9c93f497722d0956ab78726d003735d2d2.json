@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO profile_revisions (id, user_id, display_name, bio, avatar_attachment_hash, created_at, signature, prior_profile_hash, canonical_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "6cd2551c2b8fc76dede5febcf8b1db9c93f497722d0956ab78726d003735d2d2"
+}

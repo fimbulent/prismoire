@@ -48,9 +48,17 @@ pub const TAG_POST_REVISION: &str = "post-rev";
 pub const TAG_RETRACTION: &str = "retract";
 /// Object-class tag for a trust-edge mutation (`t = "trust-edge"`).
 pub const TAG_TRUST_EDGE: &str = "trust-edge";
+/// Object-class tag for a user-profile revision (`t = "profile"`).
+pub const TAG_PROFILE: &str = "profile";
 
 /// V1 format version for all currently-defined object classes.
 pub const V1: u64 = 1;
+
+/// Maximum bio length in *characters* (Unicode scalar values) for a
+/// V1 `profile` payload per spec §5.8. Producers are responsible for
+/// enforcing this before signing; this module is byte-faithful and
+/// does not truncate.
+pub const MAX_PROFILE_BIO_LEN: usize = 4096;
 
 // --- Typed payloads ---
 
@@ -63,6 +71,7 @@ pub enum SignedPayload {
     PostRevision(PostRevision),
     Retraction(Retraction),
     TrustEdge(TrustEdge),
+    ProfileRevision(ProfileRevision),
 }
 
 /// Post revision (initial creation or subsequent edit).
@@ -147,6 +156,32 @@ pub struct TrustEdge {
     pub prior_edge_hash: Option<[u8; 32]>,
 }
 
+/// User profile revision (display-name / bio / avatar change).
+///
+/// Chains form per-user  history with the same `latest-wins by created_at`
+/// semantics as [`TrustEdge`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileRevision {
+    /// Ed25519 public key of the user (the signer). Bound into the
+    /// canonical payload as the `user` field — matches the
+    /// `identity_key` arm in [`verify`].
+    pub user: [u8; 32],
+    /// Display name in Unicode NFC. Empty string permitted (receivers
+    /// render a truncated pubkey hex in that case).
+    pub display_name: String,
+    /// Bio in Unicode NFC. Empty string permitted. Producers must
+    /// enforce length ≤ [`MAX_PROFILE_BIO_LEN`] before signing.
+    pub bio: String,
+    /// SHA-256 of an attachment carrying the avatar image, or `None`
+    /// if the user has no avatar.
+    pub avatar_attachment_hash: Option<[u8; 32]>,
+    /// Revision time, Unix milliseconds, UTC.
+    pub created_at: u64,
+    /// SHA-256 of the canonical payload bytes of the prior `profile`
+    /// object for `user`. `None` for the user's first revision.
+    pub prior_profile_hash: Option<[u8; 32]>,
+}
+
 // --- Errors ---
 
 /// A canonical-form or schema violation when parsing a signed payload.
@@ -182,6 +217,12 @@ pub enum ParseError {
     InvalidStance(String),
     /// An integer field would not fit in `u64`.
     IntegerOutOfRange(&'static str),
+    /// A bounded text field exceeds its maximum byte length.
+    TextTooLong {
+        field: &'static str,
+        max: usize,
+        got: usize,
+    },
 }
 
 impl std::fmt::Display for ParseError {
@@ -207,6 +248,9 @@ impl std::fmt::Display for ParseError {
             }
             Self::InvalidStance(s) => write!(f, "invalid trust stance: {s}"),
             Self::IntegerOutOfRange(name) => write!(f, "integer field out of u64 range: {name}"),
+            Self::TextTooLong { field, max, got } => {
+                write!(f, "field {field}: max {max} bytes, got {got}")
+            }
         }
     }
 }
@@ -266,6 +310,7 @@ impl SignedPayload {
             Self::PostRevision(p) => post_revision_to_cbor(p),
             Self::Retraction(r) => retraction_to_cbor(r),
             Self::TrustEdge(e) => trust_edge_to_cbor(e),
+            Self::ProfileRevision(p) => profile_revision_to_cbor(p),
         }
     }
 }
@@ -354,6 +399,28 @@ fn trust_edge_to_cbor(e: &TrustEdge) -> Value {
     build_map(entries)
 }
 
+fn profile_revision_to_cbor(p: &ProfileRevision) -> Value {
+    // Required fields per spec §5.8. Optional `avatar_attachment_hash`
+    // and `prior_profile_hash` are appended below — absence is signalled
+    // by omitting the key (not by encoding a CBOR null), matching the
+    // post-revision / trust-edge optional-field convention.
+    let mut entries: Vec<(&'static str, Value)> = vec![
+        ("v", uint(V1)),
+        ("t", text(TAG_PROFILE)),
+        ("user", bytes(&p.user)),
+        ("display_name", text(&p.display_name)),
+        ("bio", text(&p.bio)),
+        ("created_at", uint(p.created_at)),
+    ];
+    if let Some(avatar) = p.avatar_attachment_hash {
+        entries.push(("avatar_attachment_hash", bytes(&avatar)));
+    }
+    if let Some(prior) = p.prior_profile_hash {
+        entries.push(("prior_profile_hash", bytes(&prior)));
+    }
+    build_map(entries)
+}
+
 // --- Parser ---
 
 impl SignedPayload {
@@ -420,6 +487,10 @@ impl SignedPayload {
             TAG_TRUST_EDGE => {
                 require_version(TAG_TRUST_EDGE, version)?;
                 parse_trust_edge(&fields).map(SignedPayload::TrustEdge)
+            }
+            TAG_PROFILE => {
+                require_version(TAG_PROFILE, version)?;
+                parse_profile_revision(&fields).map(SignedPayload::ProfileRevision)
             }
             _ => Err(ParseError::UnknownClass(t)),
         }
@@ -501,6 +572,42 @@ fn parse_retraction(fields: &BTreeMap<String, Value>) -> Result<Retraction, Pars
     })
 }
 
+fn parse_profile_revision(fields: &BTreeMap<String, Value>) -> Result<ProfileRevision, ParseError> {
+    let user = field_bytes_fixed::<32>(fields, "user")?;
+    let display_name = field_text(fields, "display_name")?;
+    let bio = field_text(fields, "bio")?;
+    // Defense-in-depth bound on inbound bio length. The local sign path
+    // already gates writes at MAX_BIO_LEN (500 bytes, in users.rs);
+    // this check protects the verifier against federation peers
+    // attempting to ship outsized bios.
+    if bio.len() > MAX_PROFILE_BIO_LEN {
+        return Err(ParseError::TextTooLong {
+            field: "bio",
+            max: MAX_PROFILE_BIO_LEN,
+            got: bio.len(),
+        });
+    }
+    let created_at = field_uint(fields, "created_at")?;
+    let avatar_attachment_hash = if fields.contains_key("avatar_attachment_hash") {
+        Some(field_bytes_fixed::<32>(fields, "avatar_attachment_hash")?)
+    } else {
+        None
+    };
+    let prior_profile_hash = if fields.contains_key("prior_profile_hash") {
+        Some(field_bytes_fixed::<32>(fields, "prior_profile_hash")?)
+    } else {
+        None
+    };
+    Ok(ProfileRevision {
+        user,
+        display_name,
+        bio,
+        avatar_attachment_hash,
+        created_at,
+        prior_profile_hash,
+    })
+}
+
 fn parse_trust_edge(fields: &BTreeMap<String, Value>) -> Result<TrustEdge, ParseError> {
     let from_key = field_bytes_fixed::<32>(fields, "from_key")?;
     let to_key = field_bytes_fixed::<32>(fields, "to_key")?;
@@ -545,6 +652,7 @@ pub fn verify(
         SignedPayload::PostRevision(p) => &p.author,
         SignedPayload::Retraction(r) => &r.author,
         SignedPayload::TrustEdge(e) => &e.from_key,
+        SignedPayload::ProfileRevision(p) => &p.user,
     };
     if identity_key != claimed_key.as_bytes() {
         return Err(VerifyError::AuthorMismatch);
@@ -587,6 +695,13 @@ mod tests {
         "to_key",
         "stance",
         "prior_edge_hash",
+        // profile fields — `created_at` overlaps post-rev / retract /
+        // trust-edge.
+        "user",
+        "display_name",
+        "bio",
+        "avatar_attachment_hash",
+        "prior_profile_hash",
     ];
 
     #[test]
@@ -633,6 +748,152 @@ mod tests {
             created_at: 1_700_000_002_000,
             prior_edge_hash: if with_prior { Some([0x77; 32]) } else { None },
         }
+    }
+
+    fn sample_profile_revision(with_avatar: bool, with_prior: bool) -> ProfileRevision {
+        ProfileRevision {
+            user: [0x88; 32],
+            display_name: "Alice".to_string(),
+            bio: "hello, world".to_string(),
+            avatar_attachment_hash: if with_avatar { Some([0x99; 32]) } else { None },
+            created_at: 1_700_000_003_000,
+            prior_profile_hash: if with_prior { Some([0xaa; 32]) } else { None },
+        }
+    }
+
+    #[test]
+    fn profile_revision_round_trip_minimal() {
+        let p = sample_profile_revision(false, false);
+        let bytes = SignedPayload::ProfileRevision(p.clone()).encode();
+        let decoded = SignedPayload::parse(&bytes).unwrap();
+        assert_eq!(decoded, SignedPayload::ProfileRevision(p));
+    }
+
+    #[test]
+    fn profile_revision_round_trip_full() {
+        let p = sample_profile_revision(true, true);
+        let bytes = SignedPayload::ProfileRevision(p.clone()).encode();
+        let decoded = SignedPayload::parse(&bytes).unwrap();
+        assert_eq!(decoded, SignedPayload::ProfileRevision(p));
+    }
+
+    #[test]
+    fn profile_revision_empty_strings_round_trip() {
+        // Spec §5.8 explicitly permits empty display_name and bio.
+        // Receivers render a pubkey-hex placeholder for empty
+        // display_name and treat empty bio as absent. Both must
+        // round-trip identically — empty string and missing key are
+        // distinct (only display_name and bio are required; the
+        // optional avatar / prior fields are omitted when absent).
+        let p = ProfileRevision {
+            user: [0; 32],
+            display_name: String::new(),
+            bio: String::new(),
+            avatar_attachment_hash: None,
+            created_at: 0,
+            prior_profile_hash: None,
+        };
+        let bytes = SignedPayload::ProfileRevision(p.clone()).encode();
+        let decoded = SignedPayload::parse(&bytes).unwrap();
+        assert_eq!(decoded, SignedPayload::ProfileRevision(p));
+    }
+
+    #[test]
+    fn profile_revision_rejects_oversized_bio_on_parse() {
+        // Forge a profile-revision payload whose `bio` is one byte over
+        // the MAX_PROFILE_BIO_LEN ceiling and confirm the parser
+        // rejects it. This is the inbound-federation defense: local
+        // writers gate at 500 bytes (users.rs), but a peer could
+        // publish a 1MB bio — the verifier must reject it before any
+        // hash-chain bookkeeping runs.
+        let mut p = sample_profile_revision(false, false);
+        p.bio = "a".repeat(MAX_PROFILE_BIO_LEN + 1);
+        let bytes = SignedPayload::ProfileRevision(p).encode();
+        let result = SignedPayload::parse(&bytes);
+        assert!(matches!(
+            result,
+            Err(ParseError::TextTooLong {
+                field: "bio",
+                max: MAX_PROFILE_BIO_LEN,
+                got,
+            }) if got == MAX_PROFILE_BIO_LEN + 1
+        ));
+    }
+
+    #[test]
+    fn profile_revision_avatar_present_vs_absent_differ() {
+        let p_no = sample_profile_revision(false, false);
+        let p_yes = sample_profile_revision(true, false);
+        let b_no = SignedPayload::ProfileRevision(p_no).encode();
+        let b_yes = SignedPayload::ProfileRevision(p_yes).encode();
+        assert_ne!(b_no, b_yes);
+    }
+
+    #[test]
+    fn sign_and_verify_profile_revision() {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let verifying_key = signing_key.verifying_key();
+        let mut p = sample_profile_revision(false, false);
+        p.user = *verifying_key.as_bytes();
+        let bytes = SignedPayload::ProfileRevision(p).encode();
+        let sig = signing_key.sign(&bytes);
+        let result = verify(&bytes, &sig.to_bytes(), &verifying_key).expect("verify");
+        assert!(matches!(result, SignedPayload::ProfileRevision(_)));
+    }
+
+    #[test]
+    fn verify_rejects_profile_revision_user_mismatch() {
+        // Payload says user = key_a; we present key_b as the claimed key.
+        let key_a = SigningKey::generate(&mut OsRng);
+        let key_b = SigningKey::generate(&mut OsRng);
+        let mut p = sample_profile_revision(false, false);
+        p.user = *key_a.verifying_key().as_bytes();
+        let bytes = SignedPayload::ProfileRevision(p).encode();
+        let sig = key_a.sign(&bytes);
+        let result = verify(&bytes, &sig.to_bytes(), &key_b.verifying_key());
+        assert!(matches!(result, Err(VerifyError::AuthorMismatch)));
+    }
+
+    #[test]
+    fn profile_revision_canonical_bytes_match_hand_computed() {
+        // Minimal all-zero profile revision: empty display_name, empty
+        // bio, no avatar, created_at = 0, no prior.
+        let p = ProfileRevision {
+            user: [0; 32],
+            display_name: String::new(),
+            bio: String::new(),
+            avatar_attachment_hash: None,
+            created_at: 0,
+            prior_profile_hash: None,
+        };
+        let bytes = SignedPayload::ProfileRevision(p).encode();
+        let mut expected: Vec<u8> = Vec::new();
+        // Map header: 6 entries -> 0xa6
+        expected.push(0xa6);
+        // "t" -> "profile"
+        expected.extend_from_slice(&[0x61, b't']);
+        expected.extend_from_slice(&[0x67, b'p', b'r', b'o', b'f', b'i', b'l', b'e']);
+        // "v" -> 1
+        expected.extend_from_slice(&[0x61, b'v']);
+        expected.push(0x01);
+        // "bio" -> "" (text-0)
+        expected.extend_from_slice(&[0x63, b'b', b'i', b'o']);
+        expected.push(0x60);
+        // "user" -> 32 zero bytes
+        expected.extend_from_slice(&[0x64, b'u', b's', b'e', b'r']);
+        expected.extend_from_slice(&[0x58, 0x20]);
+        expected.extend_from_slice(&[0u8; 32]);
+        // "created_at" -> 0
+        expected.extend_from_slice(&[
+            0x6a, b'c', b'r', b'e', b'a', b't', b'e', b'd', b'_', b'a', b't',
+        ]);
+        expected.push(0x00);
+        // "display_name" -> "" (text-0)
+        expected.extend_from_slice(&[
+            0x6c, b'd', b'i', b's', b'p', b'l', b'a', b'y', b'_', b'n', b'a', b'm', b'e',
+        ]);
+        expected.push(0x60);
+        assert_eq!(bytes, expected);
     }
 
     #[test]

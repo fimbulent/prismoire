@@ -176,8 +176,6 @@ pub enum ErrorCode {
     // -- Misc user fields --------------------------------------------
     /// Bio exceeds the configured maximum length.
     BioTooLong,
-    /// Admin remove-bio: target user has no bio set.
-    BioAlreadyEmpty,
 
     // -- Admin -------------------------------------------------------
     /// Action requires admin privileges.
@@ -278,7 +276,6 @@ impl ErrorCode {
             | Self::InvitePrivilegeUnchanged
             | Self::UserAlreadyDeleted
             | Self::RoomAlreadyDeleted
-            | Self::BioAlreadyEmpty
             | Self::FavoriteSetMismatch
             | Self::FavoriteCapExceeded => StatusCode::CONFLICT,
 
@@ -385,7 +382,6 @@ impl ErrorCode {
             Self::TagTooLong => "tag is too long",
 
             Self::BioTooLong => "bio is too long",
-            Self::BioAlreadyEmpty => "user has no bio set",
 
             Self::AdminRequired => "admin access required",
             Self::ReasonRequired => "reason is required",

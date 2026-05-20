@@ -36,7 +36,6 @@
 		unsuspend_user: 'unsuspended',
 		revoke_invites: 'revoked invites for',
 		grant_invites: 'granted invites for',
-		remove_bio: 'removed bio for',
 		edit_config: 'edited the site configuration'
 	};
 

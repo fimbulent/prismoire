@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, display_name, bio,\n                  avatar_attachment_hash AS \"avatar_attachment_hash?: Vec<u8>\",\n                  created_at AS \"created_at!: i64\",\n                  prior_profile_hash AS \"prior_profile_hash?: Vec<u8>\",\n                  canonical_hash AS \"canonical_hash!: Vec<u8>\"\n           FROM profile_revisions\n           WHERE user_id = ?\n           ORDER BY created_at ASC, id ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "display_name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "bio",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "avatar_attachment_hash?: Vec<u8>",
+        "ordinal": 3,
+        "type_info": "Blob"
+      },
+      {
+        "name": "created_at!: i64",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "prior_profile_hash?: Vec<u8>",
+        "ordinal": 5,
+        "type_info": "Blob"
+      },
+      {
+        "name": "canonical_hash!: Vec<u8>",
+        "ordinal": 6,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "bb6ec49f8a1d04ea0634e70ad33ca634f4be8425d696c2165a1d53cad5fb2b30"
+}

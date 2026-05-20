@@ -1,10 +1,10 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT bio FROM users WHERE id = ?",
+  "query": "SELECT display_name FROM users WHERE id = ?",
   "describe": {
     "columns": [
       {
-        "name": "bio",
+        "name": "display_name",
         "ordinal": 0,
         "type_info": "Text"
       }
@@ -13,8 +13,8 @@
       "Right": 1
     },
     "nullable": [
-      true
+      false
     ]
   },
-  "hash": "4811daa47848ff367aa61085de976510dfe68c2a4ff0819a24f7ef0374382892"
+  "hash": "7273f916f4adcd0d802a7644ea96107cc60d130a6996c037fb632a07bb63f3e6"
 }

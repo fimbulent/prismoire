@@ -34,6 +34,11 @@
 //!   deleted user can no longer author content, so a standing trust
 //!   endorsement of them has nothing to weigh anymore and would only
 //!   serve as latent noise in the trust graph.
+//! - Erases canonical bytes of every signed `profile` revision the
+//!   user authored, then drops the projection rows. The display_name
+//!   and bio snapshots in `profile_revisions` are personal data; the
+//!   `users` row anonymisation alone would leak them via the signed-
+//!   object history.
 //! - Drops `ban_trust_snapshots` rows referencing the user in either
 //!   capacity (target of a past ban/suspend, or a truster captured at
 //!   the moment someone else was moderated). Same rationale: with the
@@ -87,6 +92,7 @@ pub struct DataExport {
     pub credentials: Vec<CredentialExport>,
     pub signing_keys: Vec<SigningKeyExport>,
     pub trust_edges_outbound: Vec<TrustEdgeExport>,
+    pub profile_revisions: Vec<ProfileRevisionExport>,
     pub invites_created: Vec<InviteExport>,
     pub threads: Vec<ThreadExport>,
     pub posts: Vec<PostExport>,
@@ -166,6 +172,27 @@ pub struct TrustEdgeExport {
     pub trust_type: String,
     pub created_at: String,
     pub reason: Option<String>,
+}
+
+/// One signed profile revision authored by the exporting user.
+///
+/// The signed-object content (display_name + bio + avatar) is
+/// projection data — the same payload is also recoverable by
+/// re-parsing the canonical CBOR from `signed_objects.payload`. We
+/// emit it as projection so an export reader doesn't need a CBOR
+/// decoder to read their own profile history.
+#[derive(Serialize)]
+pub struct ProfileRevisionExport {
+    pub id: String,
+    pub display_name: String,
+    pub bio: String,
+    pub avatar_attachment_hash_b64: Option<String>,
+    /// Authored time in Unix milliseconds. Stored as INTEGER in the
+    /// DB rather than ISO-8601 text so the same value can be the
+    /// `created_at` field of the canonical CBOR payload.
+    pub created_at_ms: i64,
+    pub prior_profile_hash_b64: Option<String>,
+    pub canonical_hash_b64: String,
 }
 
 #[derive(Serialize)]
@@ -368,6 +395,37 @@ pub async fn export_my_data(
         })
         .collect();
 
+    // Signed profile revisions. Sorted by `created_at` ascending so the
+    // export reads as a natural chain head-to-current. Hash columns are
+    // emitted as base64 (the rest of the export emits BLOBs the same way
+    // via the `b64` helper).
+    let profile_revision_rows = sqlx::query!(
+        r#"SELECT id, display_name, bio,
+                  avatar_attachment_hash AS "avatar_attachment_hash?: Vec<u8>",
+                  created_at AS "created_at!: i64",
+                  prior_profile_hash AS "prior_profile_hash?: Vec<u8>",
+                  canonical_hash AS "canonical_hash!: Vec<u8>"
+           FROM profile_revisions
+           WHERE user_id = ?
+           ORDER BY created_at ASC, id ASC"#,
+        user_id,
+    )
+    .fetch_all(db)
+    .await?;
+
+    let profile_revisions: Vec<ProfileRevisionExport> = profile_revision_rows
+        .into_iter()
+        .map(|r| ProfileRevisionExport {
+            id: r.id,
+            display_name: r.display_name,
+            bio: r.bio,
+            avatar_attachment_hash_b64: r.avatar_attachment_hash.as_deref().map(b64),
+            created_at_ms: r.created_at,
+            prior_profile_hash_b64: r.prior_profile_hash.as_deref().map(b64),
+            canonical_hash_b64: b64(&r.canonical_hash),
+        })
+        .collect();
+
     let invite_rows = sqlx::query!(
         "SELECT id, code, created_at, revoked_at, max_uses, expires_at \
          FROM invites WHERE created_by = ? ORDER BY created_at ASC",
@@ -565,6 +623,7 @@ pub async fn export_my_data(
         credentials,
         signing_keys,
         trust_edges_outbound,
+        profile_revisions,
         invites_created,
         threads,
         posts,
@@ -886,6 +945,22 @@ pub(crate) async fn soft_delete_user(
     )
     .execute(&mut **tx)
     .await?;
+
+    // 6a. Erase canonical bytes of signed `profile` revisions, then
+    //     drop the projection rows. Same ordering rationale as step
+    //     6 — once the projection is gone the canonical_hash subquery
+    //     in `erase_user_profile_revision_payloads` has nothing to
+    //     join against. The display_name and bio snapshots in
+    //     `profile_revisions` are personal data, so erasure here is
+    //     load-bearing for GDPR (the `users` row's display_name /
+    //     bio are already anonymised by step 2).
+    //     TODO: emit a signed `deactivate` (§5.11) once it lands so
+    //     peers can mirror profile-payload erasure on receipt.
+    crate::signing::erase_user_profile_revision_payloads(&mut **tx, user_id).await?;
+
+    sqlx::query!("DELETE FROM profile_revisions WHERE user_id = ?", user_id)
+        .execute(&mut **tx)
+        .await?;
 
     // 6b. Drop ban/suspend trust snapshots that reference the deleted
     //     user in either capacity. As a `target_user`: self-delete

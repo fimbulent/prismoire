@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n              id AS \"id!: String\",\n              canonical_hash AS \"canonical_hash!: Vec<u8>\"\n           FROM profile_revisions\n           WHERE user_id = ?\n             AND created_at = (\n                 SELECT MAX(created_at) FROM profile_revisions\n                 WHERE user_id = ?\n             )",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "canonical_hash!: Vec<u8>",
+        "ordinal": 1,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "1d82d38ff8e8bb5d8ed05a65bff33c60e06dbad757a669d088fba15bf6da01a9"
+}

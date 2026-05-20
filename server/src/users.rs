@@ -956,6 +956,14 @@ pub async fn get_trust_edges(
 // ---------------------------------------------------------------------------
 
 /// Update the authenticated user's bio. Only allowed on own profile.
+///
+/// Bio mutations are profile revisions in the signed-object model
+/// Every successful update appends one `profile` signed object: a
+/// snapshot of the `(display_name, bio, avatar)` tuple at the new
+/// bio value. The `display_name` is read fresh from the DB inside
+/// the transaction so the snapshot can't drift against a stale
+/// auth-user cache, even though display_name is currently immutable
+/// post-signup.
 pub async fn update_bio(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -977,14 +985,92 @@ pub async fn update_bio(
     }
 
     let bio_value = bio.filter(|b| !b.is_empty());
+    // The signed `profile` payload binds `bio` as a required text
+    // field (empty string permitted). Project the nullable-DB value
+    // onto the empty string for signing so absent bio and explicit
+    // empty bio produce the same canonical bytes and the same hash-chain
+    // head.
+    let bio_for_payload: &str = bio_value.unwrap_or("");
+
+    let now_dt = chrono::Utc::now();
+    let created_at_ms = u64::try_from(now_dt.timestamp_millis()).map_err(|_| {
+        tracing::error!(
+            ts_ms = now_dt.timestamp_millis(),
+            "system clock is pre-1970; cannot sign profile revision"
+        );
+        AppError::code(ErrorCode::Internal)
+    })?;
+
+    // BEGIN IMMEDIATE: serializes concurrent profile mutations for the
+    // same user so the prior-hash lookup and the new INSERT see a
+    // consistent snapshot. Two writers racing on the same user's bio
+    // would otherwise both read the same `prior_profile_hash` and
+    // fork the signed chain (identical pathology to the trust-edge
+    // chain — see `set_trust_edge`).
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
 
     sqlx::query!(
         "UPDATE users SET bio = ? WHERE id = ?",
         bio_value,
         user.user_id,
     )
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
+
+    // Read display_name fresh inside the tx (see fn doc). users.id is
+    // PK and the row must exist — the auth layer already proved it.
+    let user_row = sqlx::query!("SELECT display_name FROM users WHERE id = ?", user.user_id,)
+        .fetch_one(&mut *tx)
+        .await?;
+
+    let prior_hash = crate::signing::compute_prior_profile_hash(&mut *tx, &user.user_id).await?;
+
+    let signed = crate::signing::sign_profile_revision(
+        &mut *tx,
+        &user.user_id,
+        &user_row.display_name,
+        bio_for_payload,
+        None,
+        created_at_ms,
+        prior_hash,
+    )
+    .await?;
+    let payload = signed.payload;
+    let signature = signed.signature;
+    let canonical_hash = signed.canonical_hash;
+    let prior_hash_db: Option<Vec<u8>> = prior_hash.map(|h| h.to_vec());
+    let canonical_hash_db: Vec<u8> = canonical_hash.to_vec();
+    let created_at_ms_db = i64::try_from(created_at_ms).map_err(|_| {
+        tracing::error!(
+            created_at_ms,
+            "profile revision created_at_ms does not fit in i64"
+        );
+        AppError::code(ErrorCode::Internal)
+    })?;
+
+    let id = Uuid::new_v4().to_string();
+    sqlx::query!(
+        "INSERT INTO profile_revisions \
+            (id, user_id, display_name, bio, avatar_attachment_hash, created_at, \
+             signature, prior_profile_hash, canonical_hash) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        id,
+        user.user_id,
+        user_row.display_name,
+        bio_for_payload,
+        None::<Vec<u8>>,
+        created_at_ms_db,
+        signature,
+        prior_hash_db,
+        canonical_hash_db,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    crate::signing::store_signed_object(&mut *tx, "profile", &payload, &signature, &canonical_hash)
+        .await?;
+
+    tx.commit().await?;
 
     Ok(StatusCode::NO_CONTENT)
 }

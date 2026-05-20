@@ -445,3 +445,46 @@ CREATE TABLE IF NOT EXISTS "signing_keys" (
 );
 CREATE INDEX idx_signing_keys_user_id ON signing_keys(user_id);
 CREATE UNIQUE INDEX idx_signing_keys_active ON signing_keys(user_id) WHERE active = 1;
+CREATE TABLE profile_revisions (
+    id TEXT PRIMARY KEY NOT NULL,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    -- Canonical bytes are the source of truth. These projection
+    -- columns exist so reads (and FTS triggers if we add them later)
+    -- don't have to round-trip through CBOR parsing.
+    display_name TEXT NOT NULL,
+    bio TEXT NOT NULL,
+    -- 32-byte SHA-256 of the avatar attachment, or NULL.
+    avatar_attachment_hash BLOB,
+    -- Authored time in Unix milliseconds (the same value that lives in
+    -- the canonical payload's `created_at`). Stored as INTEGER, not
+    -- ISO-8601 text, so latest-wins ordering is a direct numeric
+    -- comparison and ties never depend on string-format quirks.
+    created_at INTEGER NOT NULL,
+    -- 64-byte Ed25519 signature over the canonical CBOR payload.
+    signature BLOB NOT NULL,
+    -- SHA-256 of the canonical bytes of the prior profile object for
+    -- the same user, or NULL when this is the user's first revision.
+    prior_profile_hash BLOB,
+    -- SHA-256 of this row's canonical bytes. Persisted (rather than
+    -- recomputed on lookup) for the same reason as
+    -- `trust_edges.canonical_hash`: post-rotation key changes must not
+    -- silently rebind the chain.
+    canonical_hash BLOB NOT NULL,
+    format_version INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX idx_profile_revisions_user ON profile_revisions(user_id);
+CREATE INDEX idx_profile_revisions_user_recent
+    ON profile_revisions(user_id, created_at DESC, id DESC);
+CREATE VIEW current_profile_revisions AS
+SELECT id, user_id, display_name, bio, avatar_attachment_hash,
+       created_at, signature, prior_profile_hash, canonical_hash,
+       format_version
+FROM (
+    SELECT pr.*, ROW_NUMBER() OVER (
+        PARTITION BY user_id
+        ORDER BY created_at DESC, id DESC
+    ) AS rn
+    FROM profile_revisions pr
+) ranked
+WHERE rn = 1
+/* current_profile_revisions(id,user_id,display_name,bio,avatar_attachment_hash,created_at,signature,prior_profile_hash,canonical_hash,format_version) */;

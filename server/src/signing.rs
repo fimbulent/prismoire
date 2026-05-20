@@ -4,7 +4,9 @@ use sha2::Digest;
 use sqlx::{SqliteExecutor, SqlitePool};
 use uuid::Uuid;
 
-use crate::signed::{PostRevision, Retraction, SignedPayload, TrustEdge, TrustStance};
+use crate::signed::{
+    PostRevision, ProfileRevision, Retraction, SignedPayload, TrustEdge, TrustStance,
+};
 
 /// Output of signing a class-specific payload.
 pub struct SigningOutput {
@@ -264,6 +266,36 @@ pub async fn erase_user_trust_edge_payloads<'e, E: SqliteExecutor<'e>>(
            AND canonical_hash IN ( \
                SELECT canonical_hash FROM trust_edges \
                WHERE source_user = ? AND canonical_hash IS NOT NULL \
+           )",
+        user_id,
+    )
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
+/// Erase the canonical payloads of every profile revision the user signed.
+///
+/// Used by account deletion (`privacy::soft_delete_user`). Direct
+/// analog of [`erase_user_trust_edge_payloads`]: NULL the
+/// `signed_objects.payload` bytes for every signed `profile` row
+/// the user authored, *before* the projection rows are dropped. Once
+/// the projection rows are gone the `canonical_hash IN (SELECT ...)`
+/// subquery returns nothing.
+///
+/// No `inner_class` narrowing — `canonical_hash` is the PK on
+/// `signed_objects` and uniquely identifies one row across all classes.
+pub async fn erase_user_profile_revision_payloads<'e, E: SqliteExecutor<'e>>(
+    executor: E,
+    user_id: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        "UPDATE signed_objects \
+         SET payload = NULL, erased_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+         WHERE payload IS NOT NULL \
+           AND canonical_hash IN ( \
+               SELECT canonical_hash FROM profile_revisions \
+               WHERE user_id = ? \
            )",
         user_id,
     )
@@ -536,6 +568,41 @@ pub async fn sign_trust_edge(
 /// for each pair — the unsigned past has no representable hash, and
 /// federation peers wouldn't have those bytes either. Accepted
 /// limitation, documented on the migration.
+/// Pick the bytewise-maximum 32-byte canonical hash from a set of
+/// candidate rows, returning `None` if the iterator is empty.
+///
+/// Shared tie-break for the `compute_prior_*_hash` family: each caller
+/// pulls every row tied at the latest `created_at` for its chain key
+/// and feeds the `(row_id, canonical_hash_bytes)` pairs in here.
+/// `table` is the originating table name (e.g. `"trust_edges"`,
+/// `"profile_revisions"`) and only appears in the error-path tracing
+/// event when a `canonical_hash` column violates the 32-byte
+/// invariant — the application enforces it on insert, so this branch
+/// fires only if someone bypassed the writer.
+fn pick_max_canonical_hash<I>(rows: I, table: &'static str) -> Result<Option<[u8; 32]>, SignError>
+where
+    I: IntoIterator<Item = (String, Vec<u8>)>,
+{
+    let mut best: Option<[u8; 32]> = None;
+    for (row_id, hash_bytes) in rows {
+        let hash: [u8; 32] = hash_bytes.as_slice().try_into().map_err(|_| {
+            tracing::error!(
+                table = %table,
+                row_id = %row_id,
+                len = hash_bytes.len(),
+                "canonical_hash is not 32 bytes"
+            );
+            SignError::InvalidData
+        })?;
+        match best {
+            None => best = Some(hash),
+            Some(current) if hash > current => best = Some(hash),
+            _ => {}
+        }
+    }
+    Ok(best)
+}
+
 pub async fn compute_prior_edge_hash<'e, E: SqliteExecutor<'e>>(
     db: E,
     source_user_id: &str,
@@ -568,28 +635,113 @@ pub async fn compute_prior_edge_hash<'e, E: SqliteExecutor<'e>>(
     .await
     .map_err(SignError::Db)?;
 
-    if rows.is_empty() {
-        return Ok(None);
-    }
+    pick_max_canonical_hash(
+        rows.into_iter().map(|r| (r.id, r.canonical_hash)),
+        "trust_edges",
+    )
+}
 
-    let mut best: Option<[u8; 32]> = None;
-    for row in rows {
-        let hash: [u8; 32] = row.canonical_hash.as_slice().try_into().map_err(|_| {
-            tracing::error!(
-                edge_id = %row.id,
-                len = row.canonical_hash.len(),
-                "trust_edges.canonical_hash is not 32 bytes"
-            );
-            SignError::InvalidData
-        })?;
-        match best {
-            None => best = Some(hash),
-            Some(current) if hash > current => best = Some(hash),
-            _ => {}
-        }
+/// Sign a `profile` canonical payload with an already-loaded key.
+///
+/// The signer (`key`) is bound as `user` in the payload.
+/// `created_at_ms` and `prior_profile_hash` must match the values
+/// the caller persists; the canonical CBOR encoding binds both.
+///
+/// The caller is responsible for computing `prior_profile_hash`
+/// (SHA-256 of the canonical bytes of the most recent prior signed
+/// `profile` for the user, or `None` for the first revision).
+pub fn sign_profile_revision_with_key(
+    key: &SigningKey,
+    display_name: &str,
+    bio: &str,
+    avatar_attachment_hash: Option<[u8; 32]>,
+    created_at_ms: u64,
+    prior_profile_hash: Option<[u8; 32]>,
+) -> SigningOutput {
+    let public_key = *key.verifying_key().as_bytes();
+    let payload = ProfileRevision {
+        user: public_key,
+        display_name: display_name.to_string(),
+        bio: bio.to_string(),
+        avatar_attachment_hash,
+        created_at: created_at_ms,
+        prior_profile_hash,
+    };
+    let payload_bytes = SignedPayload::ProfileRevision(payload).encode();
+    let signature = key.sign(&payload_bytes).to_bytes().to_vec();
+    let canonical_hash: [u8; 32] = sha2::Sha256::digest(&payload_bytes).into();
+    SigningOutput {
+        payload: payload_bytes,
+        signature,
+        public_key,
+        canonical_hash,
     }
+}
 
-    Ok(best)
+/// Sign a `profile` canonical payload for the given user.
+///
+/// DB-fetching wrapper around [`sign_profile_revision_with_key`].
+/// Looks up the user's active signing key and signs in one step;
+/// callers that need to chain via `prior_profile_hash` should
+/// invoke [`compute_prior_profile_hash`] before calling this.
+///
+/// Errors:
+/// - [`SignError::NoKey`] — user has no active row in `signing_keys`
+///   (soft-deleted or legacy unsigned user).
+pub async fn sign_profile_revision<'e, E: SqliteExecutor<'e>>(
+    db: E,
+    user_id: &str,
+    display_name: &str,
+    bio: &str,
+    avatar_attachment_hash: Option<[u8; 32]>,
+    created_at_ms: u64,
+    prior_profile_hash: Option<[u8; 32]>,
+) -> Result<SigningOutput, SignError> {
+    let key = load_active_signing_key(db, user_id).await?;
+    Ok(sign_profile_revision_with_key(
+        &key,
+        display_name,
+        bio,
+        avatar_attachment_hash,
+        created_at_ms,
+        prior_profile_hash,
+    ))
+}
+
+/// Look up the `prior_profile_hash` for a new profile revision.
+///
+/// Direct analog of [`compute_prior_edge_hash`] (see that function
+/// for the rationale on hash persistence vs. byte reconstruction,
+/// and tie-breaking by bytewise canonical_hash comparison).
+///
+/// Returns the canonical hash of the most recent prior signed
+/// profile for `user_id`. Returns `None` when there is no prior
+/// (the new revision is the user's first).
+pub async fn compute_prior_profile_hash<'e, E: SqliteExecutor<'e>>(
+    db: E,
+    user_id: &str,
+) -> Result<Option<[u8; 32]>, SignError> {
+    let rows = sqlx::query!(
+        r#"SELECT
+              id AS "id!: String",
+              canonical_hash AS "canonical_hash!: Vec<u8>"
+           FROM profile_revisions
+           WHERE user_id = ?
+             AND created_at = (
+                 SELECT MAX(created_at) FROM profile_revisions
+                 WHERE user_id = ?
+             )"#,
+        user_id,
+        user_id,
+    )
+    .fetch_all(db)
+    .await
+    .map_err(SignError::Db)?;
+
+    pick_max_canonical_hash(
+        rows.into_iter().map(|r| (r.id, r.canonical_hash)),
+        "profile_revisions",
+    )
 }
 
 /// Sign a `retract` canonical payload for the given user.

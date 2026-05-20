@@ -31,7 +31,8 @@ use std::path::{Path, PathBuf};
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 
 use prismoire_server::signed::{
-    self, ParseError, PostRevision, Retraction, SignedPayload, TrustEdge, TrustStance,
+    self, ParseError, PostRevision, ProfileRevision, Retraction, SignedPayload, TrustEdge,
+    TrustStance,
 };
 
 // --- Pinned test keys (never use for anything real) ---
@@ -194,6 +195,78 @@ fn positive_fixtures() -> Vec<PositiveFixture> {
                     prior_edge_hash: Some([0xab; 32]),
                 };
                 (SignedPayload::TrustEdge(e), key)
+            },
+        },
+        // First profile revision: required fields only (no avatar, no
+        // prior). Locks in the absent-optional encoding for a six-key
+        // map.
+        PositiveFixture {
+            stem: "profile/v1-minimal",
+            payload: || {
+                let key = signing_key(&KEY_ALICE_SEED);
+                let p = ProfileRevision {
+                    user: *key.verifying_key().as_bytes(),
+                    display_name: "Alice".to_string(),
+                    bio: "first bio".to_string(),
+                    avatar_attachment_hash: None,
+                    created_at: 1_700_000_010_000,
+                    prior_profile_hash: None,
+                };
+                (SignedPayload::ProfileRevision(p), key)
+            },
+        },
+        // Profile revision with both optionals present: avatar hash and
+        // prior_profile_hash. Locks in an eight-key map and the
+        // canonical (length-prefixed) ordering of the longer keys.
+        PositiveFixture {
+            stem: "profile/v1-with-avatar-and-prior",
+            payload: || {
+                let key = signing_key(&KEY_ALICE_SEED);
+                let p = ProfileRevision {
+                    user: *key.verifying_key().as_bytes(),
+                    display_name: "Alice".to_string(),
+                    bio: "second bio".to_string(),
+                    avatar_attachment_hash: Some([0xcd; 32]),
+                    created_at: 1_700_000_011_000,
+                    prior_profile_hash: Some([0xab; 32]),
+                };
+                (SignedPayload::ProfileRevision(p), key)
+            },
+        },
+        // Empty display_name and empty bio: spec §5.8 permits both.
+        // Receivers render a pubkey-hex placeholder for empty
+        // display_name; producers must still emit the empty string
+        // (not omit the key).
+        PositiveFixture {
+            stem: "profile/v1-empty-strings",
+            payload: || {
+                let key = signing_key(&KEY_BOB_SEED);
+                let p = ProfileRevision {
+                    user: *key.verifying_key().as_bytes(),
+                    display_name: String::new(),
+                    bio: String::new(),
+                    avatar_attachment_hash: None,
+                    created_at: 1_700_000_012_000,
+                    prior_profile_hash: None,
+                };
+                (SignedPayload::ProfileRevision(p), key)
+            },
+        },
+        // Multi-byte UTF-8 in display_name and bio: same NFC
+        // byte-faithfulness concern as `post-rev/v1-non-ascii-body`.
+        PositiveFixture {
+            stem: "profile/v1-non-ascii",
+            payload: || {
+                let key = signing_key(&KEY_CAROL_SEED);
+                let p = ProfileRevision {
+                    user: *key.verifying_key().as_bytes(),
+                    display_name: "Káröl".to_string(),
+                    bio: "héllo 🌍 世界".to_string(),
+                    avatar_attachment_hash: None,
+                    created_at: 1_700_000_013_000,
+                    prior_profile_hash: None,
+                };
+                (SignedPayload::ProfileRevision(p), key)
             },
         },
     ]
