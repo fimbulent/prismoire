@@ -21,7 +21,10 @@
 <script lang="ts">
 	import SectionedAutocomplete from '$lib/components/ui/SectionedAutocomplete.svelte';
 
-	let expanded = $state(false);
+	// `expanded` is bindable so the surrounding nav can react — on mobile
+	// it hides the Prismoire logo and lets the search field take the full
+	// row width while expanded.
+	let { expanded = $bindable(false) } = $props();
 	let autocomplete = $state<{
 		focus(): void;
 		clear(): void;
@@ -76,7 +79,12 @@
 	}
 </script>
 
-<div bind:this={wrapperEl} class="flex items-center gap-2" role="search" onfocusout={onFocusOut}>
+<div
+	bind:this={wrapperEl}
+	class="flex items-center gap-2 min-w-0"
+	role="search"
+	onfocusout={onFocusOut}
+>
 	<button
 		type="button"
 		onclick={toggle}
@@ -107,8 +115,8 @@
 		debounced) request seq + committedQuery guards.
 	-->
 	<div
-		class="overflow-visible transition-all duration-200 {expanded
-			? 'w-48 opacity-100'
+		class="overflow-visible transition-all duration-200 min-w-0 {expanded
+			? 'w-[14rem] sm:w-48 opacity-100'
 			: 'w-0 opacity-0 pointer-events-none'}"
 		aria-hidden={!expanded}
 	>

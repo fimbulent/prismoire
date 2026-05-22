@@ -13,6 +13,9 @@
 
 	let dropdownOpen = $state(false);
 	let dropdownEl = $state<HTMLElement | null>(null);
+	// On mobile the nav doesn't fit logo + expanded search + dropdown,
+	// so we hide the logo and let search take the full row while expanded.
+	let searchExpanded = $state(false);
 
 	// Keep the `<html data-theme>` attribute in sync with the current
 	// theme when it changes (e.g. after `invalidateAll()` re-runs the
@@ -71,12 +74,39 @@
 </svelte:head>
 
 <div class="bg-bg text-text-primary min-h-screen flex flex-col">
-<nav class="h-[var(--nav-height)] bg-bg-surface border-b border-border px-4 flex items-center justify-between">
-	<a href="/" class="text-accent font-bold tracking-wide text-lg hover:opacity-90">Prismoire</a>
+<nav class="h-[var(--nav-height)] bg-bg-surface border-b border-border px-4 flex items-center gap-4">
+	<!--
+		On mobile, the logo collapses (shrinks + fades) when search expands
+		so the search field can take the row. We use the CSS grid trick:
+		the anchor is a single-column grid whose track animates from
+		`1fr` (intrinsic content width, since the parent is content-sized)
+		down to `0fr` — no hardcoded pixel width, so it works for any brand
+		string a deployed instance might use. `overflow-hidden` +
+		`whitespace-nowrap` + `min-w-0` on the inner span let the track
+		actually shrink below content size and clip the text leftward as
+		it does. Desktop (`sm:`) stays at `1fr` regardless of search state.
+	-->
+	<a
+		href="/"
+		aria-hidden={searchExpanded || undefined}
+		tabindex={searchExpanded ? -1 : undefined}
+		class="text-accent font-bold tracking-wide text-lg hover:opacity-90 grid overflow-hidden whitespace-nowrap transition-all duration-200 {searchExpanded
+			? 'grid-cols-[0fr] opacity-0 pointer-events-none sm:grid-cols-[1fr] sm:opacity-100 sm:pointer-events-auto'
+			: 'grid-cols-[1fr] opacity-100'}"
+	>
+		<span class="min-w-0">Prismoire</span>
+	</a>
 
-	<div class="flex items-center gap-4 text-sm">
+	<!--
+		`ml-auto` anchors the right cluster to the right edge regardless of
+		whether the logo is rendered. That way, hiding the logo on mobile
+		(when search is expanded) doesn't reflow the right side — the
+		search field can grow leftward into the freed space without any
+		flex-grow snap, matching the desktop animation.
+	-->
+	<div class="ml-auto flex items-center gap-4 text-sm min-w-0">
 		{#if session.isLoggedIn && !session.isRestricted}
-			<NavSearch />
+			<NavSearch bind:expanded={searchExpanded} />
 		{/if}
 		{#if session.isLoggedIn}
 			<div class="relative" bind:this={dropdownEl}>
