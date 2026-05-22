@@ -232,11 +232,6 @@ CREATE TABLE user_tags (
     CHECK (viewer_id <> target_id),
     CHECK (length(tag) > 0)
 );
-CREATE TABLE user_settings (
-    user_id TEXT PRIMARY KEY NOT NULL REFERENCES users(id),
-    theme TEXT NOT NULL DEFAULT 'rose-pine-moon',
-    font TEXT NOT NULL DEFAULT 'literata'
-);
 CREATE TABLE trust_edges (
     id TEXT PRIMARY KEY NOT NULL,
     source_user TEXT NOT NULL REFERENCES users(id),
@@ -544,4 +539,9 @@ CREATE TABLE user_storage_budgets (
     available_bytes INTEGER NOT NULL CHECK (available_bytes >= 0),
     last_refill_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     lifetime_spent INTEGER NOT NULL DEFAULT 0 CHECK (lifetime_spent >= 0)
+);
+CREATE TABLE IF NOT EXISTS "user_settings" (
+    user_id TEXT PRIMARY KEY NOT NULL REFERENCES users(id),
+    theme TEXT NOT NULL DEFAULT 'rose-pine',
+    font TEXT NOT NULL DEFAULT 'literata'
 );

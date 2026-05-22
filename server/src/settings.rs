@@ -25,7 +25,7 @@ const VALID_THEMES: &[&str] = &[
     "iceberg",
 ];
 
-pub const DEFAULT_THEME: &str = "rose-pine-moon";
+pub const DEFAULT_THEME: &str = "rose-pine";
 
 /// Allow-list of prose-font slugs. Mirrors the catalogue in
 /// `web/src/lib/fonts.ts` and the `@font-face` declarations in

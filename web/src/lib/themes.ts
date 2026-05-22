@@ -43,7 +43,7 @@ export const themes: ThemeMeta[] = [
 	{ id: 'iceberg', name: 'Iceberg' }
 ];
 
-export const DEFAULT_THEME: ThemeId = 'rose-pine-moon';
+export const DEFAULT_THEME: ThemeId = 'rose-pine';
 
 /**
  * Apply a theme in the browser by flipping the `data-theme` attribute on
