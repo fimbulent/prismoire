@@ -228,6 +228,48 @@ pub enum ErrorCode {
     /// favorites — the client's view is stale and must refetch.
     FavoriteSetMismatch,
 
+    // -- Attachments -------------------------------------------------
+    /// No attachment blob row matched the requested hash, or the hash is
+    /// not visible to the requester. The two are deliberately fused on
+    /// the wire so visibility does not leak via response shape
+    /// (`docs/attachments.md` §4 step 2).
+    AttachmentNotFound,
+    /// Upload exceeded the per-blob byte cap (input or post-re-encode
+    /// stored size).
+    AttachmentTooLarge,
+    /// Upload's detected MIME is not in [`signed::ALLOWED_MIMES`]
+    /// (`docs/attachments.md` §3 step 2).
+    AttachmentMimeRejected,
+    /// Image dimensions exceeded `MAX_IMAGE_PX_DECODE`.
+    AttachmentImageDimensions,
+    /// Image bytes failed to decode under the declared MIME.
+    AttachmentImageDecode,
+    /// Multipart request was malformed, missing the `file` part, or
+    /// carried multiple parts.
+    AttachmentMultipartInvalid,
+    /// Upload would overdraw the user's storage budget.
+    BudgetExceeded,
+    /// Filename failed the `FILENAME_RULES` sanitization (§2.2):
+    /// empty after sanitization, or did not round-trip the
+    /// canonicalization pass.
+    AttachmentFilenameInvalid,
+    /// Two `attachments[]` entries share the same `content_hash`.
+    AttachmentDuplicateHash,
+    /// Two `attachments[]` entries share the same (canonicalized)
+    /// `filename`. Body `![](filename)` references resolve by name, so
+    /// duplicate names would be ambiguous — bind-time rejection keeps
+    /// the resolution rule deterministic (`docs/attachments.md` §3).
+    AttachmentDuplicateFilename,
+    /// A body `![](filename)` reference appeared more than once. Each
+    /// attachment may be inlined at most once per revision.
+    AttachmentInlineRefDuplicate,
+    /// A body `![](filename)` reference resolved to a non-image MIME.
+    /// Only image attachments can be inlined; other MIMEs must render
+    /// as a download chip below the post.
+    AttachmentInlineRefNotImage,
+    /// Upload was zero bytes (no content to share).
+    AttachmentEmpty,
+
     // -- Catch-all ---------------------------------------------------
     /// Generic client error when no more specific code applies.
     BadRequest,
@@ -262,7 +304,8 @@ impl ErrorCode {
             | Self::ThreadNotFound
             | Self::PostNotFound
             | Self::NoTrustEdge
-            | Self::ReportNotFound => StatusCode::NOT_FOUND,
+            | Self::ReportNotFound
+            | Self::AttachmentNotFound => StatusCode::NOT_FOUND,
 
             Self::DisplayNameTaken
             | Self::SetupAlreadyComplete
@@ -280,6 +323,12 @@ impl ErrorCode {
             | Self::FavoriteCapExceeded => StatusCode::CONFLICT,
 
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+
+            Self::AttachmentTooLarge | Self::AttachmentImageDimensions => {
+                StatusCode::PAYLOAD_TOO_LARGE
+            }
+            Self::AttachmentMimeRejected => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Self::BudgetExceeded => StatusCode::PAYMENT_REQUIRED,
 
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
 
@@ -320,6 +369,14 @@ impl ErrorCode {
             | Self::InvalidFont
             | Self::InvalidDuration
             | Self::ConfirmationMismatch
+            | Self::AttachmentImageDecode
+            | Self::AttachmentMultipartInvalid
+            | Self::AttachmentFilenameInvalid
+            | Self::AttachmentDuplicateHash
+            | Self::AttachmentDuplicateFilename
+            | Self::AttachmentInlineRefDuplicate
+            | Self::AttachmentInlineRefNotImage
+            | Self::AttachmentEmpty
             | Self::BadRequest => StatusCode::BAD_REQUEST,
         }
     }
@@ -407,6 +464,24 @@ impl ErrorCode {
             Self::FavoriteCapExceeded => "favorite rooms limit reached",
             Self::FavoriteSetMismatch => "favorite rooms changed in another tab; please refetch",
 
+            Self::AttachmentNotFound => "attachment not found",
+            Self::AttachmentTooLarge => "attachment exceeds size cap",
+            Self::AttachmentMimeRejected => "attachment MIME type is not allowed",
+            Self::AttachmentImageDimensions => "image dimensions exceed cap",
+            Self::AttachmentImageDecode => "image could not be decoded",
+            Self::AttachmentMultipartInvalid => "multipart upload was malformed",
+            Self::BudgetExceeded => "storage budget exceeded",
+            Self::AttachmentFilenameInvalid => "filename is invalid",
+            Self::AttachmentDuplicateHash => "the same attachment was bound twice in this post",
+            Self::AttachmentDuplicateFilename => "two attachments cannot share the same filename",
+            Self::AttachmentInlineRefDuplicate => {
+                "an attachment can only be inlined once in the body"
+            }
+            Self::AttachmentInlineRefNotImage => {
+                "only image attachments can be inlined in the body"
+            }
+            Self::AttachmentEmpty => "attachment has zero bytes",
+
             Self::BadRequest => "bad request",
             Self::RateLimited => "rate limited",
             Self::Internal => "internal server error",
@@ -465,6 +540,14 @@ impl AppError {
     pub fn with_fields(mut self, fields: HashMap<String, ErrorCode>) -> Self {
         self.fields = Some(fields);
         self
+    }
+
+    /// Read the `ErrorCode` this error will serialize with. Test-only
+    /// today — handlers should not branch on the code, only construct
+    /// them. The IntoResponse path consumes `self.code` directly.
+    #[cfg(test)]
+    pub fn error_code(&self) -> ErrorCode {
+        self.code
     }
 }
 

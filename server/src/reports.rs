@@ -44,6 +44,12 @@ pub struct ReportResponse {
     pub resolved_by_name: Option<String>,
     pub resolved_at: Option<String>,
     pub report_count: i64,
+    /// Attachments bound to the reported post's latest revision. Lets
+    /// the moderator see inline images referenced in the body (often
+    /// the very reason a post was reported). Empty for posts with no
+    /// attachments; omitted from JSON in that case.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<crate::threads::AttachmentResponse>,
 }
 
 #[derive(Serialize)]
@@ -220,6 +226,7 @@ pub async fn list_reports(
             resolved_by_name: r.resolved_by_name,
             resolved_at: r.resolved_at,
             report_count: r.report_count,
+            attachments: Vec::new(),
         })
         .collect()
     } else {
@@ -281,12 +288,26 @@ pub async fn list_reports(
             resolved_by_name: r.resolved_by_name,
             resolved_at: r.resolved_at,
             report_count: r.report_count,
+            attachments: Vec::new(),
         })
         .collect()
     };
 
     let has_more = reports.len() > REPORTS_PAGE_SIZE;
-    let reports: Vec<ReportResponse> = reports.into_iter().take(REPORTS_PAGE_SIZE).collect();
+    let mut reports: Vec<ReportResponse> = reports.into_iter().take(REPORTS_PAGE_SIZE).collect();
+
+    // Second pass: resolve attachments for every reported post on this
+    // page. Mirrors `users::get_activity` — moderators reviewing a
+    // reported post see the inline images the body references, which
+    // is often the very content under review.
+    let post_ids: Vec<String> = reports.iter().map(|r| r.post_id.clone()).collect();
+    let mut attachments_map =
+        crate::threads::fetch_latest_attachments(&state.db, &post_ids).await?;
+    for r in &mut reports {
+        if let Some(atts) = attachments_map.remove(&r.post_id) {
+            r.attachments = atts;
+        }
+    }
 
     let next_cursor = if has_more {
         reports.last().map(|r| format!("{}|{}", r.created_at, r.id))

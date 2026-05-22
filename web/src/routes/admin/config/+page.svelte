@@ -23,6 +23,8 @@
 	let maxIntervalSec = $state('');
 	let bfsCacheMiB = $state('');
 	let sourceRepoUrl = $state('');
+	let attachmentCapMiB = $state('');
+	let attachmentRefillMiB = $state('');
 
 	$effect(() => {
 		debounceSec = String(data.config.rebuild_debounce_ms / MS_PER_SEC);
@@ -30,6 +32,10 @@
 		maxIntervalSec = String(data.config.rebuild_max_interval_ms / MS_PER_SEC);
 		bfsCacheMiB = String(data.config.rebuild_bfs_cache_bytes / BYTES_PER_MIB);
 		sourceRepoUrl = data.config.source_repo_url ?? '';
+		attachmentCapMiB = String(data.config.attachment_budget_cap_bytes / BYTES_PER_MIB);
+		attachmentRefillMiB = String(
+			data.config.attachment_budget_refill_bytes_per_day / BYTES_PER_MIB
+		);
 	});
 
 	let saving = $state(false);
@@ -52,6 +58,8 @@
 	const minIntervalMs = $derived(parseScaled(minIntervalSec, MS_PER_SEC));
 	const maxIntervalMs = $derived(parseScaled(maxIntervalSec, MS_PER_SEC));
 	const bfsCacheBytes = $derived(parseScaled(bfsCacheMiB, BYTES_PER_MIB));
+	const attachmentCapBytes = $derived(parseScaled(attachmentCapMiB, BYTES_PER_MIB));
+	const attachmentRefillBytes = $derived(parseScaled(attachmentRefillMiB, BYTES_PER_MIB));
 
 	// Any numeric field cleared or unparseable blocks save — there is no
 	// sensible interpretation of "clear this knob" for these settings.
@@ -59,7 +67,9 @@
 		debounceMs !== null &&
 			minIntervalMs !== null &&
 			maxIntervalMs !== null &&
-			bfsCacheBytes !== null
+			bfsCacheBytes !== null &&
+			attachmentCapBytes !== null &&
+			attachmentRefillBytes !== null
 	);
 
 	// Derived view of "is this field still equal to what the server
@@ -74,7 +84,9 @@
 			minIntervalMs !== data.config.rebuild_min_interval_ms ||
 			maxIntervalMs !== data.config.rebuild_max_interval_ms ||
 			bfsCacheBytes !== data.config.rebuild_bfs_cache_bytes ||
-			sourceRepoUrl.trim() !== (data.config.source_repo_url ?? '')
+			sourceRepoUrl.trim() !== (data.config.source_repo_url ?? '') ||
+			attachmentCapBytes !== data.config.attachment_budget_cap_bytes ||
+			attachmentRefillBytes !== data.config.attachment_budget_refill_bytes_per_day
 		);
 	});
 
@@ -102,6 +114,18 @@
 		if (trimmedUrl !== (data.config.source_repo_url ?? '')) {
 			patch.source_repo_url = trimmedUrl;
 		}
+		if (
+			attachmentCapBytes !== null &&
+			attachmentCapBytes !== data.config.attachment_budget_cap_bytes
+		) {
+			patch.attachment_budget_cap_bytes = attachmentCapBytes;
+		}
+		if (
+			attachmentRefillBytes !== null &&
+			attachmentRefillBytes !== data.config.attachment_budget_refill_bytes_per_day
+		) {
+			patch.attachment_budget_refill_bytes_per_day = attachmentRefillBytes;
+		}
 
 		if (Object.keys(patch).length === 0) return;
 
@@ -125,6 +149,10 @@
 		maxIntervalSec = String(data.config.rebuild_max_interval_ms / MS_PER_SEC);
 		bfsCacheMiB = String(data.config.rebuild_bfs_cache_bytes / BYTES_PER_MIB);
 		sourceRepoUrl = data.config.source_repo_url ?? '';
+		attachmentCapMiB = String(data.config.attachment_budget_cap_bytes / BYTES_PER_MIB);
+		attachmentRefillMiB = String(
+			data.config.attachment_budget_refill_bytes_per_day / BYTES_PER_MIB
+		);
 	}
 </script>
 
@@ -238,6 +266,68 @@
 							? `${(data.overview.trust.bfs_cache_hit_rate * 100).toFixed(1)}%`
 							: '—'}
 					</span>.
+				</div>
+			</div>
+		</div>
+	</section>
+
+	<section class="bg-bg-surface border border-border rounded-md p-5 mb-4">
+		<div class="text-sm font-semibold text-text-primary mb-1">
+			Attachment Storage Budget
+		</div>
+		<div class="text-xs text-text-muted mb-3">
+			Per-user token-bucket rate limit for attachment uploads. Each user has a personal
+			bucket that starts full at the cap; uploads spend bytes from the bucket, and the
+			bucket refills linearly over time (up to the cap). Retracting a post does
+			<em>not</em> refund the bucket — this is intentional, to prevent upload-and-delete
+			cycles from bypassing the limit. Total lifetime storage per user isn't capped;
+			the knobs below only control how much can be uploaded at once and how quickly
+			that capacity replenishes. Defaults are 10 MiB cap, 1 MiB / day refill.
+		</div>
+
+		<div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+			<div>
+				<label for="config-attachment-cap-mib" class="text-xs text-text-muted block mb-1">
+					Budget cap (MiB)
+				</label>
+				<input
+					id="config-attachment-cap-mib"
+					type="number"
+					min="0"
+					max="10240"
+					step="any"
+					bind:value={attachmentCapMiB}
+					disabled={saving}
+					class="w-full bg-bg border border-border rounded-md text-text-primary text-sm px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted font-sans"
+				/>
+				<div class="text-xs text-text-muted mt-1">
+					Bucket size: the maximum upload burst available when a user's bucket is full,
+					and the ceiling that refill stops accumulating at. Higher values let users
+					upload more in a single session (e.g. a thread with several large images);
+					they don't change how much can be stored long-term. Set to 0 to disable
+					uploads entirely.
+				</div>
+			</div>
+
+			<div>
+				<label for="config-attachment-refill-mib" class="text-xs text-text-muted block mb-1">
+					Daily refill (MiB / day)
+				</label>
+				<input
+					id="config-attachment-refill-mib"
+					type="number"
+					min="0"
+					max="10240"
+					step="any"
+					bind:value={attachmentRefillMiB}
+					disabled={saving}
+					class="w-full bg-bg border border-border rounded-md text-text-primary text-sm px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted font-sans"
+				/>
+				<div class="text-xs text-text-muted mt-1">
+					Sustained upload rate: bytes added back to each user's bucket per day. This
+					is the long-run pace at which a user can upload — a user who empties their
+					bucket can upload roughly this much per day going forward. Set to 0 to make
+					the cap a one-time allowance with no replenishment.
 				</div>
 			</div>
 		</div>

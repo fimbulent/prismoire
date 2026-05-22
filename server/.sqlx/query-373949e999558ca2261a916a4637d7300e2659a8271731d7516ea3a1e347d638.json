@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT pa.content_hash AS \"content_hash!: Vec<u8>\"\n             FROM post_attachments pa\n             JOIN attachment_blobs ab ON ab.content_hash = pa.content_hash\n            WHERE pa.post_id = ?\n              AND ab.blob IS NOT NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "content_hash!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "373949e999558ca2261a916a4637d7300e2659a8271731d7516ea3a1e347d638"
+}

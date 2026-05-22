@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { goto, invalidateAll } from '$app/navigation';
 	import { updateSettings } from '$lib/api/settings';
-	import { exportMyData, deleteMyAccount } from '$lib/api/privacy';
+	import { exportMyData, exportMyAttachments, deleteMyAccount } from '$lib/api/privacy';
 	import { errorMessage } from '$lib/i18n/errors';
 	import { toast } from '$lib/components/ui/toast.svelte';
 	import { theme } from '$lib/stores/theme.svelte';
@@ -11,6 +11,9 @@
 
 	let exporting = $state(false);
 	let exportError = $state<string | null>(null);
+
+	let exportingAttachments = $state(false);
+	let attachmentExportError = $state<string | null>(null);
 
 	let deleteArmed = $state(false);
 	let deleteConfirmText = $state('');
@@ -46,6 +49,18 @@
 			exportError = errorMessage(e, 'Failed to export data');
 		} finally {
 			exporting = false;
+		}
+	}
+
+	async function handleExportAttachments() {
+		exportingAttachments = true;
+		attachmentExportError = null;
+		try {
+			await exportMyAttachments();
+		} catch (e) {
+			attachmentExportError = errorMessage(e, 'Failed to export attachments');
+		} finally {
+			exportingAttachments = false;
 		}
 	}
 
@@ -170,8 +185,10 @@
 						<div class="text-sm font-medium text-text-primary">Export my data</div>
 						<div class="text-xs text-text-muted mt-0.5">
 							Download a JSON file containing your profile, settings, signing
-							keypair, credentials, outbound trust edges, and every thread,
-							post, and report you authored.
+							keypair, credentials, outbound trust edges, every thread, post,
+							and report you authored, and the metadata for your attachments
+							(filenames, sizes, MIME types). The attachment bytes themselves
+							are in the separate archive below.
 						</div>
 					</div>
 					<button
@@ -184,6 +201,30 @@
 				</div>
 				{#if exportError}
 					<div class="text-xs text-danger mt-2">{exportError}</div>
+				{/if}
+			</div>
+
+			<div class="p-4">
+				<div class="flex flex-wrap items-start justify-between gap-3">
+					<div>
+						<div class="text-sm font-medium text-text-primary">Export my attachments</div>
+						<div class="text-xs text-text-muted mt-0.5">
+							Download a ZIP archive of every attachment you've uploaded,
+							including uploads still staged but not yet posted. Includes a
+							<code class="px-1 rounded bg-bg-surface-raised">MANIFEST.json</code>
+							that maps each blob back to the posts it appears in.
+						</div>
+					</div>
+					<button
+						onclick={handleExportAttachments}
+						disabled={exportingAttachments}
+						class="text-xs px-3 py-1.5 rounded-md border border-border text-text-primary bg-bg-surface-raised hover:bg-bg-hover cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+					>
+						{exportingAttachments ? 'Preparing…' : 'Export'}
+					</button>
+				</div>
+				{#if attachmentExportError}
+					<div class="text-xs text-danger mt-2">{attachmentExportError}</div>
 				{/if}
 			</div>
 

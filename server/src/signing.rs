@@ -5,7 +5,7 @@ use sqlx::{SqliteExecutor, SqlitePool};
 use uuid::Uuid;
 
 use crate::signed::{
-    PostRevision, ProfileRevision, Retraction, SignedPayload, TrustEdge, TrustStance,
+    AttachmentRef, PostRevision, ProfileRevision, Retraction, SignedPayload, TrustEdge, TrustStance,
 };
 
 /// Output of signing a class-specific payload.
@@ -356,6 +356,7 @@ pub fn sign_post_revision_with_key(
     revision: u64,
     body: &str,
     created_at_ms: u64,
+    attachments: Vec<AttachmentRef>,
 ) -> SigningOutput {
     let public_key = *key.verifying_key().as_bytes();
     let payload = PostRevision {
@@ -366,6 +367,7 @@ pub fn sign_post_revision_with_key(
         revision,
         body: body.to_string(),
         created_at: created_at_ms,
+        attachments,
     };
     let payload_bytes = SignedPayload::PostRevision(payload).encode();
     let signature = key.sign(&payload_bytes).to_bytes().to_vec();
@@ -457,6 +459,7 @@ pub async fn sign_post_revision(
     revision: u64,
     body: &str,
     created_at_ms: u64,
+    attachments: Vec<AttachmentRef>,
 ) -> Result<SigningOutput, SignError> {
     let key = load_active_signing_key(db, user_id).await?;
     Ok(sign_post_revision_with_key(
@@ -467,6 +470,7 @@ pub async fn sign_post_revision(
         revision,
         body,
         created_at_ms,
+        attachments,
     ))
 }
 

@@ -33,7 +33,8 @@ use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Method, Request, Response, StatusCode, header};
 use http_body_util::BodyExt;
-use prismoire_config::RateLimitConfig;
+use prismoire_config::{AttachmentsConfig, RateLimitConfig};
+use prismoire_server::instance_config::AttachmentBudget;
 use prismoire_server::middleware::csrf::AllowedOrigin;
 use prismoire_server::middleware::security_headers::HttpsEnabled;
 use prismoire_server::trust::{self, RebuildSchedule, TrustGraph};
@@ -149,6 +150,14 @@ pub async fn test_app() -> (Router, Arc<AppState>) {
     let pending_deltas = Arc::new(trust::PendingDeltas::new(Some(app_metrics.clone())));
     let rebuild_schedule = Arc::new(RwLock::new(RebuildSchedule::default()));
     let source_repo_url = Arc::new(RwLock::new(None));
+    // Match the migration defaults (docs/attachments.md §10.3):
+    // cap 10 MiB, refill 1 MiB/day. Handler tests that exercise the
+    // upload path can overwrite this via the lock if they want a
+    // different policy.
+    let attachment_budget = Arc::new(RwLock::new(AttachmentBudget {
+        cap_bytes: 10 * 1024 * 1024,
+        refill_bytes_per_day: 1024 * 1024,
+    }));
 
     let state = Arc::new(AppState {
         db: pool,
@@ -165,6 +174,8 @@ pub async fn test_app() -> (Router, Arc<AppState>) {
         pending_deltas,
         rebuild_schedule,
         source_repo_url,
+        attachment_budget,
+        attachments_config: AttachmentsConfig::default(),
     });
 
     let layers = rate_limit::build_layers(&test_rate_limit_config(), false);

@@ -60,6 +60,202 @@ pub const V1: u64 = 1;
 /// does not truncate.
 pub const MAX_PROFILE_BIO_LEN: usize = 4096;
 
+// --- Attachment protocol invariants (docs/attachments.md §10.1) ---
+//
+// These are part of the federation wire contract. Per-instance drift
+// breaks interop or security; loosening on one instance forces every
+// peer to choose between rejecting legitimate posts and accepting
+// content that violates its own policy. Bumping any of these is a
+// protocol revision, not a knob. They live here (next to the rest of
+// the canonical-byte invariants) so every validation path — upload
+// rejection, signed-payload verification, federation accept/reject —
+// references the same values.
+
+/// Maximum size of a single attachment blob, in bytes (`MAX_ATTACHMENT_SIZE`).
+///
+/// Appears in the signed canonical bytes (`attachments[].size`). Wire
+/// invariant per `federation-protocol.md` §11.6.
+pub const MAX_ATTACHMENT_SIZE: usize = 500 * 1024;
+
+/// Maximum number of attachments bound to a single post revision
+/// (`MAX_ATTACHMENTS_PER_OP`). Array length is signed, so this cannot
+/// vary per instance.
+pub const MAX_ATTACHMENTS_PER_OP: usize = 3;
+
+/// Maximum length of a sanitized attachment filename, in UTF-8 bytes
+/// (`MAX_ATTACHMENT_FILENAME_LEN`). The numeric form of the cap in
+/// `FILENAME_RULES`; sized to match a `Content-Disposition`-friendly
+/// indexable column length.
+pub const MAX_ATTACHMENT_FILENAME_LEN: usize = 255;
+
+/// Allowlist of attachment MIME types (`ALLOWED_MIMES`).
+///
+/// Both a wire contract and a security invariant. GIF, HTML, and SVG
+/// are deliberately excluded — see `docs/attachments.md` §3 step 2 for
+/// the rationale (animation pushes toward image-driven culture; HTML
+/// and SVG are executable in a browser). The upload classifier and the
+/// federation-receive MIME re-verification both gate on this exact
+/// list.
+pub const ALLOWED_MIMES: &[&str] = &[
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "text/plain",
+    "application/pdf",
+];
+
+/// CBOR map-key constant: the optional outer key carrying the
+/// attachment array on a `post-rev` payload. Empty arrays MUST omit
+/// the key entirely (the no-attachments case has exactly one canonical
+/// form). See `docs/attachments.md` §2.1.
+pub const KEY_ATTACHMENTS: &str = "attachments";
+
+/// CBOR map-key constant: inner attachment-map field — 32-byte SHA-256
+/// of the stored blob bytes.
+pub const KEY_ATTACHMENT_CONTENT_HASH: &str = "content_hash";
+
+/// CBOR map-key constant: inner attachment-map field — sanitized
+/// filename per §2.2.
+pub const KEY_ATTACHMENT_FILENAME: &str = "filename";
+
+/// CBOR map-key constant: inner attachment-map field — MIME, member of
+/// [`ALLOWED_MIMES`].
+pub const KEY_ATTACHMENT_MIME: &str = "mime";
+
+/// CBOR map-key constant: inner attachment-map field — byte length of
+/// the named blob.
+pub const KEY_ATTACHMENT_SIZE: &str = "size";
+
+/// One entry in a `post-rev`'s signed `attachments[]` array.
+///
+/// All four fields are signed: the hash binds the bytes, but `mime`,
+/// `size`, and `filename` are signed too so a federation peer (or
+/// local attacker) cannot rename or substitute MIME/size while leaving
+/// the signature valid. Layout intent (inline vs chip) is *not*
+/// signed — it's derived at render time from `![](filename)`
+/// references in the post body (§2.1, §3 inline-rules).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentRef {
+    /// SHA-256 of the stored blob bytes.
+    pub content_hash: [u8; 32],
+    /// MIME type — must be a member of [`ALLOWED_MIMES`].
+    pub mime: String,
+    /// Byte length of the named blob; must equal the stored size and
+    /// be ≤ [`MAX_ATTACHMENT_SIZE`].
+    pub size: u64,
+    /// Sanitized filename (§2.2): NFC, no path separators / NUL /
+    /// control characters / leading dots, ≤ [`MAX_ATTACHMENT_FILENAME_LEN`]
+    /// UTF-8 bytes, non-empty.
+    pub filename: String,
+}
+
+/// Apply `FILENAME_RULES` (§2.2) to a candidate filename.
+///
+/// 1. NFC normalize.
+/// 2. Strip path separators (`/`, `\`) and NUL.
+/// 3. Strip ASCII control characters (`U+0001`..`U+001F`, `U+007F`).
+/// 4. Strip Unicode bidi controls (`U+200E`, `U+200F`,
+///    `U+202A`..`U+202E`, `U+2066`..`U+2069`). Without this, a signed
+///    filename containing `U+202E` (RLO) renders deceptively in
+///    `Content-Disposition` — e.g. `evil\u{202E}gpj.exe` displays as
+///    `evilexe.gpj` to the reader.
+/// 5. Strip zero-width / invisible code points (`U+200B`..`U+200D`,
+///    `U+2060`, `U+FEFF`). These are unobservable in a download UI
+///    yet survive into the served filename, so they let two
+///    distinct signed filenames render identically.
+/// 6. Strip Windows-reserved characters (`<`, `>`, `:`, `"`, `|`,
+///    `?`, `*`). The serve path emits the signed filename verbatim
+///    in `Content-Disposition`; without this, a Windows reader
+///    cannot save the file and the ZIP-export sanitizer would
+///    silently rename it later.
+/// 7. Strip leading dots so the entry is not a hidden file on Unix
+///    extraction.
+/// 8. Truncate to [`MAX_ATTACHMENT_FILENAME_LEN`] UTF-8 bytes, never
+///    splitting a code point.
+/// 9. Reject (return `None`) if the result is empty.
+///
+/// This is the *wire-canonical* rule — verifiers MUST reject any
+/// signed body whose `filename` does not survive a fresh pass
+/// byte-identically (`docs/attachments.md` §2.2 / §10.1,
+/// `docs/federation-protocol.md` §11.6).
+pub fn sanitize_attachment_filename(raw: &str) -> Option<String> {
+    use unicode_normalization::UnicodeNormalization;
+
+    // NFC normalize, then drop forbidden code points in a single pass.
+    let normalized: String = raw
+        .nfc()
+        .filter(|c| {
+            let cu = *c as u32;
+            // Strip path separators and NUL.
+            if *c == '/' || *c == '\\' || *c == '\0' {
+                return false;
+            }
+            // Strip ASCII control characters (C0 controls + DEL).
+            // U+0000 is already excluded above; we keep the inclusive
+            // range here for clarity.
+            if (0x01..=0x1F).contains(&cu) || cu == 0x7F {
+                return false;
+            }
+            // Strip Unicode bidirectional formatting controls.
+            // LRM/RLM are direction marks; LRE/RLE/PDF/LRO/RLO are
+            // embedding/override controls; LRI/RLI/FSI/PDI are the
+            // isolate controls. Any of these in a signed filename
+            // lets the rendered Content-Disposition string lie about
+            // its true left-to-right byte order.
+            if cu == 0x200E
+                || cu == 0x200F
+                || (0x202A..=0x202E).contains(&cu)
+                || (0x2066..=0x2069).contains(&cu)
+            {
+                return false;
+            }
+            // Strip zero-width / invisible code points. ZWSP/ZWNJ/ZWJ
+            // (U+200B..U+200D), word-joiner (U+2060), and the BOM /
+            // ZWNBSP (U+FEFF) all render as nothing yet remain
+            // distinct on the wire — perfect for spoofing visually
+            // identical filenames that resolve to different signed
+            // bytes.
+            if (0x200B..=0x200D).contains(&cu) || cu == 0x2060 || cu == 0xFEFF {
+                return false;
+            }
+            // Strip Windows-reserved filename characters. The serve
+            // path puts the signed filename verbatim into
+            // Content-Disposition; on Windows these characters are
+            // illegal in filenames and cause save dialogs to fail or
+            // silently rewrite. Matches `sanitize_zip_entry_name` in
+            // `privacy.rs` so the JSON metadata, the ZIP entry, and
+            // the served filename all agree.
+            if matches!(*c, '<' | '>' | ':' | '"' | '|' | '?' | '*') {
+                return false;
+            }
+            true
+        })
+        .collect();
+
+    // Strip leading dots (rule 4). `trim_start_matches` is byte-safe
+    // here because `.` is single-byte ASCII.
+    let stripped = normalized.trim_start_matches('.');
+
+    // Truncate to MAX_ATTACHMENT_FILENAME_LEN UTF-8 bytes without
+    // splitting a code point. Walk char boundaries from the start and
+    // stop at the last boundary that fits.
+    let truncated: &str = if stripped.len() <= MAX_ATTACHMENT_FILENAME_LEN {
+        stripped
+    } else {
+        let mut end = MAX_ATTACHMENT_FILENAME_LEN;
+        while end > 0 && !stripped.is_char_boundary(end) {
+            end -= 1;
+        }
+        &stripped[..end]
+    };
+
+    if truncated.is_empty() {
+        None
+    } else {
+        Some(truncated.to_string())
+    }
+}
+
 // --- Typed payloads ---
 
 /// A typed signed payload, decoded from canonical CBOR.
@@ -93,6 +289,11 @@ pub struct PostRevision {
     pub body: String,
     /// Unix milliseconds since epoch, UTC.
     pub created_at: u64,
+    /// Optional attachments bound to this revision
+    /// (`docs/attachments.md` §2.1). Empty vec encodes as "key absent"
+    /// on the wire so existing signed posts remain bit-identical.
+    /// Wire-invariant: when present, 1..=[`MAX_ATTACHMENTS_PER_OP`].
+    pub attachments: Vec<AttachmentRef>,
 }
 
 /// Post retraction.
@@ -223,6 +424,19 @@ pub enum ParseError {
         max: usize,
         got: usize,
     },
+    /// `attachments` key was present but its array was empty
+    /// (the canonical no-attachments form is the omitted key).
+    AttachmentsEmpty,
+    /// `attachments` array length exceeds [`MAX_ATTACHMENTS_PER_OP`].
+    AttachmentsTooMany { max: usize, got: usize },
+    /// A signed `filename` did not survive a fresh
+    /// [`sanitize_attachment_filename`] pass byte-identically.
+    /// This is the §2.2 wire-canonical check.
+    NonCanonicalFilename,
+    /// A signed `mime` is not a member of [`ALLOWED_MIMES`].
+    DisallowedMime(String),
+    /// A signed `attachments[].size` exceeds [`MAX_ATTACHMENT_SIZE`].
+    AttachmentTooLarge { max: u64, got: u64 },
 }
 
 impl std::fmt::Display for ParseError {
@@ -250,6 +464,19 @@ impl std::fmt::Display for ParseError {
             Self::IntegerOutOfRange(name) => write!(f, "integer field out of u64 range: {name}"),
             Self::TextTooLong { field, max, got } => {
                 write!(f, "field {field}: max {max} bytes, got {got}")
+            }
+            Self::AttachmentsEmpty => f.write_str(
+                "attachments array is empty; the canonical no-attachments form omits the key",
+            ),
+            Self::AttachmentsTooMany { max, got } => {
+                write!(f, "attachments array length {got} exceeds maximum {max}")
+            }
+            Self::NonCanonicalFilename => {
+                f.write_str("signed attachment filename is not canonical per FILENAME_RULES")
+            }
+            Self::DisallowedMime(s) => write!(f, "attachment mime not in ALLOWED_MIMES: {s}"),
+            Self::AttachmentTooLarge { max, got } => {
+                write!(f, "attachment size {got} exceeds maximum {max}")
             }
         }
     }
@@ -371,7 +598,31 @@ fn post_revision_to_cbor(p: &PostRevision) -> Value {
     if let Some(parent_id) = p.parent_id {
         entries.push(("parent_id", bytes(&parent_id)));
     }
+    // Attachments key is omitted entirely when the vec is empty
+    // (`docs/attachments.md` §2.1 wire invariant) so existing signed
+    // posts in the wild remain bit-identical.
+    if !p.attachments.is_empty() {
+        entries.push((KEY_ATTACHMENTS, attachments_to_cbor(&p.attachments)));
+    }
     build_map(entries)
+}
+
+/// Encode an `AttachmentRef` array to a canonical CBOR array.
+///
+/// Each inner map is built via [`build_map`] so its keys are sorted
+/// canonically. The array preserves caller order — array index *is*
+/// the on-screen position (§2.1), so the encoder MUST NOT sort.
+fn attachments_to_cbor(refs: &[AttachmentRef]) -> Value {
+    Value::Array(refs.iter().map(attachment_ref_to_cbor).collect())
+}
+
+fn attachment_ref_to_cbor(r: &AttachmentRef) -> Value {
+    build_map(vec![
+        (KEY_ATTACHMENT_CONTENT_HASH, bytes(&r.content_hash)),
+        (KEY_ATTACHMENT_FILENAME, text(&r.filename)),
+        (KEY_ATTACHMENT_MIME, text(&r.mime)),
+        (KEY_ATTACHMENT_SIZE, uint(r.size)),
+    ])
 }
 
 fn retraction_to_cbor(r: &Retraction) -> Value {
@@ -550,6 +801,11 @@ fn parse_post_revision(fields: &BTreeMap<String, Value>) -> Result<PostRevision,
     let revision = field_uint(fields, "revision")?;
     let body = field_text(fields, "body")?;
     let created_at = field_uint(fields, "created_at")?;
+    let attachments = if fields.contains_key(KEY_ATTACHMENTS) {
+        parse_attachments(fields)?
+    } else {
+        Vec::new()
+    };
     Ok(PostRevision {
         post_id,
         author,
@@ -558,6 +814,99 @@ fn parse_post_revision(fields: &BTreeMap<String, Value>) -> Result<PostRevision,
         revision,
         body,
         created_at,
+        attachments,
+    })
+}
+
+/// Parse the optional `attachments` array on a `post-rev`.
+///
+/// Caller has already established that the key is present; an empty
+/// array here is a wire violation per `docs/attachments.md` §2.1
+/// (the no-attachments case must omit the key entirely).
+fn parse_attachments(fields: &BTreeMap<String, Value>) -> Result<Vec<AttachmentRef>, ParseError> {
+    let v = fields
+        .get(KEY_ATTACHMENTS)
+        .ok_or(ParseError::MissingField(KEY_ATTACHMENTS))?;
+    let items = match v {
+        Value::Array(items) => items,
+        _ => return Err(ParseError::WrongType(KEY_ATTACHMENTS)),
+    };
+    // Per §2.1: 1..=MAX_ATTACHMENTS_PER_OP when present. Empty arrays
+    // are non-canonical (the omitted form is the canonical
+    // no-attachments encoding).
+    if items.is_empty() {
+        return Err(ParseError::AttachmentsEmpty);
+    }
+    if items.len() > MAX_ATTACHMENTS_PER_OP {
+        return Err(ParseError::AttachmentsTooMany {
+            max: MAX_ATTACHMENTS_PER_OP,
+            got: items.len(),
+        });
+    }
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        out.push(parse_attachment_ref(item)?);
+    }
+    Ok(out)
+}
+
+fn parse_attachment_ref(v: &Value) -> Result<AttachmentRef, ParseError> {
+    let map_entries = match v {
+        Value::Map(m) => m,
+        _ => return Err(ParseError::WrongType("attachments[]")),
+    };
+    // Walk inner-map entries with the same canonical-order + duplicate
+    // checks the top-level parser applies. Re-encode comparison
+    // already caught indefinite-length / non-canonical-integer issues
+    // at the outer level; the inner key-order check below is the
+    // load-bearing canonicalization for the inner maps (ciborium
+    // preserves Value::Map insertion order on parse + serialize).
+    let mut fields: BTreeMap<String, Value> = BTreeMap::new();
+    let mut last_key: Option<String> = None;
+    for (k, v) in map_entries {
+        let key_str = match k {
+            Value::Text(s) => s.clone(),
+            _ => return Err(ParseError::NonTextKey),
+        };
+        if let Some(prev) = &last_key
+            && cbor_text_key_cmp(prev, &key_str) != Ordering::Less
+        {
+            return Err(ParseError::KeysOutOfOrder);
+        }
+        if fields.contains_key(&key_str) {
+            return Err(ParseError::DuplicateKey(key_str));
+        }
+        last_key = Some(key_str.clone());
+        fields.insert(key_str, v.clone());
+    }
+
+    let content_hash = field_bytes_fixed::<32>(&fields, KEY_ATTACHMENT_CONTENT_HASH)?;
+    let filename = field_text(&fields, KEY_ATTACHMENT_FILENAME)?;
+    // Wire-invariant: the signed filename MUST be the byte-identical
+    // output of FILENAME_RULES (§2.2 step 6). Re-run the sanitizer
+    // and reject any drift — this is what stops a malicious origin
+    // from signing `"../../etc/passwd"` and forcing a permissive
+    // peer to accept it.
+    match sanitize_attachment_filename(&filename) {
+        Some(canonical) if canonical == filename => {}
+        _ => return Err(ParseError::NonCanonicalFilename),
+    }
+    let mime = field_text(&fields, KEY_ATTACHMENT_MIME)?;
+    if !ALLOWED_MIMES.contains(&mime.as_str()) {
+        return Err(ParseError::DisallowedMime(mime));
+    }
+    let size = field_uint(&fields, KEY_ATTACHMENT_SIZE)?;
+    if size as usize > MAX_ATTACHMENT_SIZE {
+        return Err(ParseError::AttachmentTooLarge {
+            max: MAX_ATTACHMENT_SIZE as u64,
+            got: size,
+        });
+    }
+    Ok(AttachmentRef {
+        content_hash,
+        mime,
+        size,
+        filename,
     })
 }
 
@@ -702,6 +1051,13 @@ mod tests {
         "bio",
         "avatar_attachment_hash",
         "prior_profile_hash",
+        // post-rev attachment fields (§10.1, §2.1). Outer key on
+        // post-rev plus the four inner-map keys per AttachmentRef.
+        "attachments",
+        "content_hash",
+        "filename",
+        "mime",
+        "size",
     ];
 
     #[test]
@@ -729,6 +1085,29 @@ mod tests {
             revision: 0,
             body: "Hello, world!".to_string(),
             created_at: 1_700_000_000_000,
+            attachments: Vec::new(),
+        }
+    }
+
+    fn sample_attachment_ref() -> AttachmentRef {
+        AttachmentRef {
+            content_hash: [0xAA; 32],
+            mime: "image/png".to_string(),
+            size: 12345,
+            filename: "photo.png".to_string(),
+        }
+    }
+
+    fn sample_post_revision_with_attachments() -> PostRevision {
+        PostRevision {
+            post_id: [0x01; 16],
+            author: [0x02; 32],
+            thread_id: [0x03; 16],
+            parent_id: None,
+            revision: 0,
+            body: "Look at this!".to_string(),
+            created_at: 1_700_000_000_000,
+            attachments: vec![sample_attachment_ref()],
         }
     }
 
@@ -759,6 +1138,261 @@ mod tests {
             created_at: 1_700_000_003_000,
             prior_profile_hash: if with_prior { Some([0xaa; 32]) } else { None },
         }
+    }
+
+    // --- AttachmentRef / attachments[] round-trip and canonicalization ---
+
+    #[test]
+    fn post_revision_round_trip_with_attachment() {
+        let p = sample_post_revision_with_attachments();
+        let bytes = SignedPayload::PostRevision(p.clone()).encode();
+        let decoded = SignedPayload::parse(&bytes).unwrap();
+        assert_eq!(decoded, SignedPayload::PostRevision(p));
+    }
+
+    #[test]
+    fn post_revision_attachments_absent_vs_present_bytes_differ() {
+        // The empty-vec case omits the `attachments` key entirely so
+        // legacy posts (signed before the feature) remain bit-identical.
+        // This test pins that invariant.
+        let p_no = sample_post_revision();
+        let p_yes = sample_post_revision_with_attachments();
+        let b_no = SignedPayload::PostRevision(p_no).encode();
+        let b_yes = SignedPayload::PostRevision(p_yes).encode();
+        assert_ne!(b_no, b_yes);
+    }
+
+    #[test]
+    fn post_revision_round_trip_three_attachments() {
+        // Exercise the §10.1 MAX_ATTACHMENTS_PER_OP boundary plus the
+        // mixed-MIME shape. Three entries means the inner-array length
+        // still fits the immediate CBOR length prefix (`0x83`).
+        let refs = vec![
+            AttachmentRef {
+                content_hash: [0xAA; 32],
+                mime: "image/png".to_string(),
+                size: 1024,
+                filename: "a.png".to_string(),
+            },
+            AttachmentRef {
+                content_hash: [0xBB; 32],
+                mime: "application/pdf".to_string(),
+                size: 4096,
+                filename: "b.pdf".to_string(),
+            },
+            AttachmentRef {
+                content_hash: [0xCC; 32],
+                mime: "text/plain".to_string(),
+                size: 16,
+                filename: "c.txt".to_string(),
+            },
+        ];
+        let mut p = sample_post_revision();
+        p.attachments = refs;
+        let bytes = SignedPayload::PostRevision(p.clone()).encode();
+        let decoded = SignedPayload::parse(&bytes).unwrap();
+        assert_eq!(decoded, SignedPayload::PostRevision(p));
+    }
+
+    #[test]
+    fn post_revision_rejects_oversized_attachments_array_on_parse() {
+        // Hand-forge a CBOR payload whose `attachments` array length
+        // exceeds MAX_ATTACHMENTS_PER_OP by one and confirm the
+        // parser rejects it. We build via the encoder for everything
+        // *except* the attachments array length, then patch — the
+        // encoder declines to construct a vec of 4 because the type
+        // is unbounded but the spec is 1..=3, so we route around it
+        // by replacing the attachments value at the Value layer.
+        use ciborium::Value;
+        let mut p = sample_post_revision();
+        // Push 4 entries through the same path the encoder would —
+        // we don't validate cardinality on encode (canonicalization
+        // checks the bytes a producer signs are well-formed; the
+        // length-bound is parser-side).
+        for i in 0..(MAX_ATTACHMENTS_PER_OP + 1) {
+            p.attachments.push(AttachmentRef {
+                content_hash: [i as u8; 32],
+                mime: "image/png".to_string(),
+                size: 1,
+                filename: format!("x{i}.png"),
+            });
+        }
+        let bytes = SignedPayload::PostRevision(p).encode();
+        // Sanity-check the array length the encoder produced.
+        let val: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        match &val {
+            Value::Map(entries) => {
+                let attachments_entry = entries
+                    .iter()
+                    .find(|(k, _)| matches!(k, Value::Text(s) if s == "attachments"));
+                let arr = match attachments_entry {
+                    Some((_, Value::Array(a))) => a,
+                    _ => panic!("expected attachments array"),
+                };
+                assert_eq!(arr.len(), MAX_ATTACHMENTS_PER_OP + 1);
+            }
+            _ => panic!("expected map"),
+        }
+        let result = SignedPayload::parse(&bytes);
+        assert!(matches!(
+            result,
+            Err(ParseError::AttachmentsTooMany { max, got })
+            if max == MAX_ATTACHMENTS_PER_OP && got == MAX_ATTACHMENTS_PER_OP + 1
+        ));
+    }
+
+    #[test]
+    fn post_revision_rejects_non_canonical_filename_on_parse() {
+        // A signed body whose filename does not survive a fresh
+        // FILENAME_RULES pass byte-identically MUST be rejected
+        // (§2.2 step 6). The encoder is byte-faithful, so we have
+        // to construct a payload whose `filename` field contains a
+        // forbidden code point and confirm the parser catches it.
+        let mut p = sample_post_revision();
+        p.attachments.push(AttachmentRef {
+            content_hash: [0xAB; 32],
+            mime: "image/png".to_string(),
+            size: 1,
+            // Embedded slash should never survive sanitization.
+            filename: "evil/../path.png".to_string(),
+        });
+        let bytes = SignedPayload::PostRevision(p).encode();
+        let result = SignedPayload::parse(&bytes);
+        assert!(matches!(result, Err(ParseError::NonCanonicalFilename)));
+    }
+
+    #[test]
+    fn post_revision_rejects_disallowed_mime_on_parse() {
+        let mut p = sample_post_revision();
+        p.attachments.push(AttachmentRef {
+            content_hash: [0xAB; 32],
+            // text/html is excluded by ALLOWED_MIMES — a permissive
+            // peer cannot accept it.
+            mime: "text/html".to_string(),
+            size: 1,
+            filename: "evil.html".to_string(),
+        });
+        let bytes = SignedPayload::PostRevision(p).encode();
+        let result = SignedPayload::parse(&bytes);
+        assert!(matches!(
+            result,
+            Err(ParseError::DisallowedMime(s)) if s == "text/html"
+        ));
+    }
+
+    #[test]
+    fn post_revision_rejects_oversized_attachment_size_on_parse() {
+        let mut p = sample_post_revision();
+        p.attachments.push(AttachmentRef {
+            content_hash: [0xAB; 32],
+            mime: "image/png".to_string(),
+            size: MAX_ATTACHMENT_SIZE as u64 + 1,
+            filename: "huge.png".to_string(),
+        });
+        let bytes = SignedPayload::PostRevision(p).encode();
+        let result = SignedPayload::parse(&bytes);
+        assert!(matches!(
+            result,
+            Err(ParseError::AttachmentTooLarge { max, got })
+            if max == MAX_ATTACHMENT_SIZE as u64 && got == MAX_ATTACHMENT_SIZE as u64 + 1
+        ));
+    }
+
+    #[test]
+    fn sanitize_attachment_filename_basic() {
+        // Plain ASCII filename round-trips.
+        assert_eq!(
+            sanitize_attachment_filename("photo.png").as_deref(),
+            Some("photo.png")
+        );
+        // Path separators stripped.
+        assert_eq!(
+            sanitize_attachment_filename("../etc/passwd").as_deref(),
+            Some("etcpasswd")
+        );
+        // NUL stripped.
+        assert_eq!(
+            sanitize_attachment_filename("safe\0name.txt").as_deref(),
+            Some("safename.txt")
+        );
+        // ASCII control characters stripped.
+        assert_eq!(
+            sanitize_attachment_filename("a\x01b\x1Fc\x7Fd.txt").as_deref(),
+            Some("abcd.txt")
+        );
+        // Leading dots stripped.
+        assert_eq!(
+            sanitize_attachment_filename("...hidden.txt").as_deref(),
+            Some("hidden.txt")
+        );
+        // All-dots reduces to empty → None.
+        assert_eq!(sanitize_attachment_filename(".....").as_deref(), None);
+        // Empty input → None.
+        assert_eq!(sanitize_attachment_filename("").as_deref(), None);
+    }
+
+    #[test]
+    fn sanitize_attachment_filename_strips_bidi_controls() {
+        // The classic RLO (U+202E) spoof: "evil\u{202E}gpj.exe" would
+        // render as "evilexe.gpj" in a Content-Disposition filename.
+        // After sanitization the RLO is gone and the bytes match what
+        // the reader sees.
+        assert_eq!(
+            sanitize_attachment_filename("evil\u{202E}gpj.exe").as_deref(),
+            Some("evilgpj.exe")
+        );
+        // All other bidi formatting characters strip too.
+        let with_all_bidi = "a\u{200E}b\u{200F}c\u{202A}d\u{202B}e\u{202C}f\u{202D}g\
+                             h\u{2066}i\u{2067}j\u{2068}k\u{2069}l.txt";
+        assert_eq!(
+            sanitize_attachment_filename(with_all_bidi).as_deref(),
+            Some("abcdefghijkl.txt")
+        );
+    }
+
+    #[test]
+    fn sanitize_attachment_filename_strips_zero_width() {
+        // ZWSP/ZWNJ/ZWJ, word-joiner, BOM/ZWNBSP — all invisible,
+        // all stripped, so two filenames that look identical can't
+        // diverge on the wire.
+        assert_eq!(
+            sanitize_attachment_filename("photo\u{200B}.png").as_deref(),
+            Some("photo.png")
+        );
+        let with_all_zw = "a\u{200B}b\u{200C}c\u{200D}d\u{2060}e\u{FEFF}f.txt";
+        assert_eq!(
+            sanitize_attachment_filename(with_all_zw).as_deref(),
+            Some("abcdef.txt")
+        );
+    }
+
+    #[test]
+    fn sanitize_attachment_filename_strips_windows_reserved() {
+        // < > : " | ? * are illegal in Windows filenames and would
+        // break save-as on the serve path.
+        assert_eq!(
+            sanitize_attachment_filename(r#"a<b>c:d"e|f?g*h.txt"#).as_deref(),
+            Some("abcdefgh.txt")
+        );
+    }
+
+    #[test]
+    fn sanitize_attachment_filename_truncates_safely() {
+        // A 256-byte all-ASCII name must truncate to 255.
+        let long = "a".repeat(MAX_ATTACHMENT_FILENAME_LEN + 1);
+        let out = sanitize_attachment_filename(&long).unwrap();
+        assert_eq!(out.len(), MAX_ATTACHMENT_FILENAME_LEN);
+        // Multi-byte code points at the truncation boundary must not
+        // split. Build a string whose byte 255 lands in the middle
+        // of a 3-byte code point (CJK char `世` = 3 bytes), and check
+        // the result ends on a code-point boundary < 255 bytes.
+        let mut s = "a".repeat(MAX_ATTACHMENT_FILENAME_LEN - 1);
+        s.push('世'); // pushes byte 254..=256
+        let out = sanitize_attachment_filename(&s).unwrap();
+        // The boundary walk-back means we keep the leading 'a' run
+        // but drop the partial `世`.
+        assert!(out.len() < MAX_ATTACHMENT_FILENAME_LEN);
+        assert!(out.is_char_boundary(out.len()));
     }
 
     #[test]

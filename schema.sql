@@ -72,7 +72,9 @@ CREATE TABLE instance_config (
     rebuild_min_interval_ms INTEGER NOT NULL CHECK (rebuild_min_interval_ms BETWEEN 1000 AND 3600000),
     rebuild_max_interval_ms INTEGER NOT NULL CHECK (rebuild_max_interval_ms BETWEEN 1000 AND 3600000),
     rebuild_bfs_cache_bytes INTEGER NOT NULL CHECK (rebuild_bfs_cache_bytes BETWEEN 1048576 AND 4294967296),
-    source_repo_url TEXT,
+    source_repo_url TEXT, attachment_budget_cap_bytes INTEGER NOT NULL DEFAULT 10485760
+    CHECK (attachment_budget_cap_bytes BETWEEN 0 AND 10737418240), attachment_budget_refill_bytes_per_day INTEGER NOT NULL DEFAULT 1048576
+    CHECK (attachment_budget_refill_bytes_per_day BETWEEN 0 AND 10737418240),
     CHECK (rebuild_debounce_ms <= rebuild_min_interval_ms),
     CHECK (rebuild_min_interval_ms <= rebuild_max_interval_ms)
 );
@@ -488,3 +490,58 @@ FROM (
 ) ranked
 WHERE rn = 1
 /* current_profile_revisions(id,user_id,display_name,bio,avatar_attachment_hash,created_at,signature,prior_profile_hash,canonical_hash,format_version) */;
+CREATE TABLE attachment_blobs (
+    content_hash BLOB NOT NULL PRIMARY KEY,
+    blob BLOB,
+    content_type TEXT NOT NULL,
+    size INTEGER NOT NULL CHECK (size >= 0),
+    uploader TEXT REFERENCES users(id),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    refcount INTEGER NOT NULL DEFAULT 0 CHECK (refcount >= 0)
+);
+CREATE INDEX idx_attachment_blobs_uploader
+    ON attachment_blobs(uploader);
+CREATE TABLE post_attachments (
+    post_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    position INTEGER NOT NULL CHECK (position BETWEEN 0 AND 2),
+    content_hash BLOB NOT NULL REFERENCES attachment_blobs(content_hash),
+    filename TEXT NOT NULL,
+    PRIMARY KEY (post_id, revision, position),
+    UNIQUE (post_id, revision, content_hash),
+    FOREIGN KEY (post_id, revision)
+        REFERENCES post_revisions(post_id, revision)
+        ON DELETE CASCADE
+);
+CREATE INDEX idx_post_attachments_content_hash
+    ON post_attachments(content_hash);
+CREATE TRIGGER trg_post_attachments_refcount_inc
+AFTER INSERT ON post_attachments
+BEGIN
+    UPDATE attachment_blobs
+       SET refcount = refcount + 1
+     WHERE content_hash = NEW.content_hash;
+END;
+CREATE TRIGGER trg_post_attachments_refcount_dec
+AFTER DELETE ON post_attachments
+BEGIN
+    UPDATE attachment_blobs
+       SET refcount = refcount - 1
+     WHERE content_hash = OLD.content_hash;
+END;
+CREATE TABLE attachment_staging (
+    content_hash BLOB NOT NULL PRIMARY KEY,
+    uploader TEXT NOT NULL REFERENCES users(id),
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX idx_attachment_staging_uploader
+    ON attachment_staging(uploader);
+CREATE INDEX idx_attachment_staging_expires_at
+    ON attachment_staging(expires_at);
+CREATE TABLE user_storage_budgets (
+    user_id TEXT NOT NULL PRIMARY KEY REFERENCES users(id),
+    available_bytes INTEGER NOT NULL CHECK (available_bytes >= 0),
+    last_refill_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    lifetime_spent INTEGER NOT NULL DEFAULT 0 CHECK (lifetime_spent >= 0)
+);

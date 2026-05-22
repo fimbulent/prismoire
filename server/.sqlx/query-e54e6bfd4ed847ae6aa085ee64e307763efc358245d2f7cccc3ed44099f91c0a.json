@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT content_type AS \"content_type!: String\",\n                      size AS \"size!: i64\"\n                 FROM attachment_blobs WHERE content_hash = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "content_type!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "size!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "e54e6bfd4ed847ae6aa085ee64e307763efc358245d2f7cccc3ed44099f91c0a"
+}

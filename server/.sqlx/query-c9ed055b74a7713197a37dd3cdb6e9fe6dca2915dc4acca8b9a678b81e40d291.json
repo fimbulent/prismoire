@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM attachment_staging WHERE expires_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "c9ed055b74a7713197a37dd3cdb6e9fe6dca2915dc4acca8b9a678b81e40d291"
+}

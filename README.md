@@ -89,7 +89,28 @@ auth_replenish_seconds = 4     # default: 4   — refill interval for auth endpo
 auth_burst_size = 5            # default: 5   — max burst for auth endpoints
 user_replenish_seconds = 1     # default: 1   — refill interval for per-user writes
 user_burst_size = 20           # default: 20  — max burst for per-user writes
+
+[attachments]
+max_image_px_decode = 4096          # default: 4096       — pixel-bomb guard: max width or height
+                                    #                       accepted before the decoder allocates a
+                                    #                       pixel buffer. Local upload policy only;
+                                    #                       peers do not re-decode incoming blobs.
+max_image_px_output = 1600          # default: 1600       — server-side re-encode cap: max
+                                    #                       longest-side dimension of the stored
+                                    #                       image, sized to the inline-image
+                                    #                       rendering width.
+staging_ttl_seconds = 86400         # default: 86400 (24h) — TTL for `attachment_staging` rows;
+                                    #                       uploads never bound to a post are
+                                    #                       swept after this duration.
+sweep_interval_seconds = 3600       # default: 3600 (1h)  — cadence of the staging-expiry +
+                                    #                       orphan-blob GC background task.
+request_body_overhead_bytes = 8192  # default: 8192 (8 KiB) — body-size slack on the upload route
+                                    #                       above the wire-invariant 500 KiB
+                                    #                       attachment cap; covers multipart
+                                    #                       boundaries and form fields.
 ```
+
+The `[attachments]` knobs (docs/attachments.md §10.2) are federation-inert: they shape how the local origin handles an upload (decode safety, re-encode target, sweep cadence). Per-user storage budgets — `attachment_budget_cap_bytes` and `attachment_budget_refill_bytes_per_day` — are live-tunable instance config persisted in the database, edited via the admin Config tab (or `PATCH /api/admin/config`), not TOML.
 
 `trust_proxy_headers` controls where the per-IP rate limiter looks for the client IP:
 

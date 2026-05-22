@@ -1,8 +1,15 @@
 <script lang="ts">
-	import { createThread, getThreadsByLink, type ThreadSummary } from '$lib/api/threads';
+	import {
+		createThread,
+		getThreadsByLink,
+		type ThreadSummary,
+		type AttachmentBindRef
+	} from '$lib/api/threads';
 	import { searchRooms, type RoomChip } from '$lib/api/rooms';
 	import Autocomplete from '$lib/components/ui/Autocomplete.svelte';
 	import ThreadListRow from '$lib/components/post/ThreadListRow.svelte';
+	import AttachmentPicker from '$lib/components/post/AttachmentPicker.svelte';
+	import { extractImageRefs } from '$lib/markdown';
 	import { validateRoomSlug } from '$lib/validation/room-name';
 	import { errorMessage } from '$lib/i18n/errors';
 	import { goto } from '$app/navigation';
@@ -24,6 +31,7 @@
 	let body = $state('');
 	let link = $state('');
 	let kind = $state<PostKind>('text');
+	let attachments = $state<AttachmentBindRef[]>([]);
 	let error = $state<string | null>(null);
 	let submitting = $state(false);
 
@@ -131,6 +139,18 @@
 		return null;
 	});
 
+	/** Append a markdown snippet (`![alt](filename)`) to the body so
+	 *  newly-uploaded images render inline by default. Dedup by
+	 *  filename via `extractImageRefs` so a user who manually typed
+	 *  `![](foo.png)` before uploading foo.png doesn't get a duplicate
+	 *  ref after the upload completes. Trailing newline leaves the
+	 *  cursor on a fresh line for follow-up typing. */
+	function handleAttachmentInsert(snippet: string, filename: string) {
+		if (extractImageRefs(body).includes(filename)) return;
+		const trimmed = body.replace(/\n+$/, '');
+		body = trimmed === '' ? snippet + '\n' : trimmed + '\n\n' + snippet + '\n';
+	}
+
 	async function handleSubmit(e: SubmitEvent) {
 		e.preventDefault();
 		const slugError = validateRoomSlug(room);
@@ -170,7 +190,8 @@
 				room: room.trim().toLowerCase(),
 				title: title.trim(),
 				body: trimmedBody,
-				...(kind === 'link' ? { link: link.trim() } : {})
+				...(kind === 'link' ? { link: link.trim() } : {}),
+				...(attachments.length > 0 ? { attachments } : {})
 			});
 			goto(`/r/${encodeURIComponent(thread.room_slug)}/${thread.id}`);
 		} catch (e) {
@@ -396,6 +417,13 @@
 				{/if}
 			</div>
 		</div>
+
+		<AttachmentPicker
+			attachments={attachments}
+			onchange={(next) => (attachments = next)}
+			oninsert={handleAttachmentInsert}
+			disabled={submitting}
+		/>
 
 		{#if visibleSuggestions.length > 0}
 			<!--

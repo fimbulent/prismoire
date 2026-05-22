@@ -16,6 +16,13 @@
 //! Session tokens are deliberately excluded: they are live auth credentials
 //! that would grant account access to anyone who got hold of an export file.
 //!
+//! Attachment blob *bytes* are emitted by a companion endpoint —
+//! `GET /api/me/export/attachments` — which returns a ZIP archive of the
+//! user's uploaded files plus a self-describing `MANIFEST.json` mapping
+//! each blob back to its bindings. The split keeps the JSON small and
+//! lets users download just the metadata or just the bytes; see
+//! `docs/attachments.md` §8.
+//!
 //! # Delete (`DELETE /api/me`)
 //!
 //! Soft-deletes the user:
@@ -43,6 +50,20 @@
 //!   capacity (target of a past ban/suspend, or a truster captured at
 //!   the moment someone else was moderated). Same rationale: with the
 //!   account gone, those snapshot rows have nothing to describe.
+//! - Sweeps every `attachment_staging` row the user uploaded (§7.a of
+//!   `docs/attachments.md`) and GCs any `attachment_blobs` row that
+//!   reaches `refcount = 0` without a remaining staging anchor.
+//!   Bindings on the user's still-visible posts were already dropped
+//!   by the retraction cascade, so this step picks up the remaining
+//!   staged-but-unbound and now-orphan blobs.
+//! - NULLs `attachment_blobs.uploader` on every surviving blob the user
+//!   uploaded (§7.b). Severs the personal-data link "this user
+//!   uploaded these bytes" on blobs that another user has independently
+//!   uploaded the same SHA-256 of and bound to a still-live post.
+//! - Drops the user's `user_storage_budgets` row (§7.c). The
+//!   `lifetime_spent` / `available_bytes` figures are account-scoped
+//!   state with nothing to associate with once the account is
+//!   anonymized.
 //! - Revokes any open invites the user created.
 //! - Deactivates signing keys (`active = 0`) rather than deleting them, so
 //!   past signatures on content still authored by other users remain
@@ -64,6 +85,7 @@ use ed25519_dalek::SigningKey;
 use serde::Serialize;
 use uuid::Uuid;
 
+use crate::attachments;
 use crate::display_name::display_name_skeleton;
 use crate::error::{AppError, ErrorCode};
 use crate::session::{RestrictedAuthUser, clear_session_cookie};
@@ -72,7 +94,17 @@ use crate::state::AppState;
 
 /// Wire version of the export payload. Bump whenever the shape changes so
 /// downstream tools can branch on it.
-const EXPORT_VERSION: u32 = 1;
+///
+/// v2 (2026-05): adds per-revision `attachments` on `PostRevisionExport`,
+/// plus top-level `pending_attachments`, `storage_budget`, and
+/// `attachments_blob_archive`. See `docs/attachments.md` §8.1.
+const EXPORT_VERSION: u32 = 2;
+
+/// Companion-endpoint pointer baked into `DataExport.attachments_blob_archive`.
+/// Reminds anyone parsing the JSON without UI context that the blob bytes
+/// live in the ZIP at `GET /api/me/export/attachments`. See
+/// `docs/attachments.md` §8.1.
+const ATTACHMENTS_BLOB_ARCHIVE_PATH: &str = "/api/me/export/attachments";
 
 // ---------------------------------------------------------------------------
 // Export response types
@@ -100,6 +132,21 @@ pub struct DataExport {
     pub moderation_actions_against_me: Vec<AdminLogExport>,
     pub favorite_rooms: Vec<FavoriteRoomExport>,
     pub user_tags_set: Vec<UserTagExport>,
+    /// Staged-but-unbound uploads the user owns. Each row is a blob the
+    /// user uploaded to the staging area but didn't yet bind to a post
+    /// (or whose binding was edited away before the staging TTL ran).
+    /// Included so the export covers every user-owned attachment-side
+    /// row, not just bindings reachable via a post-revision.
+    pub pending_attachments: Vec<PendingAttachmentExport>,
+    /// Per-user storage allowance state. Always emitted; a missing
+    /// `user_storage_budgets` row maps to the zero-default struct so
+    /// readers can rely on the field's presence.
+    pub storage_budget: StorageBudgetExport,
+    /// Pointer to the companion ZIP endpoint that carries the actual
+    /// blob bytes. The JSON export deliberately omits the bytes (the
+    /// metadata side is small and easy to read; the bytes belong in a
+    /// streamable ZIP). Always set to `/api/me/export/attachments`.
+    pub attachments_blob_archive: String,
 }
 
 #[derive(Serialize)]
@@ -228,6 +275,54 @@ pub struct PostRevisionExport {
     /// Ed25519 signature over the revision body, base64url (no padding).
     pub signature_b64: String,
     pub created_at: String,
+    /// Attachments bound to this specific revision, in `position` order.
+    /// Per-revision rather than per-post because the edit path (§6 of
+    /// `docs/attachments.md`) lets each revision carry a different set;
+    /// the export preserves the full history. Empty for revisions with
+    /// no attachments.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AttachmentExport>,
+}
+
+/// One attachment binding as it appeared on a specific post revision.
+///
+/// `content_hash_b64` is the identity field — the matching bytes live
+/// in the companion ZIP at `blobs/<short-hash>-<sanitized-filename>`
+/// (see `docs/attachments.md` §8.2). `filename` is per-binding (the
+/// same blob can be referenced by two posts under different names);
+/// inline-vs-download display is now derived from `![](name)` body
+/// references at render time rather than carried in the binding row.
+#[derive(Serialize)]
+pub struct AttachmentExport {
+    pub content_hash_b64: String,
+    pub size: i64,
+    pub mime: String,
+    pub filename: String,
+}
+
+/// One staged-but-unbound upload owned by the exporting user.
+///
+/// Distinct from `AttachmentExport` because there is no post binding
+/// yet — only the staging anchor + the underlying blob row. Will become
+/// a regular binding (and migrate into a `PostRevisionExport.attachments`
+/// entry) the first time it gets bound to a post.
+#[derive(Serialize)]
+pub struct PendingAttachmentExport {
+    pub content_hash_b64: String,
+    pub size: i64,
+    pub mime: String,
+    pub expires_at: String,
+    pub created_at: String,
+}
+
+/// Per-user storage allowance state. Mirrors `user_storage_budgets`.
+/// Zero-default when the user has never triggered the row's lazy creation
+/// (no uploads yet) so the export field is always present.
+#[derive(Serialize)]
+pub struct StorageBudgetExport {
+    pub available_bytes: i64,
+    pub last_refill_at: String,
+    pub lifetime_spent: i64,
 }
 
 #[derive(Serialize)]
@@ -489,9 +584,47 @@ pub async fn export_my_data(
         .fetch_all(db)
         .await?;
 
+        // Attachments are per-revision (`docs/attachments.md` §6); a
+        // single query gathers every revision's bindings for this
+        // post, joined to `attachment_blobs` for `size` + `mime`. The
+        // result is bucketed by `revision` below so each
+        // `PostRevisionExport` sees only its own bindings.
+        let attachment_rows = sqlx::query!(
+            r#"SELECT pa.revision AS "revision!: i64",
+                      pa.position AS "position!: i64",
+                      pa.content_hash AS "content_hash!: Vec<u8>",
+                      pa.filename AS "filename!: String",
+                      ab.size AS "size!: i64",
+                      ab.content_type AS "mime!: String"
+                 FROM post_attachments pa
+                 JOIN attachment_blobs ab ON ab.content_hash = pa.content_hash
+                WHERE pa.post_id = ?
+                ORDER BY pa.revision ASC, pa.position ASC"#,
+            post_row.id,
+        )
+        .fetch_all(db)
+        .await?;
+
+        let mut attachments_by_revision: std::collections::HashMap<i64, Vec<AttachmentExport>> =
+            std::collections::HashMap::new();
+        for ar in attachment_rows {
+            attachments_by_revision
+                .entry(ar.revision)
+                .or_default()
+                .push(AttachmentExport {
+                    content_hash_b64: b64(&ar.content_hash),
+                    size: ar.size,
+                    mime: ar.mime,
+                    filename: ar.filename,
+                });
+        }
+
         let revisions = revision_rows
             .into_iter()
             .map(|r| PostRevisionExport {
+                attachments: attachments_by_revision
+                    .remove(&r.revision)
+                    .unwrap_or_default(),
                 revision: r.revision,
                 body: r.body,
                 signature_b64: b64(&r.signature),
@@ -596,6 +729,61 @@ pub async fn export_my_data(
         })
         .collect();
 
+    // Staged-but-unbound uploads the user owns. Each row anchors a
+    // blob the user uploaded but hasn't (yet) bound to a post; the
+    // join to `attachment_blobs` pulls `size` + `mime` for the
+    // export. Bytes are intentionally NOT selected — they belong in
+    // the companion ZIP. See `docs/attachments.md` §8.1.
+    let pending_rows = sqlx::query!(
+        r#"SELECT s.content_hash AS "content_hash!: Vec<u8>",
+                  s.expires_at AS "expires_at!: String",
+                  s.created_at AS "created_at!: String",
+                  ab.size AS "size!: i64",
+                  ab.content_type AS "mime!: String"
+             FROM attachment_staging s
+             JOIN attachment_blobs ab ON ab.content_hash = s.content_hash
+            WHERE s.uploader = ?
+            ORDER BY s.created_at ASC"#,
+        user_id,
+    )
+    .fetch_all(db)
+    .await?;
+
+    let pending_attachments: Vec<PendingAttachmentExport> = pending_rows
+        .into_iter()
+        .map(|r| PendingAttachmentExport {
+            content_hash_b64: b64(&r.content_hash),
+            size: r.size,
+            mime: r.mime,
+            expires_at: r.expires_at,
+            created_at: r.created_at,
+        })
+        .collect();
+
+    // Per-user storage allowance. Missing row → zero-default struct
+    // so the export field is always present (users who have never
+    // uploaded anything haven't triggered the lazy row creation).
+    let budget_row = sqlx::query!(
+        "SELECT available_bytes, last_refill_at, lifetime_spent \
+         FROM user_storage_budgets WHERE user_id = ?",
+        user_id,
+    )
+    .fetch_optional(db)
+    .await?;
+
+    let storage_budget = match budget_row {
+        Some(r) => StorageBudgetExport {
+            available_bytes: r.available_bytes,
+            last_refill_at: r.last_refill_at,
+            lifetime_spent: r.lifetime_spent,
+        },
+        None => StorageBudgetExport {
+            available_bytes: 0,
+            last_refill_at: String::new(),
+            lifetime_spent: 0,
+        },
+    };
+
     let exported_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
     let export = DataExport {
@@ -631,6 +819,9 @@ pub async fn export_my_data(
         moderation_actions_against_me,
         favorite_rooms,
         user_tags_set,
+        pending_attachments,
+        storage_budget,
+        attachments_blob_archive: ATTACHMENTS_BLOB_ARCHIVE_PATH.to_string(),
     };
 
     // Suggest a filename to the browser so "Save as…" is one click. The
@@ -671,6 +862,485 @@ fn sanitize_filename_stem(s: &str) -> String {
     s.chars()
         .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/me/export/attachments
+// ---------------------------------------------------------------------------
+
+/// Wire shape of one blob record inside the ZIP's `MANIFEST.json`.
+///
+/// See `docs/attachments.md` §8.2: one entry per unique content hash
+/// (dedup is preserved). `bindings` lists every still-visible binding the
+/// exporting user authored; `staging` is true iff the blob was uploaded
+/// but never bound (a "pending" upload — `attachment_staging` row).
+#[derive(Serialize)]
+struct ZipManifestBlob {
+    content_hash_b64: String,
+    file_name_in_zip: String,
+    size: i64,
+    mime: String,
+    bindings: Vec<ZipManifestBinding>,
+    staging: bool,
+}
+
+#[derive(Serialize)]
+struct ZipManifestBinding {
+    post_id: String,
+    revision: i64,
+    position: i64,
+    filename: String,
+}
+
+#[derive(Serialize)]
+struct ZipManifest {
+    export_version: u32,
+    exported_at: String,
+    user_id: String,
+    /// Pointer to the companion JSON metadata export. Same intent as
+    /// `DataExport.attachments_blob_archive` in the opposite direction:
+    /// a user opening only the ZIP can find where the metadata lives.
+    metadata_archive: String,
+    blobs: Vec<ZipManifestBlob>,
+}
+
+/// Stream the user's attachment bytes as a ZIP.
+///
+/// Companion to `GET /api/me/export`: the JSON export carries the
+/// per-binding metadata and points here via
+/// `attachments_blob_archive`. The ZIP carries the actual bytes plus a
+/// self-describing `MANIFEST.json` that maps each blob back to the
+/// bindings it satisfies. See `docs/attachments.md` §8.2.
+///
+/// Available to banned and suspended users (same precedent as
+/// `export_my_data`). Users with zero attachments still get a valid
+/// ZIP — empty `blobs/` directory + a `MANIFEST.json` with an empty
+/// `blobs` array. Clearer than disabling the button with no
+/// explanation.
+pub async fn export_my_attachments(
+    State(state): State<Arc<AppState>>,
+    user: RestrictedAuthUser,
+) -> Result<impl IntoResponse, AppError> {
+    let db = &state.db;
+    let user_id = user.user_id.as_str();
+
+    // Load the user's display name for the suggested ZIP filename.
+    // Reuses the same `sanitize_filename_stem` pass as the JSON export
+    // so the two file names are visibly twinned in the user's downloads
+    // folder.
+    let user_row = sqlx::query!("SELECT display_name FROM users WHERE id = ?", user_id)
+        .fetch_one(db)
+        .await?;
+
+    // Bindings authored by this user: one row per (post, revision,
+    // position). Joined to `post_revisions` so we have the
+    // `created_at` we need to pick the most-recent binding's filename
+    // per blob (§8.2 "which user-filename does a blob get").
+    let binding_rows = sqlx::query!(
+        r#"SELECT pa.post_id AS "post_id!: String",
+                  pa.revision AS "revision!: i64",
+                  pa.position AS "position!: i64",
+                  pa.content_hash AS "content_hash!: Vec<u8>",
+                  pa.filename AS "filename!: String",
+                  pr.created_at AS "rev_created_at!: String"
+             FROM post_attachments pa
+             JOIN posts p ON p.id = pa.post_id
+             JOIN post_revisions pr ON pr.post_id = pa.post_id AND pr.revision = pa.revision
+            WHERE p.author = ?"#,
+        user_id,
+    )
+    .fetch_all(db)
+    .await?;
+
+    // Staging anchors owned by this user (uploads not yet bound).
+    let staging_rows = sqlx::query!(
+        r#"SELECT content_hash AS "content_hash!: Vec<u8>"
+             FROM attachment_staging
+            WHERE uploader = ?"#,
+        user_id,
+    )
+    .fetch_all(db)
+    .await?;
+
+    // Union of every content_hash the user owns through either path.
+    // BTreeMap so iteration is stable (sort by hash) — gives the ZIP
+    // a deterministic entry order independent of SQLite's internal
+    // row layout, which keeps test fixtures reproducible.
+    use std::collections::BTreeMap;
+    let mut hashes_owned: BTreeMap<Vec<u8>, ()> = BTreeMap::new();
+    for r in &binding_rows {
+        hashes_owned.insert(r.content_hash.clone(), ());
+    }
+    for r in &staging_rows {
+        hashes_owned.insert(r.content_hash.clone(), ());
+    }
+
+    // Bucket bindings by content_hash so each blob can be rendered
+    // with its full bindings array in the manifest.
+    let mut bindings_by_hash: std::collections::HashMap<Vec<u8>, Vec<ZipManifestBinding>> =
+        std::collections::HashMap::new();
+    // Track each blob's "winning" filename — the one written into
+    // `blobs/<short-hash>-<filename>` and into `file_name_in_zip`.
+    // Per spec: most recent revision, ties broken by post id ASC,
+    // then position ASC.
+    // Store `(rev_created_at, post_id, position)` and pick the
+    // promotion winner via the custom comparison below — we want max
+    // on `rev_created_at` and min on the tiebreakers, so a plain
+    // lex-order tuple comparison doesn't fit. Explicit branching is
+    // clearer than encoding negated keys for `Reverse`.
+    type WinningKey = (String, String, i64);
+    let mut winning_filename: std::collections::HashMap<Vec<u8>, (WinningKey, String)> =
+        std::collections::HashMap::new();
+    for r in binding_rows {
+        let key: WinningKey = (r.rev_created_at.clone(), r.post_id.clone(), r.position);
+        let entry = winning_filename
+            .entry(r.content_hash.clone())
+            .or_insert_with(|| (key.clone(), r.filename.clone()));
+        // Most-recent revision wins. Tie: smaller post_id and smaller
+        // position win. So we want: max rev_created_at, then min post_id,
+        // then min position. Promote when strictly better.
+        let is_better = match key.0.cmp(&entry.0.0) {
+            std::cmp::Ordering::Greater => true,
+            std::cmp::Ordering::Less => false,
+            std::cmp::Ordering::Equal => match key.1.cmp(&entry.0.1) {
+                std::cmp::Ordering::Less => true,
+                std::cmp::Ordering::Greater => false,
+                std::cmp::Ordering::Equal => key.2 < entry.0.2,
+            },
+        };
+        if is_better {
+            *entry = (key, r.filename.clone());
+        }
+
+        bindings_by_hash
+            .entry(r.content_hash)
+            .or_default()
+            .push(ZipManifestBinding {
+                post_id: r.post_id,
+                revision: r.revision,
+                position: r.position,
+                filename: r.filename,
+            });
+    }
+
+    // Stabilise per-blob binding lists by (revision asc, position asc).
+    // Same idea as the hash-level sort: deterministic output regardless
+    // of how the DB returned the rows.
+    for v in bindings_by_hash.values_mut() {
+        v.sort_by(|a, b| {
+            a.post_id
+                .cmp(&b.post_id)
+                .then_with(|| a.revision.cmp(&b.revision))
+                .then_with(|| a.position.cmp(&b.position))
+        });
+    }
+
+    // Pull every blob the user owns. `ab.blob` is `Option<Vec<u8>>`
+    // because the column is nullable (federation-received placeholders
+    // and a few §5 erasure paths leave the bytes NULL); we still emit
+    // a manifest record with the bytes absent for such rows so the
+    // user sees "this blob exists / was federated, but its bytes are
+    // not stored locally" rather than the row vanishing silently.
+    //
+    // Using `?1` twice with the same bound parameter mirrors the spec
+    // §8.2 query; sqlx allows positional bindings via `?N`.
+    let blob_rows = sqlx::query!(
+        r#"WITH user_blobs AS (
+            SELECT DISTINCT pa.content_hash
+              FROM post_attachments pa
+              JOIN posts p ON p.id = pa.post_id
+             WHERE p.author = ?
+            UNION
+            SELECT s.content_hash FROM attachment_staging s WHERE s.uploader = ?
+           )
+           SELECT ab.content_hash AS "content_hash!: Vec<u8>",
+                  ab.blob AS "blob?: Vec<u8>",
+                  ab.content_type AS "mime!: String",
+                  ab.size AS "size!: i64"
+             FROM attachment_blobs ab
+             JOIN user_blobs ub ON ub.content_hash = ab.content_hash"#,
+        user_id,
+        user_id,
+    )
+    .fetch_all(db)
+    .await?;
+
+    // Index blob rows by content_hash so the deterministic loop below
+    // can look up the bytes / mime / size for each owned hash.
+    struct BlobEntry {
+        blob: Option<Vec<u8>>,
+        mime: String,
+        size: i64,
+    }
+    let mut blob_by_hash: std::collections::HashMap<Vec<u8>, BlobEntry> =
+        std::collections::HashMap::with_capacity(blob_rows.len());
+    for r in blob_rows {
+        blob_by_hash.insert(
+            r.content_hash,
+            BlobEntry {
+                blob: r.blob,
+                mime: r.mime,
+                size: r.size,
+            },
+        );
+    }
+
+    // Walk hashes in deterministic order (BTreeMap key order = hash
+    // bytewise ascending) and assemble the manifest + ZIP entry list.
+    // We carry the bytes through as well so `spawn_blocking` can write
+    // the archive without re-touching the DB.
+    let mut manifest_blobs: Vec<ZipManifestBlob> = Vec::with_capacity(hashes_owned.len());
+    let mut zip_entries: Vec<(String, Option<Vec<u8>>)> = Vec::with_capacity(hashes_owned.len());
+    // Disambiguate identical sanitized filenames across different blobs
+    // (e.g. two screenshots both sanitized to `screenshot.png`). The
+    // short-hash prefix already differs per blob, so the full
+    // `<short-hash>-<filename>` is unique, but if two blobs collide on
+    // the same short-hash *and* same sanitized filename (vanishingly
+    // unlikely at 48 bits but possible) we'd produce duplicate ZIP
+    // entries which is a hard error. Track seen names to detect that.
+    let mut seen_entry_names: std::collections::HashSet<String> =
+        std::collections::HashSet::with_capacity(hashes_owned.len());
+    for (content_hash, _) in hashes_owned {
+        let BlobEntry { blob, mime, size } = match blob_by_hash.remove(&content_hash) {
+            Some(t) => t,
+            // Defensive: a hash present in bindings/staging but missing
+            // from `attachment_blobs` would indicate a torn schema state.
+            // Skip the row rather than aborting the export — the manifest
+            // alone is still useful.
+            None => {
+                tracing::warn!(
+                    user_id = %user_id,
+                    hash = %short_hash_hex(&content_hash),
+                    "attachment hash referenced by user but missing from attachment_blobs",
+                );
+                continue;
+            }
+        };
+
+        let bindings = bindings_by_hash.remove(&content_hash).unwrap_or_default();
+        let staging = bindings.is_empty();
+
+        // Pick the user-visible filename for this blob, then build the
+        // full ZIP entry name `blobs/<short-hash>-<sanitized>`.
+        let raw_name = winning_filename.remove(&content_hash).map(|(_, name)| name);
+        let entry_filename = zip_entry_filename(&content_hash, raw_name.as_deref(), &mime);
+        let entry_path = format!("blobs/{entry_filename}");
+
+        // Hard-collision guard (see comment on `seen_entry_names`).
+        // The short-hash prefix gives us 48 bits of separation, so a
+        // collision means two distinct content hashes happened to share
+        // the same 12 hex prefix AND sanitize to the same suffix. In
+        // that case fall back to a full-hex prefix. A second collision
+        // on the full-hex form would require two distinct content
+        // hashes to share their entire 256-bit hex prefix, which is
+        // impossible (we iterate over a set keyed on `content_hash`),
+        // so we assert it as a tripwire — silent duplicates would
+        // produce an invalid ZIP.
+        let final_path = if seen_entry_names.insert(entry_path.clone()) {
+            entry_path
+        } else {
+            let full_hex = attachments::hex_encode(&content_hash);
+            let collision_path = format!("blobs/{full_hex}-{entry_filename}");
+            tracing::warn!(
+                user_id = %user_id,
+                short_hash = %short_hash_hex(&content_hash),
+                "short-hash collision in ZIP export; falling back to full-hex prefix",
+            );
+            let inserted = seen_entry_names.insert(collision_path.clone());
+            debug_assert!(
+                inserted,
+                "full-hex ZIP entry collision: distinct content_hashes share a 256-bit prefix"
+            );
+            collision_path
+        };
+        let final_filename = final_path
+            .strip_prefix("blobs/")
+            .unwrap_or(&final_path)
+            .to_string();
+
+        manifest_blobs.push(ZipManifestBlob {
+            content_hash_b64: b64(&content_hash),
+            file_name_in_zip: final_filename,
+            size,
+            mime,
+            bindings,
+            staging,
+        });
+        zip_entries.push((final_path, blob));
+    }
+
+    let exported_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let manifest = ZipManifest {
+        export_version: EXPORT_VERSION,
+        exported_at,
+        user_id: user_id.to_string(),
+        metadata_archive: "/api/me/export".to_string(),
+        blobs: manifest_blobs,
+    };
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest).map_err(|e| {
+        tracing::error!(error = %e, "failed to serialize attachments-export manifest");
+        AppError::code(ErrorCode::Internal)
+    })?;
+
+    // ZIP encoding is CPU-bound (deflate) and the `zip` crate is
+    // synchronous, so the assembly runs in `spawn_blocking`. Per-blob
+    // memory is bounded by `MAX_ATTACHMENT_SIZE` (500 KiB); the in-
+    // memory buffer is the user's whole archive at once, which is
+    // bounded by `lifetime_spent` per the storage-budget design.
+    //
+    // We use STORE (no compression) — every supported MIME (PNG, JPEG,
+    // WebP, PDF, txt with a 500 KiB cap) is either already compressed
+    // or small enough that deflate wouldn't meaningfully shrink it.
+    // Deflate would just burn CPU.
+    let zip_bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, std::io::Error> {
+        use std::io::Write;
+        use zip::ZipWriter;
+        use zip::write::SimpleFileOptions;
+
+        let mut cursor = std::io::Cursor::new(Vec::<u8>::with_capacity(64 * 1024));
+        let mut writer = ZipWriter::new(&mut cursor);
+        let opts = SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            // SimpleFileOptions defaults the version-needed-to-extract
+            // and general-purpose bit-flag based on filename contents;
+            // the `zip` crate sets the UTF-8 flag automatically when
+            // the entry name is not pure ASCII, so non-ASCII filenames
+            // (e.g. `🦀.rs`) decode correctly.
+            .large_file(false);
+
+        // Manifest goes first so a partial download (e.g. broken
+        // connection mid-ZIP) still hands the user something
+        // interpretable: knowing which blobs were *supposed* to be in
+        // the archive is more useful than half a blob.
+        writer.start_file("MANIFEST.json", opts)?;
+        writer.write_all(&manifest_bytes)?;
+
+        for (path, blob) in zip_entries {
+            writer.start_file(&path, opts)?;
+            if let Some(bytes) = blob {
+                writer.write_all(&bytes)?;
+            }
+            // NULL blob: emit a zero-byte entry. The manifest's `size`
+            // field still reflects the *intended* size; consumers
+            // detect the discrepancy and can surface "bytes
+            // unavailable" without us inventing a sentinel format.
+        }
+
+        // `finish` consumes the writer and returns the inner sink
+        // (`&mut Cursor`) — drop the returned ref so the outer
+        // `cursor.into_inner()` can take ownership.
+        let _ = writer.finish()?;
+        Ok(cursor.into_inner())
+    })
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "attachments ZIP build task panicked");
+        AppError::code(ErrorCode::Internal)
+    })?
+    .map_err(|e| {
+        tracing::error!(error = %e, "attachments ZIP build I/O error");
+        AppError::code(ErrorCode::Internal)
+    })?;
+
+    // Suggested filename, mirroring the JSON export's convention.
+    let safe_name = sanitize_filename_stem(&user_row.display_name);
+    let stem = if safe_name.is_empty() {
+        user_id.to_string()
+    } else {
+        safe_name
+    };
+    let filename = format!("prismoire-attachments-{stem}.zip");
+    let disposition = format!("attachment; filename=\"{filename}\"");
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        "application/zip".parse().unwrap(),
+    );
+    headers.insert(
+        axum::http::header::CONTENT_DISPOSITION,
+        disposition.parse().unwrap(),
+    );
+
+    Ok((headers, zip_bytes))
+}
+
+/// First 12 hex chars of a content hash, lowercase. 48 bits — collision-
+/// proof at any plausible per-user archive size while staying readable
+/// in directory listings. See `docs/attachments.md` §8.2.
+fn short_hash_hex(content_hash: &[u8]) -> String {
+    let mut s = String::with_capacity(12);
+    for b in content_hash.iter().take(6) {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
+/// MIME → conventional filename extension for staging-only blobs that
+/// have no user-supplied filename. Restricted to the five members of
+/// `ALLOWED_MIMES`; anything else falls back to `.bin` (which the
+/// schema constraints make unreachable today, but acts as a defensive
+/// default if the allowlist later grows).
+fn mime_to_extension(mime: &str) -> &'static str {
+    match mime {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "text/plain" => "txt",
+        "application/pdf" => "pdf",
+        _ => "bin",
+    }
+}
+
+/// Sanitize a user-supplied filename for safe inclusion as a ZIP entry.
+///
+/// Stricter than the bind-time §2.2 pass because ZIP entries become
+/// real filesystem paths at extraction time:
+/// - strip path separators (`/`, `\`) — zip-slip defense
+/// - strip NUL + ASCII control characters
+/// - strip leading dots — no hidden files on Unix extraction
+/// - strip Windows-reserved characters (`< > : " | ? *`)
+/// - truncate to 80 UTF-8 bytes at a char boundary
+///
+/// UTF-8 is preserved; the `zip` crate sets the encoding flag based on
+/// entry-name content. Returns the empty string if sanitization removes
+/// everything — callers fall back to `<short-hash>.<ext>`.
+fn sanitize_zip_entry_name(name: &str) -> String {
+    let filtered: String = name
+        .chars()
+        .filter(|c| {
+            !matches!(c, '/' | '\\' | '<' | '>' | ':' | '"' | '|' | '?' | '*') && !c.is_control()
+        })
+        .collect();
+    // Strip leading dots after filtering: a filename like ".hidden" should
+    // become "hidden", and "..." should become "" (then fall back).
+    let trimmed = filtered.trim_start_matches('.');
+
+    // Truncate at an 80-byte limit, respecting UTF-8 char boundaries.
+    if trimmed.len() <= 80 {
+        return trimmed.to_string();
+    }
+    let mut end = 80;
+    while end > 0 && !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    trimmed[..end].to_string()
+}
+
+/// Pick the `<short-hash>-<sanitized-user-filename>` for one blob.
+///
+/// `raw_name` is the winning binding's filename (per §8.2's
+/// most-recent-binding rule), or `None` for staging-only blobs. Falls
+/// back to `<short-hash>.<ext>` when the user filename sanitizes to
+/// empty or doesn't exist at all.
+fn zip_entry_filename(content_hash: &[u8], raw_name: Option<&str>, mime: &str) -> String {
+    let short = short_hash_hex(content_hash);
+    let sanitized = raw_name.map(sanitize_zip_entry_name).unwrap_or_default();
+    if sanitized.is_empty() {
+        format!("{short}.{}", mime_to_extension(mime))
+    } else {
+        format!("{short}-{sanitized}")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -876,6 +1546,54 @@ pub(crate) async fn soft_delete_user(
     sqlx::query!(
         "UPDATE threads_fts SET op_body = '' WHERE rowid IN \
          (SELECT rowid FROM threads WHERE author = ?)",
+        user_id,
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    // 1c. Attachment cleanup (`docs/attachments.md` §7).
+    //
+    //     The retraction loop in step 1 already dropped every
+    //     `post_attachments` row the user authored (via the
+    //     `post_revisions` cascade or via the explicit DELETE inside
+    //     `retract_post`), which fires the refcount-dec trigger and
+    //     leaves orphan blobs with `refcount = 0`. Three things remain:
+    //
+    //     a. Sweep the user's staged-but-unbound uploads, then GC any
+    //        orphan blob that now has neither a binding nor a staging
+    //        anchor. The blob GC sweeps *all* orphans, not just this
+    //        user's — piggybacking the same pass is cheaper than
+    //        filtering by `uploader` and leaves other users' orphans
+    //        to the hourly sweeper anyway.
+    sqlx::query!("DELETE FROM attachment_staging WHERE uploader = ?", user_id)
+        .execute(&mut **tx)
+        .await?;
+
+    //        Run the shared §5 orphan-blob GC predicate. Same function
+    //        used by `edit_post` / `retract_post` and by the background
+    //        sweeper, so this path cannot drift from the others.
+    crate::attachments::gc_orphan_blobs(tx).await?;
+
+    //     b. NULL `uploader` on every surviving blob the user uploaded.
+    //        A blob survives the GC above when another user
+    //        independently uploaded the same SHA-256 and bound it to a
+    //        still-live post (refcount > 0). In that case the row
+    //        stays, but its `uploader` column still names the deleted
+    //        user — personal data linking them to having uploaded
+    //        these bytes. NULLing severs the link; the content lives
+    //        on anonymously as content-addressed bytes.
+    sqlx::query!(
+        "UPDATE attachment_blobs SET uploader = NULL WHERE uploader = ?",
+        user_id,
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    //     c. Drop the user's storage-budget row. `lifetime_spent` and
+    //        `available_bytes` are account-scoped state with nothing
+    //        to associate with once the account is anonymized.
+    sqlx::query!(
+        "DELETE FROM user_storage_budgets WHERE user_id = ?",
         user_id,
     )
     .execute(&mut **tx)

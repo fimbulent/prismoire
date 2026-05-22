@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::Json;
@@ -5,11 +6,16 @@ use axum::extract::{Path, State};
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 
+use crate::attachments::{
+    AttachmentBindRef, gc_orphan_blobs, hex_encode, parse_hash_hex, persist_attachment_bindings,
+    validate_attachments, validate_body_attachment_refs,
+};
 use crate::error::{AppError, ErrorCode};
 use crate::session::AuthUser;
+use crate::signed::SignedPayload;
 use crate::signing;
 use crate::state::AppState;
-use crate::threads::{PostResponse, validate_body};
+use crate::threads::{AttachmentResponse, PostResponse, validate_body};
 use crate::trust::UserViewerInfo;
 
 // ---------------------------------------------------------------------------
@@ -21,6 +27,34 @@ pub struct RevisionResponse {
     pub revision: i64,
     pub body: String,
     pub created_at: String,
+    /// Attachments signed into this specific revision, decoded from the
+    /// canonical CBOR payload in `signed_objects`. Empty for revisions
+    /// whose payload has been erased (post retracted) and for replies.
+    /// Each entry carries `available` indicating whether the binding +
+    /// blob still exist on this post — `false` means the attachment was
+    /// removed in a later revision (`docs/attachments.md` §6.1 set-diff
+    /// drops bindings across all revisions) and the UI should render a
+    /// "removed" placeholder instead of an image/download link.
+    pub attachments: Vec<RevisionAttachmentEntry>,
+}
+
+/// Per-revision attachment entry returned by
+/// `GET /api/posts/:id/revisions`. Mirrors `AttachmentResponse` plus an
+/// `available` flag that distinguishes "still bound and servable" from
+/// "removed in a later edit". See `RevisionResponse::attachments`.
+#[derive(Serialize)]
+pub struct RevisionAttachmentEntry {
+    pub content_hash: String,
+    pub filename: String,
+    pub mime: String,
+    pub size: i64,
+    /// 0-based index in the signed `attachments[]` array.
+    pub position: i64,
+    /// `true` when a current `post_attachments` row + non-NULL blob
+    /// exist for this hash on this post. `false` once the binding has
+    /// been dropped by a §6.1 set-diff or the blob has been GC'd /
+    /// not-yet-fetched.
+    pub available: bool,
 }
 
 #[derive(Serialize)]
@@ -36,6 +70,14 @@ pub struct RevisionHistoryResponse {
 #[derive(Deserialize)]
 pub struct EditPostRequest {
     pub body: String,
+    /// Replacement attachment array for revision N+1
+    /// (`docs/attachments.md` §6.1). Missing / empty means the edited
+    /// revision drops any attachments the prior revision carried —
+    /// the prior revision's `post_attachments` rows stay in place
+    /// (each revision projects its own array independently). On
+    /// retract every revision's binding rows are dropped together.
+    #[serde(default)]
+    pub attachments: Vec<AttachmentBindRef>,
 }
 
 // ---------------------------------------------------------------------------
@@ -61,6 +103,18 @@ pub async fn edit_post(
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| AppError::code(ErrorCode::PostNotFound))?;
+
+    // Replies cannot carry attachments — those live on the thread OP
+    // only per docs/attachments.md §3. `create_reply` rejects the same
+    // shape at request-parse time; this is the mirror guard for the
+    // edit path so a reply author can't smuggle bindings into a signed
+    // revision by editing instead of creating.
+    if post.parent.is_some() && !req.attachments.is_empty() {
+        return Err(AppError::with_message(
+            ErrorCode::BadRequest,
+            "replies cannot carry attachments".to_string(),
+        ));
+    }
 
     let max_len = if post.parent.is_some() {
         10_000
@@ -121,17 +175,70 @@ pub async fn edit_post(
         AppError::code(ErrorCode::Internal)
     })?;
 
-    let signed = signing::sign_post_revision(
-        &state.db,
-        &user.user_id,
+    // §6.1 set diff: removed = hashes(rev_N) \ hashes(rev_N+1).
+    // Pull the prior revision's hash set (rev N = revision_count - 1).
+    let prior_revision = new_revision - 1;
+    let prior_rows = sqlx::query!(
+        r#"SELECT content_hash AS "content_hash!: Vec<u8>"
+             FROM post_attachments
+            WHERE post_id = ? AND revision = ?"#,
+        post_id,
+        prior_revision,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    let prior_hashes: std::collections::HashSet<Vec<u8>> =
+        prior_rows.into_iter().map(|r| r.content_hash).collect();
+    // Drop malformed entries silently here: the canonical decode +
+    // wire-error mapping happens inside `validate_attachments` a few
+    // lines below, so a bad `content_hash` here just means it can't
+    // possibly match a prior-revision hash (set-diff misses it) and
+    // the validator surfaces the proper `AttachmentNotFound` /
+    // `BadRequest` to the caller.
+    let new_hashes: std::collections::HashSet<Vec<u8>> = req
+        .attachments
+        .iter()
+        .filter_map(|a| parse_hash_hex(&a.content_hash).map(|h| h.to_vec()))
+        .collect();
+
+    // For each removed hash, drop its bindings across *all* prior
+    // revisions of this post (§6.1 step 3). The AFTER DELETE trigger
+    // decrements `attachment_blobs.refcount`; orphan blobs get GC'd
+    // below after all deletes are done.
+    for hash in prior_hashes.difference(&new_hashes) {
+        sqlx::query!(
+            "DELETE FROM post_attachments WHERE post_id = ? AND content_hash = ?",
+            post_id,
+            hash,
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    // §6.1 step 2+4: resolve the new array (read-only validation).
+    // Carried-over hashes are re-bound as new revision N+1 rows; the
+    // blob persists via content addressing.
+    let signed_attachments = validate_attachments(&mut tx, &user.user_id, &req.attachments).await?;
+
+    // Cross-check `![](filename)` references in the edited body
+    // against the new array (same predicate as create — each ref must
+    // hit an image MIME and may appear at most once).
+    validate_body_attachment_refs(&body, &signed_attachments)?;
+
+    // Load the user's signing key via the same tx connection — see
+    // the matching note in `create_thread.rs` for why this matters
+    // under a single-connection pool.
+    let signing_key = signing::load_active_signing_key(&mut *tx, &user.user_id).await?;
+    let signed = signing::sign_post_revision_with_key(
+        &signing_key,
         &post_uuid,
         &thread_uuid,
         parent_uuid.as_ref(),
         revision_u64,
         &body,
         created_at_ms,
-    )
-    .await?;
+        signed_attachments.clone(),
+    );
     let signature = signed.signature.clone();
     let canonical_hash_db: Vec<u8> = signed.canonical_hash.to_vec();
 
@@ -147,6 +254,20 @@ pub async fn edit_post(
     )
     .execute(&mut *tx)
     .await?;
+
+    // Now that revision N+1 exists, insert its `post_attachments`
+    // projection rows and drop any staging rows for the new bindings.
+    persist_attachment_bindings(&mut tx, &post_id, new_revision, &signed_attachments).await?;
+
+    // After both the §6.1-step-3 removals and the new-revision inserts:
+    // GC any blob whose refcount dropped to zero and which is not
+    // held by a staging row. Order matters within the transaction —
+    // running GC after `persist_attachment_bindings` ensures the
+    // refcount snapshot the predicate sees reflects the post-edit
+    // state (new revision rows already inserted), not an intermediate
+    // mid-edit state. The same `gc_orphan_blobs` predicate is reused
+    // by the retract path.
+    gc_orphan_blobs(&mut tx).await?;
 
     // Dual-write the canonical bytes into `signed_objects`.
     signing::store_signed_object(
@@ -184,6 +305,23 @@ pub async fn edit_post(
 
     tx.commit().await?;
 
+    // Project the just-signed array into the response shape. Only OP
+    // posts can carry attachments, but reflecting the signed
+    // `signed_attachments` here either way keeps the edit response
+    // shape consistent with `create_thread` — replies will have an
+    // empty array.
+    let response_attachments: Vec<AttachmentResponse> = signed_attachments
+        .iter()
+        .enumerate()
+        .map(|(idx, r)| AttachmentResponse {
+            content_hash: hex_encode(&r.content_hash),
+            filename: r.filename.clone(),
+            mime: r.mime.clone(),
+            size: r.size as i64,
+            position: idx as i64,
+        })
+        .collect();
+
     Ok(Json(PostResponse {
         id: post_id,
         parent_id: meta.parent_id,
@@ -199,6 +337,7 @@ pub async fn edit_post(
         viewer: UserViewerInfo::self_view(),
         has_more_children: false,
         distrust_scaffold: false,
+        attachments: response_attachments,
     }))
 }
 
@@ -269,6 +408,17 @@ pub async fn retract_post(
     .execute(&mut *tx)
     .await?;
 
+    // §5 attachment retraction: drop every binding row for this post
+    // across *all* revisions. The AFTER DELETE trigger on
+    // `post_attachments` decrements refcount on the corresponding
+    // `attachment_blobs` row; any blob that now has refcount=0 and is
+    // not held by a staging row is GC'd inline below. This is the
+    // §6.1 step-3 GC predicate reused for the retract path.
+    sqlx::query!("DELETE FROM post_attachments WHERE post_id = ?", post_id,)
+        .execute(&mut *tx)
+        .await?;
+    gc_orphan_blobs(&mut tx).await?;
+
     // Dual-write the canonical retraction bytes into `signed_objects`
     // alongside the projection updates.
     signing::store_signed_object(
@@ -318,24 +468,72 @@ pub async fn list_revisions(
     .await?
     .ok_or_else(|| AppError::code(ErrorCode::PostNotFound))?;
 
+    // Pull rows for every revision plus the corresponding signed
+    // payload. The LEFT JOIN tolerates erased payloads: after retract,
+    // `signed_objects.payload` is NULL while `signed_objects.canonical_hash`
+    // is retained for chain continuity, so we still need a row but the
+    // bytes are gone (`docs/federation-protocol.md` §11.4). For those
+    // revisions we surface the body/timestamps from `post_revisions`
+    // and emit an empty `attachments[]` — we cannot reconstruct what
+    // *was* bound without the signed bytes, but that's the same
+    // information loss the retraction was meant to enforce.
     let rows = sqlx::query!(
-        "SELECT revision, body, created_at \
-         FROM post_revisions \
-         WHERE post_id = ? \
-         ORDER BY revision ASC",
+        r#"SELECT pr.revision AS "revision!: i64",
+                  pr.body AS "body!: String",
+                  pr.created_at AS "created_at!: String",
+                  so.payload AS "payload?: Vec<u8>"
+             FROM post_revisions pr
+             LEFT JOIN signed_objects so ON so.canonical_hash = pr.canonical_hash
+            WHERE pr.post_id = ?
+            ORDER BY pr.revision ASC"#,
         post_id,
     )
     .fetch_all(&state.db)
     .await?;
 
-    let revisions = rows
-        .into_iter()
-        .map(|r| RevisionResponse {
+    // Build the "still available" hash set in a single query. A binding
+    // is available iff a `post_attachments` row exists for (post_id,
+    // content_hash) — §6.1 set-diff drops these across all revisions
+    // when an attachment is removed in a later edit — AND the blob
+    // bytes are present (NULL `blob` is the fetch-pending / GC'd state,
+    // mirroring the 404 the serve path returns for that case).
+    let available_rows = sqlx::query!(
+        r#"SELECT DISTINCT pa.content_hash AS "content_hash!: Vec<u8>"
+             FROM post_attachments pa
+             JOIN attachment_blobs ab ON ab.content_hash = pa.content_hash
+            WHERE pa.post_id = ?
+              AND ab.blob IS NOT NULL"#,
+        post_id,
+    )
+    .fetch_all(&state.db)
+    .await?;
+    let available: HashSet<Vec<u8>> = available_rows.into_iter().map(|r| r.content_hash).collect();
+
+    let mut revisions = Vec::with_capacity(rows.len());
+    for r in rows {
+        let mut atts: Vec<RevisionAttachmentEntry> = Vec::new();
+        if let Some(bytes) = r.payload.as_deref()
+            && let Ok(SignedPayload::PostRevision(pr)) = SignedPayload::parse(bytes)
+        {
+            for (idx, a) in pr.attachments.iter().enumerate() {
+                let hash_vec = a.content_hash.to_vec();
+                atts.push(RevisionAttachmentEntry {
+                    content_hash: hex_encode(&a.content_hash),
+                    filename: a.filename.clone(),
+                    mime: a.mime.clone(),
+                    size: a.size as i64,
+                    position: idx as i64,
+                    available: available.contains(&hash_vec),
+                });
+            }
+        }
+        revisions.push(RevisionResponse {
             revision: r.revision,
             body: r.body,
             created_at: r.created_at,
-        })
-        .collect();
+            attachments: atts,
+        });
+    }
 
     Ok(Json(RevisionHistoryResponse {
         post_id,

@@ -28,8 +28,8 @@ use uuid::Uuid;
 use crate::admin::require_admin;
 use crate::error::AppError;
 use crate::instance_config::{
-    save_rebuild_schedule, save_source_repo_url, validate_rebuild_schedule,
-    validate_source_repo_url,
+    AttachmentBudget, save_attachment_budget, save_rebuild_schedule, save_source_repo_url,
+    validate_attachment_budget, validate_rebuild_schedule, validate_source_repo_url,
 };
 use crate::session::AuthUser;
 use crate::state::AppState;
@@ -52,6 +52,11 @@ pub struct AdminConfigResponse {
     pub rebuild_max_interval_ms: u64,
     pub rebuild_bfs_cache_bytes: u64,
     pub source_repo_url: Option<String>,
+    /// Per-user attachment storage budget cap, in bytes
+    /// (docs/attachments.md §10.3).
+    pub attachment_budget_cap_bytes: u64,
+    /// Per-user attachment storage budget refill, bytes per day.
+    pub attachment_budget_refill_bytes_per_day: u64,
 }
 
 /// Partial-update payload for `PATCH /api/admin/config`.
@@ -68,6 +73,8 @@ pub struct AdminConfigUpdateRequest {
     pub rebuild_max_interval_ms: Option<u64>,
     pub rebuild_bfs_cache_bytes: Option<u64>,
     pub source_repo_url: Option<String>,
+    pub attachment_budget_cap_bytes: Option<u64>,
+    pub attachment_budget_refill_bytes_per_day: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -100,9 +107,21 @@ fn snapshot_source_repo_url(state: &AppState) -> Option<String> {
     }
 }
 
+/// Read the current attachment-budget snapshot from `AppState`.
+fn snapshot_attachment_budget(state: &AppState) -> AttachmentBudget {
+    match state.attachment_budget.read() {
+        Ok(guard) => *guard,
+        Err(poisoned) => {
+            tracing::error!("admin_config: attachment_budget RwLock poisoned");
+            *poisoned.into_inner()
+        }
+    }
+}
+
 fn schedule_to_response(
     schedule: &RebuildSchedule,
     source_repo_url: Option<String>,
+    budget: AttachmentBudget,
 ) -> AdminConfigResponse {
     AdminConfigResponse {
         rebuild_debounce_ms: schedule.debounce.as_millis() as u64,
@@ -110,6 +129,8 @@ fn schedule_to_response(
         rebuild_max_interval_ms: schedule.max_interval.as_millis() as u64,
         rebuild_bfs_cache_bytes: schedule.bfs_cache_bytes,
         source_repo_url,
+        attachment_budget_cap_bytes: budget.cap_bytes,
+        attachment_budget_refill_bytes_per_day: budget.refill_bytes_per_day,
     }
 }
 
@@ -147,7 +168,12 @@ pub async fn get_config(
     require_admin(&user)?;
     let schedule = snapshot_schedule(&state);
     let source_repo_url = snapshot_source_repo_url(&state);
-    Ok(Json(schedule_to_response(&schedule, source_repo_url)))
+    let budget = snapshot_attachment_budget(&state);
+    Ok(Json(schedule_to_response(
+        &schedule,
+        source_repo_url,
+        budget,
+    )))
 }
 
 // ---------------------------------------------------------------------------
@@ -176,6 +202,7 @@ pub async fn update_config(
 
     let current = snapshot_schedule(&state);
     let current_url = snapshot_source_repo_url(&state);
+    let current_budget = snapshot_attachment_budget(&state);
 
     // Build the candidate schedule by overlaying any provided fields
     // on the current snapshot. We always validate the whole thing,
@@ -215,18 +242,48 @@ pub async fn update_config(
     };
     let url_changed = req.source_repo_url.is_some() && new_url != current_url;
 
-    if !schedule_changed && !url_changed {
+    // Build the candidate attachment budget the same way: overlay
+    // any provided fields on the current snapshot, validate as a
+    // unit. Cross-field validation is currently trivial (each value
+    // capped independently) but keeping the unit shape leaves room
+    // for future "refill ≤ cap" style invariants without churning
+    // the call shape.
+    let candidate_budget = AttachmentBudget {
+        cap_bytes: req
+            .attachment_budget_cap_bytes
+            .unwrap_or(current_budget.cap_bytes),
+        refill_bytes_per_day: req
+            .attachment_budget_refill_bytes_per_day
+            .unwrap_or(current_budget.refill_bytes_per_day),
+    };
+    let budget_changed = candidate_budget != current_budget;
+    if budget_changed {
+        validate_attachment_budget(&candidate_budget)?;
+    }
+
+    if !schedule_changed && !url_changed && !budget_changed {
         // Nothing actually changed; return the current view without
         // hitting the DB or writing an audit-log entry. Covers the
         // no-op PATCH-of-current-value case the UI produces if the
         // user clicks "save" without editing anything.
-        return Ok(Json(schedule_to_response(&current, current_url)));
+        return Ok(Json(schedule_to_response(
+            &current,
+            current_url,
+            current_budget,
+        )));
     }
 
     // Compact summary of what changed for the audit log. Old values
     // aren't included to keep the row short; a sequence of entries
     // reconstructs the history.
-    let reason = build_change_summary(&current, &candidate, &new_url, url_changed);
+    let reason = build_change_summary(
+        &current,
+        &candidate,
+        &new_url,
+        url_changed,
+        &current_budget,
+        &candidate_budget,
+    );
 
     // Atomically persist the config UPDATE(s) and the audit-log INSERT
     // so a crash between them can't leave the table changed without a
@@ -245,6 +302,9 @@ pub async fn update_config(
             .as_deref()
             .expect("url_changed implies new_url is Some");
         save_source_repo_url(&mut *tx, url).await?;
+    }
+    if budget_changed {
+        save_attachment_budget(&mut *tx, &candidate_budget).await?;
     }
     log_edit_config(&mut *tx, &user.user_id, &reason).await?;
     tx.commit().await?;
@@ -267,11 +327,20 @@ pub async fn update_config(
             }
         }
     }
+    if budget_changed {
+        match state.attachment_budget.write() {
+            Ok(mut guard) => *guard = candidate_budget,
+            Err(_) => {
+                tracing::error!("update_config: attachment_budget RwLock poisoned");
+            }
+        }
+    }
 
     // Return the updated view from the mirrors we just wrote.
     Ok(Json(schedule_to_response(
         &snapshot_schedule(&state),
         snapshot_source_repo_url(&state),
+        snapshot_attachment_budget(&state),
     )))
 }
 
@@ -281,6 +350,8 @@ fn build_change_summary(
     new: &RebuildSchedule,
     new_url: &Option<String>,
     url_changed: bool,
+    old_budget: &AttachmentBudget,
+    new_budget: &AttachmentBudget,
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
     if old.debounce != new.debounce {
@@ -299,6 +370,18 @@ fn build_change_summary(
         parts.push(format!(
             "source_repo_url={}",
             new_url.as_deref().unwrap_or("")
+        ));
+    }
+    if old_budget.cap_bytes != new_budget.cap_bytes {
+        parts.push(format!(
+            "attachment_budget_cap_bytes={}",
+            new_budget.cap_bytes
+        ));
+    }
+    if old_budget.refill_bytes_per_day != new_budget.refill_bytes_per_day {
+        parts.push(format!(
+            "attachment_budget_refill_bytes_per_day={}",
+            new_budget.refill_bytes_per_day
         ));
     }
     if parts.is_empty() {

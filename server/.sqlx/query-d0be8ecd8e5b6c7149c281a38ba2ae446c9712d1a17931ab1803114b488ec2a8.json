@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE instance_config\n            SET attachment_budget_cap_bytes = ?,\n                attachment_budget_refill_bytes_per_day = ?\n          WHERE id = 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "d0be8ecd8e5b6c7149c281a38ba2ae446c9712d1a17931ab1803114b488ec2a8"
+}

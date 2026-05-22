@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT p.author AS \"author_id!: String\",\n                  pa.filename AS \"filename!: String\"\n             FROM post_attachments pa\n             JOIN posts p ON p.id = pa.post_id\n             JOIN post_revisions pr\n                  ON pr.post_id = pa.post_id AND pr.revision = pa.revision\n            WHERE pa.content_hash = ?\n              AND pa.revision = p.revision_count - 1\n              AND p.retracted_at IS NULL\n            ORDER BY pr.created_at DESC, p.id ASC, pa.position ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "author_id!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "filename!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "5d306d5d1f60dc61c3cfb7d98ffaeab72e4dffe991488e87f926ba2ffba8631e"
+}

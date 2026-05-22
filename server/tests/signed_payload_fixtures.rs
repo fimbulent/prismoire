@@ -78,6 +78,7 @@ fn positive_fixtures() -> Vec<PositiveFixture> {
                     revision: 0,
                     body: "Hello, world!".to_string(),
                     created_at: 1_700_000_000_000,
+                    attachments: Vec::new(),
                 };
                 (SignedPayload::PostRevision(p), key)
             },
@@ -94,6 +95,7 @@ fn positive_fixtures() -> Vec<PositiveFixture> {
                     revision: 0,
                     body: "Reply body.".to_string(),
                     created_at: 1_700_000_001_000,
+                    attachments: Vec::new(),
                 };
                 (SignedPayload::PostRevision(p), key)
             },
@@ -113,6 +115,7 @@ fn positive_fixtures() -> Vec<PositiveFixture> {
                     revision: 100,
                     body: "Hundred-and-first revision.".to_string(),
                     created_at: 1_700_000_006_000,
+                    attachments: Vec::new(),
                 };
                 (SignedPayload::PostRevision(p), key)
             },
@@ -133,6 +136,7 @@ fn positive_fixtures() -> Vec<PositiveFixture> {
                     revision: 0,
                     body: "héllo 🌍 世界".to_string(),
                     created_at: 1_700_000_007_000,
+                    attachments: Vec::new(),
                 };
                 (SignedPayload::PostRevision(p), key)
             },

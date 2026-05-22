@@ -97,6 +97,98 @@ pub struct WarmCursor {
     pub rank_offset: usize,
 }
 
+/// Serialized attachment binding shown alongside a post in the read
+/// JSON (`docs/attachments.md` §4 / §9). Each entry is one row in the
+/// post's signed `attachments[]` array, projected through the
+/// `post_attachments` × `attachment_blobs` join so the frontend has
+/// everything it needs to render either the inline `<img>` or the
+/// download chip without a second round trip:
+///
+/// - `content_hash` — lower-case hex SHA-256 of the blob bytes, used
+///   to build the `/api/attachments/{hash}` URL. Same value the signed
+///   CBOR carries; the binding row stores it as BLOB and we hex it
+///   here for JSON friendliness.
+/// - `filename` — post-§2.2 sanitized display name (what the
+///   download UI shows and what `Content-Disposition` carries).
+/// - `mime` — content type from `attachment_blobs.content_type`.
+///   The frontend decides inline vs download by matching the filename
+///   against `![](name)` references in the post body
+///   (`docs/attachments.md` §3); only `image/*` may be inlined.
+/// - `size` — stored byte length from `attachment_blobs.size`.
+/// - `position` — 0..N-1 stable display order within the array.
+///
+/// Only ever populated for OP posts; replies never carry attachments
+/// (rejected at `create_reply`), so `PostResponse.attachments` is
+/// `skip_serializing_if = "Vec::is_empty"` to keep reply payloads clean.
+#[derive(Serialize, Clone)]
+pub struct AttachmentResponse {
+    pub content_hash: String,
+    pub filename: String,
+    pub mime: String,
+    pub size: i64,
+    pub position: i64,
+}
+
+/// Fetch attachment bindings for a set of post IDs, scoped to the latest
+/// revision of each post.
+///
+/// Used wherever a list of posts needs its attachments resolved alongside
+/// the body: full thread view (`get_thread`), profile recent activity
+/// (`users::get_activity`), the admin reports queue (`reports::list_reports`).
+/// All of these surface the latest-revision body, so the latest-revision
+/// attachment set is the correct match — for older revisions, see the
+/// per-revision history endpoint (`get_post_revisions`).
+///
+/// On retract `post_attachments` rows are dropped (see `retract_post`),
+/// so a retracted post in the input simply yields no entries. The join
+/// to `attachment_blobs` produces the `mime` and `size` the response
+/// shape needs.
+pub async fn fetch_latest_attachments(
+    db: &sqlx::SqlitePool,
+    post_ids: &[String],
+) -> Result<HashMap<String, Vec<AttachmentResponse>>, AppError> {
+    let mut map: HashMap<String, Vec<AttachmentResponse>> = HashMap::new();
+    if post_ids.is_empty() {
+        return Ok(map);
+    }
+
+    let ids_json =
+        serde_json::to_string(post_ids).map_err(|_| AppError::code(ErrorCode::Internal))?;
+
+    let rows = sqlx::query!(
+        r#"SELECT pa.post_id AS "post_id!: String",
+                  pa.position AS "position!: i64",
+                  pa.filename AS "filename!: String",
+                  pa.content_hash AS "content_hash!: Vec<u8>",
+                  ab.content_type AS "mime!: String",
+                  ab.size AS "size!: i64"
+             FROM post_attachments pa
+             JOIN attachment_blobs ab ON ab.content_hash = pa.content_hash
+            WHERE pa.post_id IN (SELECT value FROM json_each(?))
+              AND pa.revision = (
+                  SELECT MAX(pr.revision) FROM post_revisions pr
+                   WHERE pr.post_id = pa.post_id
+              )
+            ORDER BY pa.post_id, pa.position"#,
+        ids_json,
+    )
+    .fetch_all(db)
+    .await?;
+
+    for row in rows {
+        map.entry(row.post_id)
+            .or_default()
+            .push(AttachmentResponse {
+                content_hash: crate::attachments::hex_encode(&row.content_hash),
+                filename: row.filename,
+                mime: row.mime,
+                size: row.size,
+                position: row.position,
+            });
+    }
+    Ok(map)
+}
+
 #[derive(Serialize)]
 pub struct PostResponse {
     pub id: String,
@@ -121,6 +213,12 @@ pub struct PostResponse {
     /// distrusted user's post is visible. See spec §"Distrust action UX".
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub distrust_scaffold: bool,
+    /// Per-revision attachment array for OP posts
+    /// (`docs/attachments.md` §4 / §9). Empty for replies and for any
+    /// post whose latest revision carries no attachments — the field
+    /// is omitted from JSON in that case via `skip_serializing_if`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AttachmentResponse>,
 }
 
 #[derive(Serialize)]
@@ -173,6 +271,13 @@ pub struct RepliesPageResponse {
 pub struct CreateReplyRequest {
     pub parent_id: String,
     pub body: String,
+    /// Replies never carry attachments per `docs/attachments.md` §3 —
+    /// attachments live on the thread OP only. The field exists in the
+    /// request shape so a non-empty array is rejected with a clean 400
+    /// instead of being silently ignored at signing time. Default is
+    /// empty.
+    #[serde(default)]
+    pub attachments: Vec<crate::attachments::AttachmentBindRef>,
 }
 
 // ---------------------------------------------------------------------------

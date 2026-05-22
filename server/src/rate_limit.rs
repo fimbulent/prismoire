@@ -109,6 +109,8 @@ pub type UserLayer =
     GovernorLayer<SessionKeyExtractor, NoOpMiddleware<QuantaInstant>, axum::body::Body>;
 pub type ReportLayer =
     GovernorLayer<SessionKeyExtractor, NoOpMiddleware<QuantaInstant>, axum::body::Body>;
+pub type UploadLayer =
+    GovernorLayer<SessionKeyExtractor, NoOpMiddleware<QuantaInstant>, axum::body::Body>;
 pub type CspReportLayer =
     GovernorLayer<ClientIpKeyExtractor, NoOpMiddleware<QuantaInstant>, axum::body::Body>;
 
@@ -122,6 +124,7 @@ pub struct RateLimitLayers {
     pub auth: AuthLayer,
     pub user: UserLayer,
     pub report: ReportLayer,
+    pub upload: UploadLayer,
     pub csp_report: CspReportLayer,
 }
 
@@ -184,6 +187,27 @@ const REPORT_REPLENISH_SECONDS: u64 = 10;
 /// quick succession. Three tokens accommodate that without allowing
 /// sustained abuse.
 const REPORT_BURST_SIZE: u32 = 3;
+
+/// Replenish interval for the `POST /api/attachments` per-session bucket,
+/// in seconds.
+///
+/// Upload is the most CPU-expensive authenticated endpoint: it pulls
+/// up-to-500-KiB multipart bodies, runs a header-dimensions probe, a
+/// full decode, a downscale, and a re-encode — all on the
+/// `spawn_blocking` pool, but still finite shared capacity. A tighter
+/// per-session bucket than the general `user_limiter` prevents one
+/// user from monopolising the encode pool by spamming the route. One
+/// token every five seconds caps sustained throughput to ~12 uploads
+/// per minute per session, which comfortably covers compose-time
+/// burst patterns (up to 3 attachments per post) while shedding abuse.
+const UPLOAD_REPLENISH_SECONDS: u64 = 5;
+
+/// Burst size for the `POST /api/attachments` per-session bucket.
+///
+/// Six tokens absorb a compose flow where the user uploads a few
+/// attachments in quick succession, or retries an upload after a
+/// network hiccup, without dipping into rate-limit territory.
+const UPLOAD_BURST_SIZE: u32 = 6;
 
 /// Replenish interval for the `/api/csp-report` per-IP bucket, in seconds.
 ///
@@ -264,6 +288,17 @@ pub fn build_layers(
             .expect("invalid report rate limit config"),
     );
 
+    let upload_config = Arc::new(
+        GovernorConfigBuilder::default()
+            .key_extractor(SessionKeyExtractor {
+                ip_fallback: ip_extractor,
+            })
+            .per_second(UPLOAD_REPLENISH_SECONDS)
+            .burst_size(UPLOAD_BURST_SIZE)
+            .finish()
+            .expect("invalid upload rate limit config"),
+    );
+
     let csp_report_config = Arc::new(
         GovernorConfigBuilder::default()
             .key_extractor(ip_extractor)
@@ -278,6 +313,7 @@ pub fn build_layers(
         auth: GovernorLayer::new(auth_config).error_handler(govern_error_handler),
         user: GovernorLayer::new(user_config).error_handler(govern_error_handler),
         report: GovernorLayer::new(report_config).error_handler(govern_error_handler),
+        upload: GovernorLayer::new(upload_config).error_handler(govern_error_handler),
         csp_report: GovernorLayer::new(csp_report_config).error_handler(govern_error_handler),
     }
 }

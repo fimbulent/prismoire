@@ -30,6 +30,18 @@ use crate::trust::RebuildSchedule;
 pub struct InstanceConfig {
     pub rebuild_schedule: RebuildSchedule,
     pub source_repo_url: Option<String>,
+    pub attachment_budget: AttachmentBudget,
+}
+
+/// Live-tunable per-user attachment storage budget
+/// (docs/attachments.md §10.3). Token-bucket parameters: `cap_bytes`
+/// is the ceiling, `refill_bytes_per_day` is the linear refill. Pure
+/// operator policy with no federation effect — drift between
+/// instances is harmless.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttachmentBudget {
+    pub cap_bytes: u64,
+    pub refill_bytes_per_day: u64,
 }
 
 /// Load the singleton `instance_config` row.
@@ -47,7 +59,9 @@ pub async fn load_from_db(db: &SqlitePool) -> Result<InstanceConfig, sqlx::Error
                rebuild_min_interval_ms AS "rebuild_min_interval_ms!: i64",
                rebuild_max_interval_ms AS "rebuild_max_interval_ms!: i64",
                rebuild_bfs_cache_bytes AS "rebuild_bfs_cache_bytes!: i64",
-               source_repo_url
+               source_repo_url,
+               attachment_budget_cap_bytes AS "attachment_budget_cap_bytes!: i64",
+               attachment_budget_refill_bytes_per_day AS "attachment_budget_refill_bytes_per_day!: i64"
            FROM instance_config
            WHERE id = 1"#
     )
@@ -62,6 +76,10 @@ pub async fn load_from_db(db: &SqlitePool) -> Result<InstanceConfig, sqlx::Error
             bfs_cache_bytes: row.rebuild_bfs_cache_bytes as u64,
         },
         source_repo_url: row.source_repo_url,
+        attachment_budget: AttachmentBudget {
+            cap_bytes: row.attachment_budget_cap_bytes as u64,
+            refill_bytes_per_day: row.attachment_budget_refill_bytes_per_day as u64,
+        },
     })
 }
 
@@ -123,6 +141,60 @@ where
     )
     .execute(db)
     .await?;
+    Ok(())
+}
+
+/// Persist a new attachment budget to the `instance_config` row
+/// (docs/attachments.md §10.3).
+///
+/// Generic over the executor so callers can run this inside a
+/// transaction alongside the matching `admin_log` insert, matching
+/// the pattern used by [`save_rebuild_schedule`] and
+/// [`save_source_repo_url`].
+pub async fn save_attachment_budget<'e, E>(
+    db: E,
+    budget: &AttachmentBudget,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::sqlite::SqliteExecutor<'e>,
+{
+    let cap = budget.cap_bytes as i64;
+    let refill = budget.refill_bytes_per_day as i64;
+    sqlx::query!(
+        "UPDATE instance_config
+            SET attachment_budget_cap_bytes = ?,
+                attachment_budget_refill_bytes_per_day = ?
+          WHERE id = 1",
+        cap,
+        refill,
+    )
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// Validate a candidate [`AttachmentBudget`] against the admin-config
+/// invariants. Mirrors the DB-level CHECK constraints so the API
+/// returns a clear human-readable error rather than a
+/// constraint-violation message.
+///
+/// The 10 GiB cap on both fields matches the migration CHECK; values
+/// above that would be absurd in operator practice and risk i64
+/// arithmetic foot-guns elsewhere.
+pub fn validate_attachment_budget(budget: &AttachmentBudget) -> Result<(), AppError> {
+    const MAX_BYTES: u64 = 10 * 1024 * 1024 * 1024; // 10 GiB
+    if budget.cap_bytes > MAX_BYTES {
+        return Err(AppError::with_message(
+            ErrorCode::BadRequest,
+            "attachment budget cap must be <= 10 GiB",
+        ));
+    }
+    if budget.refill_bytes_per_day > MAX_BYTES {
+        return Err(AppError::with_message(
+            ErrorCode::BadRequest,
+            "attachment budget refill must be <= 10 GiB per day",
+        ));
+    }
     Ok(())
 }
 

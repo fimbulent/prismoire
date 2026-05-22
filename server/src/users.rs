@@ -131,6 +131,12 @@ pub struct ActivityItem {
     pub room_slug: String,
     pub body: String,
     pub created_at: String,
+    /// Attachments bound to the post's latest revision. Empty for
+    /// replies (which can't carry attachments per `docs/attachments.md`
+    /// §3) and for thread-OP posts with none; omitted from JSON in that
+    /// case so the activity payload stays compact.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<crate::threads::AttachmentResponse>,
 }
 
 #[derive(Serialize)]
@@ -812,11 +818,22 @@ pub async fn get_activity(
         .await?;
 
     let has_more = rows.len() as i64 > ACTIVITY_PAGE_SIZE;
-    let items: Vec<ActivityItem> = rows
+    let page_rows: Vec<_> = rows.into_iter().take(ACTIVITY_PAGE_SIZE as usize).collect();
+
+    // Second pass: pull the latest-revision attachment set for every
+    // post on this page so the frontend can resolve `![](filename)` refs
+    // in the rendered activity body. Reply rows yield empty entries
+    // (they can't carry attachments per docs/attachments.md §3), so the
+    // join cost stays proportional to OP rows in the page.
+    let post_ids: Vec<String> = page_rows.iter().map(|r| r.1.clone()).collect();
+    let mut attachments_map =
+        crate::threads::fetch_latest_attachments(&state.db, &post_ids).await?;
+
+    let items: Vec<ActivityItem> = page_rows
         .into_iter()
-        .take(ACTIVITY_PAGE_SIZE as usize)
         .map(
             |(activity_type, post_id, thread_id, thread_title, room_slug, body, created_at)| {
+                let attachments = attachments_map.remove(&post_id).unwrap_or_default();
                 ActivityItem {
                     activity_type,
                     post_id,
@@ -825,6 +842,7 @@ pub async fn get_activity(
                     room_slug,
                     body,
                     created_at: created_at.clone(),
+                    attachments,
                 }
             },
         )

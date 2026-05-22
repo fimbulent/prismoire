@@ -26,6 +26,38 @@
 	</div>
 {/snippet}
 
+<!--
+	Variant for the Images section: the live renderer resolves image refs
+	through the trust-gated `/api/attachments/{hash}` route, which a public
+	help page can't reach. Instead, we hand-craft the same `<figure>` /
+	`<figcaption>` markup the real renderer emits and point at a static
+	asset so the demo renders identically to what users will see in posts.
+	The `.markdown-figure`, `.attachment-inline`, and `.markdown-figcaption`
+	classes are global rules in `app.css`, so the hand-crafted output picks
+	up the exact same visuals as the live renderer.
+-->
+{#snippet imageExample(source: string, src: string, alt: string, caption: string | null)}
+	<div class="grid md:grid-cols-2 bg-bg-surface border border-border rounded-md overflow-hidden my-4">
+		<div class="bg-bg-surface-raised p-4 border-b md:border-b-0 md:border-r border-border">
+			<div class="text-[0.7rem] uppercase font-bold tracking-wider text-text-muted mb-2 font-sans">
+				You type
+			</div>
+			<pre class="font-prose text-prose text-text-primary whitespace-pre-wrap break-words m-0">{source}</pre>
+		</div>
+		<div class="p-4">
+			<div class="text-[0.7rem] uppercase font-bold tracking-wider text-text-muted mb-2 font-sans">
+				What appears
+			</div>
+			<figure class="markdown-figure">
+				<img {src} {alt} class="attachment-inline" loading="lazy" decoding="async" />
+				{#if caption}
+					<figcaption class="markdown-figcaption">{caption}</figcaption>
+				{/if}
+			</figure>
+		</div>
+	</div>
+{/snippet}
+
 <article>
 	<h1 class="text-3xl font-bold leading-tight mb-4">Markdown</h1>
 
@@ -59,6 +91,45 @@
 	<section class="mb-8">
 		<h2 class="text-xl font-semibold mb-2">Links</h2>
 		{@render example('[the project page](https://example.com)')}
+	</section>
+
+	<section class="mb-8">
+		<h2 class="text-xl font-semibold mb-2">Images</h2>
+		<p class="text-text-secondary mb-2">
+			You can include an image you've uploaded to a thread by referencing its filename
+			with an exclamation mark and brackets. The text inside the brackets is the image's
+			<strong class="text-text-primary">alt text</strong> — a short description for screen
+			readers or anyone whose browser can't display the image.
+		</p>
+		{@render imageExample(
+			'![Prismoire icon](icon-192.png)',
+			'/icon-192.png',
+			'Prismoire icon',
+			null
+		)}
+		<p class="text-text-secondary mb-2 mt-4">
+			Add a <strong class="text-text-primary">caption</strong> in quotes after the filename.
+			The caption appears centered below the image. Captions are visible — alt text is for
+			accessibility — so it's fine for them to say different things.
+		</p>
+		{@render imageExample(
+			'![Prismoire icon](icon-192.png "Our mark, rendered at 192px.")',
+			'/icon-192.png',
+			'Prismoire icon',
+			'Our mark, rendered at 192px.'
+		)}
+		<div class="text-text-muted text-sm space-y-1 mt-3">
+			<p>
+				Images come from files you've attached to the thread — only the original poster
+				can attach files, and only thread bodies (not replies) can carry images. When
+				you upload an image, it's added to the body automatically.
+			</p>
+			<p>
+				External image URLs
+				(<code class="font-mono text-[0.875em] bg-bg-surface-raised text-text-primary px-1.5 py-0.5 rounded">![alt](https://example.com/x.png)</code>)
+				are intentionally rendered as plain links, not embedded.
+			</p>
+		</div>
 	</section>
 
 	<section class="mb-8">
@@ -190,8 +261,11 @@ function greet(name) {
 		</p>
 		<ul class="text-text-secondary list-disc pl-6 space-y-2">
 			<li>
-				<strong class="text-text-primary">Images.</strong> Image syntax is rendered as a plain link,
-				not an embedded image.
+				<strong class="text-text-primary">External images.</strong> Image syntax pointing at
+				another site (e.g.
+				<code class="font-mono text-[0.875em] bg-bg-surface-raised text-text-primary px-1.5 py-0.5 rounded">![alt](https://example.com/x.png)</code>)
+				is rendered as a plain link rather than an embedded image. To inline an image,
+				upload it as an attachment first — see the Images section above.
 			</li>
 			<li>
 				<strong class="text-text-primary">Raw HTML.</strong> HTML tags inside your post are stripped
@@ -211,8 +285,8 @@ function greet(name) {
 		<h2 class="text-xl font-semibold mb-2">Where each feature works</h2>
 		<p class="text-text-secondary">
 			<strong class="text-text-primary">Thread bodies</strong> support every feature on this page.
-			<strong class="text-text-primary">Replies</strong> omit headings and horizontal rules so nested
-			conversations stay compact.
+			<strong class="text-text-primary">Replies</strong> omit headings, horizontal rules, and images so
+			nested conversations stay compact.
 			<strong class="text-text-primary">Bios</strong> on your profile are deliberately minimal — only
 			paragraphs, bold, italic, strikethrough, inline code, and links.
 		</p>

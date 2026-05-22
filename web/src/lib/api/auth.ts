@@ -105,6 +105,20 @@ export type ErrorCode =
 	// Settings
 	| 'invalid_theme'
 	| 'invalid_font'
+	// Attachments
+	| 'attachment_not_found'
+	| 'attachment_too_large'
+	| 'attachment_mime_rejected'
+	| 'attachment_image_dimensions'
+	| 'attachment_image_decode'
+	| 'attachment_multipart_invalid'
+	| 'budget_exceeded'
+	| 'attachment_filename_invalid'
+	| 'attachment_duplicate_hash'
+	| 'attachment_duplicate_filename'
+	| 'attachment_inline_ref_duplicate'
+	| 'attachment_inline_ref_not_image'
+	| 'attachment_empty'
 	// Catch-all
 	| 'bad_request'
 	| 'rate_limited'

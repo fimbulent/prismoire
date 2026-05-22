@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT pa.post_id AS \"post_id!: String\",\n                  pa.position AS \"position!: i64\",\n                  pa.filename AS \"filename!: String\",\n                  pa.content_hash AS \"content_hash!: Vec<u8>\",\n                  ab.content_type AS \"mime!: String\",\n                  ab.size AS \"size!: i64\"\n             FROM post_attachments pa\n             JOIN attachment_blobs ab ON ab.content_hash = pa.content_hash\n            WHERE pa.post_id IN (SELECT value FROM json_each(?))\n              AND pa.revision = (\n                  SELECT MAX(pr.revision) FROM post_revisions pr\n                   WHERE pr.post_id = pa.post_id\n              )\n            ORDER BY pa.post_id, pa.position",
+  "describe": {
+    "columns": [
+      {
+        "name": "post_id!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "position!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "filename!: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "content_hash!: Vec<u8>",
+        "ordinal": 3,
+        "type_info": "Blob"
+      },
+      {
+        "name": "mime!: String",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "size!: i64",
+        "ordinal": 5,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "2d20535a67c78960303d878f0b17358a91d126c11554376d6f3d2ffc8e24115f"
+}

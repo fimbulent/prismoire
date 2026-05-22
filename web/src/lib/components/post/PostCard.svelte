@@ -4,13 +4,18 @@
 		retractPost,
 		getPostRevisions,
 		type PostResponse,
-		type RevisionHistoryResponse
+		type RevisionHistoryResponse,
+		type RevisionAttachmentEntry,
+		type AttachmentResponse
 	} from '$lib/api/threads';
 	import { reportPost, type ReportReason } from '$lib/api/admin';
 	import { relativeTime } from '$lib/format';
 	import { session } from '$lib/stores/session.svelte';
 	import UserName from '$lib/components/trust/UserName.svelte';
 	import Markdown from '$lib/components/ui/Markdown.svelte';
+	import { extractImageRefs, type MarkdownAttachments } from '$lib/markdown';
+	import AttachmentList from '$lib/components/post/AttachmentList.svelte';
+	import AttachmentPicker, { type PickerSeed } from '$lib/components/post/AttachmentPicker.svelte';
 	import { errorMessage } from '$lib/i18n/errors';
 	import { slide } from 'svelte/transition';
 
@@ -28,6 +33,7 @@
 
 	let editingPostId = $state<string | null>(null);
 	let editBody = $state('');
+	let editAttachments = $state<PickerSeed[]>([]);
 	let editError = $state<string | null>(null);
 	let editSaving = $state(false);
 
@@ -54,12 +60,44 @@
 	function startEditing() {
 		editingPostId = post.id;
 		editBody = post.body;
+		// Seed the picker with the current revision's attachments so the
+		// edit form opens on the same set the post is showing. Carry
+		// `mime` and `size` from the read-side `AttachmentResponse` so
+		// the picker can render the correct type badge and — critically
+		// for images — surface the `⠿` drag-to-inline handle (which is
+		// gated by `mime.startsWith('image/')`). Without these, seeded
+		// entries fall back to `application/octet-stream` and users
+		// editing posts can't re-inline an existing image without
+		// re-uploading. `editPost` accepts the wider shape and
+		// serializes only the fields it knows about.
+		editAttachments = (post.attachments ?? []).map((a) => ({
+			content_hash: a.content_hash,
+			filename: a.filename,
+			mime: a.mime,
+			size: a.size
+		}));
 		editError = null;
+	}
+
+	/** Append a markdown snippet (`![alt](filename)`) to the edit body
+	 *  with a paragraph break, so a newly-uploaded image renders inline
+	 *  by default. Dedup by filename via `extractImageRefs` so re-
+	 *  opening the edit form (which seeds the picker with the post's
+	 *  existing attachments — but they're never re-uploaded, so this
+	 *  branch wouldn't fire for them anyway) or re-uploading the same
+	 *  image doesn't double the body. The trailing newline keeps the
+	 *  cursor on a fresh line after the snippet, ready for the user to
+	 *  keep writing. */
+	function handleAttachmentInsert(snippet: string, filename: string) {
+		if (extractImageRefs(editBody).includes(filename)) return;
+		const trimmed = editBody.replace(/\n+$/, '');
+		editBody = trimmed === '' ? snippet + '\n' : trimmed + '\n\n' + snippet + '\n';
 	}
 
 	function cancelEditing() {
 		editingPostId = null;
 		editBody = '';
+		editAttachments = [];
 		editError = null;
 	}
 
@@ -67,13 +105,15 @@
 		editSaving = true;
 		editError = null;
 		try {
-			const updated = await editPost(post.id, editBody);
+			const updated = await editPost(post.id, editBody, editAttachments);
 			post.body = updated.body;
 			post.edited_at = updated.edited_at;
 			post.revision = updated.revision;
 			post.retracted_at = updated.retracted_at;
+			post.attachments = updated.attachments;
 			editingPostId = null;
 			editBody = '';
+			editAttachments = [];
 			historyData = null;
 			historyPostId = null;
 			delete viewingRevisions[post.id];
@@ -135,6 +175,67 @@
 			return found?.body ?? post.body;
 		}
 		return post.body;
+	}
+
+	/** Attachments for the currently displayed revision.
+	 *
+	 * When viewing the latest revision, return `post.attachments` (the
+	 * live projection from `get_thread` — always available). When
+	 * viewing an older revision, return that revision's signed
+	 * `attachments[]` as decoded by `list_revisions`, including the
+	 * `available` flag so removed bindings render as placeholders. */
+	function getDisplayAttachments(): (AttachmentResponse | RevisionAttachmentEntry)[] {
+		const rev = viewingRevisions[post.id];
+		if (rev !== undefined && historyData && historyData.post_id === post.id) {
+			const found = historyData.revisions.find((r) => r.revision === rev);
+			return found?.attachments ?? [];
+		}
+		return post.attachments ?? [];
+	}
+
+	/** Build the filename → {hash, mime} map the markdown renderer
+	 *  consults for `![](filename)` refs. Keyed by the canonical
+	 *  filename the OP signed (which is exactly what the picker drops
+	 *  into the textarea on drag-insert). Only the OP post can carry
+	 *  attachments, so replies always pass `undefined` — we don't want
+	 *  a stray `![](foo.png)` in a reply body to render against another
+	 *  post's blob.
+	 *
+	 *  For historical revisions, `RevisionAttachmentEntry` may carry
+	 *  `available: false` for bindings that have since been removed —
+	 *  we still include them in the map so the renderer emits an
+	 *  `<img>` (which will 403 at the serve-time gate) rather than
+	 *  silently dropping the ref to a broken-image placeholder. The
+	 *  broken-image UX matches what a reader would see if the blob
+	 *  was server-removed mid-render. */
+	function getAttachmentMap(): MarkdownAttachments | undefined {
+		if (post.parent_id !== null) return undefined;
+		const list = getDisplayAttachments();
+		if (list.length === 0) return undefined;
+		const map: MarkdownAttachments = {};
+		for (const att of list) {
+			map[att.filename] = { content_hash: att.content_hash, mime: att.mime };
+		}
+		return map;
+	}
+
+	/** Attachments to surface as download chips below the body: every
+	 *  binding the post has, *minus* the ones the body inlines as an
+	 *  `<img>`. Suppressing chips for inlined images keeps the reader
+	 *  from seeing the same image twice (once inline via markdown
+	 *  resolution, once as a download chip below). Non-image
+	 *  attachments and image attachments the author didn't `![](…)`-
+	 *  reference still render as chips. Suppression is keyed by
+	 *  filename (the same key the inline ref uses); a `![](foo.png)`
+	 *  inside a fenced code block does not count, because
+	 *  `extractImageRefs` walks tokens (code tokens never produce
+	 *  image children). */
+	function getChipAttachments(): (AttachmentResponse | RevisionAttachmentEntry)[] {
+		const list = getDisplayAttachments();
+		if (list.length === 0) return list;
+		const inlined = new Set(extractImageRefs(getDisplayBody()));
+		if (inlined.size === 0) return list;
+		return list.filter((a) => !(a.mime.startsWith('image/') && inlined.has(a.filename)));
 	}
 
 	function getViewingOldLabel(): string | null {
@@ -277,6 +378,14 @@
 				{editRemaining.toLocaleString()} characters remaining
 			</p>
 		{/if}
+		{#if post.parent_id === null}
+			<AttachmentPicker
+				attachments={editAttachments}
+				onchange={(next) => (editAttachments = next)}
+				oninsert={handleAttachmentInsert}
+				disabled={editSaving}
+			/>
+		{/if}
 		<div class="flex gap-2">
 			<button
 				onclick={saveEdit}
@@ -301,7 +410,17 @@
 			>back to latest</button>
 		</div>
 	{/if}
-	<Markdown source={getDisplayBody()} profile={post.parent_id === null ? 'full' : 'reply'} />
+	<Markdown
+		source={getDisplayBody()}
+		profile={post.parent_id === null ? 'full' : 'reply'}
+		attachments={getAttachmentMap()}
+	/>
+	{#if post.parent_id === null}
+		{@const chipAtts = getChipAttachments()}
+		{#if chipAtts.length > 0}
+			<AttachmentList attachments={chipAtts} />
+		{/if}
+	{/if}
 {/if}
 
 {#if !compact}

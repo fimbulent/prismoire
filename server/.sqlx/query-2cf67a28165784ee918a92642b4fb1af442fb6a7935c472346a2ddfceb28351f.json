@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT pr.revision AS \"revision!: i64\",\n                  pr.body AS \"body!: String\",\n                  pr.created_at AS \"created_at!: String\",\n                  so.payload AS \"payload?: Vec<u8>\"\n             FROM post_revisions pr\n             LEFT JOIN signed_objects so ON so.canonical_hash = pr.canonical_hash\n            WHERE pr.post_id = ?\n            ORDER BY pr.revision ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "revision!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "body!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at!: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "payload?: Vec<u8>",
+        "ordinal": 3,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "2cf67a28165784ee918a92642b4fb1af442fb6a7935c472346a2ddfceb28351f"
+}

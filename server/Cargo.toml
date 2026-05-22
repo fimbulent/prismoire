@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-axum = { version = "0.8", features = ["json"] }
+axum = { version = "0.8", features = ["json", "multipart"] }
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 ciborium = "0.2"
@@ -12,6 +12,14 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 futures = { version = "0.3", default-features = false, features = ["std"] }
 governor = "0.10"
 http = "1"
+# Image decode/encode for attachment uploads (docs/attachments.md §3).
+# Default features cover PNG/JPEG; webp is pulled in for header dimensions
+# and lossless support, but lossy WebP re-encode goes through the `webp`
+# crate because `image`'s built-in encoder is lossless-only as of 0.25.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+# Magic-byte MIME detection — first stage of the two-stage classifier
+# (docs/attachments.md §3 step 2).
+infer = { version = "0.16", default-features = false }
 prismoire-config = { workspace = true }
 quick_cache = "0.6"
 rand = { workspace = true }
@@ -29,8 +37,17 @@ unicode-segmentation = "1"
 tower_governor = { version = "0.8", features = ["axum"] }
 url = "2"
 uuid = { workspace = true, features = ["v4", "serde"] }
+# Lossy WebP re-encode for attachment uploads (docs/attachments.md §3 step 3.4).
+# `image`'s WebP encoder is lossless-only as of 0.25; a lossless re-encode
+# of a lossy 1600 px input frequently busts the 500 KiB cap.
+webp = "0.3"
 # conditional-ui: enables discoverable credentials for passkey autofill
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation", "conditional-ui"] }
+# ZIP archive writer for the GDPR attachments export
+# (`GET /api/me/export/attachments`). The default features pull in
+# deflate; we don't need encryption or other compression methods.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+pulldown-cmark = { version = "0.13.4", default-features = false }
 
 [features]
 # Mounts test-only auth bypass handlers (POST /test/setup-admin and

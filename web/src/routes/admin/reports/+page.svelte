@@ -11,6 +11,7 @@
 	} from '$lib/api/admin';
 	import { relativeTime } from '$lib/format';
 	import Markdown from '$lib/components/ui/Markdown.svelte';
+	import { buildAttachmentMap } from '$lib/markdown';
 	import MoreButton from '$lib/components/ui/MoreButton.svelte';
 	import Checkbox from '$lib/components/ui/Checkbox.svelte';
 	import { errorMessage } from '$lib/i18n/errors';
@@ -285,7 +286,11 @@
 						</span>
 					</div>
 					<div class="text-sm leading-7 text-text-secondary">
-						<Markdown source={report.post_body} profile="reply" />
+						<Markdown
+							source={report.post_body}
+							profile="reply"
+							attachments={buildAttachmentMap(report.attachments)}
+						/>
 					</div>
 				</div>
 

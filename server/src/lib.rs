@@ -21,6 +21,7 @@ pub mod admin_config;
 pub mod admin_overview;
 pub mod admin_routes;
 pub mod admin_watchlists;
+pub mod attachments;
 pub mod auth;
 pub mod csp_report;
 pub mod display_name;
@@ -94,6 +95,7 @@ pub fn build_app(
         auth: auth_limiter,
         user: user_limiter,
         report: report_limiter,
+        upload: upload_limiter,
         csp_report: csp_report_limiter,
     } = layers;
 
@@ -183,7 +185,15 @@ pub fn build_app(
             get(settings::get_settings).patch(settings::update_settings),
         )
         .route("/api/me/export", get(privacy::export_my_data))
+        .route(
+            "/api/me/export/attachments",
+            get(privacy::export_my_attachments),
+        )
         .route("/api/me", delete(privacy::delete_my_account))
+        .route(
+            "/api/attachments/{hash}",
+            get(attachments::serve_attachment),
+        )
         .route("/api/admin/log", get(admin::get_admin_log))
         .route(
             "/api/admin/threads/{id}/lock",
@@ -246,6 +256,31 @@ pub fn build_app(
         ))
         .layer(report_limiter);
 
+    // Attachment uploads carry their own per-session rate limit because
+    // `POST /api/attachments` is by far the most CPU-expensive
+    // authenticated endpoint (multipart parse + image decode + downscale
+    // + re-encode, all on the `spawn_blocking` pool). The general
+    // `user_limiter` would let a single session spam the encode pool;
+    // a dedicated bucket caps sustained throughput without affecting
+    // other write endpoints. The body-size cap on the inner `.layer(...)`
+    // is the wire-canonical `MAX_ATTACHMENT_SIZE` (500 KiB) plus the
+    // configurable `attachments.request_body_overhead_bytes` slack for
+    // multipart boundary headers and form fields (docs/attachments.md
+    // §3 step 0). The route still inherits the outer `ip_limiter`.
+    let upload_route = Router::new()
+        .route(
+            "/api/attachments",
+            post(attachments::upload_attachment).layer(axum::extract::DefaultBodyLimit::max(
+                signed::MAX_ATTACHMENT_SIZE
+                    + shared_state.attachments_config.request_body_overhead_bytes,
+            )),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            shared_state.clone(),
+            session::session_middleware,
+        ))
+        .layer(upload_limiter);
+
     // `/api/auth/session` is intentionally separated from the rest of
     // the authed routes so it does not carry the per-session
     // `user_limiter`. The endpoint is cheap, idempotent, and called by
@@ -299,6 +334,7 @@ pub fn build_app(
         .merge(auth_routes)
         .merge(session_route)
         .merge(report_route)
+        .merge(upload_route)
         .merge(authed);
 
     #[cfg(any(test, feature = "test-auth"))]

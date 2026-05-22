@@ -23,6 +23,43 @@ export interface ThreadListResponse {
 	next_cursor: string | null;
 }
 
+/**
+ * Per-revision attachment binding surfaced on an OP `PostResponse`
+ * (`docs/attachments.md` §4 / §9). The server projects the post's
+ * latest-revision attachment array into this shape so the frontend
+ * has filename, MIME, size, and stable position without a second
+ * round trip.
+ */
+export interface AttachmentResponse {
+	/** Lower-case hex SHA-256 of the blob, used to build the
+	 * `/api/attachments/{hash}` URL. */
+	content_hash: string;
+	/** Sanitized display filename (download UI label + Content-Disposition). */
+	filename: string;
+	/** Canonical MIME from the upload classifier. Whether the
+	 * attachment renders inline or as a chip is now decided by the
+	 * post body's `![](filename)` references — only image MIMEs are
+	 * eligible (`docs/attachments.md` §3). */
+	mime: string;
+	/** Stored size in bytes (post-re-encode for images). */
+	size: number;
+	/** 0..N-1 stable display order within the array. */
+	position: number;
+}
+
+/**
+ * Request-side wire shape for binding an already-uploaded blob to a
+ * post revision. `content_hash` is the lowercase hex returned by
+ * `POST /api/attachments`; `filename` must already be canonical per
+ * server-side FILENAME_RULES. Inline-vs-download intent is not part of
+ * the bind wire shape — the server derives it from `![](filename)`
+ * references in the post body.
+ */
+export interface AttachmentBindRef {
+	content_hash: string;
+	filename: string;
+}
+
 export interface PostResponse {
 	id: string;
 	parent_id: string | null;
@@ -42,6 +79,10 @@ export interface PostResponse {
 	 * subtree. Render a small hint next to the author explaining why a
 	 * distrusted user's post is visible. */
 	distrust_scaffold?: boolean;
+	/** Per-revision attachments for OP posts. Omitted by the server when
+	 * empty; treat `undefined` as the empty array. Replies never carry
+	 * attachments. */
+	attachments?: AttachmentResponse[];
 }
 
 export interface ThreadDetail {
@@ -83,6 +124,8 @@ export interface CreateThreadRequest {
 	body: string;
 	/** When set, this is a link post. Must be http(s) and ≤ 2048 chars. */
 	link?: string;
+	/** Attachment bindings (0..3). Empty / omitted = no attachments. */
+	attachments?: AttachmentBindRef[];
 }
 
 interface FetchOpts {
@@ -226,13 +269,14 @@ export async function getThreadSubtree(
 export async function editPost(
 	postId: string,
 	body: string,
+	attachments: AttachmentBindRef[] = [],
 	opts: FetchOpts = {}
 ): Promise<PostResponse> {
 	const f = opts.fetch ?? globalThis.fetch;
 	const res = await f(`/api/posts/${encodeURIComponent(postId)}`, {
 		method: 'PATCH',
 		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({ body })
+		body: JSON.stringify({ body, attachments })
 	});
 	if (!res.ok) await throwApiError(res);
 	return res.json();
@@ -246,10 +290,37 @@ export async function retractPost(postId: string, opts: FetchOpts = {}): Promise
 	if (!res.ok) await throwApiError(res);
 }
 
+/**
+ * Per-revision attachment entry returned by `GET /api/posts/:id/revisions`.
+ *
+ * Decoded from the revision's signed CBOR payload, so this is the
+ * authoritative record of what the author bound to that specific
+ * revision — independent of the live `post_attachments` projection,
+ * which §6.1 set-diff prunes across all revisions when an attachment
+ * is removed in a later edit. The `available` flag distinguishes
+ * "still bound and servable" from "removed later or blob missing":
+ *
+ *  - `available: true`  — render normally (img / download chip).
+ *  - `available: false` — render a `[attachment removed]` placeholder;
+ *                         the `/api/attachments/{hash}` URL would 404.
+ */
+export interface RevisionAttachmentEntry {
+	content_hash: string;
+	filename: string;
+	mime: string;
+	size: number;
+	position: number;
+	available: boolean;
+}
+
 export interface RevisionResponse {
 	revision: number;
 	body: string;
 	created_at: string;
+	/** Attachments signed into this revision, with availability flag.
+	 * Empty when the revision has been retracted (payload erased) or
+	 * when the post is a reply (replies cannot carry attachments). */
+	attachments: RevisionAttachmentEntry[];
 }
 
 export interface RevisionHistoryResponse {

@@ -15,7 +15,9 @@ use crate::trust::{
 };
 use uuid::Uuid;
 
-use super::common::{PostResponse, RepliesPageResponse, SubtreeResponse, ThreadDetailResponse};
+use super::common::{
+    AttachmentResponse, PostResponse, RepliesPageResponse, SubtreeResponse, ThreadDetailResponse,
+};
 
 /// Maximum number of top-level replies returned in the initial thread view.
 const TOP_LEVEL_LIMIT: usize = 30;
@@ -360,6 +362,7 @@ impl TreeCtx<'_> {
         current_depth: usize,
         max_depth: usize,
         bodies: &HashMap<String, BodyInfo>,
+        attachments: &HashMap<String, Vec<AttachmentResponse>>,
         focus_path: &HashSet<usize>,
     ) -> PostResponse {
         let meta = &self.tree.metas[idx];
@@ -383,7 +386,7 @@ impl TreeCtx<'_> {
                     } else {
                         current_depth + 1
                     };
-                    self.build_tree(ci, child_depth, max_depth, bodies, focus_path)
+                    self.build_tree(ci, child_depth, max_depth, bodies, attachments, focus_path)
                 })
                 .collect()
         };
@@ -400,6 +403,12 @@ impl TreeCtx<'_> {
         let is_distrusted_scaffold = self.viewer.reader_id.as_deref()
             != Some(meta.author_id.as_str())
             && self.viewer.distrust_set.contains(&meta.author_id);
+
+        // Only OPs carry attachments per §3, and replies have no rows
+        // in `post_attachments` anyway — the lookup just yields an
+        // empty vec for them, which serializes away under
+        // `skip_serializing_if = "Vec::is_empty"`.
+        let post_attachments = attachments.get(&meta.id).cloned().unwrap_or_default();
 
         PostResponse {
             viewer: UserViewerInfo::build(
@@ -422,6 +431,7 @@ impl TreeCtx<'_> {
             children: child_posts,
             has_more_children,
             distrust_scaffold: is_distrusted_scaffold,
+            attachments: post_attachments,
         }
     }
 
@@ -692,6 +702,7 @@ pub async fn get_thread(
     }
 
     let bodies = fetch_bodies(&state.db, &post_ids).await?;
+    let attachments = super::common::fetch_latest_attachments(&state.db, &post_ids).await?;
 
     let op_meta = &meta_tree.metas[meta_tree.root_idx];
     let op_body = bodies.get(&op_meta.id);
@@ -699,6 +710,7 @@ pub async fn get_thread(
         Some(bi) => (bi.body.clone(), bi.edited_at.clone(), bi.revision),
         None => (String::new(), None, 0),
     };
+    let op_attachments = attachments.get(&op_meta.id).cloned().unwrap_or_default();
     // If the OP author is distrusted (but the thread is still rendering
     // because the reader has a reply below), flag the scaffold marker so
     // the client can show a hint.
@@ -707,7 +719,7 @@ pub async fn get_thread(
 
     let op_children: Vec<PostResponse> = top_level
         .into_iter()
-        .map(|ci| ctx.build_tree(ci, 1, MAX_DEPTH, &bodies, &no_focus))
+        .map(|ci| ctx.build_tree(ci, 1, MAX_DEPTH, &bodies, &attachments, &no_focus))
         .collect();
 
     let reply_count = count_tree_replies(&op_children);
@@ -733,6 +745,7 @@ pub async fn get_thread(
         children: op_children,
         has_more_children: false,
         distrust_scaffold: op_distrust_scaffold,
+        attachments: op_attachments,
     };
 
     Ok(Json(ThreadDetailResponse {
@@ -846,6 +859,7 @@ async fn build_focused_response(
     }
 
     let bodies = fetch_bodies(db, &post_ids).await?;
+    let attachments = super::common::fetch_latest_attachments(db, &post_ids).await?;
 
     let op_meta = &meta_tree.metas[meta_tree.root_idx];
     let op_body = bodies.get(&op_meta.id);
@@ -853,6 +867,7 @@ async fn build_focused_response(
         Some(bi) => (bi.body.clone(), bi.edited_at.clone(), bi.revision),
         None => (String::new(), None, 0),
     };
+    let op_attachments = attachments.get(&op_meta.id).cloned().unwrap_or_default();
     // If the OP author is distrusted (but the thread is still rendering
     // because the reader has a reply below), flag the scaffold marker so
     // the client can show a hint.
@@ -861,7 +876,7 @@ async fn build_focused_response(
 
     let op_children: Vec<PostResponse> = top_level
         .into_iter()
-        .map(|ci| ctx.build_tree(ci, 1, MAX_DEPTH, &bodies, &focus_path))
+        .map(|ci| ctx.build_tree(ci, 1, MAX_DEPTH, &bodies, &attachments, &focus_path))
         .collect();
 
     let reply_count = count_tree_replies(&op_children);
@@ -887,6 +902,7 @@ async fn build_focused_response(
         children: op_children,
         has_more_children: false,
         distrust_scaffold: op_distrust_scaffold,
+        attachments: op_attachments,
     };
 
     Ok(Json(ThreadDetailResponse {
@@ -968,10 +984,11 @@ pub async fn get_thread_replies(
     }
 
     let bodies = fetch_bodies(&state.db, &post_ids).await?;
+    let attachments = super::common::fetch_latest_attachments(&state.db, &post_ids).await?;
 
     let replies: Vec<PostResponse> = page
         .into_iter()
-        .map(|ci| ctx.build_tree(ci, 1, MAX_DEPTH, &bodies, &no_focus))
+        .map(|ci| ctx.build_tree(ci, 1, MAX_DEPTH, &bodies, &attachments, &no_focus))
         .collect();
 
     Ok(Json(RepliesPageResponse { replies, has_more }))
@@ -1032,7 +1049,8 @@ pub async fn get_thread_subtree(
     );
 
     let bodies = fetch_bodies(&state.db, &post_ids).await?;
-    let post = ctx.build_tree(subtree_root, 0, MAX_DEPTH, &bodies, &no_focus);
+    let attachments = super::common::fetch_latest_attachments(&state.db, &post_ids).await?;
+    let post = ctx.build_tree(subtree_root, 0, MAX_DEPTH, &bodies, &attachments, &no_focus);
 
     Ok(Json(SubtreeResponse { post }))
 }

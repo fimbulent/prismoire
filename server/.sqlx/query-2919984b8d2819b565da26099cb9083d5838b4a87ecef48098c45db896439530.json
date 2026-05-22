@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n               rebuild_debounce_ms AS \"rebuild_debounce_ms!: i64\",\n               rebuild_min_interval_ms AS \"rebuild_min_interval_ms!: i64\",\n               rebuild_max_interval_ms AS \"rebuild_max_interval_ms!: i64\",\n               rebuild_bfs_cache_bytes AS \"rebuild_bfs_cache_bytes!: i64\",\n               source_repo_url,\n               attachment_budget_cap_bytes AS \"attachment_budget_cap_bytes!: i64\",\n               attachment_budget_refill_bytes_per_day AS \"attachment_budget_refill_bytes_per_day!: i64\"\n           FROM instance_config\n           WHERE id = 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "rebuild_debounce_ms!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "rebuild_min_interval_ms!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "rebuild_max_interval_ms!: i64",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "rebuild_bfs_cache_bytes!: i64",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "source_repo_url",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "attachment_budget_cap_bytes!: i64",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "attachment_budget_refill_bytes_per_day!: i64",
+        "ordinal": 6,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "2919984b8d2819b565da26099cb9083d5838b4a87ecef48098c45db896439530"
+}

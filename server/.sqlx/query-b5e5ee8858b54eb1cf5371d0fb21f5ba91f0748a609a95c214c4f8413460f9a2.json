@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM attachment_blobs WHERE refcount = 0 AND NOT EXISTS ( SELECT 1 FROM attachment_staging s WHERE s.content_hash = attachment_blobs.content_hash )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "b5e5ee8858b54eb1cf5371d0fb21f5ba91f0748a609a95c214c4f8413460f9a2"
+}

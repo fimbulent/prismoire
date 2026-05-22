@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 1 AS \"n!: i64\" FROM post_attachments pa JOIN posts p ON p.id = pa.post_id WHERE pa.content_hash = ? AND p.author = ? LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "n!: i64",
+        "ordinal": 0,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "3a0c207702bb629497780caf6a03543158f4ebce4b290d0628bce807e1698de3"
+}

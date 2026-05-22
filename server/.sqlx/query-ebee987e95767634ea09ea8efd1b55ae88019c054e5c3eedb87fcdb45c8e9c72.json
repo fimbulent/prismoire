@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO attachment_blobs\n            (content_hash, blob, content_type, size, uploader, created_at)\n         VALUES (?, ?, ?, ?, ?, ?)\n         ON CONFLICT(content_hash) DO UPDATE SET\n            blob = COALESCE(attachment_blobs.blob, excluded.blob)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "ebee987e95767634ea09ea8efd1b55ae88019c054e5c3eedb87fcdb45c8e9c72"
+}

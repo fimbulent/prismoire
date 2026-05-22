@@ -5,6 +5,10 @@ use axum::extract::State;
 use axum::response::IntoResponse;
 use serde::Deserialize;
 
+use crate::attachments::{
+    AttachmentBindRef, hex_encode, persist_attachment_bindings, validate_attachments,
+    validate_body_attachment_refs,
+};
 use crate::error::{AppError, ErrorCode};
 use crate::room_name::{is_announcements, validate_room_slug};
 use crate::session::AuthUser;
@@ -13,8 +17,8 @@ use crate::state::AppState;
 use crate::trust::UserViewerInfo;
 
 use super::common::{
-    MAX_BODY_LEN, PostResponse, ThreadDetailResponse, normalize_url_for_fts, validate_body,
-    validate_link, validate_title,
+    AttachmentResponse, MAX_BODY_LEN, PostResponse, ThreadDetailResponse, normalize_url_for_fts,
+    validate_body, validate_link, validate_title,
 };
 
 /// Wire request for `POST /api/threads`.
@@ -33,6 +37,13 @@ pub struct CreateThreadWithRoomRequest {
     pub body: String,
     #[serde(default)]
     pub link: Option<String>,
+    /// Request-side attachment array (`docs/attachments.md` §6). Each
+    /// entry references a hash the caller staged via `POST
+    /// /api/attachments` (or already bound to a prior post). Empty by
+    /// default; capped at `MAX_ATTACHMENTS_PER_OP` inside
+    /// [`bind_attachments`].
+    #[serde(default)]
+    pub attachments: Vec<AttachmentBindRef>,
 }
 
 /// Create a new thread, implicitly creating the room if it doesn't exist.
@@ -95,27 +106,15 @@ pub async fn create_thread(
     let thread_id = thread_uuid.to_string();
     let post_id = post_uuid.to_string();
 
-    let signed = signing::sign_post_revision(
-        &state.db,
-        &user.user_id,
-        &post_uuid,
-        &thread_uuid,
-        None,
-        0,
-        &body,
-        created_at_ms,
-    )
-    .await?;
-    let signature = signed.signature.clone();
-    let canonical_hash_db: Vec<u8> = signed.canonical_hash.to_vec();
-
     // Normalized form drops scheme + leading `www.` so those near-
     // universal tokens never enter `threads_fts`. Raw `link_url` is
     // preserved for display.
     let link_url_normalized = link_url.as_deref().map(normalize_url_for_fts);
 
     // Wrap the thread / OP-post / revision / canonical-bytes inserts in
-    // a single transaction.
+    // a single transaction. Attachment binding rows go in *after* the
+    // post_revisions row (FK requirement) but the validated refs are
+    // resolved beforehand so they can be passed to the signer.
     let mut tx = state.db.begin().await?;
 
     sqlx::query!(
@@ -143,6 +142,36 @@ pub async fn create_thread(
     .execute(&mut *tx)
     .await?;
 
+    // Resolve the request-side attachment array into validated refs
+    // for signing (no DB writes yet — the `post_attachments` rows
+    // require a `post_revisions` parent that doesn't exist until the
+    // signed bytes have been computed).
+    let signed_attachments = validate_attachments(&mut tx, &user.user_id, &req.attachments).await?;
+
+    // Cross-check `![](filename)` references in the body against the
+    // resolved attachments: each must hit an image MIME and may appear
+    // at most once. Dangling refs are tolerated (renderer placeholder).
+    validate_body_attachment_refs(&body, &signed_attachments)?;
+
+    // Load the user's signing key via the same tx connection. With a
+    // single-connection pool (the integration-test setup), calling the
+    // pool-fetching `sign_post_revision(&state.db, ...)` while holding
+    // an open tx deadlocks; routing the key fetch through `tx` keeps
+    // everything on one connection.
+    let signing_key = signing::load_active_signing_key(&mut *tx, &user.user_id).await?;
+    let signed = signing::sign_post_revision_with_key(
+        &signing_key,
+        &post_uuid,
+        &thread_uuid,
+        None,
+        0,
+        &body,
+        created_at_ms,
+        signed_attachments.clone(),
+    );
+    let signature = signed.signature.clone();
+    let canonical_hash_db: Vec<u8> = signed.canonical_hash.to_vec();
+
     sqlx::query!(
         "INSERT INTO post_revisions (post_id, revision, body, signature, canonical_hash, created_at) \
          VALUES (?, 0, ?, ?, ?, ?)",
@@ -154,6 +183,10 @@ pub async fn create_thread(
     )
     .execute(&mut *tx)
     .await?;
+
+    // Now that revision 0 exists, project the validated refs into
+    // `post_attachments` and drop the matching staging rows.
+    persist_attachment_bindings(&mut tx, &post_id, 0, &signed_attachments).await?;
 
     // Dual-write the canonical bytes into the federation-shared store
     // (`signed_objects`). The post_revisions row above is the local
@@ -168,6 +201,23 @@ pub async fn create_thread(
     .await?;
 
     tx.commit().await?;
+
+    // Project the just-signed array into the response shape. The OP
+    // is the only post that can carry attachments, so this is the
+    // only PostResponse on the create path that gets a non-empty
+    // `attachments` field. Position is the array index — the same
+    // convention `post_attachments.position` records.
+    let response_attachments: Vec<AttachmentResponse> = signed_attachments
+        .iter()
+        .enumerate()
+        .map(|(idx, r)| AttachmentResponse {
+            content_hash: hex_encode(&r.content_hash),
+            filename: r.filename.clone(),
+            mime: r.mime.clone(),
+            size: r.size as i64,
+            position: idx as i64,
+        })
+        .collect();
 
     Ok((
         axum::http::StatusCode::CREATED,
@@ -196,6 +246,7 @@ pub async fn create_thread(
                 viewer: UserViewerInfo::self_view(),
                 has_more_children: false,
                 distrust_scaffold: false,
+                attachments: response_attachments,
             },
             reply_count: 0,
             total_reply_count: 0,

@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT pa.post_id AS \"post_id!: String\",\n                  pa.revision AS \"revision!: i64\",\n                  pa.position AS \"position!: i64\",\n                  pa.content_hash AS \"content_hash!: Vec<u8>\",\n                  pa.filename AS \"filename!: String\",\n                  pr.created_at AS \"rev_created_at!: String\"\n             FROM post_attachments pa\n             JOIN posts p ON p.id = pa.post_id\n             JOIN post_revisions pr ON pr.post_id = pa.post_id AND pr.revision = pa.revision\n            WHERE p.author = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "post_id!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "revision!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "position!: i64",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "content_hash!: Vec<u8>",
+        "ordinal": 3,
+        "type_info": "Blob"
+      },
+      {
+        "name": "filename!: String",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "rev_created_at!: String",
+        "ordinal": 5,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "7f04d6affcd4e205d6e16047aa959bf01a05eee50812835e07452ed06744f51a"
+}

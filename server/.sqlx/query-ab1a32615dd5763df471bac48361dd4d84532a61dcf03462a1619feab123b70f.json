@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO user_storage_budgets\n            (user_id, available_bytes, last_refill_at, lifetime_spent)\n         VALUES (?, ?, ?, ?)\n         ON CONFLICT(user_id) DO UPDATE SET\n            available_bytes = excluded.available_bytes,\n            last_refill_at  = excluded.last_refill_at,\n            lifetime_spent  = excluded.lifetime_spent",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "ab1a32615dd5763df471bac48361dd4d84532a61dcf03462a1619feab123b70f"
+}

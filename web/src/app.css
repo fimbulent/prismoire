@@ -497,3 +497,75 @@
 	--danger: #e27878;
 	--success: #b4be82;
 }
+
+/* Inline attachment image (docs/attachments.md §9 — "Attachments in
+   read views"). Fit-contain caps both dimensions so a tall portrait
+   doesn't push the rest of the post off-screen; the height ceiling is
+   relative to the viewport so it scales sensibly on mobile and on
+   wide monitors. The 0.75rem vertical rhythm matches the markdown
+   block spacing above/below. */
+.attachment-inline {
+	display: block;
+	max-width: 100%;
+	height: auto;
+	max-height: 60vh;
+	object-fit: contain;
+	margin-block: 0.75rem;
+	/* Subtle border + rounded corners so an image with a near-bg color
+	   at its edges (screenshots on a light/dark UI, plots with no
+	   chrome) has a visible boundary against the post background. */
+	border: 1px solid var(--border);
+	border-radius: 0.375rem;
+}
+
+/* Image figures (`![alt](file "caption")`). The figure owns the
+   vertical rhythm; the contained <img> zeros its own block margins
+   so they don't double up inside the figure.
+   `display: flex; align-items: center` centers both image and caption
+   horizontally as a unit — without this, an image narrower than the
+   post column would sit flush-left with a centered caption floating
+   in the middle of the column, which reads as visually disjointed.
+   Column-saturated images render exactly as before since
+   `max-width: 100%` on `.attachment-inline` still fills the figure's
+   available width.
+   These rules are global (not scoped to Markdown.svelte) so the
+   `/help/markdown` page can demo a figure with a static asset URL
+   without round-tripping through the trust-gated
+   `/api/attachments/{hash}` route. */
+.markdown-figure {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	margin-block: 0.75em;
+}
+
+.markdown-figure .attachment-inline {
+	margin-block: 0;
+}
+
+.markdown-figcaption {
+	text-align: center;
+	color: var(--text-secondary);
+	font-size: 0.8em;
+	font-style: italic;
+	margin-top: 0.4em;
+	/* Captions are short by convention; allow wrapping but keep them
+	   easy to read with `pretty` for last-line balance. */
+	text-wrap: pretty;
+}
+
+/* Inline placeholder emitted by the markdown image renderer when a
+   `![](filename)` ref can't be resolved — either the surface
+   intentionally suppresses inline images (search results, profile
+   bio, admin views without attachments) or the ref is dangling.
+   Rendered inline so it doesn't disrupt paragraph flow; muted colour
+   + slightly smaller font signal "this is a placeholder, not real
+   content" without screaming for attention. The `[image: ...]`
+   bracket convention is borrowed from screen-reader image-omitted
+   announcements, so the visual reading matches the assistive-tech
+   experience. */
+.image-omitted {
+	color: var(--text-muted);
+	font-size: 0.9em;
+	font-style: italic;
+}

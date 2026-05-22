@@ -17,6 +17,7 @@
 	import Markdown from '$lib/components/ui/Markdown.svelte';
 	import { relativeTime } from '$lib/format';
 	import { smartypants } from '$lib/typography';
+	import { buildAttachmentMap } from '$lib/markdown';
 	import type { ActivityItem } from '$lib/api/users';
 
 	interface Props {
@@ -74,7 +75,11 @@
 			{/if}
 		{/if}
 		<div class="text-prose leading-7 text-text-secondary mt-1">
-			<Markdown source={item.body} profile={item.type === 'thread_started' ? 'full' : 'reply'} />
+			<Markdown
+				source={item.body}
+				profile={item.type === 'thread_started' ? 'full' : 'reply'}
+				attachments={buildAttachmentMap(item.attachments)}
+			/>
 		</div>
 	</div>
 </div>

@@ -1,4 +1,5 @@
 import { throwApiError, type FetchFn } from './auth';
+import type { AttachmentResponse } from './threads';
 
 export interface AdminLogEntry {
 	id: string;
@@ -84,6 +85,11 @@ export interface AdminConfig {
 	rebuild_max_interval_ms: number;
 	rebuild_bfs_cache_bytes: number;
 	source_repo_url: string | null;
+	/** Per-user attachment-storage budget cap, in bytes
+	 * (docs/attachments.md §10.3). Token-bucket ceiling. */
+	attachment_budget_cap_bytes: number;
+	/** Per-user attachment-storage budget refill, bytes per day. */
+	attachment_budget_refill_bytes_per_day: number;
 }
 
 export type AdminConfigUpdate = Partial<{
@@ -92,6 +98,8 @@ export type AdminConfigUpdate = Partial<{
 	rebuild_max_interval_ms: number;
 	rebuild_bfs_cache_bytes: number;
 	source_repo_url: string;
+	attachment_budget_cap_bytes: number;
+	attachment_budget_refill_bytes_per_day: number;
 }>;
 
 export async function getAdminConfig(opts: FetchOpts = {}): Promise<AdminConfig> {
@@ -140,6 +148,9 @@ export interface ReportResponse {
 	resolved_by_name: string | null;
 	resolved_at: string | null;
 	report_count: number;
+	/** Attachments bound to the reported post's latest revision. Omitted by
+	 * the server when empty; treat `undefined` as the empty array. */
+	attachments?: AttachmentResponse[];
 }
 
 export interface ReportListResponse {

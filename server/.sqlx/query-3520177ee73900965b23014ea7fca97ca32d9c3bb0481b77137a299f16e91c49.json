@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "WITH user_blobs AS (\n            SELECT DISTINCT pa.content_hash\n              FROM post_attachments pa\n              JOIN posts p ON p.id = pa.post_id\n             WHERE p.author = ?\n            UNION\n            SELECT s.content_hash FROM attachment_staging s WHERE s.uploader = ?\n           )\n           SELECT ab.content_hash AS \"content_hash!: Vec<u8>\",\n                  ab.blob AS \"blob?: Vec<u8>\",\n                  ab.content_type AS \"mime!: String\",\n                  ab.size AS \"size!: i64\"\n             FROM attachment_blobs ab\n             JOIN user_blobs ub ON ub.content_hash = ab.content_hash",
+  "describe": {
+    "columns": [
+      {
+        "name": "content_hash!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "blob?: Vec<u8>",
+        "ordinal": 1,
+        "type_info": "Blob"
+      },
+      {
+        "name": "mime!: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "size!: i64",
+        "ordinal": 3,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "3520177ee73900965b23014ea7fca97ca32d9c3bb0481b77137a299f16e91c49"
+}

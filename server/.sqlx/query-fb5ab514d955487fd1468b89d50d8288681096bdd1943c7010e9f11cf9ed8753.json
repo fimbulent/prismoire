@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO attachment_staging\n            (content_hash, uploader, expires_at, created_at)\n         VALUES (?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "fb5ab514d955487fd1468b89d50d8288681096bdd1943c7010e9f11cf9ed8753"
+}

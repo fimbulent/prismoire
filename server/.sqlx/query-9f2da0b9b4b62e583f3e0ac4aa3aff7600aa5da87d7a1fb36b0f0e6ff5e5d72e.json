@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 1 AS \"n!: i64\" FROM attachment_staging WHERE content_hash = ? AND uploader = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "n!: i64",
+        "ordinal": 0,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "9f2da0b9b4b62e583f3e0ac4aa3aff7600aa5da87d7a1fb36b0f0e6ff5e5d72e"
+}

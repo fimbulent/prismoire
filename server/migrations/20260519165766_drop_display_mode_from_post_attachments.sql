@@ -1,0 +1,17 @@
+-- Drop the `post_attachments.display_mode` column.
+--
+-- Layout intent (inline vs download) is no longer per-binding metadata
+-- carried in the signed payload. Instead, the post body's
+-- `![](filename)` markdown references decide what renders inline at
+-- read time, while every other attachment defaults to the download
+-- chip — and `Content-Disposition` on `GET /api/attachments/{hash}` is
+-- derived from the blob's MIME (`image/*` → `inline`, otherwise
+-- `attachment`).
+--
+-- See `docs/attachments.md` §3 (body-driven inline references) and §4
+-- step 5 (serve-time disposition).
+--
+-- The column has only a CHECK constraint (no UNIQUE / PRIMARY KEY /
+-- index references it), so a plain `ALTER TABLE DROP COLUMN` is
+-- sufficient — no table-rebuild dance required.
+ALTER TABLE post_attachments DROP COLUMN display_mode;

@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT pa.revision AS \"revision!: i64\",\n                      pa.position AS \"position!: i64\",\n                      pa.content_hash AS \"content_hash!: Vec<u8>\",\n                      pa.filename AS \"filename!: String\",\n                      ab.size AS \"size!: i64\",\n                      ab.content_type AS \"mime!: String\"\n                 FROM post_attachments pa\n                 JOIN attachment_blobs ab ON ab.content_hash = pa.content_hash\n                WHERE pa.post_id = ?\n                ORDER BY pa.revision ASC, pa.position ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "revision!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "position!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "content_hash!: Vec<u8>",
+        "ordinal": 2,
+        "type_info": "Blob"
+      },
+      {
+        "name": "filename!: String",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "size!: i64",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "mime!: String",
+        "ordinal": 5,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "b8dd2b0e4d19bcafb2e7862619e2cd2140988aafc438f6d04815b50d7082a2c7"
+}

@@ -1,11 +1,13 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+use prismoire_config::AttachmentsConfig;
 use sqlx::SqlitePool;
 use tokio::sync::Notify;
 use webauthn_rs::Webauthn;
 
 use crate::error::{AppError, ErrorCode};
+use crate::instance_config::AttachmentBudget;
 use crate::metrics::Metrics;
 use crate::trust::{PendingDeltas, RebuildSchedule, TrustGraph};
 
@@ -50,6 +52,17 @@ pub struct AppState {
     /// render the AGPL source link in the footer without a DB roundtrip
     /// per request. `None` only before the initial setup flow completes.
     pub source_repo_url: Arc<std::sync::RwLock<Option<String>>>,
+    /// Live mirror of the attachment-budget columns from
+    /// `instance_config` (docs/attachments.md §10.3). Read by the
+    /// upload handler at debit time so admin edits via
+    /// `/api/admin/config` take effect on the next upload without a
+    /// server restart.
+    pub attachment_budget: Arc<std::sync::RwLock<AttachmentBudget>>,
+    /// Server-static attachment-processing knobs from TOML
+    /// (`docs/attachments.md` §10.2): decode/output pixel caps, staging
+    /// TTL, sweep cadence, request-body overhead. Loaded once at
+    /// startup; restart-required to change.
+    pub attachments_config: AttachmentsConfig,
 }
 
 impl AppState {

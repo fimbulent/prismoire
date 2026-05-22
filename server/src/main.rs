@@ -8,7 +8,8 @@ use prismoire_config::Config;
 use prismoire_server::middleware::csrf::AllowedOrigin;
 use prismoire_server::middleware::security_headers::HttpsEnabled;
 use prismoire_server::{
-    AppState, build_app, csp_report, instance_config, metrics, rate_limit, session, trust,
+    AppState, attachments, build_app, csp_report, instance_config, metrics, rate_limit, session,
+    trust,
 };
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqlitePoolOptions;
@@ -128,6 +129,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let loaded_config = instance_config::load_from_db(&pool).await?;
     let rebuild_schedule = Arc::new(RwLock::new(loaded_config.rebuild_schedule));
     let source_repo_url = Arc::new(RwLock::new(loaded_config.source_repo_url));
+    let attachment_budget = Arc::new(RwLock::new(loaded_config.attachment_budget));
 
     let shared_state = Arc::new(AppState {
         db: pool.clone(),
@@ -140,6 +142,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pending_deltas: pending_deltas.clone(),
         rebuild_schedule: rebuild_schedule.clone(),
         source_repo_url: source_repo_url.clone(),
+        attachment_budget: attachment_budget.clone(),
+        attachments_config: config.attachments.clone(),
     });
 
     // Spawn the debounced trust graph rebuild background task.
@@ -164,6 +168,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Spawn the expired session and stale auth challenge cleanup sweep.
     // Runs once per hour (see `session::cleanup_loop`).
     tokio::spawn(session::cleanup_loop(shared_state.db.clone()));
+
+    // Spawn the attachment staging-expiry + orphan-blob GC sweep.
+    // Cadence is the server-static `attachments.sweep_interval_seconds`
+    // from TOML (docs/attachments.md §10.2). See `attachments::sweep`.
+    tokio::spawn(attachments::sweep_loop(
+        shared_state.db.clone(),
+        config.attachments.sweep_interval_seconds,
+    ));
 
     let layers = rate_limit::build_layers(&config.rate_limit, config.server.trust_proxy_headers);
 

@@ -14,6 +14,8 @@ pub struct Config {
     pub webauthn: WebauthnConfig,
     #[serde(default)]
     pub rate_limit: RateLimitConfig,
+    #[serde(default)]
+    pub attachments: AttachmentsConfig,
 }
 
 /// Server configuration (`[server]` section).
@@ -96,6 +98,62 @@ impl Default for RateLimitConfig {
             auth_burst_size: 5,
             user_replenish_seconds: 1,
             user_burst_size: 20,
+        }
+    }
+}
+
+/// Attachment processing configuration (`[attachments]` section).
+///
+/// These knobs (docs/attachments.md §10.2) are federation-inert: they
+/// shape how the local origin handles an upload (decode safety,
+/// re-encode target, sweep cadence), and once bytes are
+/// hash-addressed and federated, peers serve cached bytes without
+/// re-processing. Live alongside the other deployment-shaped knobs
+/// rather than in `instance_config` because changing them requires no
+/// audit log and applies on restart, not live.
+///
+/// Wire-canonical constants (`MAX_ATTACHMENT_SIZE`,
+/// `ALLOWED_MIMES`, etc.) are §10.1 protocol invariants and live in
+/// `server/src/signed.rs` as `const` — NOT here.
+#[derive(Clone, Deserialize)]
+#[serde(default)]
+pub struct AttachmentsConfig {
+    /// Pixel-bomb guard. Maximum width or height (px) accepted before
+    /// the decoder allocates a pixel buffer. Applied at the
+    /// header-read step (`image::ImageReader::into_dimensions`),
+    /// before any work proportional to pixel count. Local upload
+    /// policy only — peers do not re-decode incoming blobs.
+    pub max_image_px_decode: u32,
+    /// Server-side re-encode cap. Maximum longest-side dimension (px)
+    /// of the stored image. Sized to the inline-image rendering width
+    /// (`--container-measure: 70ch` × 2-3× device-pixel density).
+    /// Storage and bandwidth follow this cap, not the decode guard.
+    pub max_image_px_output: u32,
+    /// Time-to-live (seconds) for `attachment_staging` rows: an upload
+    /// that never gets bound to a post is swept after this duration.
+    /// Purely local table housekeeping; not on the wire.
+    pub staging_ttl_seconds: u64,
+    /// Cadence of the staging sweep / orphan-GC background task.
+    /// Sized so swept rows are reaped within roughly one TTL window
+    /// of their expiry.
+    pub sweep_interval_seconds: u64,
+    /// Body-size slack (bytes) allowed on the upload route above the
+    /// wire-invariant `MAX_ATTACHMENT_SIZE`. Covers multipart
+    /// boundary headers and small form fields so legitimate uploads
+    /// of a single 500-KiB blob fit; tuned so the Axum body-limit
+    /// rejects multi-gigabyte abuse before the §3 step 1 check would
+    /// buffer it. Not a wire concern.
+    pub request_body_overhead_bytes: usize,
+}
+
+impl Default for AttachmentsConfig {
+    fn default() -> Self {
+        Self {
+            max_image_px_decode: 4096,
+            max_image_px_output: 1600,
+            staging_ttl_seconds: 24 * 60 * 60,
+            sweep_interval_seconds: 60 * 60,
+            request_body_overhead_bytes: 8 * 1024,
         }
     }
 }

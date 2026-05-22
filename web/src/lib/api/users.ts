@@ -1,4 +1,5 @@
 import { throwApiError, type FetchFn } from './auth';
+import type { AttachmentResponse } from './threads';
 
 /**
  * Per-viewer envelope serialized on the wire as the `"viewer"` field
@@ -85,6 +86,10 @@ export interface ActivityItem {
 	room_slug: string;
 	body: string;
 	created_at: string;
+	/** Attachments bound to the post's latest revision. Omitted by the
+	 * server when empty; treat `undefined` as the empty array. Only
+	 * thread-OP rows can carry attachments — reply rows always omit. */
+	attachments?: AttachmentResponse[];
 }
 
 export interface ActivityResponse {

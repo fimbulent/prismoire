@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM attachment_staging WHERE uploader = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "de393090d7ce0b0fb5188a98e1101a72d994786457209bb622b8c7567df41df3"
+}

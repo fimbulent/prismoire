@@ -1,14 +1,19 @@
 <script lang="ts">
-	import { renderMarkdown, type MarkdownProfile } from '$lib/markdown';
+	import {
+		renderMarkdown,
+		type MarkdownProfile,
+		type MarkdownAttachments
+	} from '$lib/markdown';
 
 	interface Props {
 		source: string;
 		profile?: MarkdownProfile;
+		attachments?: MarkdownAttachments;
 	}
 
-	let { source, profile = 'full' }: Props = $props();
+	let { source, profile = 'full', attachments }: Props = $props();
 
-	let html = $derived(renderMarkdown(source, profile));
+	let html = $derived(renderMarkdown(source, profile, attachments));
 </script>
 
 <div class="markdown font-prose text-prose" class:prominent={profile === 'full'}>
@@ -244,4 +249,11 @@
 		text-decoration: line-through;
 		color: var(--text-muted);
 	}
+
+	/* `.markdown-figure` / `.markdown-figcaption` rules live in
+	   `src/app.css` alongside `.attachment-inline` — putting them
+	   globally keeps the help page's hand-crafted image example
+	   visually consistent with what the live renderer emits, without
+	   needing the help page to construct a fake `/api/attachments/`
+	   round-trip just to demo a figure. */
 </style>

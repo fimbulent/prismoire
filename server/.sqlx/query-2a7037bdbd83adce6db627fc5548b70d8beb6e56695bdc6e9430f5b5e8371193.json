@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM post_attachments WHERE post_id = ? AND content_hash = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "2a7037bdbd83adce6db627fc5548b70d8beb6e56695bdc6e9430f5b5e8371193"
+}

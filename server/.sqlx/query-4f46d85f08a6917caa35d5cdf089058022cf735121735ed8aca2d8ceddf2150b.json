@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT content_hash AS \"content_hash!: Vec<u8>\"\n             FROM post_attachments\n            WHERE post_id = ? AND revision = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "content_hash!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4f46d85f08a6917caa35d5cdf089058022cf735121735ed8aca2d8ceddf2150b"
+}

@@ -104,6 +104,21 @@ const ERROR_MESSAGES: Record<ErrorCode, string> = {
 	invalid_theme: 'Invalid theme.',
 	invalid_font: 'Invalid font.',
 
+	// Attachments
+	attachment_not_found: 'Attachment not found.',
+	attachment_too_large: 'Attachment is too large.',
+	attachment_mime_rejected: 'That file type is not allowed.',
+	attachment_image_dimensions: 'Image dimensions exceed the limit.',
+	attachment_image_decode: 'Image could not be decoded.',
+	attachment_multipart_invalid: 'Upload was malformed. Please try again.',
+	budget_exceeded: "You've reached your attachment storage limit.",
+	attachment_filename_invalid: 'Filename contains invalid characters.',
+	attachment_duplicate_hash: 'The same attachment was added twice.',
+	attachment_duplicate_filename: 'Two attachments cannot share the same filename.',
+	attachment_inline_ref_duplicate: 'An attachment can only be displayed inline once in the body.',
+	attachment_inline_ref_not_image: 'Only image attachments can be displayed inline in the body.',
+	attachment_empty: 'Cannot upload an empty file.',
+
 	// Catch-all
 	bad_request: 'The request was invalid.',
 	rate_limited: 'You are doing that too often. Please slow down.',

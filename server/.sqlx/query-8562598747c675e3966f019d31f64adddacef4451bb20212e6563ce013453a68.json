@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT content_hash AS \"content_hash!: Vec<u8>\"\n             FROM attachment_staging\n            WHERE uploader = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "content_hash!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8562598747c675e3966f019d31f64adddacef4451bb20212e6563ce013453a68"
+}

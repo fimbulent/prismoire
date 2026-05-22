@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT available_bytes AS \"available_bytes!: i64\",\n                  last_refill_at AS \"last_refill_at!: String\",\n                  lifetime_spent AS \"lifetime_spent!: i64\"\n             FROM user_storage_budgets\n            WHERE user_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "available_bytes!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "last_refill_at!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "lifetime_spent!: i64",
+        "ordinal": 2,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "742cd8c33751cbe516792281ddf3f9e8f41719d1bc74e1055a3ed452438d4c52"
+}

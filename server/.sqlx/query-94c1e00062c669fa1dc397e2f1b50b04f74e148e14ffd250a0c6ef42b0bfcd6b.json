@@ -1,22 +1,22 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT revision, body, created_at FROM post_revisions WHERE post_id = ? ORDER BY revision ASC",
+  "query": "SELECT available_bytes, last_refill_at, lifetime_spent FROM user_storage_budgets WHERE user_id = ?",
   "describe": {
     "columns": [
       {
-        "name": "revision",
+        "name": "available_bytes",
         "ordinal": 0,
         "type_info": "Integer"
       },
       {
-        "name": "body",
+        "name": "last_refill_at",
         "ordinal": 1,
         "type_info": "Text"
       },
       {
-        "name": "created_at",
+        "name": "lifetime_spent",
         "ordinal": 2,
-        "type_info": "Text"
+        "type_info": "Integer"
       }
     ],
     "parameters": {
@@ -28,5 +28,5 @@
       false
     ]
   },
-  "hash": "e088a25a03da51fba6be0c3923e34c9ebaad45343e181d2fb21cad8ce5949511"
+  "hash": "94c1e00062c669fa1dc397e2f1b50b04f74e148e14ffd250a0c6ef42b0bfcd6b"
 }

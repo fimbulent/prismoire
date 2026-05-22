@@ -28,6 +28,17 @@ pub async fn create_reply(
     user: AuthUser,
     Json(req): Json<CreateReplyRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    // Replies cannot carry attachments — those live on the thread OP
+    // only per docs/attachments.md §3. Rejecting at request-parse time
+    // gives the client a clear error instead of dropping the array
+    // silently inside the signed payload.
+    if !req.attachments.is_empty() {
+        return Err(AppError::with_message(
+            ErrorCode::BadRequest,
+            "replies cannot carry attachments".to_string(),
+        ));
+    }
+
     let body = validate_body(&req.body, MAX_REPLY_BODY_LEN)
         .map_err(|msg| AppError::with_message(ErrorCode::InvalidPostBody, msg))?;
 
@@ -91,6 +102,12 @@ pub async fn create_reply(
         0,
         &body,
         created_at_ms,
+        // Replies don't carry attachments per docs/attachments.md
+        // §3 — attachments live on the thread OP only. Phase 6 will
+        // reject any `attachments[]` field on the reply route at
+        // request-parse time, but the signed call always gets an
+        // empty vec here.
+        Vec::new(),
     )
     .await?;
     let signature = signed.signature.clone();
@@ -211,6 +228,10 @@ pub async fn create_reply(
             viewer: UserViewerInfo::self_view(),
             has_more_children: false,
             distrust_scaffold: false,
+            // Replies never carry attachments (rejected upstream by
+            // the `req.attachments.is_empty()` check), so the field
+            // is always empty here.
+            attachments: vec![],
         }),
     ))
 }
