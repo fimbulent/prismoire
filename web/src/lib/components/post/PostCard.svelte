@@ -365,7 +365,7 @@
 	<div class="space-y-3">
 		<textarea
 			bind:value={editBody}
-			class="w-full min-h-32 bg-bg border border-border rounded-md p-3 text-base leading-7 resize-y focus:outline-none focus:border-accent-muted font-mono text-sm"
+			class="w-full min-h-32 bg-bg border border-border rounded-md p-3 text-text-primary font-prose text-prose resize-y focus:outline-none focus:border-accent-muted placeholder:text-text-muted"
 		></textarea>
 		{#if editError}
 			<div class="text-danger text-sm">{editError}</div>
