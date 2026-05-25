@@ -44,16 +44,63 @@ use crate::federation::envelope::{self, AUTH_HEADER, VerifyError, VerifyMode};
 use crate::federation::errors::{internal_error, unauthorized, unsupported_media_type};
 use crate::federation::identity::CBOR_CONTENT_TYPE;
 
-/// Largest body the envelope-verify middleware will read off the wire
-/// before short-circuiting.
+/// Default body cap for any federation route not listed in
+/// [`route_body_cap`].
 ///
-/// Phase 3's authenticated surface is bounded by small fixed-field
-/// bodies (handshake messages, termination notices, GETs with empty
-/// bodies); 64 KiB is a generous cap that still keeps a hostile
-/// peer's request from amplifying memory pressure. Phase 4's
-/// frontier/delta routes will need a larger budget; expect this
-/// constant to be replaced by a per-route table at that point.
-pub const MAX_FEDERATION_BODY: usize = 64 * 1024;
+/// 64 KiB comfortably covers Phase-3 handshake bodies (peer-request,
+/// peer-response, peer-relationship — all small fixed-field CBOR
+/// envelopes) while keeping a hostile peer's request from amplifying
+/// memory pressure for routes that have not yet been thought through.
+/// Routes that legitimately need more bytes opt in via the per-route
+/// table below; anything else hits this ceiling.
+pub const DEFAULT_FEDERATION_BODY_CAP: usize = 64 * 1024;
+
+/// Body cap for `/federation/v1/frontier/announce` and
+/// `/federation/v1/frontier/delta`.
+///
+/// 16 MiB matches the protocol's `MAX_ANNOUNCE_BODY` default
+/// (`docs/federation-protocol.md` §8.8 — "covers both filters
+/// combined"). §8.8 sizes this to a ≈ 13 M-key 3-hop closure at 1%
+/// FPR; the content filter dominates by ≈ 10× over the edge-origin
+/// filter, so almost the entire budget is the content filter's bits
+/// with the §6 envelope adding negligible framing. Senders whose
+/// pair exceeds this cap are required by the spec to trim. The §8.2
+/// hard ceiling `MAX_M_BITS = 2³²` (≈ 512 MiB per filter) is the
+/// protocol-level safety net; this cap is the operational one.
+pub const FRONTIER_BODY_CAP: usize = 16 * 1024 * 1024;
+
+/// Body cap for `/federation/v1/edges` (push) — Phase 5.
+///
+/// One push body carries a single signed trust-edge object (signed
+/// payload + envelope). A V1 trust edge is bounded by signature +
+/// pubkeys + a small score field; a few KiB in CBOR. 64 KiB is far
+/// more than the protocol requires and matches the default so we
+/// don't need a special-case entry until batched-push lands.
+pub const EDGES_BODY_CAP: usize = 64 * 1024;
+
+/// Resolve the body cap for a given federation path.
+///
+/// Match is path-prefix-aware but anchored on a trailing slash (or
+/// exact equality) so neighbouring routes can't bleed into a cap
+/// they weren't sized for — `/federation/v1/edges-foo` is *not*
+/// `/federation/v1/edges`. Order matters: more specific prefixes
+/// come first. Routes not listed fall through to
+/// [`DEFAULT_FEDERATION_BODY_CAP`].
+fn route_body_cap(path: &str) -> usize {
+    // `/frontier/announce` and `/frontier/delta` are the only POSTs
+    // under this prefix. `/frontier` (no trailing segment) is a GET
+    // with no body, but charging it the larger cap costs nothing.
+    if path == "/federation/v1/frontier" || path.starts_with("/federation/v1/frontier/") {
+        FRONTIER_BODY_CAP
+    // Both `/edges` (POST push) and `/edges/backfill` (GET pull,
+    // empty body) land here. The push body sizing is bounded by a
+    // single signed trust-edge object.
+    } else if path == "/federation/v1/edges" || path.starts_with("/federation/v1/edges/") {
+        EDGES_BODY_CAP
+    } else {
+        DEFAULT_FEDERATION_BODY_CAP
+    }
+}
 
 /// Body bytes the middleware drained from the request.
 ///
@@ -117,8 +164,12 @@ async fn verify(state: Arc<AppState>, mode: VerifyMode, req: Request, next: Next
 
     // Drain the body once. §6.5 step 10 needs the exact bytes for the
     // body-hash check; handlers downstream read the same bytes back
-    // via VerifiedBody so neither side re-encodes.
-    let bytes = match axum::body::to_bytes(body, MAX_FEDERATION_BODY).await {
+    // via VerifiedBody so neither side re-encodes. The per-route cap
+    // table keeps low-bandwidth routes from being abused while
+    // letting frontier-announce bodies (which legitimately need
+    // megabytes of Bloom-filter bits) through.
+    let cap = route_body_cap(&path);
+    let bytes = match axum::body::to_bytes(body, cap).await {
         Ok(b) => b,
         // `to_bytes` errors on both length-cap overruns and broken
         // transports. Either way the envelope cannot be verified, so
@@ -168,4 +219,74 @@ async fn verify(state: Arc<AppState>, mode: VerifyMode, req: Request, next: Next
     req.extensions_mut().insert(envelope);
     req.extensions_mut().insert(VerifiedBody(bytes));
     next.run(req).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn route_body_cap_picks_frontier_cap_for_announce_and_delta() {
+        assert_eq!(
+            route_body_cap("/federation/v1/frontier/announce"),
+            FRONTIER_BODY_CAP,
+        );
+        assert_eq!(
+            route_body_cap("/federation/v1/frontier/delta"),
+            FRONTIER_BODY_CAP,
+        );
+    }
+
+    #[test]
+    fn route_body_cap_picks_edges_cap_for_edges_routes() {
+        assert_eq!(route_body_cap("/federation/v1/edges"), EDGES_BODY_CAP);
+        assert_eq!(
+            route_body_cap("/federation/v1/edges/backfill"),
+            EDGES_BODY_CAP,
+        );
+    }
+
+    #[test]
+    fn route_body_cap_falls_through_to_default_for_handshake_routes() {
+        assert_eq!(
+            route_body_cap("/federation/v1/peer-request"),
+            DEFAULT_FEDERATION_BODY_CAP,
+        );
+        assert_eq!(
+            route_body_cap("/federation/v1/peer-response"),
+            DEFAULT_FEDERATION_BODY_CAP,
+        );
+        assert_eq!(
+            route_body_cap("/federation/v1/peer-relationship"),
+            DEFAULT_FEDERATION_BODY_CAP,
+        );
+        assert_eq!(
+            route_body_cap("/federation/v1/peers"),
+            DEFAULT_FEDERATION_BODY_CAP,
+        );
+    }
+
+    #[test]
+    fn route_body_cap_does_not_match_unrelated_paths() {
+        // Defensive: the prefix match must not bleed into /api/*.
+        assert_eq!(route_body_cap("/api/posts"), DEFAULT_FEDERATION_BODY_CAP);
+        assert_eq!(route_body_cap("/"), DEFAULT_FEDERATION_BODY_CAP);
+    }
+
+    #[test]
+    fn route_body_cap_does_not_bleed_into_sibling_paths() {
+        // A hypothetical `/federation/v1/edges-foo` (or
+        // `/federation/v1/frontier-extra`) MUST NOT inherit the
+        // larger cap of its prefix-sibling. The slash-anchored
+        // match guards against an attacker who could pick a route
+        // name that prefix-matches and amplifies memory pressure.
+        assert_eq!(
+            route_body_cap("/federation/v1/edges-foo"),
+            DEFAULT_FEDERATION_BODY_CAP,
+        );
+        assert_eq!(
+            route_body_cap("/federation/v1/frontier-extra"),
+            DEFAULT_FEDERATION_BODY_CAP,
+        );
+    }
 }

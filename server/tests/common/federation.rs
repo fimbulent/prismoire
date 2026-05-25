@@ -84,12 +84,12 @@ impl FederationTransport for InProcessTransport {
             let response = router
                 .oneshot(req)
                 .await
-                .map_err(|e| TransportError::Dispatch(e.to_string()))?;
+                .map_err(|_| TransportError::Dispatch("other"))?;
             let (parts, body) = response.into_parts();
             let bytes = body
                 .collect()
                 .await
-                .map_err(|e| TransportError::Dispatch(format!("collect body: {e}")))?
+                .map_err(|_| TransportError::Dispatch("body"))?
                 .to_bytes();
             Ok(Response::from_parts(parts, bytes))
         })

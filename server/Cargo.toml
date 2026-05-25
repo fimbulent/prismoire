@@ -23,6 +23,13 @@ infer = { version = "0.16", default-features = false }
 prismoire-config = { workspace = true }
 quick_cache = "0.6"
 rand = { workspace = true }
+# Outbound HTTP client for the production FederationTransport
+# (docs/federation-impl-plan.md §Phase 5). `rustls-tls-webpki-roots`
+# keeps the build hermetic — no system OpenSSL or native trust-store
+# dependency. The default `reqwest::Client` is unused; we construct
+# one via ClientBuilder so the smoke-test harness can opt into
+# `danger_accept_invalid_certs` for its self-signed loopback cert.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "http2"] }
 serde = { workspace = true }
 sha2 = "0.10"
 subtle = "2"

@@ -38,6 +38,7 @@ use rand::rngs::OsRng;
 use sqlx::SqlitePool;
 
 use crate::AppState;
+use crate::federation::domain::parse_instance_domain;
 use crate::federation::envelope::{self, AUTH_HEADER};
 use crate::federation::errors::{bad_request, conflict, internal_error, not_found, unauthorized};
 use crate::federation::identity::CBOR_CONTENT_TYPE;
@@ -508,6 +509,12 @@ pub enum InitiateError {
     /// constraint; operator must remove the existing row (or fix the
     /// typed domain/pubkey pair) before retrying.
     DomainConflict,
+    /// Operator-supplied `target_domain` failed
+    /// [`parse_instance_domain`] (path/query/userinfo characters,
+    /// scheme prefix, empty, oversize, etc.). Caught at the operator
+    /// boundary so a typo can't poison `peers.instance_domain` with a
+    /// value the transport would refuse later.
+    InvalidTargetDomain,
 }
 
 impl From<sqlx::Error> for InitiateError {
@@ -547,6 +554,16 @@ pub async fn operator_initiate_peer_request(
     // reject before signing anything.
     if target_pubkey == *instance_key.public_bytes() {
         return Err(InitiateError::SelfPeering);
+    }
+
+    // SSRF defence at the operator boundary: reject typo'd or
+    // malicious `target_domain` values before they reach the peers
+    // table. The same check runs against `initiator_domain` in
+    // `handle_peer_request` for inbound traffic; this is the
+    // outbound equivalent. The transport re-validates as defence
+    // in depth.
+    if parse_instance_domain(target_domain).is_err() {
+        return Err(InitiateError::InvalidTargetDomain);
     }
 
     // Pre-check `instance_domain` uniqueness against existing rows.
@@ -800,6 +817,18 @@ pub async fn handle_peer_request(
     // because in bootstrap mode it has no peer row to consult.
     if parsed.initiator_instance_pubkey != envelope.sender {
         return unauthorized();
+    }
+
+    // SSRF defence: `initiator_domain` is wire-supplied and will be
+    // persisted into `peers.instance_domain`, where every outbound
+    // federation request will subsequently `format!` it into a URL.
+    // Reject anything that is not a clean `host[:port]` here so the
+    // database never accepts a value the transport would have to
+    // refuse later (and so the operator's `/peers` UI doesn't show
+    // injection payloads as legitimate-looking peer rows). The
+    // transport re-validates as defence in depth.
+    if parse_instance_domain(&parsed.initiator_domain).is_err() {
+        return bad_request("invalid_initiator_domain");
     }
 
     // Pre-check `instance_domain` uniqueness: if another peer row

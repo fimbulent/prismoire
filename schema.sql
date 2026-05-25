@@ -593,7 +593,7 @@ CREATE TABLE peers (
 , termination_reason TEXT);
 CREATE INDEX idx_peers_status ON peers(status);
 CREATE UNIQUE INDEX idx_peers_request_id ON peers(request_id);
-CREATE TABLE peer_frontiers (
+CREATE TABLE IF NOT EXISTS "peer_frontiers" (
     -- Sender's instance signing pubkey (raw 32 bytes). One row per
     -- peer; the PK is identical to `peers.instance_pubkey`.
     peer_pubkey BLOB PRIMARY KEY NOT NULL
@@ -602,13 +602,17 @@ CREATE TABLE peer_frontiers (
     -- Highest §8.3 `version` we have applied from this sender. The
     -- §8.3/§8.4 handlers reject any inbound body with
     -- `version <= applied_version` per the spec's monotonic-cursor
-    -- rule.
-    applied_version INTEGER NOT NULL,
+    -- rule. Non-negative because the counter starts at 0 and only
+    -- increases via saturating_add(1).
+    applied_version INTEGER NOT NULL
+                CHECK (applied_version >= 0),
 
     -- §8.3 `epoch_start` (unix ms). Informational on the wire; we
     -- persist it because §8.5 GET callers see it in the snapshot
-    -- they fetch.
-    epoch_start INTEGER NOT NULL,
+    -- they fetch. Non-negative because unix_ms timestamps are
+    -- always non-negative in the eras this system will run in.
+    epoch_start INTEGER NOT NULL
+                CHECK (epoch_start >= 0),
 
     -- §8.3 `active_horizon_days`. 0 means "no trimming applied."
     -- Informational; we persist for §20 dashboards and for the

@@ -20,7 +20,12 @@ use std::future::Future;
 use std::pin::Pin;
 
 use axum::body::Bytes;
-use http::{Request, Response};
+use http::{HeaderName, Request, Response};
+
+use crate::federation::domain::{
+    allow_private_targets_from_env, is_blocked_ip_literal, parse_instance_domain,
+};
+use crate::federation::envelope::AUTH_HEADER;
 
 /// Stable identifier for a peer instance.
 ///
@@ -73,6 +78,12 @@ impl fmt::Debug for PeerId {
 /// class. Later phases (e.g. the §20 anomaly counters) will likely
 /// need a richer split; expand this enum at that point rather than
 /// shoehorning new state in here speculatively.
+///
+/// The [`Dispatch`] variant carries only a fixed category string —
+/// no peer-resolved IPs, ports, DNS detail, or TLS subject info.
+/// That detail is logged via `tracing` for the operator but kept off
+/// the error surface so callers (and any future text-of-error-based
+/// instrumentation) cannot be turned into an SSRF probe oracle.
 #[derive(Debug)]
 pub enum TransportError {
     /// The transport has no route to the requested peer. For the
@@ -80,10 +91,22 @@ pub enum TransportError {
     /// for the production transport it means the peer record carries
     /// no resolvable domain.
     UnknownPeer(PeerId),
+    /// The peer record's `instance_domain` is structurally invalid
+    /// (post-validation drift, manual DB edit, or pre-validation
+    /// row written by an older build). The transport refuses to
+    /// dispatch to such a peer.
+    InvalidPeerDomain(PeerId),
+    /// The peer record's `instance_domain` resolves to an IP literal
+    /// in a private / loopback / link-local / metadata range and
+    /// the `PRISMOIRE_FEDERATION_ALLOW_PRIVATE_TARGETS` escape hatch
+    /// is off. See [`crate::federation::domain`].
+    BlockedTarget(PeerId),
     /// The transport reached the peer (or attempted to) but the
-    /// request/response cycle failed. The string is for diagnostics
-    /// only — do not branch on its contents.
-    Dispatch(String),
+    /// request/response cycle failed. The category is one of a
+    /// fixed enum-of-strings (`"timeout"`, `"connect"`, `"tls"`,
+    /// `"body"`, `"build"`, `"other"`); do not parse it for
+    /// anything other than coarse classification.
+    Dispatch(&'static str),
 }
 
 impl fmt::Display for TransportError {
@@ -92,8 +115,14 @@ impl fmt::Display for TransportError {
             TransportError::UnknownPeer(id) => {
                 write!(f, "no transport route to peer {id}")
             }
-            TransportError::Dispatch(msg) => {
-                write!(f, "federation transport dispatch failed: {msg}")
+            TransportError::InvalidPeerDomain(id) => {
+                write!(f, "peer {id} has a malformed instance_domain")
+            }
+            TransportError::BlockedTarget(id) => {
+                write!(f, "peer {id} resolves to a blocked target IP range")
+            }
+            TransportError::Dispatch(category) => {
+                write!(f, "federation transport dispatch failed: {category}")
             }
         }
     }
@@ -144,18 +173,261 @@ pub trait FederationTransport: Send + Sync + 'static {
 /// Placeholder transport that rejects every outbound call as
 /// [`TransportError::UnknownPeer`].
 ///
-/// Used by `main.rs` to satisfy the `AppState::federation_transport`
-/// slot in Phase 2 — production has no operator-initiated peering
-/// surface yet, so no production code path actually invokes the
-/// transport. Phase 5 swaps this for the real `reqwest`-backed
-/// impl once outbound HTTPS is in scope. Tests bypass it entirely
-/// by binding their own `InProcessTransport`.
+/// Retained for unit tests and any deployment that wants to disable
+/// outbound federation entirely (e.g. a test-only run that should
+/// never reach the network). Production binaries should bind the
+/// [`ReqwestTransport`] instead.
 pub struct NullTransport;
 
 impl FederationTransport for NullTransport {
     fn request<'a>(&'a self, target: &'a PeerId, _request: Request<Bytes>) -> TransportFuture<'a> {
         let target = *target;
         Box::pin(async move { Err(TransportError::UnknownPeer(target)) })
+    }
+}
+
+/// Production [`FederationTransport`] backed by `reqwest` over HTTPS.
+///
+/// Resolves `PeerId` → `peers.instance_domain` via the database, then
+/// reassembles the caller's request against
+/// `https://{instance_domain}{path-and-query}` and dispatches via a
+/// shared `reqwest::Client` (HTTP/2 over rustls).
+///
+/// The constructor takes a pre-built [`reqwest::Client`] rather than
+/// building one internally so deployments (and the Layer-2 smoke test)
+/// can configure TLS roots, timeouts, proxies, and connection pooling
+/// without each requiring a new constructor variant. [`default_client`]
+/// returns a production-shaped client; the loopback smoke test builds
+/// its own with `danger_accept_invalid_certs(true)` to trust its
+/// self-signed cert.
+pub struct ReqwestTransport {
+    /// Shared HTTP/2 client. Cheap to clone (`reqwest::Client` is
+    /// `Arc`-internal) but we hold one per transport since it owns
+    /// the connection pool we want to share across all outbound
+    /// federation requests.
+    client: reqwest::Client,
+    /// Handle to the `peers` table. Lookups are by primary key
+    /// (`instance_pubkey`) so the pool footprint is one read per
+    /// outbound request — well within SQLite's WAL concurrency
+    /// envelope.
+    db: sqlx::SqlitePool,
+    /// Latched at construction from
+    /// `PRISMOIRE_FEDERATION_ALLOW_PRIVATE_TARGETS`. When `false`
+    /// (the production default), IP-literal targets in loopback /
+    /// link-local / RFC1918 / metadata ranges are refused before
+    /// dispatch. When `true` (the Layer-2 smoke test), the check
+    /// is bypassed so `127.0.0.1:PORT` works for the self-signed
+    /// loopback peering test.
+    allow_private_targets: bool,
+}
+
+impl ReqwestTransport {
+    /// Construct a [`ReqwestTransport`] over the supplied client.
+    /// The SSRF policy is sampled from the environment at this
+    /// point — restart the process to change it.
+    pub fn new(db: sqlx::SqlitePool, client: reqwest::Client) -> Self {
+        Self {
+            client,
+            db,
+            allow_private_targets: allow_private_targets_from_env(),
+        }
+    }
+
+    /// Production-shaped `reqwest::Client`. Configured for the
+    /// federation §6 envelope-signing model:
+    ///
+    /// - **Rustls + webpki roots.** Hermetic build, no system TLS
+    ///   trust store. TLS does not pin peer identity (§22) — peer
+    ///   identity rides on §6 envelope sigs, not the cert; this
+    ///   protects against a passive eavesdropper but a (CA + DNS)
+    ///   compromise still allows MITM-of-transport (not of the
+    ///   protocol). Calls to non-signing routes (`/identity`) gain
+    ///   only TLS-level assurance.
+    /// - **HTTP/2.** Connection reuse across federation calls cuts
+    ///   handshake cost dramatically when fanout drives many calls
+    ///   per second to the same peer.
+    /// - **`redirect::Policy::none()`.** Following a redirect breaks
+    ///   the §6.5 envelope check on the receiving side (signature
+    ///   covers the *original* method + path + body) AND opens a
+    ///   second SSRF vector. Any non-2xx/4xx/5xx status is surfaced
+    ///   to the caller, including 3xx — that's deliberate.
+    /// - **Connect / total timeouts.** A hostile peer can stall a
+    ///   TLS handshake; the 5-second connect cap bounds that. The
+    ///   30-second total cap bounds slowloris-style response leaks.
+    /// - **Generic `User-Agent`.** Advertises only `prismoire/
+    ///   federation` (no version) so a CVE-pinned mass scanner has
+    ///   to do more work to single us out.
+    ///
+    /// Returns an error only if `reqwest::ClientBuilder::build` fails
+    /// — in practice that means the embedded TLS init is broken,
+    /// which is a deploy-time problem, not a runtime one.
+    pub fn default_client() -> Result<reqwest::Client, reqwest::Error> {
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
+            .user_agent("prismoire/federation")
+            .build()
+    }
+}
+
+/// Headers the transport is willing to forward from the caller's
+/// `http::Request` onto the outbound `reqwest::Request`.
+///
+/// Whitelist (not blacklist) so a future trait consumer that hands us
+/// a request carrying inbound `Host`, `Cookie`, `Authorization`,
+/// hop-by-hop, or `Content-Length` headers cannot accidentally
+/// smuggle them onto an outbound federation call. Today's callers
+/// (handshake handlers in `peering.rs`, the Phase-5 fanout) only set
+/// `Content-Type` and the §6 envelope auth header; this list will
+/// grow only when a new federation route legitimately needs a new
+/// header.
+fn header_is_forwardable(name: &HeaderName) -> bool {
+    name == http::header::CONTENT_TYPE || name.as_str().eq_ignore_ascii_case(AUTH_HEADER)
+}
+
+impl FederationTransport for ReqwestTransport {
+    fn request<'a>(&'a self, target: &'a PeerId, request: Request<Bytes>) -> TransportFuture<'a> {
+        Box::pin(async move {
+            let target_id = *target;
+
+            // Step 1: resolve PeerId → instance_domain. The peers table
+            // is keyed by the same 32 bytes the transport speaks in;
+            // any status is acceptable — peering callbacks need to
+            // reach pending peers, and fanout reaches active ones.
+            let target_bytes: &[u8] = target.as_bytes();
+            let row = sqlx::query!(
+                "SELECT instance_domain FROM peers WHERE instance_pubkey = ?",
+                target_bytes,
+            )
+            .fetch_optional(&self.db)
+            .await
+            .map_err(|e| {
+                tracing::error!(peer = %target_id, error = %e, "peers lookup failed");
+                TransportError::Dispatch("other")
+            })?;
+            let Some(row) = row else {
+                return Err(TransportError::UnknownPeer(target_id));
+            };
+            let instance_domain = row.instance_domain;
+
+            // Step 2: re-validate the domain (defence in depth — the
+            // inbound boundary in `peering.rs` already did this, but
+            // a row written by an older build, a manual operator
+            // edit, or a future caller that bypassed the boundary
+            // would all reach us here).
+            let parsed = match parse_instance_domain(&instance_domain) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(
+                        peer = %target_id,
+                        error = %e,
+                        "rejecting outbound: instance_domain failed re-validation",
+                    );
+                    return Err(TransportError::InvalidPeerDomain(target_id));
+                }
+            };
+
+            // Step 3: SSRF kill-switch for IP-literal targets in
+            // loopback / link-local / RFC1918 / metadata / CGNAT
+            // ranges. Hostnames (anything not a parseable IP literal)
+            // bypass this check — DNS-rebinding-resistant filtering
+            // is the operational-hardening pass's job.
+            if !self.allow_private_targets && is_blocked_ip_literal(&parsed.host) {
+                tracing::warn!(
+                    peer = %target_id,
+                    host = %parsed.host,
+                    "rejecting outbound: target IP is in a blocked range",
+                );
+                return Err(TransportError::BlockedTarget(target_id));
+            }
+
+            // Step 4: assemble the URL. We use `url::Url::parse` over
+            // a pre-constructed `https://{authority}{path}` string,
+            // and `reqwest::Url::parse` validates the result, so
+            // anything still slippery after `parse_instance_domain`
+            // fails closed at parse time rather than silently
+            // dispatching somewhere unexpected.
+            let path_and_query = request
+                .uri()
+                .path_and_query()
+                .map(|pq| pq.as_str())
+                .unwrap_or("/");
+            let raw_url = format!("https://{instance_domain}{path_and_query}");
+            let url = match reqwest::Url::parse(&raw_url) {
+                Ok(u) => u,
+                Err(e) => {
+                    tracing::warn!(peer = %target_id, error = %e, "outbound URL parse failed");
+                    return Err(TransportError::InvalidPeerDomain(target_id));
+                }
+            };
+
+            // Step 5: convert http::Request<Bytes> into a reqwest
+            // request. Method + body carry over byte-exactly so
+            // envelope signatures (which cover method, path, body
+            // bytes) stay valid in flight. Headers go through an
+            // allow-list filter (see `header_is_forwardable`) — the
+            // trait contract says the caller hands us a fully
+            // assembled request, but trusting that across the
+            // process for outbound HTTP is a liability.
+            let (parts, body) = request.into_parts();
+            let mut builder = self.client.request(parts.method.clone(), url);
+            for (name, value) in parts.headers.iter() {
+                if header_is_forwardable(name) {
+                    builder = builder.header(name, value);
+                }
+            }
+            let response = builder.body(body).send().await.map_err(|e| {
+                let category = classify_reqwest_error(&e);
+                tracing::warn!(peer = %target_id, error = %e, category, "outbound send failed");
+                TransportError::Dispatch(category)
+            })?;
+
+            // Step 6: convert reqwest::Response back into
+            // http::Response<Bytes>. Status + headers carry through;
+            // body is collected to Bytes so callers see the same
+            // shape regardless of which transport was bound.
+            let status = response.status();
+            let headers = response.headers().clone();
+            let body_bytes = response.bytes().await.map_err(|e| {
+                tracing::warn!(peer = %target_id, error = %e, "outbound body read failed");
+                TransportError::Dispatch("body")
+            })?;
+            let mut http_response = Response::builder()
+                .status(status)
+                .body(body_bytes)
+                .map_err(|e| {
+                    tracing::error!(peer = %target_id, error = %e, "response build failed");
+                    TransportError::Dispatch("build")
+                })?;
+            *http_response.headers_mut() = headers;
+            Ok(http_response)
+        })
+    }
+}
+
+/// Classify a `reqwest::Error` into a fixed-enum category string.
+///
+/// The categories are deliberately coarse so callers can do simple
+/// "timeout?" / "connect?" / "TLS?" branching without parsing free
+/// text. Detail is dropped on the floor at this layer; the full
+/// error is logged at `warn` (with the peer pubkey) at the call site
+/// before this function is reached.
+fn classify_reqwest_error(e: &reqwest::Error) -> &'static str {
+    if e.is_timeout() {
+        "timeout"
+    } else if e.is_connect() {
+        "connect"
+    } else if e.is_request() {
+        // Catches malformed-URL / malformed-header errors that
+        // sneak past our boundary validation.
+        "build"
+    } else if e.is_redirect() {
+        "redirect"
+    } else if e.is_body() || e.is_decode() {
+        "body"
+    } else {
+        "other"
     }
 }
 

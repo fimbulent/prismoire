@@ -29,6 +29,7 @@
 //! reshaping these foundations.
 
 pub mod bloom;
+pub mod domain;
 pub mod envelope;
 pub mod errors;
 pub mod frontier;
