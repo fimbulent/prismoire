@@ -170,6 +170,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         instance_key,
         federation_nonce_lru,
         federation_transport,
+        local_frontier: Arc::new(std::sync::RwLock::new(Arc::new(
+            prismoire_server::federation::frontier::LocalFrontier::empty(),
+        ))),
     });
 
     // Spawn the debounced trust graph rebuild background task.

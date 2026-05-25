@@ -229,6 +229,9 @@ pub async fn test_app_with_transport_and_domain(
         instance_key,
         federation_nonce_lru: Arc::new(NonceLru::default()),
         federation_transport,
+        local_frontier: Arc::new(std::sync::RwLock::new(Arc::new(
+            prismoire_server::federation::frontier::LocalFrontier::empty(),
+        ))),
     });
 
     let layers = rate_limit::build_layers(&test_rate_limit_config(), false);

@@ -1,0 +1,104 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT applied_version, epoch_start, active_horizon_days, cf_family, cf_k, cf_m, cf_n_est, cf_fpr_target, cf_bytes, ef_family, ef_k, ef_m, ef_n_est, ef_fpr_target, ef_bytes FROM peer_frontiers WHERE peer_pubkey = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "applied_version",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "epoch_start",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "active_horizon_days",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "cf_family",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "cf_k",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "cf_m",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "cf_n_est",
+        "ordinal": 6,
+        "type_info": "Integer"
+      },
+      {
+        "name": "cf_fpr_target",
+        "ordinal": 7,
+        "type_info": "Float"
+      },
+      {
+        "name": "cf_bytes",
+        "ordinal": 8,
+        "type_info": "Blob"
+      },
+      {
+        "name": "ef_family",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "ef_k",
+        "ordinal": 10,
+        "type_info": "Integer"
+      },
+      {
+        "name": "ef_m",
+        "ordinal": 11,
+        "type_info": "Integer"
+      },
+      {
+        "name": "ef_n_est",
+        "ordinal": 12,
+        "type_info": "Integer"
+      },
+      {
+        "name": "ef_fpr_target",
+        "ordinal": 13,
+        "type_info": "Float"
+      },
+      {
+        "name": "ef_bytes",
+        "ordinal": 14,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "8dbb4a33bf771084cc330f64a4d0c50f479e8d6b8c120431b08868dd5ec11748"
+}

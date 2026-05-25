@@ -35,7 +35,7 @@ use axum::routing::{delete, get, post};
 
 use crate::AppState;
 use crate::federation::middleware::{verify_bootstrap, verify_known_peer};
-use crate::federation::{identity, peering};
+use crate::federation::{frontier, identity, peering};
 
 /// Build the `/federation/v1/*` subrouter.
 ///
@@ -65,6 +65,23 @@ pub fn federation_router(state: Arc<AppState>) -> Router {
         .route(
             "/federation/v1/peer-relationship",
             delete(peering::handle_peer_relationship_delete),
+        )
+        // §8 frontier sync: announce / delta / GET all sit behind the
+        // KnownPeer envelope verifier per §8 ("only an active peer
+        // may push or pull a frontier"). The GET is peers-only by
+        // default — we don't expose our own frontier to anonymous
+        // callers, since it materially leaks the local trust graph.
+        .route(
+            "/federation/v1/frontier/announce",
+            post(frontier::handle_frontier_announce),
+        )
+        .route(
+            "/federation/v1/frontier/delta",
+            post(frontier::handle_frontier_delta),
+        )
+        .route(
+            "/federation/v1/frontier",
+            get(frontier::handle_frontier_get),
         )
         .layer(from_fn_with_state(state.clone(), verify_known_peer));
 

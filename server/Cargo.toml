@@ -27,6 +27,13 @@ serde = { workspace = true }
 sha2 = "0.10"
 subtle = "2"
 serde_json = "1"
+# SipHash-2-4 primitive for the `prismoire-bloom-v1` frontier filter
+# family (docs/federation-protocol.md §8.2). The keyed constructor
+# (`SipHasher24::new_with_keys`) is the load-bearing API; we keep the
+# whole bloom-filter wire format and bit-ordering in-house (see
+# `server/src/federation/bloom.rs`) so no off-the-shelf bloom crate
+# can drift from the spec.
+siphasher = "1"
 sqlx = { workspace = true, features = ["migrate"] }
 tokio = { workspace = true }
 tracing = { workspace = true }

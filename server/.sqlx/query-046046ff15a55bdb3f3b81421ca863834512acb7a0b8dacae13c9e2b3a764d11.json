@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT applied_version, cursor FROM peer_frontiers WHERE peer_pubkey = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "applied_version",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "cursor",
+        "ordinal": 1,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "046046ff15a55bdb3f3b81421ca863834512acb7a0b8dacae13c9e2b3a764d11"
+}

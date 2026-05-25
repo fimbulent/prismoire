@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT applied_version, cf_bytes FROM peer_frontiers WHERE peer_pubkey = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "applied_version",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "cf_bytes",
+        "ordinal": 1,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "cf363da49d82aeda8b319450cce3099ea5079088120b21b15c62a0d2a8078276"
+}

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT applied_version FROM peer_frontiers WHERE peer_pubkey = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "applied_version",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "67461543fcd9e9bed224311d584cdc62d1016c795cbdf34a4f6d123e90c56f04"
+}

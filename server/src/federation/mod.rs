@@ -28,11 +28,14 @@
 //! middleware, frontier sync, content propagation, …) rather than
 //! reshaping these foundations.
 
+pub mod bloom;
 pub mod envelope;
 pub mod errors;
+pub mod frontier;
 pub mod identity;
 pub mod instance_key;
 pub mod middleware;
 pub mod peering;
 pub mod router;
+pub mod routing;
 pub mod transport;

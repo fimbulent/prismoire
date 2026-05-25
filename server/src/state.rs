@@ -8,6 +8,7 @@ use webauthn_rs::Webauthn;
 
 use crate::error::{AppError, ErrorCode};
 use crate::federation::envelope::NonceLru;
+use crate::federation::frontier::LocalFrontier;
 use crate::federation::instance_key::InstanceKey;
 use crate::federation::transport::FederationTransport;
 use crate::instance_config::AttachmentBudget;
@@ -88,6 +89,14 @@ pub struct AppState {
     /// integration tests bind it to an in-process router registry
     /// so multi-instance scenarios run without sockets.
     pub federation_transport: Arc<dyn FederationTransport>,
+    /// In-memory snapshot of this instance's own frontier — the
+    /// 3-hop / 2-hop forward closures over local users that we
+    /// advertise to peers per `docs/federation-protocol.md` §7.4 + §8.
+    /// Refreshed by [`crate::federation::frontier::refresh_local_frontier`]
+    /// before each outbound announce and read by the §8.5 GET route.
+    /// Readers clone the inner `Arc<LocalFrontier>` for zero-contention
+    /// concurrent access.
+    pub local_frontier: Arc<std::sync::RwLock<Arc<LocalFrontier>>>,
 }
 
 impl AppState {

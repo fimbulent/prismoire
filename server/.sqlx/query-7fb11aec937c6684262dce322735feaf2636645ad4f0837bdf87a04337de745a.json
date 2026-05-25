@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT applied_version, cf_family, ef_family FROM peer_frontiers WHERE peer_pubkey = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "applied_version",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "cf_family",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "ef_family",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "7fb11aec937c6684262dce322735feaf2636645ad4f0837bdf87a04337de745a"
+}
