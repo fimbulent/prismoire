@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT status, termination_reason, decision_message FROM peers WHERE instance_pubkey = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "status",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "termination_reason",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "decision_message",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "d8d85a93cb14316c5cc953e238276efecc6eca4f409fa153ee9ed138315a6782"
+}

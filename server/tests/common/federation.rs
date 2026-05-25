@@ -32,7 +32,7 @@ use prismoire_server::federation::transport::{
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 
-use super::test_app_with_transport;
+use super::test_app_with_transport_and_domain;
 
 /// Shared `PeerId -> Router` registry. Every `InProcessTransport`
 /// instantiated by the same [`MultiInstanceHarness`] points at the
@@ -173,7 +173,10 @@ impl MultiInstanceHarness {
         // immediately makes B reachable from A's transport.
         let transport: Arc<dyn FederationTransport> =
             Arc::new(InProcessTransport::new(self.registry.clone()));
-        let (router, state) = test_app_with_transport(transport.clone()).await;
+        // Per-label domain so harness scenarios with N ≥ 3 instances
+        // don't collide on the `peers.instance_domain` UNIQUE constraint.
+        let domain = format!("{label}.test.local");
+        let (router, state) = test_app_with_transport_and_domain(transport.clone(), &domain).await;
 
         // Peer id == this instance's Ed25519 signing pubkey, as the
         // production transport will eventually use. The state's

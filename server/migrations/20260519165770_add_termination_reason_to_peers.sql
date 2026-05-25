@@ -1,0 +1,22 @@
+-- Persist the §5.4 DELETE /peer-relationship `reason` enum so the
+-- operator UI can render past terminations with intent ("we ended
+-- this for compromise_response" vs "they ended this for
+-- policy_violation"). Without this column the audit trail collapses
+-- to a bare status flip with no motivation attached.
+--
+-- The spec's enum is `operator_initiated`, `compromise_response`,
+-- `policy_violation`. We accept the wire value as-is rather than
+-- mapping to a smaller local space: keeping the protocol token
+-- means a new value added to a future protocol revision lands as
+-- data, not as a migration. NULL for any row that has not been
+-- terminated (the vast majority for the lifetime of the table).
+--
+-- The companion `message` field on the wire body lands in the
+-- existing `decision_message` column. That column is documented as
+-- "operator-set message for the most recent lifecycle event on this
+-- row", which already covers welcome notes on accept, rejection
+-- reasons on reject, and termination explanations on terminate.
+-- Overwriting a prior welcome message at termination time is the
+-- correct behaviour for that column's contract: the row's status
+-- says `terminated`, the message is the termination message.
+ALTER TABLE peers ADD COLUMN termination_reason TEXT;

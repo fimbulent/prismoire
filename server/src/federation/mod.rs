@@ -29,8 +29,10 @@
 //! reshaping these foundations.
 
 pub mod envelope;
+pub mod errors;
 pub mod identity;
 pub mod instance_key;
+pub mod middleware;
 pub mod peering;
 pub mod router;
 pub mod transport;

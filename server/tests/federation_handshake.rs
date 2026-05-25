@@ -64,7 +64,7 @@ async fn identity_endpoint_returns_protocol_shaped_card() {
     );
 
     let card = IdentityCard::decode(response.body()).expect("identity card decodes");
-    assert_eq!(card.instance_domain, "test.local");
+    assert_eq!(card.instance_domain, "a.test.local");
     assert_eq!(&card.instance_pubkey, a.state.instance_key.public_bytes());
     assert!(
         card.protocol_versions.contains(&1),

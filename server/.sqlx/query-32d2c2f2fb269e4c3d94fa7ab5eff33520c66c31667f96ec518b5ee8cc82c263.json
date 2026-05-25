@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE peers SET status = 'terminated', termination_reason = ?, last_handshake = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE instance_pubkey = ? AND status = 'active'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "32d2c2f2fb269e4c3d94fa7ab5eff33520c66c31667f96ec518b5ee8cc82c263"
+}

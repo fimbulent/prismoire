@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT instance_pubkey, instance_domain, first_seen, COALESCE(agreed_capabilities, capabilities) AS \"caps?\" FROM peers WHERE status = 'active'",
+  "describe": {
+    "columns": [
+      {
+        "name": "instance_pubkey",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "instance_domain",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "first_seen",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "caps?",
+        "ordinal": 3,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "88af8b2dc7d1ae7a6d32148ee6ad4200ef05aa8af69ffe30609c8764c12138c6"
+}

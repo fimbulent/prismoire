@@ -590,6 +590,6 @@ CREATE TABLE peers (
     -- exchanged with this peer (peer-request sent/received,
     -- peer-response received). NULL until the first such event.
     last_handshake      TEXT
-);
+, termination_reason TEXT);
 CREATE INDEX idx_peers_status ON peers(status);
 CREATE UNIQUE INDEX idx_peers_request_id ON peers(request_id);

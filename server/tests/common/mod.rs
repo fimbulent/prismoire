@@ -165,6 +165,21 @@ pub async fn test_app() -> (Router, Arc<AppState>) {
 pub async fn test_app_with_transport(
     federation_transport: Arc<dyn FederationTransport>,
 ) -> (Router, Arc<AppState>) {
+    test_app_with_transport_and_domain(federation_transport, "test.local").await
+}
+
+/// As [`test_app_with_transport`], but with a caller-supplied
+/// `instance_domain`. The multi-instance harness uses this so each
+/// labelled instance gets a distinct domain (`a.test.local`,
+/// `b.test.local`, …) — required because the `peers` table enforces
+/// `UNIQUE(instance_domain)` and any harness scenario that records
+/// more than two peer rows on a single instance would otherwise
+/// collide on `"test.local"` and surface as a 409 from
+/// `operator_initiate_peer_request`.
+pub async fn test_app_with_transport_and_domain(
+    federation_transport: Arc<dyn FederationTransport>,
+    instance_domain: &str,
+) -> (Router, Arc<AppState>) {
     let pool = fresh_db().await;
     let trust_graph_notify = Arc::new(Notify::new());
     let trust_graph = Arc::new(RwLock::new(Arc::new(TrustGraph::empty())));
@@ -210,7 +225,7 @@ pub async fn test_app_with_transport(
         // care about the value beyond round-tripping it through the
         // wire); the instance signing key just loaded above; a fresh
         // replay LRU per instance; and the caller-supplied transport.
-        instance_domain: "test.local".to_string(),
+        instance_domain: instance_domain.to_string(),
         instance_key,
         federation_nonce_lru: Arc::new(NonceLru::default()),
         federation_transport,

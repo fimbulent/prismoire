@@ -28,7 +28,7 @@
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::http::{Method, Request, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use ciborium::value::{Integer, Value};
@@ -38,17 +38,26 @@ use rand::rngs::OsRng;
 use sqlx::SqlitePool;
 
 use crate::AppState;
-use crate::federation::envelope::{self, AUTH_HEADER, VerifyError, VerifyMode};
+use crate::federation::envelope::{self, AUTH_HEADER};
+use crate::federation::errors::{bad_request, conflict, internal_error, not_found, unauthorized};
 use crate::federation::identity::CBOR_CONTENT_TYPE;
 use crate::federation::instance_key::InstanceKey;
+use crate::federation::middleware::VerifiedBody;
 use crate::federation::transport::{FederationTransport, PeerId, TransportError};
+use crate::signed::FedEnvelope;
 
-/// Maximum CBOR body size for either handshake POST. The protocol's
-/// peer-request / peer-response bodies are bounded by a small handful
-/// of fixed fields plus the proposed-capabilities array (a few short
-/// tokens), so 64 KiB is a generous cap that still keeps the handler
-/// from being a memory-amplification vector.
-const PEER_HANDSHAKE_MAX_BODY: usize = 64 * 1024;
+/// Hard cap on persisted `terminator_domain` length. DNS allows up
+/// to 253 chars; rounding to 255 leaves slack for transitional
+/// punycode variants without inviting "domain" fields the size of a
+/// novel into the audit row.
+const MAX_DOMAIN_LEN: usize = 255;
+
+/// Hard cap on persisted operator messages (`message` /
+/// `decision_message`). 4 KiB is more than any human-typed welcome
+/// or termination note will reach; the middleware's 64 KiB body cap
+/// is too permissive for a column the admin UI will routinely
+/// display verbatim.
+const MAX_MESSAGE_LEN: usize = 4096;
 
 /// §5.4 peer-request body (initiator → target).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +120,53 @@ impl PeerDecision {
         match s {
             "accept" => Some(PeerDecision::Accept),
             "reject" => Some(PeerDecision::Reject),
+            _ => None,
+        }
+    }
+}
+
+/// §5.4 `DELETE /peer-relationship` body. Either side of an active
+/// peering can send this to wind the relationship down. The peer row
+/// flips to `terminated` (audit-retained) on both sides; subsequent
+/// envelope-signed traffic from the now-terminated peer 401s.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerRelationshipDeleteBody {
+    /// The terminating side's bare canonical domain.
+    pub terminator_domain: String,
+    /// Reason tag as defined by §5.4.
+    pub reason: TerminationReason,
+    /// Optional operator-set explanation. Stored on both sides in
+    /// the existing `decision_message` column.
+    pub message: Option<String>,
+    /// Unix milliseconds, UTC.
+    pub created_at: u64,
+}
+
+/// `reason` field of [`PeerRelationshipDeleteBody`]. Spec-restricted
+/// to exactly three tokens; the wire string is preserved verbatim in
+/// the `termination_reason` column so a future protocol revision can
+/// add values as data, not as a schema migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminationReason {
+    OperatorInitiated,
+    CompromiseResponse,
+    PolicyViolation,
+}
+
+impl TerminationReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            TerminationReason::OperatorInitiated => "operator_initiated",
+            TerminationReason::CompromiseResponse => "compromise_response",
+            TerminationReason::PolicyViolation => "policy_violation",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "operator_initiated" => Some(TerminationReason::OperatorInitiated),
+            "compromise_response" => Some(TerminationReason::CompromiseResponse),
+            "policy_violation" => Some(TerminationReason::PolicyViolation),
             _ => None,
         }
     }
@@ -306,6 +362,78 @@ impl PeerResponseBody {
             decision: decision?,
             agreed_capabilities: caps,
             decision_message: msg,
+            created_at: created_at?,
+        })
+    }
+}
+
+impl PeerRelationshipDeleteBody {
+    /// Encode to wire CBOR. Spec table order; `message` is omitted
+    /// from the map entirely when `None` so a missing key on the
+    /// wire round-trips as `None` on decode.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut entries: Vec<(Value, Value)> = vec![
+            (
+                Value::Text("terminator_domain".into()),
+                Value::Text(self.terminator_domain.clone()),
+            ),
+            (
+                Value::Text("reason".into()),
+                Value::Text(self.reason.as_str().to_string()),
+            ),
+            (
+                Value::Text("created_at".into()),
+                Value::Integer(Integer::from(self.created_at)),
+            ),
+        ];
+        if let Some(msg) = &self.message {
+            entries.push((Value::Text("message".into()), Value::Text(msg.clone())));
+        }
+        let mut buf = Vec::with_capacity(64);
+        ciborium::ser::into_writer(&Value::Map(entries), &mut buf)
+            .expect("ciborium ser is infallible into Vec");
+        buf
+    }
+
+    /// Decode from wire CBOR. Returns `None` on structural
+    /// deviation (missing required field, unknown `reason` token,
+    /// wrong type for a known key).
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let value: Value = ciborium::de::from_reader(bytes).ok()?;
+        let entries = match value {
+            Value::Map(m) => m,
+            _ => return None,
+        };
+        let mut domain: Option<String> = None;
+        let mut reason: Option<TerminationReason> = None;
+        let mut message: Option<String> = None;
+        let mut created_at: Option<u64> = None;
+        for (k, v) in entries {
+            let key = match k {
+                Value::Text(s) => s,
+                _ => continue,
+            };
+            match key.as_str() {
+                "terminator_domain" => {
+                    domain = Some(text_required(v)?);
+                }
+                "reason" => {
+                    let s = text_required(v)?;
+                    reason = Some(TerminationReason::parse(&s)?);
+                }
+                "message" => {
+                    message = Some(text_required(v)?);
+                }
+                "created_at" => {
+                    created_at = Some(uint_required(v)?);
+                }
+                _ => {}
+            }
+        }
+        Some(PeerRelationshipDeleteBody {
+            terminator_domain: domain?,
+            reason: reason?,
+            message,
             created_at: created_at?,
         })
     }
@@ -650,40 +778,18 @@ fn decode_text_array(bytes: &[u8]) -> Option<Vec<String>> {
 
 /// `POST /federation/v1/peer-request` handler.
 ///
-/// Bootstrap-exception verifier: §6.5 step 5 lookup is skipped and
-/// instead this handler enforces self-consistency (`envelope.sender
-/// == body.initiator_instance_pubkey`). On success, records a
-/// `pending_inbound` row visible to the operator's admin UI.
+/// Bootstrap-exception verifier: the §6 middleware (mounted in
+/// `federation::router`) runs `VerifyMode::Bootstrap` so §6.5 step 5
+/// is skipped; this handler enforces the spec-mandated
+/// self-consistency check (`envelope.sender ==
+/// body.initiator_instance_pubkey`) that bootstrap mode leaves to
+/// the caller. On success, records a `pending_inbound` row visible to
+/// the operator's admin UI.
 pub async fn handle_peer_request(
     State(state): State<Arc<AppState>>,
-    req: Request<axum::body::Body>,
+    Extension(envelope): Extension<FedEnvelope>,
+    Extension(VerifiedBody(body)): Extension<VerifiedBody>,
 ) -> Response {
-    let (parts, body) = req.into_parts();
-    if let Some(resp) = require_cbor_content_type(&parts.headers) {
-        return resp;
-    }
-    let body = match axum::body::to_bytes(body, PEER_HANDSHAKE_MAX_BODY).await {
-        Ok(b) => b,
-        Err(_) => return unauthorized(),
-    };
-
-    let auth_header = parts.headers.get(AUTH_HEADER);
-    let envelope = match envelope::verify_inbound(
-        &state.db,
-        state.instance_key.public_bytes(),
-        &state.federation_nonce_lru,
-        VerifyMode::Bootstrap,
-        &Method::POST,
-        "/federation/v1/peer-request",
-        &body,
-        auth_header,
-    )
-    .await
-    {
-        Ok(e) => e,
-        Err(_) => return unauthorized(),
-    };
-
     let parsed = match PeerRequestBody::decode(&body) {
         Some(p) => p,
         None => return bad_request("invalid_body"),
@@ -771,75 +877,27 @@ pub async fn handle_peer_request(
 
 /// `POST /federation/v1/peer-response` handler.
 ///
-/// Receives the callback from the responder. The envelope is
-/// verified in `KnownPeer` mode against the `pending_outbound` row
-/// we recorded when our operator hit "Request"; on accept, the row
-/// flips to `active` with the agreed capability set.
+/// Receives the callback from the responder. The §6 middleware runs
+/// `VerifyMode::Bootstrap` for this route — the responder is in our
+/// `pending_outbound` set, not `active`, so the verifier's step-5
+/// peers lookup would reject otherwise. Bootstrap also means
+/// `envelope.sender == body.responder_instance_pubkey` must be
+/// enforced here; the verifier didn't do it. On accept, the
+/// matching `pending_outbound` row flips to `active` with the agreed
+/// capability set.
 pub async fn handle_peer_response(
     State(state): State<Arc<AppState>>,
-    req: Request<axum::body::Body>,
+    Extension(envelope): Extension<FedEnvelope>,
+    Extension(VerifiedBody(body)): Extension<VerifiedBody>,
 ) -> Response {
-    let (parts, body) = req.into_parts();
-    if let Some(resp) = require_cbor_content_type(&parts.headers) {
-        return resp;
-    }
-    let body = match axum::body::to_bytes(body, PEER_HANDSHAKE_MAX_BODY).await {
-        Ok(b) => b,
-        Err(_) => return unauthorized(),
-    };
-
-    let auth_header = parts.headers.get(AUTH_HEADER);
-    // The peer-response envelope is signed by the responder, who is
-    // *not yet* in our `active` peers table — they're in
-    // `pending_outbound` from our point of view. Use Bootstrap mode
-    // for the envelope verify and then do the lookup ourselves
-    // below, scoped to `pending_outbound` rows specifically.
-    let envelope = match envelope::verify_inbound(
-        &state.db,
-        state.instance_key.public_bytes(),
-        &state.federation_nonce_lru,
-        VerifyMode::Bootstrap,
-        &Method::POST,
-        "/federation/v1/peer-response",
-        &body,
-        auth_header,
-    )
-    .await
-    {
-        Ok(e) => e,
-        Err(VerifyError::MissingHeader)
-        | Err(VerifyError::BadBase64)
-        | Err(VerifyError::BadWireFormat)
-        | Err(VerifyError::BadPayload)
-        | Err(VerifyError::NotFedEnvelope)
-        | Err(VerifyError::SignatureFailed)
-        | Err(VerifyError::WrongReceiver)
-        | Err(VerifyError::MethodMismatch)
-        | Err(VerifyError::PathMismatch)
-        | Err(VerifyError::BodyHashMismatch)
-        | Err(VerifyError::ClockSkew)
-        | Err(VerifyError::Replay) => return unauthorized(),
-        // Bootstrap mode never produces `UnknownSender` (the verifier
-        // skips its step-5 peers lookup), so this arm is structurally
-        // unreachable today. It is enumerated explicitly to keep the
-        // match exhaustive against the `VerifyError` enum. Once §20
-        // anomaly counters land, an inbound peer-response with a key
-        // that doesn't match our recorded `pending_outbound` row is a
-        // separately-interesting signal (MITM vs. mid-flight key
-        // rotation) and will want its own counter rather than being
-        // folded into the generic `unauthorized` bucket below.
-        Err(VerifyError::UnknownSender) => return unauthorized(),
-        Err(VerifyError::Db(e)) => {
-            tracing::error!(error = %e, "db error during peer-response envelope verify");
-            return internal_error();
-        }
-    };
-
     let parsed = match PeerResponseBody::decode(&body) {
         Some(p) => p,
         None => return bad_request("invalid_body"),
     };
 
+    // Bootstrap self-consistency: see `handle_peer_request` for the
+    // rationale. Without this check the responder could plausibly
+    // claim any pubkey in the body while signing with another.
     if parsed.responder_instance_pubkey != envelope.sender {
         return unauthorized();
     }
@@ -932,66 +990,266 @@ pub async fn handle_peer_response(
     StatusCode::OK.into_response()
 }
 
-/// CBOR-encode an error body of shape `{ "error": <code> }` per
-/// `federation-protocol.md` §1.7 (the `/federation/v1/*` surface is
-/// CBOR-only — no JSON anywhere, including error responses).
-fn cbor_error_body(code: &str) -> Vec<u8> {
-    let value = Value::Map(vec![(
-        Value::Text("error".into()),
-        Value::Text(code.into()),
-    )]);
-    let mut buf = Vec::with_capacity(32);
-    ciborium::ser::into_writer(&value, &mut buf).expect("ciborium ser is infallible");
-    buf
-}
+/// `GET /federation/v1/peers` handler (§5.5).
+///
+/// Returns this instance's *active* peer list so the caller's
+/// operator UI can suggest "peers of your peers" as candidates for
+/// new peerings. Mounted behind `verify_known_peer`, so the §6
+/// middleware has already enforced that the requester is in
+/// `peers WHERE status = 'active'`; default visibility per §5.5 is
+/// peers-only, which is exactly what `KnownPeer` enforces.
+///
+/// The protocol's "hide from discovery" flag is local policy (§5.5).
+/// No column for it exists yet, so every active peer is returned for
+/// now; once the admin surface lets operators flip the flag per row,
+/// the `WHERE status = 'active'` clause will pick up an extra
+/// `AND discoverable = 1` predicate.
+pub async fn handle_peers_list(State(state): State<Arc<AppState>>) -> Response {
+    // `first_seen` is the closest stand-in for the spec's `since`
+    // (when peering became active). The schema stores it as an ISO-
+    // 8601 string defaulted at row creation; we re-parse it to unix
+    // milliseconds for the wire payload so the requester doesn't
+    // need a chrono dependency to consume the field.
+    let rows = match sqlx::query!(
+        "SELECT instance_pubkey, instance_domain, first_seen, \
+                COALESCE(agreed_capabilities, capabilities) AS \"caps?\" \
+         FROM peers WHERE status = 'active'",
+    )
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = %e, "db error listing peers for /peers");
+            return internal_error();
+        }
+    };
 
-fn error_response(status: StatusCode, code: &str) -> Response {
-    let mut r = (status, cbor_error_body(code)).into_response();
-    r.headers_mut().insert(
+    let mut peer_entries: Vec<Value> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let since_ms = iso8601_to_unix_ms(&row.first_seen).unwrap_or_else(|| {
+            // Only reachable if something rewrote `first_seen` to a
+            // shape `strftime('%Y-%m-%dT%H:%M:%SZ', 'now')` would
+            // never emit. Emit a warning so operators notice rather
+            // than silently shipping epoch-0 to peers.
+            tracing::warn!(
+                first_seen = %row.first_seen,
+                "peers.first_seen failed ISO 8601 parse; reporting since=0 to caller"
+            );
+            0
+        });
+        let caps: Vec<String> = row
+            .caps
+            .as_ref()
+            .and_then(|b| decode_text_array(b))
+            .unwrap_or_default();
+        peer_entries.push(Value::Map(vec![
+            (
+                Value::Text("domain".into()),
+                Value::Text(row.instance_domain),
+            ),
+            (
+                Value::Text("instance_pubkey".into()),
+                Value::Bytes(row.instance_pubkey),
+            ),
+            (
+                Value::Text("since".into()),
+                Value::Integer(Integer::from(since_ms)),
+            ),
+            (
+                Value::Text("capabilities".into()),
+                Value::Array(caps.into_iter().map(Value::Text).collect()),
+            ),
+        ]));
+    }
+
+    let body_value = Value::Map(vec![(
+        Value::Text("peers".into()),
+        Value::Array(peer_entries),
+    )]);
+    let mut buf = Vec::with_capacity(128);
+    ciborium::ser::into_writer(&body_value, &mut buf).expect("ser infallible");
+
+    let mut response = (StatusCode::OK, buf).into_response();
+    response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static(CBOR_CONTENT_TYPE),
     );
-    r
+    response
 }
 
-fn unauthorized() -> Response {
-    error_response(StatusCode::UNAUTHORIZED, "unauthorized")
-}
+/// `DELETE /federation/v1/peer-relationship` handler (§5.4).
+///
+/// Either side of an active peering can wind it down. Mounted behind
+/// `verify_known_peer`, so the §6 middleware has already proved the
+/// caller is currently an `active` peer. This handler flips that row
+/// to `terminated`, persists the wire-supplied reason and optional
+/// message, and 200s. Per §5.4 the row is retained for audit.
+///
+/// Termination is idempotent: a duplicate request from the same peer
+/// (e.g. a retry of a network-fumbled DELETE) re-200s without
+/// changing the row — the UPDATE's `WHERE status = 'active'` makes
+/// the second call a no-op rather than an error, which is what the
+/// peer needs to commit its own local flip.
+pub async fn handle_peer_relationship_delete(
+    State(state): State<Arc<AppState>>,
+    Extension(envelope): Extension<FedEnvelope>,
+    Extension(VerifiedBody(body)): Extension<VerifiedBody>,
+) -> Response {
+    let parsed = match PeerRelationshipDeleteBody::decode(&body) {
+        Some(p) => p,
+        None => return bad_request("invalid_body"),
+    };
 
-fn unsupported_media_type() -> Response {
-    error_response(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type")
-}
+    // Length caps on the two free-text fields. A peer is free to
+    // send 64 KiB of garbage (the middleware's body cap), but we
+    // refuse to *persist* unbounded text into the audit row.
+    if parsed.terminator_domain.len() > MAX_DOMAIN_LEN
+        || parsed
+            .message
+            .as_deref()
+            .is_some_and(|m| m.len() > MAX_MESSAGE_LEN)
+    {
+        return bad_request("invalid_body");
+    }
 
-/// Reject the request if its `Content-Type` is not `application/cbor`.
-/// Returns `None` when the header is acceptable; `Some(response)` to
-/// short-circuit the handler with 415. Peers that send JSON would
-/// otherwise reach the CBOR decoder and fail at parse rather than at
-/// content negotiation, which is harder to diagnose.
-fn require_cbor_content_type(headers: &http::HeaderMap) -> Option<Response> {
-    let ct = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok());
-    if ct == Some(CBOR_CONTENT_TYPE) {
-        None
-    } else {
-        Some(unsupported_media_type())
+    // Cross-check that `terminator_domain` matches what we recorded
+    // for this sender. The envelope already proved the sender owns
+    // the signing key; this guards against a peer suddenly claiming
+    // a different domain in the audit log without going through a
+    // rotation/re-peering flow.
+    let sender_slice: &[u8] = &envelope.sender;
+    let known_domain = match sqlx::query!(
+        "SELECT instance_domain FROM peers WHERE instance_pubkey = ? AND status = 'active'",
+        sender_slice,
+    )
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(Some(row)) => row.instance_domain,
+        // No active row means the verifier middleware shouldn't have
+        // let this through. Treat as unauthorized rather than 500.
+        Ok(None) => return unauthorized(),
+        Err(e) => {
+            tracing::error!(error = %e, "db error looking up sender for terminator-domain check");
+            return internal_error();
+        }
+    };
+    if parsed.terminator_domain != known_domain {
+        return bad_request("invalid_body");
+    }
+
+    // The UPDATE is scoped to the sender's pubkey so a malicious
+    // peer cannot terminate someone *else's* relationship. Per the
+    // migration's documented contract, `decision_message` always
+    // moves to the most recent lifecycle event — overwrite any
+    // welcome note from the original handshake with the termination
+    // message (or with NULL if none supplied).
+    let reason_str = parsed.reason.as_str();
+    let message = parsed.message.as_deref();
+    let update_result = sqlx::query!(
+        "UPDATE peers \
+         SET status = 'terminated', \
+             termination_reason = ?, \
+             decision_message = ?, \
+             last_handshake = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+         WHERE instance_pubkey = ? AND status = 'active'",
+        reason_str,
+        message,
+        sender_slice,
+    )
+    .execute(&state.db)
+    .await;
+    match update_result {
+        Ok(_) => StatusCode::OK.into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to terminate peer relationship");
+            internal_error()
+        }
     }
 }
 
-fn bad_request(code: &str) -> Response {
-    error_response(StatusCode::BAD_REQUEST, code)
+/// Operator-side termination of an active peering.
+///
+/// Builds and signs the §5.4 DELETE payload, dispatches it to the
+/// peer, then flips our local row to `terminated`. Local flip
+/// happens *after* dispatch so a transport failure leaves the row
+/// `active` and the operator can retry; the alternative ordering
+/// would leave us terminated and the peer still talking to us
+/// (post-DELETE 401s on their side, half-handshake on ours).
+///
+/// Idempotent if the peer's response is lost mid-flight: the second
+/// call hits a no-longer-`active` row locally and falls through to a
+/// no-op UPDATE; the peer's idempotent handler also no-ops.
+pub async fn operator_terminate_peer_relationship(
+    db: &SqlitePool,
+    instance_key: &InstanceKey,
+    terminator_domain: &str,
+    transport: &Arc<dyn FederationTransport>,
+    peer_pubkey: [u8; 32],
+    reason: TerminationReason,
+    message: Option<String>,
+) -> Result<(), InitiateError> {
+    let body = PeerRelationshipDeleteBody {
+        terminator_domain: terminator_domain.to_string(),
+        reason,
+        message,
+        created_at: envelope::now_unix_ms(),
+    };
+    let body_bytes = body.encode();
+
+    let path = "/federation/v1/peer-relationship";
+    let header_value = envelope::sign_outbound(
+        instance_key,
+        peer_pubkey,
+        &Method::DELETE,
+        path,
+        &body_bytes,
+    );
+
+    let request = Request::builder()
+        .method(Method::DELETE)
+        .uri(path)
+        .header(header::CONTENT_TYPE, CBOR_CONTENT_TYPE)
+        .header(AUTH_HEADER, header_value)
+        .body(Bytes::from(body_bytes))
+        .expect("request builder");
+
+    let response = transport
+        .request(&PeerId::from_bytes(peer_pubkey), request)
+        .await
+        .map_err(InitiateError::Transport)?;
+
+    if response.status() != StatusCode::OK {
+        return Err(InitiateError::UnexpectedStatus(response.status()));
+    }
+
+    let peer_slice: &[u8] = &peer_pubkey;
+    let reason_str = reason.as_str();
+    sqlx::query!(
+        "UPDATE peers \
+         SET status = 'terminated', \
+             termination_reason = ?, \
+             last_handshake = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+         WHERE instance_pubkey = ? AND status = 'active'",
+        reason_str,
+        peer_slice,
+    )
+    .execute(db)
+    .await?;
+
+    Ok(())
 }
 
-fn not_found(code: &str) -> Response {
-    error_response(StatusCode::NOT_FOUND, code)
-}
-
-fn conflict(code: &str) -> Response {
-    error_response(StatusCode::CONFLICT, code)
-}
-
-fn internal_error() -> Response {
-    error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal")
+/// Parse an ISO 8601 `YYYY-MM-DDTHH:MM:SSZ` string (the shape
+/// `strftime('%Y-%m-%dT%H:%M:%SZ', 'now')` emits into the
+/// `first_seen` column) into unix milliseconds. Returns `None` on
+/// any deviation; the §5.5 caller logs a warning and treats that as
+/// a missing field.
+fn iso8601_to_unix_ms(s: &str) -> Option<u64> {
+    let dt = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%SZ").ok()?;
+    let ms = dt.and_utc().timestamp_millis();
+    if ms < 0 { None } else { Some(ms as u64) }
 }
 
 #[cfg(test)]
@@ -1063,5 +1321,68 @@ mod tests {
         let proposed = vec!["c".into(), "b".into(), "z".into()];
         let got = intersect_caps(&ours, &proposed);
         assert_eq!(got, vec!["b".to_string(), "c".to_string()]);
+    }
+
+    fn sample_delete() -> PeerRelationshipDeleteBody {
+        PeerRelationshipDeleteBody {
+            terminator_domain: "gamma.example".into(),
+            reason: TerminationReason::PolicyViolation,
+            message: Some("abuse policy §3".into()),
+            created_at: 1_700_000_002_000,
+        }
+    }
+
+    #[test]
+    fn peer_relationship_delete_round_trips() {
+        let r = sample_delete();
+        let bytes = r.encode();
+        let decoded = PeerRelationshipDeleteBody::decode(&bytes).expect("decode");
+        assert_eq!(decoded, r);
+    }
+
+    #[test]
+    fn peer_relationship_delete_round_trips_without_message() {
+        let mut r = sample_delete();
+        r.message = None;
+        r.reason = TerminationReason::OperatorInitiated;
+        let bytes = r.encode();
+        let decoded = PeerRelationshipDeleteBody::decode(&bytes).expect("decode");
+        assert_eq!(decoded, r);
+    }
+
+    #[test]
+    fn peer_relationship_delete_rejects_unknown_reason() {
+        // Hand-craft a body with an out-of-spec `reason` token.
+        let value = Value::Map(vec![
+            (
+                Value::Text("terminator_domain".into()),
+                Value::Text("x".into()),
+            ),
+            (Value::Text("reason".into()), Value::Text("bored".into())),
+            (
+                Value::Text("created_at".into()),
+                Value::Integer(Integer::from(1u64)),
+            ),
+        ]);
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&value, &mut buf).unwrap();
+        assert!(PeerRelationshipDeleteBody::decode(&buf).is_none());
+    }
+
+    #[test]
+    fn iso8601_to_unix_ms_handles_epoch_and_known_dates() {
+        assert_eq!(iso8601_to_unix_ms("1970-01-01T00:00:00Z"), Some(0));
+        // 2021-01-01T00:00:00Z is 1_609_459_200 unix seconds.
+        assert_eq!(
+            iso8601_to_unix_ms("2021-01-01T00:00:00Z"),
+            Some(1_609_459_200_000)
+        );
+    }
+
+    #[test]
+    fn iso8601_to_unix_ms_rejects_wrong_shape() {
+        assert!(iso8601_to_unix_ms("not-a-date").is_none());
+        assert!(iso8601_to_unix_ms("2021-01-01T00:00:00").is_none());
+        assert!(iso8601_to_unix_ms("2021/01/01T00:00:00Z").is_none());
     }
 }
