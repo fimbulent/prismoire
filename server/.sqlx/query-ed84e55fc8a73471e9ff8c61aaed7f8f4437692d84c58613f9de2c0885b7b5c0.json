@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO peers (instance_pubkey, instance_domain, status, direction, request_id) VALUES (?, ?, 'active', 'outbound', ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "ed84e55fc8a73471e9ff8c61aaed7f8f4437692d84c58613f9de2c0885b7b5c0"
+}

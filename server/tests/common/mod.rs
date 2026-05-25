@@ -36,6 +36,9 @@ use axum::extract::ConnectInfo;
 use axum::http::{Method, Request, Response, StatusCode, header};
 use http_body_util::BodyExt;
 use prismoire_config::{AttachmentsConfig, RateLimitConfig};
+use prismoire_server::federation::envelope::NonceLru;
+use prismoire_server::federation::instance_key;
+use prismoire_server::federation::transport::{FederationTransport, NullTransport};
 use prismoire_server::instance_config::AttachmentBudget;
 use prismoire_server::middleware::csrf::AllowedOrigin;
 use prismoire_server::middleware::security_headers::HttpsEnabled;
@@ -144,7 +147,24 @@ pub async fn fresh_db() -> SqlitePool {
 /// Returns `(Router, Arc<AppState>)`. The state handle is what tests
 /// pass to [`refresh_trust_graph`] when they need the cached graph to
 /// reflect newly-inserted edges.
+///
+/// Federation transport defaults to [`NullTransport`] — fine for
+/// every test that does not exercise outbound federation calls.
+/// Multi-instance tests (`tests/common/federation.rs`) use
+/// [`test_app_with_transport`] to bind a shared in-process router
+/// registry instead.
 pub async fn test_app() -> (Router, Arc<AppState>) {
+    test_app_with_transport(Arc::new(NullTransport)).await
+}
+
+/// Same as [`test_app`] but lets the caller provide a custom
+/// [`FederationTransport`]. The harness in `tests/common/federation.rs`
+/// uses this to wire each instance's outbound transport to the
+/// shared peer-router registry so multi-instance scenarios run
+/// without sockets.
+pub async fn test_app_with_transport(
+    federation_transport: Arc<dyn FederationTransport>,
+) -> (Router, Arc<AppState>) {
     let pool = fresh_db().await;
     let trust_graph_notify = Arc::new(Notify::new());
     let trust_graph = Arc::new(RwLock::new(Arc::new(TrustGraph::empty())));
@@ -160,6 +180,14 @@ pub async fn test_app() -> (Router, Arc<AppState>) {
         cap_bytes: 10 * 1024 * 1024,
         refill_bytes_per_day: 1024 * 1024,
     }));
+
+    // Each test instance gets a freshly-generated signing key
+    // persisted to its own in-memory database via the standard
+    // bootstrap path. The harness later treats `instance_key.public_bytes()`
+    // as the instance's `PeerId`.
+    let instance_key = instance_key::load_or_generate(&pool)
+        .await
+        .expect("load_or_generate on fresh test pool");
 
     let state = Arc::new(AppState {
         db: pool,
@@ -178,6 +206,14 @@ pub async fn test_app() -> (Router, Arc<AppState>) {
         source_repo_url,
         attachment_budget,
         attachments_config: AttachmentsConfig::default(),
+        // Federation glue: a fixed test domain (harness tests don't
+        // care about the value beyond round-tripping it through the
+        // wire); the instance signing key just loaded above; a fresh
+        // replay LRU per instance; and the caller-supplied transport.
+        instance_domain: "test.local".to_string(),
+        instance_key,
+        federation_nonce_lru: Arc::new(NonceLru::default()),
+        federation_transport,
     });
 
     let layers = rate_limit::build_layers(&test_rate_limit_config(), false);

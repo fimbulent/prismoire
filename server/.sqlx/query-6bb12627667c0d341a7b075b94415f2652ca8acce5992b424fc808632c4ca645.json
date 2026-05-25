@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE peers SET status = 'rejected', decision_message = ?, last_handshake = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE request_id = ? AND status = 'pending_outbound'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "6bb12627667c0d341a7b075b94415f2652ca8acce5992b424fc808632c4ca645"
+}

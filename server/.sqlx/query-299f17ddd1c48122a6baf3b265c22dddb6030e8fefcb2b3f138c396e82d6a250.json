@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT instance_pubkey, capabilities FROM peers WHERE request_id = ? AND status = 'pending_inbound' LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "instance_pubkey",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "capabilities",
+        "ordinal": 1,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "299f17ddd1c48122a6baf3b265c22dddb6030e8fefcb2b3f138c396e82d6a250"
+}

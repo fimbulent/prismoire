@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT status, direction, request_id FROM peers WHERE instance_pubkey = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "status",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "direction",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "request_id",
+        "ordinal": 2,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "9db0e5e1b6afe1e0f73340523a5996e848be3ce679c6c7c95510d98999dfe7f1"
+}

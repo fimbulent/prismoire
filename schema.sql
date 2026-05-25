@@ -78,15 +78,6 @@ CREATE TABLE instance_config (
     CHECK (rebuild_debounce_ms <= rebuild_min_interval_ms),
     CHECK (rebuild_min_interval_ms <= rebuild_max_interval_ms)
 );
-CREATE TABLE peers (
-    instance_pubkey BLOB PRIMARY KEY NOT NULL,
-    instance_domain TEXT NOT NULL UNIQUE,
-    status          TEXT NOT NULL CHECK (status IN ('pending', 'active', 'severed')),
-    capabilities    BLOB,
-    first_seen      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    last_handshake  TEXT
-);
-CREATE INDEX idx_peers_status ON peers(status);
 CREATE TABLE IF NOT EXISTS "signed_objects" (
     canonical_hash BLOB PRIMARY KEY NOT NULL,
     inner_class    TEXT NOT NULL CHECK (inner_class IN (
@@ -545,3 +536,60 @@ CREATE TABLE IF NOT EXISTS "user_settings" (
     theme TEXT NOT NULL DEFAULT 'rose-pine',
     font TEXT NOT NULL DEFAULT 'literata'
 );
+CREATE TABLE instance_signing_keys (
+    public_key  BLOB    PRIMARY KEY NOT NULL
+                        CHECK (length(public_key) = 32),
+    -- Ed25519 secret seed (`ed25519_dalek::SigningKey::from_bytes`
+    -- takes a 32-byte seed). Treated as a server secret — never
+    -- logged, never exposed in any API surface.
+    private_key BLOB    NOT NULL CHECK (length(private_key) = 32),
+    active      INTEGER NOT NULL CHECK (active IN (0, 1)),
+    created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE UNIQUE INDEX idx_instance_signing_keys_active
+    ON instance_signing_keys(active) WHERE active = 1;
+CREATE TABLE peers (
+    instance_pubkey     BLOB    PRIMARY KEY NOT NULL
+                                CHECK (length(instance_pubkey) = 32),
+    instance_domain     TEXT    NOT NULL UNIQUE,
+    status              TEXT    NOT NULL CHECK (status IN (
+                            'pending_outbound',
+                            'pending_inbound',
+                            'active',
+                            'key_rotating',
+                            'rejected',
+                            'terminated',
+                            'closed'
+                        )),
+    -- Whether the current relationship was initiated by us
+    -- (`outbound`) or by them (`inbound`). Locked at the
+    -- pending_* → active transition; preserved through the rest of
+    -- the lifecycle for audit / operator-UI display.
+    direction           TEXT    NOT NULL CHECK (direction IN ('outbound', 'inbound')),
+    -- UUID (bstr 16) of the peer-request that initiated the current
+    -- relationship phase. Outbound: minted by us, echoed by peer in
+    -- the peer-response callback. Inbound: minted by them, quoted
+    -- back in our peer-response.
+    request_id          BLOB    NOT NULL CHECK (length(request_id) = 16),
+    -- Capabilities the peer advertised in their /identity payload
+    -- (or peer-request body for inbound, peer-response body for
+    -- outbound accept). Canonical CBOR array of tstr. May lag the
+    -- peer's live /identity until next handshake step.
+    capabilities        BLOB,
+    -- Capabilities both sides agreed to use in this peering — the
+    -- intersection of advertised sets at handshake time. CBOR array
+    -- of tstr. NULL while the row is in any `pending_*` state.
+    agreed_capabilities BLOB,
+    -- Operator-set message from the most recent peer-response
+    -- (welcome note on accept, rejection reason on reject). Surfaced
+    -- in the admin UI alongside the row. NULL when no message was
+    -- supplied or when the row is still in `pending_*`.
+    decision_message    TEXT,
+    first_seen          TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    -- Wall-clock of the most recent successful handshake message
+    -- exchanged with this peer (peer-request sent/received,
+    -- peer-response received). NULL until the first such event.
+    last_handshake      TEXT
+);
+CREATE INDEX idx_peers_status ON peers(status);
+CREATE UNIQUE INDEX idx_peers_request_id ON peers(request_id);

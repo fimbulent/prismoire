@@ -7,6 +7,9 @@ use tokio::sync::Notify;
 use webauthn_rs::Webauthn;
 
 use crate::error::{AppError, ErrorCode};
+use crate::federation::envelope::NonceLru;
+use crate::federation::instance_key::InstanceKey;
+use crate::federation::transport::FederationTransport;
 use crate::instance_config::AttachmentBudget;
 use crate::metrics::Metrics;
 use crate::trust::{PendingDeltas, RebuildSchedule, TrustGraph};
@@ -63,6 +66,28 @@ pub struct AppState {
     /// TTL, sweep cadence, request-body overhead. Loaded once at
     /// startup; restart-required to change.
     pub attachments_config: AttachmentsConfig,
+    /// Bare canonical domain this instance presents on the wire
+    /// (`docs/federation-protocol.md` §5.2 `instance_domain`). Read
+    /// from `webauthn.rp_id` at boot; restart-required to change.
+    /// Surfaced in the `/federation/v1/identity` response and in the
+    /// outbound peer-request body.
+    pub instance_domain: String,
+    /// Per-instance Ed25519 signing key (§6.2). Single active key
+    /// per instance in V1. Used to sign every outbound federation
+    /// envelope and to derive this instance's public identity on
+    /// the wire. Loaded or freshly generated at startup by
+    /// [`crate::federation::instance_key::load_or_generate`].
+    pub instance_key: Arc<InstanceKey>,
+    /// Process-wide replay-protection LRU for inbound envelope
+    /// verification (§6.5 step 12, §6.7). Shared across all
+    /// `/federation/v1/*` handlers because the nonce uniqueness
+    /// requirement is *per-instance*, not per-route.
+    pub federation_nonce_lru: Arc<NonceLru>,
+    /// Outbound transport used to dispatch federation requests to
+    /// peers. Production binds this to a `reqwest`-backed impl;
+    /// integration tests bind it to an in-process router registry
+    /// so multi-instance scenarios run without sockets.
+    pub federation_transport: Arc<dyn FederationTransport>,
 }
 
 impl AppState {

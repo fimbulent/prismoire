@@ -5,6 +5,9 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::Notify;
 
 use prismoire_config::Config;
+use prismoire_server::federation::envelope::NonceLru;
+use prismoire_server::federation::instance_key;
+use prismoire_server::federation::transport::{FederationTransport, NullTransport};
 use prismoire_server::middleware::csrf::AllowedOrigin;
 use prismoire_server::middleware::security_headers::HttpsEnabled;
 use prismoire_server::{
@@ -131,6 +134,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let source_repo_url = Arc::new(RwLock::new(loaded_config.source_repo_url));
     let attachment_budget = Arc::new(RwLock::new(loaded_config.attachment_budget));
 
+    // Federation §6.2 signing key + per-instance replay LRU + outbound
+    // transport. The key is loaded once at boot and held in memory for
+    // the process lifetime; restart-required to rotate (§6.6 rotation
+    // lifecycle is Phase 3+). The transport is the `NullTransport`
+    // placeholder until Phase 5 lands a real `reqwest`-backed impl —
+    // no production code path drives outbound federation yet, so the
+    // placeholder is sufficient to satisfy `AppState`'s required
+    // field.
+    let instance_key = instance_key::load_or_generate(&pool).await?;
+    let federation_nonce_lru = Arc::new(NonceLru::default());
+    let federation_transport: Arc<dyn FederationTransport> = Arc::new(NullTransport);
+    // §5.2 `instance_domain` is the bare canonical domain this
+    // instance serves on. The closest existing config we have is
+    // `webauthn.rp_id`, which is the *same* concept by design (both
+    // identify the host as a security principal). Reuse it rather
+    // than adding a parallel `[federation].domain` knob that
+    // operators would have to keep in sync.
+    let instance_domain = config.webauthn.rp_id.clone();
+
     let shared_state = Arc::new(AppState {
         db: pool.clone(),
         webauthn,
@@ -144,6 +166,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         source_repo_url: source_repo_url.clone(),
         attachment_budget: attachment_budget.clone(),
         attachments_config: config.attachments.clone(),
+        instance_domain,
+        instance_key,
+        federation_nonce_lru,
+        federation_transport,
     });
 
     // Spawn the debounced trust graph rebuild background task.

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT instance_pubkey FROM peers WHERE instance_pubkey = ? AND status = 'active' LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "instance_pubkey",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "2fdf37fdb7120280f66c445600b50054d5828edad615b970bb877a0af0669002"
+}

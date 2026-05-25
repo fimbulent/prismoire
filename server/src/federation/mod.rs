@@ -18,6 +18,19 @@
 //! etc., each mounting routes under a dedicated `/federation/v1`
 //! subrouter that `build_app` will eventually merge alongside `/api`.
 //!
-//! No routes are mounted yet.
+//! Phase 2 mounts the first wire surface: a `/federation/v1`
+//! subrouter assembled by [`router::federation_router`] and merged
+//! into the main Axum app in `crate::lib::build_app`. The §5
+//! identity card and §5.4 handshake handlers live in
+//! [`identity`] and [`peering`]; envelope sign / verify helpers
+//! live in [`envelope`]; the per-instance signing-key vault sits
+//! in [`instance_key`]. Later phases extend (envelope-auth
+//! middleware, frontier sync, content propagation, …) rather than
+//! reshaping these foundations.
 
+pub mod envelope;
+pub mod identity;
+pub mod instance_key;
+pub mod peering;
+pub mod router;
 pub mod transport;

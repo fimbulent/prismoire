@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO peers (instance_pubkey, instance_domain, status, direction, request_id, capabilities, last_handshake) VALUES (?, ?, 'pending_inbound', 'inbound', ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')) ON CONFLICT(instance_pubkey) DO UPDATE SET status = 'pending_inbound', direction = 'inbound', instance_domain = excluded.instance_domain, request_id = excluded.request_id, capabilities = excluded.capabilities, last_handshake = excluded.last_handshake",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "c57fc14c6fe0a7d2b94db377ac668ea8f2ad84e5218d07c3ded2ee1142d7a530"
+}

@@ -389,10 +389,22 @@ pub fn build_app(
     let csp_report_router = Router::new()
         .route("/api/csp-report", post(csp_report::receive_csp_report))
         .layer(csp_report_limiter)
-        .with_state(shared_state);
+        .with_state(shared_state.clone());
+
+    // Federation subrouter. Sits outside the `/api/*` middleware
+    // stack: it has its own §6.5 envelope verification per-handler
+    // (later: a router-wide middleware in Phase 3), its own CBOR
+    // content-type discipline, and its own rate-limiting needs that
+    // do not align with the user-session-scoped buckets the `/api`
+    // surface uses. Setup-guard is also intentionally skipped — the
+    // §5.2 `GET /identity` route must answer during the bootstrap
+    // window so peer operators can fetch our pubkey while we still
+    // have no admin account.
+    let federation_router = federation::router::federation_router(shared_state.clone());
 
     api.merge(health_router)
         .merge(csp_report_router)
+        .merge(federation_router)
         .layer(axum::middleware::from_fn_with_state(
             https_enabled,
             middleware::security_headers::security_headers,

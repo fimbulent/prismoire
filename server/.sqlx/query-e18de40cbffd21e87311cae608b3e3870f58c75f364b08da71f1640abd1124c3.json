@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE peers SET status = 'active', agreed_capabilities = ?, last_handshake = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE request_id = ? AND status IN ('pending_inbound', 'active')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "e18de40cbffd21e87311cae608b3e3870f58c75f364b08da71f1640abd1124c3"
+}

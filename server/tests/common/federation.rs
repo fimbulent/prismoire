@@ -32,7 +32,7 @@ use prismoire_server::federation::transport::{
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 
-use super::test_app;
+use super::test_app_with_transport;
 
 /// Shared `PeerId -> Router` registry. Every `InProcessTransport`
 /// instantiated by the same [`MultiInstanceHarness`] points at the
@@ -164,20 +164,29 @@ impl MultiInstanceHarness {
             "harness already has an instance labelled {label:?}"
         );
 
-        let (router, state) = test_app().await;
+        // Phase 2 wires the transport into `AppState` *before* the
+        // app is built, so handlers (and the operator-initiation
+        // helpers in `federation::peering`) can dispatch outbound
+        // calls via the shared registry. Each instance gets its own
+        // `Arc<InProcessTransport>` wrapper but they all point at the
+        // single shared `Registry`, so registering instance B
+        // immediately makes B reachable from A's transport.
+        let transport: Arc<dyn FederationTransport> =
+            Arc::new(InProcessTransport::new(self.registry.clone()));
+        let (router, state) = test_app_with_transport(transport.clone()).await;
 
-        // Phase-1 peer id: deterministic per-label bytes. The shape
-        // (`[u8; 32]`) matches what Phase 2 will replace this with —
-        // the instance's Ed25519 signing public key from
-        // `GET /federation/v1/identity`. Tests written today against
-        // `handle.peer_id` will keep working once that swap happens.
-        let mut bytes = [0u8; 32];
-        let label_bytes = label.as_bytes();
-        let copy_len = label_bytes.len().min(bytes.len());
-        bytes[..copy_len].copy_from_slice(&label_bytes[..copy_len]);
-        let peer_id = PeerId::from_bytes(bytes);
+        // Peer id == this instance's Ed25519 signing pubkey, as the
+        // production transport will eventually use. The state's
+        // `instance_key` was generated at `test_app_with_transport`
+        // time; we just extract its public half here.
+        let peer_id = PeerId::from_bytes(*state.instance_key.public_bytes());
 
-        let transport = Arc::new(InProcessTransport::new(self.registry.clone()));
+        // Down-cast the `Arc<dyn ...>` into `Arc<InProcessTransport>`
+        // for the `InstanceHandle.transport` field. We hold a single
+        // shared `Arc` so the `with_state` clone in `test_app_with_transport`
+        // and the harness's own handle point at the same underlying
+        // `InProcessTransport`.
+        let concrete_transport = Arc::new(InProcessTransport::new(self.registry.clone()));
 
         self.registry.write().await.insert(peer_id, router.clone());
 
@@ -186,7 +195,7 @@ impl MultiInstanceHarness {
             label: label.to_string(),
             state,
             router,
-            transport,
+            transport: concrete_transport,
         };
         self.instances.insert(label.to_string(), handle);
         self.instances.get(label).expect("just inserted")

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT private_key FROM instance_signing_keys WHERE active = 1 LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "private_key",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "eb6a5bf9c9f7b82c1228c54272e65aa7ff0f484c8ae245ff8655de92af0b2ab1"
+}

@@ -141,6 +141,24 @@ pub trait FederationTransport: Send + Sync + 'static {
     fn request<'a>(&'a self, target: &'a PeerId, request: Request<Bytes>) -> TransportFuture<'a>;
 }
 
+/// Placeholder transport that rejects every outbound call as
+/// [`TransportError::UnknownPeer`].
+///
+/// Used by `main.rs` to satisfy the `AppState::federation_transport`
+/// slot in Phase 2 — production has no operator-initiated peering
+/// surface yet, so no production code path actually invokes the
+/// transport. Phase 5 swaps this for the real `reqwest`-backed
+/// impl once outbound HTTPS is in scope. Tests bypass it entirely
+/// by binding their own `InProcessTransport`.
+pub struct NullTransport;
+
+impl FederationTransport for NullTransport {
+    fn request<'a>(&'a self, target: &'a PeerId, _request: Request<Bytes>) -> TransportFuture<'a> {
+        let target = *target;
+        Box::pin(async move { Err(TransportError::UnknownPeer(target)) })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
