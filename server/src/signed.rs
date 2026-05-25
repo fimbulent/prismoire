@@ -51,6 +51,51 @@ pub const TAG_TRUST_EDGE: &str = "trust-edge";
 /// Object-class tag for a user-profile revision (`t = "profile"`).
 pub const TAG_PROFILE: &str = "profile";
 
+// Federation-era classes per `docs/signed-payload-format.md` §5.
+// These are the V1 wire-shape for every signed object that flows
+// across instance boundaries (or, for the ephemeral classes, signs
+// a single client ↔ server exchange).
+
+/// Cross-instance move declaration (`t = "move"`). User-signed.
+/// See `docs/signed-payload-format.md` §5.1.
+pub const TAG_MOVE: &str = "move";
+/// Admin-issued post removal (`t = "admin-rm"`). Instance-signed.
+/// See `docs/signed-payload-format.md` §5.2.
+pub const TAG_ADMIN_REMOVAL: &str = "admin-rm";
+/// Per-request federation envelope (`t = "fed-envelope"`). Instance-
+/// signed, ephemeral. See `docs/signed-payload-format.md` §5.3 and
+/// `docs/federation-protocol.md` §6.
+pub const TAG_FED_ENVELOPE: &str = "fed-envelope";
+/// Verification attestation (`t = "attest"`). Instance-signed.
+/// See `docs/signed-payload-format.md` §5.4.
+pub const TAG_ATTESTATION: &str = "attest";
+/// Cross-instance registration challenge (`t = "registration-challenge"`).
+/// User-signed, ephemeral. See `docs/signed-payload-format.md` §5.5
+/// and `docs/federation-protocol.md` §13.
+pub const TAG_REGISTRATION_CHALLENGE: &str = "registration-challenge";
+/// Recovery challenge (`t = "recovery-challenge"`). Instance-signed,
+/// ephemeral. See `docs/signed-payload-format.md` §5.6.
+pub const TAG_RECOVERY_CHALLENGE: &str = "recovery-challenge";
+/// Recovery response (`t = "recovery-response"`). User-signed,
+/// ephemeral. See `docs/signed-payload-format.md` §5.7.
+pub const TAG_RECOVERY_RESPONSE: &str = "recovery-response";
+/// Thread creation (`t = "thread-create"`). User-signed.
+/// See `docs/signed-payload-format.md` §5.9.
+pub const TAG_THREAD_CREATE: &str = "thread-create";
+/// Instance-issued moderation user-status (`t = "user-status"`).
+/// Instance-signed. See `docs/signed-payload-format.md` §5.10.
+pub const TAG_USER_STATUS: &str = "user-status";
+/// Account deactivation (`t = "deactivate"`). User-signed; terminal
+/// erasure authority over the signing user's own objects. See
+/// `docs/signed-payload-format.md` §5.11.
+pub const TAG_DEACTIVATION: &str = "deactivate";
+/// Instance-issued thread lock state (`t = "thread-status"`).
+/// Instance-signed. See `docs/signed-payload-format.md` §5.12.
+pub const TAG_THREAD_STATUS: &str = "thread-status";
+/// User report against a post (`t = "report"`). User-signed.
+/// See `docs/signed-payload-format.md` §5.13.
+pub const TAG_REPORT: &str = "report";
+
 /// V1 format version for all currently-defined object classes.
 pub const V1: u64 = 1;
 
@@ -59,6 +104,16 @@ pub const V1: u64 = 1;
 /// enforcing this before signing; this module is byte-faithful and
 /// does not truncate.
 pub const MAX_PROFILE_BIO_LEN: usize = 4096;
+
+/// Maximum thread title length in *bytes* (UTF-8) for a V1
+/// `thread-create` payload per spec §5.9. Wire invariant: federation
+/// peers reject any thread-create whose `title` exceeds this.
+pub const MAX_THREAD_TITLE_LEN: usize = 300;
+
+/// Maximum report-detail length in *bytes* (UTF-8) for a V1 `report`
+/// payload per spec §5.13. Bound applies to `detail` only; `reason`
+/// is an enum.
+pub const MAX_REPORT_DETAIL_LEN: usize = 2000;
 
 // --- Attachment protocol invariants (docs/attachments.md §10.1) ---
 //
@@ -268,6 +323,18 @@ pub enum SignedPayload {
     Retraction(Retraction),
     TrustEdge(TrustEdge),
     ProfileRevision(ProfileRevision),
+    Move(Move),
+    AdminRemoval(AdminRemoval),
+    FedEnvelope(FedEnvelope),
+    Attestation(Attestation),
+    RegistrationChallenge(RegistrationChallenge),
+    RecoveryChallenge(RecoveryChallenge),
+    RecoveryResponse(RecoveryResponse),
+    ThreadCreate(ThreadCreate),
+    UserStatus(UserStatus),
+    Deactivation(Deactivation),
+    ThreadStatus(ThreadStatus),
+    Report(Report),
 }
 
 /// Post revision (initial creation or subsequent edit).
@@ -383,6 +450,377 @@ pub struct ProfileRevision {
     pub prior_profile_hash: Option<[u8; 32]>,
 }
 
+// --- Federation-era classes (`docs/signed-payload-format.md` §5) ---
+
+/// Cross-instance move declaration. User-signed.
+///
+/// See `docs/signed-payload-format.md` §5.1 and
+/// `docs/federation-protocol.md` §12.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Move {
+    /// Ed25519 public key of the moving identity (the signer).
+    pub key: [u8; 32],
+    /// Bare canonical domain of the source instance.
+    pub from_instance: String,
+    /// Bare canonical domain of the destination instance.
+    pub to_instance: String,
+    /// Move time, Unix milliseconds, UTC.
+    pub created_at: u64,
+    /// SHA-256 of the canonical bytes of the previous `move` for
+    /// `key`. `None` for the user's first move.
+    pub prior_move_hash: Option<[u8; 32]>,
+}
+
+/// Admin-issued post removal. Instance-signed (signed by the
+/// admin's instance signing key, not by the admin's personal key).
+///
+/// See `docs/signed-payload-format.md` §5.2 and
+/// `docs/federation-protocol.md` §10.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminRemoval {
+    /// Target post UUID (raw 16 bytes).
+    pub post_id: [u8; 16],
+    /// Target post's author pubkey. Disambiguates the home-scoped
+    /// `post_id`.
+    pub target_author: [u8; 32],
+    /// Bare canonical domain of the issuing instance. MUST equal
+    /// the domain whose signing key signs this object.
+    pub signing_instance: String,
+    /// Removal time, Unix milliseconds, UTC.
+    pub created_at: u64,
+    /// Optional human-readable reason. Stored verbatim; not
+    /// interpreted by the protocol.
+    pub reason: Option<String>,
+}
+
+/// Per-request federation envelope. Instance-signed, ephemeral.
+///
+/// Rides as an HTTP header per `docs/federation-protocol.md` §6;
+/// never enters any storage tier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FedEnvelope {
+    /// Sender instance's signing pubkey (the signer).
+    pub sender: [u8; 32],
+    /// Receiver instance's signing pubkey, as currently recorded
+    /// by the sender.
+    pub receiver: [u8; 32],
+    /// HTTP method, uppercase ASCII (e.g. `"GET"`, `"POST"`).
+    /// Casing is producer-enforced; this module is byte-faithful.
+    pub method: String,
+    /// Request path including query string, percent-encoded as on
+    /// the wire.
+    pub path: String,
+    /// SHA-256 of the request body. `None` iff the request has no
+    /// body (typical for GET / HEAD). The parser enforces presence
+    /// matches `body_hash`'s semantic meaning per spec §5.3.
+    pub body_hash: Option<[u8; 32]>,
+    /// Envelope mint time, Unix milliseconds, UTC.
+    pub created_at: u64,
+    /// 16 cryptographically-random bytes, single-use per
+    /// (sender, receiver) pair.
+    pub nonce: [u8; 16],
+}
+
+/// Verification-plugin attestation. Instance-signed.
+///
+/// See `docs/signed-payload-format.md` §5.4.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attestation {
+    /// Ed25519 public key of the verified user.
+    pub subject: [u8; 32],
+    /// Plugin identifier (e.g. `"steam"`, `"reddit"`).
+    pub plugin_id: String,
+    /// Plugin-specific attestation tag (e.g. `"half_life"`,
+    /// `"account_age_4y"`).
+    pub attestation: String,
+    /// Issuance time, Unix milliseconds, UTC.
+    pub issued_at: u64,
+    /// Expiry time, Unix milliseconds, UTC. `None` means "no
+    /// expiry; revocable only by issuer."
+    pub expires_at: Option<u64>,
+    /// Issuing instance's bare canonical domain.
+    pub issuer: String,
+}
+
+/// Cross-instance registration challenge. User-signed, ephemeral.
+///
+/// See `docs/signed-payload-format.md` §5.5 and
+/// `docs/federation-protocol.md` §13.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistrationChallenge {
+    /// Ed25519 public key being registered (the signer).
+    pub user_key: [u8; 32],
+    /// Destination instance's signing pubkey at issuance time.
+    pub dest_instance_key: [u8; 32],
+    /// Destination's bare canonical domain at issuance time.
+    pub dest_domain: String,
+    /// Server-issued, CSPRNG-generated, single-use 32-byte nonce.
+    pub nonce: [u8; 32],
+    /// Server's issuance time, Unix milliseconds, UTC.
+    pub created_at: u64,
+}
+
+/// Operation scope of a recovery challenge / response pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryOperation {
+    /// Recover content authored by the subject key.
+    ContentByKey,
+    /// Recover inbound trust edges to the subject key.
+    InboundEdgesByKey,
+}
+
+impl RecoveryOperation {
+    /// Canonical string form used in the CBOR payload.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ContentByKey => "content-by-key",
+            Self::InboundEdgesByKey => "inbound-edges-by-key",
+        }
+    }
+
+    /// Parse the canonical string form. Returns `None` for any
+    /// other input.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "content-by-key" => Some(Self::ContentByKey),
+            "inbound-edges-by-key" => Some(Self::InboundEdgesByKey),
+            _ => None,
+        }
+    }
+}
+
+/// Recovery challenge. Instance-signed, ephemeral.
+///
+/// See `docs/signed-payload-format.md` §5.6 and
+/// `docs/federation-protocol.md` §14.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryChallenge {
+    /// Issuing instance's signing pubkey (the signer). The
+    /// challenge is bound to this instance — captures cannot
+    /// redirect to a different peer.
+    pub responder_instance_key: [u8; 32],
+    /// Ed25519 public key K whose recovery is being authenticated.
+    pub subject_key: [u8; 32],
+    /// Scopes the response to a single recovery endpoint.
+    pub operation: RecoveryOperation,
+    /// CSPRNG-generated, single-use 32-byte nonce.
+    pub nonce: [u8; 32],
+    /// Issuance time, Unix milliseconds, UTC.
+    pub created_at: u64,
+    /// Hard expiry, Unix milliseconds, UTC.
+    pub expires_at: u64,
+}
+
+/// Recovery response. User-signed, ephemeral.
+///
+/// See `docs/signed-payload-format.md` §5.7.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryResponse {
+    /// Ed25519 public key K (the signer). Must equal the
+    /// `subject_key` of the referenced challenge.
+    pub subject_key: [u8; 32],
+    /// Canonical hash (SHA-256 of canonical bytes) of the §5.6
+    /// challenge being redeemed.
+    pub challenge_hash: [u8; 32],
+    /// Response signing time, Unix milliseconds, UTC.
+    pub created_at: u64,
+}
+
+/// Thread creation. User-signed (by the OP author).
+///
+/// See `docs/signed-payload-format.md` §5.9.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadCreate {
+    /// Thread UUID (raw 16 bytes).
+    pub thread_id: [u8; 16],
+    /// Ed25519 public key of the thread creator / OP author (the
+    /// signer).
+    pub author: [u8; 32],
+    /// Room slug in canonical form. Globally shared namespace.
+    pub room_slug: String,
+    /// Thread title in Unicode NFC. Length bounded by
+    /// [`MAX_THREAD_TITLE_LEN`].
+    pub title: String,
+    /// Normalized link URL for link-post threads. `None` for
+    /// discussion-only threads.
+    pub link_url: Option<String>,
+    /// UUID of the OP `post-rev` (revision 0). Receivers REQUIRE
+    /// this `post-rev` to be stored before applying the
+    /// thread-create.
+    pub op_post_id: [u8; 16],
+    /// Thread creation time, Unix milliseconds, UTC.
+    pub created_at: u64,
+}
+
+/// Status kind for [`UserStatus`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserStatusKind {
+    Active,
+    Suspended,
+    Banned,
+}
+
+impl UserStatusKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Suspended => "suspended",
+            Self::Banned => "banned",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "active" => Some(Self::Active),
+            "suspended" => Some(Self::Suspended),
+            "banned" => Some(Self::Banned),
+            _ => None,
+        }
+    }
+}
+
+/// Instance-issued moderation user-status. Instance-signed.
+///
+/// See `docs/signed-payload-format.md` §5.10 and
+/// `docs/federation-protocol.md` §16.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserStatus {
+    /// Ed25519 public key of the user the status applies to.
+    pub subject: [u8; 32],
+    /// Status kind.
+    pub status: UserStatusKind,
+    /// Unix milliseconds, UTC. Present iff `status == Suspended`
+    /// AND the suspension has a fixed end time. Absent for
+    /// indefinite suspensions and for all non-suspended statuses.
+    /// Wire-invariant per §5.10; enforced by the parser.
+    pub suspended_until: Option<u64>,
+    /// Bare canonical domain of the issuing instance. MUST equal
+    /// the domain whose signing key signs this object.
+    pub signing_instance: String,
+    /// Optional human-readable reason.
+    pub reason: Option<String>,
+    /// Issuance time, Unix milliseconds, UTC.
+    pub created_at: u64,
+    /// SHA-256 of the canonical payload bytes of the prior
+    /// `user-status` object for `subject`. `None` for the user's
+    /// first status object.
+    pub prior_status_hash: Option<[u8; 32]>,
+}
+
+/// Account deactivation. User-signed; terminal. Acts as an
+/// erasure authority over every signed object whose inner author
+/// key is `user`.
+///
+/// See `docs/signed-payload-format.md` §5.11.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Deactivation {
+    /// Ed25519 public key of the user (the signer).
+    pub user: [u8; 32],
+    /// Deactivation time, Unix milliseconds, UTC.
+    pub created_at: u64,
+}
+
+/// Status kind for [`ThreadStatus`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadStatusKind {
+    Open,
+    Locked,
+}
+
+impl ThreadStatusKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Locked => "locked",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "open" => Some(Self::Open),
+            "locked" => Some(Self::Locked),
+            _ => None,
+        }
+    }
+}
+
+/// Instance-issued thread lock state. Instance-signed.
+///
+/// See `docs/signed-payload-format.md` §5.12 and
+/// `docs/federation-protocol.md` §17.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadStatus {
+    /// Target thread UUID.
+    pub thread_id: [u8; 16],
+    /// Status kind.
+    pub status: ThreadStatusKind,
+    /// Bare canonical domain of the issuing instance. MUST equal
+    /// the domain whose signing key signs this object AND be the
+    /// thread's home per §5.12's authority rule.
+    pub signing_instance: String,
+    /// Optional human-readable reason.
+    pub reason: Option<String>,
+    /// Issuance time, Unix milliseconds, UTC.
+    pub created_at: u64,
+    /// SHA-256 of the canonical payload bytes of the prior
+    /// `thread-status` object for `thread_id`. `None` for the
+    /// thread's first status object.
+    pub prior_status_hash: Option<[u8; 32]>,
+}
+
+/// Reason enum for [`Report`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportReason {
+    Spam,
+    RulesViolation,
+    IllegalContent,
+    Other,
+}
+
+impl ReportReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Spam => "spam",
+            Self::RulesViolation => "rules_violation",
+            Self::IllegalContent => "illegal_content",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "spam" => Some(Self::Spam),
+            "rules_violation" => Some(Self::RulesViolation),
+            "illegal_content" => Some(Self::IllegalContent),
+            "other" => Some(Self::Other),
+            _ => None,
+        }
+    }
+}
+
+/// User report against a post. User-signed; routed only to the
+/// target post's home (and locally to the reporter's home by
+/// policy). Never gossip-forwarded.
+///
+/// See `docs/signed-payload-format.md` §5.13 and
+/// `docs/federation-protocol.md` §18.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Report {
+    /// Target post UUID.
+    pub post_id: [u8; 16],
+    /// Target post's author pubkey.
+    pub target_author: [u8; 32],
+    /// Reporter's Ed25519 public key (the signer).
+    pub reporter: [u8; 32],
+    /// Bounded reason enum.
+    pub reason: ReportReason,
+    /// Optional reporter-supplied detail. Length bounded by
+    /// [`MAX_REPORT_DETAIL_LEN`].
+    pub detail: Option<String>,
+    /// Report time, Unix milliseconds, UTC.
+    pub created_at: u64,
+}
+
 // --- Errors ---
 
 /// A canonical-form or schema violation when parsing a signed payload.
@@ -437,6 +875,20 @@ pub enum ParseError {
     DisallowedMime(String),
     /// A signed `attachments[].size` exceeds [`MAX_ATTACHMENT_SIZE`].
     AttachmentTooLarge { max: u64, got: u64 },
+    /// `status` text was not one of the spec-defined values for the
+    /// containing class (`user-status` or `thread-status`).
+    InvalidStatus(String),
+    /// `operation` text on a `recovery-challenge` was not one of the
+    /// spec-defined values.
+    InvalidOperation(String),
+    /// `reason` text on a `report` was not one of the spec-defined
+    /// values. (For free-text `reason` fields on `admin-rm` /
+    /// `user-status` / `thread-status` this error is not produced.)
+    InvalidReportReason(String),
+    /// `suspended_until` was present on a `user-status` whose status
+    /// was not `suspended`. Per spec §5.10 the field MUST be absent
+    /// for non-suspended statuses.
+    IllegalSuspendedUntil,
 }
 
 impl std::fmt::Display for ParseError {
@@ -478,6 +930,12 @@ impl std::fmt::Display for ParseError {
             Self::AttachmentTooLarge { max, got } => {
                 write!(f, "attachment size {got} exceeds maximum {max}")
             }
+            Self::InvalidStatus(s) => write!(f, "invalid status: {s}"),
+            Self::InvalidOperation(s) => write!(f, "invalid recovery operation: {s}"),
+            Self::InvalidReportReason(s) => write!(f, "invalid report reason: {s}"),
+            Self::IllegalSuspendedUntil => f.write_str(
+                "suspended_until present on user-status whose status is not 'suspended'",
+            ),
         }
     }
 }
@@ -538,6 +996,18 @@ impl SignedPayload {
             Self::Retraction(r) => retraction_to_cbor(r),
             Self::TrustEdge(e) => trust_edge_to_cbor(e),
             Self::ProfileRevision(p) => profile_revision_to_cbor(p),
+            Self::Move(m) => move_to_cbor(m),
+            Self::AdminRemoval(a) => admin_removal_to_cbor(a),
+            Self::FedEnvelope(e) => fed_envelope_to_cbor(e),
+            Self::Attestation(a) => attestation_to_cbor(a),
+            Self::RegistrationChallenge(c) => registration_challenge_to_cbor(c),
+            Self::RecoveryChallenge(c) => recovery_challenge_to_cbor(c),
+            Self::RecoveryResponse(r) => recovery_response_to_cbor(r),
+            Self::ThreadCreate(t) => thread_create_to_cbor(t),
+            Self::UserStatus(s) => user_status_to_cbor(s),
+            Self::Deactivation(d) => deactivation_to_cbor(d),
+            Self::ThreadStatus(s) => thread_status_to_cbor(s),
+            Self::Report(r) => report_to_cbor(r),
         }
     }
 }
@@ -672,6 +1142,187 @@ fn profile_revision_to_cbor(p: &ProfileRevision) -> Value {
     build_map(entries)
 }
 
+// --- Federation-era encoders (`docs/signed-payload-format.md` §5) ---
+
+fn move_to_cbor(m: &Move) -> Value {
+    let mut entries: Vec<(&'static str, Value)> = vec![
+        ("v", uint(V1)),
+        ("t", text(TAG_MOVE)),
+        ("key", bytes(&m.key)),
+        ("from_instance", text(&m.from_instance)),
+        ("to_instance", text(&m.to_instance)),
+        ("created_at", uint(m.created_at)),
+    ];
+    if let Some(prior) = m.prior_move_hash {
+        entries.push(("prior_move_hash", bytes(&prior)));
+    }
+    build_map(entries)
+}
+
+fn admin_removal_to_cbor(a: &AdminRemoval) -> Value {
+    let mut entries: Vec<(&'static str, Value)> = vec![
+        ("v", uint(V1)),
+        ("t", text(TAG_ADMIN_REMOVAL)),
+        ("post_id", bytes(&a.post_id)),
+        ("target_author", bytes(&a.target_author)),
+        ("signing_instance", text(&a.signing_instance)),
+        ("created_at", uint(a.created_at)),
+    ];
+    if let Some(reason) = &a.reason {
+        entries.push(("reason", text(reason)));
+    }
+    build_map(entries)
+}
+
+fn fed_envelope_to_cbor(e: &FedEnvelope) -> Value {
+    let mut entries: Vec<(&'static str, Value)> = vec![
+        ("v", uint(V1)),
+        ("t", text(TAG_FED_ENVELOPE)),
+        ("sender", bytes(&e.sender)),
+        ("receiver", bytes(&e.receiver)),
+        ("method", text(&e.method)),
+        ("path", text(&e.path)),
+        ("created_at", uint(e.created_at)),
+        ("nonce", bytes(&e.nonce)),
+    ];
+    if let Some(body_hash) = e.body_hash {
+        entries.push(("body_hash", bytes(&body_hash)));
+    }
+    build_map(entries)
+}
+
+fn attestation_to_cbor(a: &Attestation) -> Value {
+    let mut entries: Vec<(&'static str, Value)> = vec![
+        ("v", uint(V1)),
+        ("t", text(TAG_ATTESTATION)),
+        ("subject", bytes(&a.subject)),
+        ("plugin_id", text(&a.plugin_id)),
+        ("attestation", text(&a.attestation)),
+        ("issued_at", uint(a.issued_at)),
+        ("issuer", text(&a.issuer)),
+    ];
+    if let Some(exp) = a.expires_at {
+        entries.push(("expires_at", uint(exp)));
+    }
+    build_map(entries)
+}
+
+fn registration_challenge_to_cbor(c: &RegistrationChallenge) -> Value {
+    build_map(vec![
+        ("v", uint(V1)),
+        ("t", text(TAG_REGISTRATION_CHALLENGE)),
+        ("user_key", bytes(&c.user_key)),
+        ("dest_instance_key", bytes(&c.dest_instance_key)),
+        ("dest_domain", text(&c.dest_domain)),
+        ("nonce", bytes(&c.nonce)),
+        ("created_at", uint(c.created_at)),
+    ])
+}
+
+fn recovery_challenge_to_cbor(c: &RecoveryChallenge) -> Value {
+    build_map(vec![
+        ("v", uint(V1)),
+        ("t", text(TAG_RECOVERY_CHALLENGE)),
+        ("responder_instance_key", bytes(&c.responder_instance_key)),
+        ("subject_key", bytes(&c.subject_key)),
+        ("operation", text(c.operation.as_str())),
+        ("nonce", bytes(&c.nonce)),
+        ("created_at", uint(c.created_at)),
+        ("expires_at", uint(c.expires_at)),
+    ])
+}
+
+fn recovery_response_to_cbor(r: &RecoveryResponse) -> Value {
+    build_map(vec![
+        ("v", uint(V1)),
+        ("t", text(TAG_RECOVERY_RESPONSE)),
+        ("subject_key", bytes(&r.subject_key)),
+        ("challenge_hash", bytes(&r.challenge_hash)),
+        ("created_at", uint(r.created_at)),
+    ])
+}
+
+fn thread_create_to_cbor(t: &ThreadCreate) -> Value {
+    let mut entries: Vec<(&'static str, Value)> = vec![
+        ("v", uint(V1)),
+        ("t", text(TAG_THREAD_CREATE)),
+        ("thread_id", bytes(&t.thread_id)),
+        ("author", bytes(&t.author)),
+        ("room_slug", text(&t.room_slug)),
+        ("title", text(&t.title)),
+        ("op_post_id", bytes(&t.op_post_id)),
+        ("created_at", uint(t.created_at)),
+    ];
+    if let Some(url) = &t.link_url {
+        entries.push(("link_url", text(url)));
+    }
+    build_map(entries)
+}
+
+fn user_status_to_cbor(s: &UserStatus) -> Value {
+    let mut entries: Vec<(&'static str, Value)> = vec![
+        ("v", uint(V1)),
+        ("t", text(TAG_USER_STATUS)),
+        ("subject", bytes(&s.subject)),
+        ("status", text(s.status.as_str())),
+        ("signing_instance", text(&s.signing_instance)),
+        ("created_at", uint(s.created_at)),
+    ];
+    if let Some(until) = s.suspended_until {
+        entries.push(("suspended_until", uint(until)));
+    }
+    if let Some(reason) = &s.reason {
+        entries.push(("reason", text(reason)));
+    }
+    if let Some(prior) = s.prior_status_hash {
+        entries.push(("prior_status_hash", bytes(&prior)));
+    }
+    build_map(entries)
+}
+
+fn deactivation_to_cbor(d: &Deactivation) -> Value {
+    build_map(vec![
+        ("v", uint(V1)),
+        ("t", text(TAG_DEACTIVATION)),
+        ("user", bytes(&d.user)),
+        ("created_at", uint(d.created_at)),
+    ])
+}
+
+fn thread_status_to_cbor(s: &ThreadStatus) -> Value {
+    let mut entries: Vec<(&'static str, Value)> = vec![
+        ("v", uint(V1)),
+        ("t", text(TAG_THREAD_STATUS)),
+        ("thread_id", bytes(&s.thread_id)),
+        ("status", text(s.status.as_str())),
+        ("signing_instance", text(&s.signing_instance)),
+        ("created_at", uint(s.created_at)),
+    ];
+    if let Some(reason) = &s.reason {
+        entries.push(("reason", text(reason)));
+    }
+    if let Some(prior) = s.prior_status_hash {
+        entries.push(("prior_status_hash", bytes(&prior)));
+    }
+    build_map(entries)
+}
+
+fn report_to_cbor(r: &Report) -> Value {
+    let mut entries: Vec<(&'static str, Value)> = vec![
+        ("v", uint(V1)),
+        ("t", text(TAG_REPORT)),
+        ("post_id", bytes(&r.post_id)),
+        ("target_author", bytes(&r.target_author)),
+        ("reporter", bytes(&r.reporter)),
+        ("reason", text(r.reason.as_str())),
+        ("created_at", uint(r.created_at)),
+    ];
+    if let Some(d) = &r.detail {
+        entries.push(("detail", text(d)));
+    }
+    build_map(entries)
+}
+
 // --- Parser ---
 
 impl SignedPayload {
@@ -742,6 +1393,54 @@ impl SignedPayload {
             TAG_PROFILE => {
                 require_version(TAG_PROFILE, version)?;
                 parse_profile_revision(&fields).map(SignedPayload::ProfileRevision)
+            }
+            TAG_MOVE => {
+                require_version(TAG_MOVE, version)?;
+                parse_move(&fields).map(SignedPayload::Move)
+            }
+            TAG_ADMIN_REMOVAL => {
+                require_version(TAG_ADMIN_REMOVAL, version)?;
+                parse_admin_removal(&fields).map(SignedPayload::AdminRemoval)
+            }
+            TAG_FED_ENVELOPE => {
+                require_version(TAG_FED_ENVELOPE, version)?;
+                parse_fed_envelope(&fields).map(SignedPayload::FedEnvelope)
+            }
+            TAG_ATTESTATION => {
+                require_version(TAG_ATTESTATION, version)?;
+                parse_attestation(&fields).map(SignedPayload::Attestation)
+            }
+            TAG_REGISTRATION_CHALLENGE => {
+                require_version(TAG_REGISTRATION_CHALLENGE, version)?;
+                parse_registration_challenge(&fields).map(SignedPayload::RegistrationChallenge)
+            }
+            TAG_RECOVERY_CHALLENGE => {
+                require_version(TAG_RECOVERY_CHALLENGE, version)?;
+                parse_recovery_challenge(&fields).map(SignedPayload::RecoveryChallenge)
+            }
+            TAG_RECOVERY_RESPONSE => {
+                require_version(TAG_RECOVERY_RESPONSE, version)?;
+                parse_recovery_response(&fields).map(SignedPayload::RecoveryResponse)
+            }
+            TAG_THREAD_CREATE => {
+                require_version(TAG_THREAD_CREATE, version)?;
+                parse_thread_create(&fields).map(SignedPayload::ThreadCreate)
+            }
+            TAG_USER_STATUS => {
+                require_version(TAG_USER_STATUS, version)?;
+                parse_user_status(&fields).map(SignedPayload::UserStatus)
+            }
+            TAG_DEACTIVATION => {
+                require_version(TAG_DEACTIVATION, version)?;
+                parse_deactivation(&fields).map(SignedPayload::Deactivation)
+            }
+            TAG_THREAD_STATUS => {
+                require_version(TAG_THREAD_STATUS, version)?;
+                parse_thread_status(&fields).map(SignedPayload::ThreadStatus)
+            }
+            TAG_REPORT => {
+                require_version(TAG_REPORT, version)?;
+                parse_report(&fields).map(SignedPayload::Report)
             }
             _ => Err(ParseError::UnknownClass(t)),
         }
@@ -977,6 +1676,273 @@ fn parse_trust_edge(fields: &BTreeMap<String, Value>) -> Result<TrustEdge, Parse
     })
 }
 
+// --- Federation-era parsers (`docs/signed-payload-format.md` §5) ---
+
+fn parse_move(fields: &BTreeMap<String, Value>) -> Result<Move, ParseError> {
+    let key = field_bytes_fixed::<32>(fields, "key")?;
+    let from_instance = field_text(fields, "from_instance")?;
+    let to_instance = field_text(fields, "to_instance")?;
+    let created_at = field_uint(fields, "created_at")?;
+    let prior_move_hash = if fields.contains_key("prior_move_hash") {
+        Some(field_bytes_fixed::<32>(fields, "prior_move_hash")?)
+    } else {
+        None
+    };
+    Ok(Move {
+        key,
+        from_instance,
+        to_instance,
+        created_at,
+        prior_move_hash,
+    })
+}
+
+fn parse_admin_removal(fields: &BTreeMap<String, Value>) -> Result<AdminRemoval, ParseError> {
+    let post_id = field_bytes_fixed::<16>(fields, "post_id")?;
+    let target_author = field_bytes_fixed::<32>(fields, "target_author")?;
+    let signing_instance = field_text(fields, "signing_instance")?;
+    let created_at = field_uint(fields, "created_at")?;
+    let reason = if fields.contains_key("reason") {
+        Some(field_text(fields, "reason")?)
+    } else {
+        None
+    };
+    Ok(AdminRemoval {
+        post_id,
+        target_author,
+        signing_instance,
+        created_at,
+        reason,
+    })
+}
+
+fn parse_fed_envelope(fields: &BTreeMap<String, Value>) -> Result<FedEnvelope, ParseError> {
+    let sender = field_bytes_fixed::<32>(fields, "sender")?;
+    let receiver = field_bytes_fixed::<32>(fields, "receiver")?;
+    let method = field_text(fields, "method")?;
+    let path = field_text(fields, "path")?;
+    let created_at = field_uint(fields, "created_at")?;
+    let nonce = field_bytes_fixed::<16>(fields, "nonce")?;
+    let body_hash = if fields.contains_key("body_hash") {
+        Some(field_bytes_fixed::<32>(fields, "body_hash")?)
+    } else {
+        None
+    };
+    Ok(FedEnvelope {
+        sender,
+        receiver,
+        method,
+        path,
+        body_hash,
+        created_at,
+        nonce,
+    })
+}
+
+fn parse_attestation(fields: &BTreeMap<String, Value>) -> Result<Attestation, ParseError> {
+    let subject = field_bytes_fixed::<32>(fields, "subject")?;
+    let plugin_id = field_text(fields, "plugin_id")?;
+    let attestation = field_text(fields, "attestation")?;
+    let issued_at = field_uint(fields, "issued_at")?;
+    let issuer = field_text(fields, "issuer")?;
+    let expires_at = if fields.contains_key("expires_at") {
+        Some(field_uint(fields, "expires_at")?)
+    } else {
+        None
+    };
+    Ok(Attestation {
+        subject,
+        plugin_id,
+        attestation,
+        issued_at,
+        expires_at,
+        issuer,
+    })
+}
+
+fn parse_registration_challenge(
+    fields: &BTreeMap<String, Value>,
+) -> Result<RegistrationChallenge, ParseError> {
+    let user_key = field_bytes_fixed::<32>(fields, "user_key")?;
+    let dest_instance_key = field_bytes_fixed::<32>(fields, "dest_instance_key")?;
+    let dest_domain = field_text(fields, "dest_domain")?;
+    let nonce = field_bytes_fixed::<32>(fields, "nonce")?;
+    let created_at = field_uint(fields, "created_at")?;
+    Ok(RegistrationChallenge {
+        user_key,
+        dest_instance_key,
+        dest_domain,
+        nonce,
+        created_at,
+    })
+}
+
+fn parse_recovery_challenge(
+    fields: &BTreeMap<String, Value>,
+) -> Result<RecoveryChallenge, ParseError> {
+    let responder_instance_key = field_bytes_fixed::<32>(fields, "responder_instance_key")?;
+    let subject_key = field_bytes_fixed::<32>(fields, "subject_key")?;
+    let operation_str = field_text(fields, "operation")?;
+    let operation = RecoveryOperation::parse(&operation_str)
+        .ok_or(ParseError::InvalidOperation(operation_str))?;
+    let nonce = field_bytes_fixed::<32>(fields, "nonce")?;
+    let created_at = field_uint(fields, "created_at")?;
+    let expires_at = field_uint(fields, "expires_at")?;
+    Ok(RecoveryChallenge {
+        responder_instance_key,
+        subject_key,
+        operation,
+        nonce,
+        created_at,
+        expires_at,
+    })
+}
+
+fn parse_recovery_response(
+    fields: &BTreeMap<String, Value>,
+) -> Result<RecoveryResponse, ParseError> {
+    let subject_key = field_bytes_fixed::<32>(fields, "subject_key")?;
+    let challenge_hash = field_bytes_fixed::<32>(fields, "challenge_hash")?;
+    let created_at = field_uint(fields, "created_at")?;
+    Ok(RecoveryResponse {
+        subject_key,
+        challenge_hash,
+        created_at,
+    })
+}
+
+fn parse_thread_create(fields: &BTreeMap<String, Value>) -> Result<ThreadCreate, ParseError> {
+    let thread_id = field_bytes_fixed::<16>(fields, "thread_id")?;
+    let author = field_bytes_fixed::<32>(fields, "author")?;
+    let room_slug = field_text(fields, "room_slug")?;
+    let title = field_text(fields, "title")?;
+    if title.len() > MAX_THREAD_TITLE_LEN {
+        return Err(ParseError::TextTooLong {
+            field: "title",
+            max: MAX_THREAD_TITLE_LEN,
+            got: title.len(),
+        });
+    }
+    let op_post_id = field_bytes_fixed::<16>(fields, "op_post_id")?;
+    let created_at = field_uint(fields, "created_at")?;
+    let link_url = if fields.contains_key("link_url") {
+        Some(field_text(fields, "link_url")?)
+    } else {
+        None
+    };
+    Ok(ThreadCreate {
+        thread_id,
+        author,
+        room_slug,
+        title,
+        link_url,
+        op_post_id,
+        created_at,
+    })
+}
+
+fn parse_user_status(fields: &BTreeMap<String, Value>) -> Result<UserStatus, ParseError> {
+    let subject = field_bytes_fixed::<32>(fields, "subject")?;
+    let status_str = field_text(fields, "status")?;
+    let status = UserStatusKind::parse(&status_str).ok_or(ParseError::InvalidStatus(status_str))?;
+    let signing_instance = field_text(fields, "signing_instance")?;
+    let created_at = field_uint(fields, "created_at")?;
+    let suspended_until = if fields.contains_key("suspended_until") {
+        Some(field_uint(fields, "suspended_until")?)
+    } else {
+        None
+    };
+    // Wire invariant per spec §5.10: `suspended_until` only valid
+    // when status == suspended. (Suspended + None still permitted
+    // for indefinite suspensions.)
+    if suspended_until.is_some() && status != UserStatusKind::Suspended {
+        return Err(ParseError::IllegalSuspendedUntil);
+    }
+    let reason = if fields.contains_key("reason") {
+        Some(field_text(fields, "reason")?)
+    } else {
+        None
+    };
+    let prior_status_hash = if fields.contains_key("prior_status_hash") {
+        Some(field_bytes_fixed::<32>(fields, "prior_status_hash")?)
+    } else {
+        None
+    };
+    Ok(UserStatus {
+        subject,
+        status,
+        suspended_until,
+        signing_instance,
+        reason,
+        created_at,
+        prior_status_hash,
+    })
+}
+
+fn parse_deactivation(fields: &BTreeMap<String, Value>) -> Result<Deactivation, ParseError> {
+    let user = field_bytes_fixed::<32>(fields, "user")?;
+    let created_at = field_uint(fields, "created_at")?;
+    Ok(Deactivation { user, created_at })
+}
+
+fn parse_thread_status(fields: &BTreeMap<String, Value>) -> Result<ThreadStatus, ParseError> {
+    let thread_id = field_bytes_fixed::<16>(fields, "thread_id")?;
+    let status_str = field_text(fields, "status")?;
+    let status =
+        ThreadStatusKind::parse(&status_str).ok_or(ParseError::InvalidStatus(status_str))?;
+    let signing_instance = field_text(fields, "signing_instance")?;
+    let created_at = field_uint(fields, "created_at")?;
+    let reason = if fields.contains_key("reason") {
+        Some(field_text(fields, "reason")?)
+    } else {
+        None
+    };
+    let prior_status_hash = if fields.contains_key("prior_status_hash") {
+        Some(field_bytes_fixed::<32>(fields, "prior_status_hash")?)
+    } else {
+        None
+    };
+    Ok(ThreadStatus {
+        thread_id,
+        status,
+        signing_instance,
+        reason,
+        created_at,
+        prior_status_hash,
+    })
+}
+
+fn parse_report(fields: &BTreeMap<String, Value>) -> Result<Report, ParseError> {
+    let post_id = field_bytes_fixed::<16>(fields, "post_id")?;
+    let target_author = field_bytes_fixed::<32>(fields, "target_author")?;
+    let reporter = field_bytes_fixed::<32>(fields, "reporter")?;
+    let reason_str = field_text(fields, "reason")?;
+    let reason =
+        ReportReason::parse(&reason_str).ok_or(ParseError::InvalidReportReason(reason_str))?;
+    let created_at = field_uint(fields, "created_at")?;
+    let detail = if fields.contains_key("detail") {
+        let d = field_text(fields, "detail")?;
+        if d.len() > MAX_REPORT_DETAIL_LEN {
+            return Err(ParseError::TextTooLong {
+                field: "detail",
+                max: MAX_REPORT_DETAIL_LEN,
+                got: d.len(),
+            });
+        }
+        Some(d)
+    } else {
+        None
+    };
+    Ok(Report {
+        post_id,
+        target_author,
+        reporter,
+        reason,
+        detail,
+        created_at,
+    })
+}
+
 // --- Verifier ---
 
 /// Full §6 verification: parse, canonical-form check, dispatch,
@@ -997,13 +1963,18 @@ pub fn verify(
 
     let payload = SignedPayload::parse(payload_bytes)?;
 
-    let identity_key: &[u8; 32] = match &payload {
-        SignedPayload::PostRevision(p) => &p.author,
-        SignedPayload::Retraction(r) => &r.author,
-        SignedPayload::TrustEdge(e) => &e.from_key,
-        SignedPayload::ProfileRevision(p) => &p.user,
-    };
-    if identity_key != claimed_key.as_bytes() {
+    // Per-class identity binding. For classes that carry the signing
+    // key as a payload field, we cross-check it against `claimed_key`
+    // so a caller can't be tricked into verifying with the wrong key.
+    // For instance-signed classes whose authority is named by *domain*
+    // rather than by key inside the payload (`admin-rm`,
+    // `user-status`, `thread-status`, `attest`), the caller is
+    // responsible for resolving signing_instance → key via the peers
+    // table and supplying it as `claimed_key`; no inner-field check
+    // is meaningful here and the dispatch returns `None`.
+    if let Some(identity_key) = identity_binding(&payload)
+        && identity_key != claimed_key.as_bytes()
+    {
         return Err(VerifyError::AuthorMismatch);
     }
 
@@ -1012,6 +1983,39 @@ pub fn verify(
         .map_err(|_| VerifyError::SignatureFailed)?;
 
     Ok(payload)
+}
+
+/// Identity-binding dispatch: for each class, return the 32-byte
+/// identity field that MUST equal the verifier's `claimed_key`, or
+/// `None` if the class doesn't bind its signing identity in the
+/// payload (in which case the caller's `claimed_key` is the sole
+/// authority — instance-signed classes whose authority is named by
+/// domain).
+fn identity_binding(payload: &SignedPayload) -> Option<&[u8; 32]> {
+    match payload {
+        // User-signed: identity field is the inner author / user key.
+        SignedPayload::PostRevision(p) => Some(&p.author),
+        SignedPayload::Retraction(r) => Some(&r.author),
+        SignedPayload::TrustEdge(e) => Some(&e.from_key),
+        SignedPayload::ProfileRevision(p) => Some(&p.user),
+        SignedPayload::Move(m) => Some(&m.key),
+        SignedPayload::Deactivation(d) => Some(&d.user),
+        SignedPayload::ThreadCreate(t) => Some(&t.author),
+        SignedPayload::Report(r) => Some(&r.reporter),
+        SignedPayload::RegistrationChallenge(c) => Some(&c.user_key),
+        SignedPayload::RecoveryResponse(r) => Some(&r.subject_key),
+        // Instance-signed with the signing key as a payload field
+        // (rather than only a domain name): bind to the key.
+        SignedPayload::FedEnvelope(e) => Some(&e.sender),
+        SignedPayload::RecoveryChallenge(c) => Some(&c.responder_instance_key),
+        // Instance-signed by domain: no inner-field binding. The
+        // caller resolves `signing_instance` / `issuer` → key via the
+        // peers table and passes the resolved key as `claimed_key`.
+        SignedPayload::AdminRemoval(_) => None,
+        SignedPayload::UserStatus(_) => None,
+        SignedPayload::ThreadStatus(_) => None,
+        SignedPayload::Attestation(_) => None,
+    }
 }
 
 #[cfg(test)]
@@ -1058,6 +2062,56 @@ mod tests {
         "filename",
         "mime",
         "size",
+        // move fields — `created_at` overlaps everywhere; `key` is also
+        // distinct from `from_key`/`to_key`/`user_key`/`subject_key`.
+        "key",
+        "from_instance",
+        "to_instance",
+        "prior_move_hash",
+        // admin-rm fields — `post_id`/`created_at` overlap.
+        "target_author",
+        "signing_instance",
+        "reason",
+        // fed-envelope fields.
+        "sender",
+        "receiver",
+        "method",
+        "path",
+        "body_hash",
+        "nonce",
+        // attest fields.
+        "subject",
+        "plugin_id",
+        "attestation",
+        "issued_at",
+        "expires_at",
+        "issuer",
+        // registration-challenge fields (`nonce`/`created_at` overlap).
+        "user_key",
+        "dest_instance_key",
+        "dest_domain",
+        // recovery-challenge fields (`nonce`/`subject_key`/`expires_at`
+        // overlap).
+        "responder_instance_key",
+        "subject_key",
+        "operation",
+        // recovery-response fields (`subject_key`/`created_at` overlap).
+        "challenge_hash",
+        // thread-create fields (`thread_id`/`author`/`created_at` overlap).
+        "room_slug",
+        "title",
+        "link_url",
+        "op_post_id",
+        // user-status fields (`subject`/`signing_instance`/`reason`/
+        // `created_at` overlap).
+        "status",
+        "suspended_until",
+        "prior_status_hash",
+        // deactivate fields (all overlap).
+        // thread-status fields (all overlap).
+        // report fields (most overlap; new field below).
+        "reporter",
+        "detail",
     ];
 
     #[test]
@@ -1834,5 +2888,419 @@ mod tests {
         bytes[pos..pos + 6].copy_from_slice(&[0x65, b'w', b'e', b'i', b'r', b'd']);
         let result = SignedPayload::parse(&bytes);
         assert!(matches!(result, Err(ParseError::InvalidStance(s)) if s == "weird"));
+    }
+
+    // --- Federation-era classes: round-trip + bounded-field tests ---
+    //
+    // Each new class gets at least one round-trip (and a variant
+    // covering its optional fields) plus one targeted negative
+    // covering whichever bounded invariant matters most for that
+    // class. Broader cross-class coverage (e.g. dispatch exhaustion,
+    // unknown-class rejection) is already exercised against `retract`
+    // earlier in this module — those tests apply to every class
+    // because dispatch lives in `SignedPayload::parse`.
+
+    fn sample_move(with_prior: bool) -> Move {
+        Move {
+            key: [0xb0; 32],
+            from_instance: "old.example".to_string(),
+            to_instance: "new.example".to_string(),
+            created_at: 1_700_000_100_000,
+            prior_move_hash: if with_prior { Some([0xb1; 32]) } else { None },
+        }
+    }
+
+    #[test]
+    fn move_round_trip_minimal_and_with_prior() {
+        for with_prior in [false, true] {
+            let m = sample_move(with_prior);
+            let bytes = SignedPayload::Move(m.clone()).encode();
+            let decoded = SignedPayload::parse(&bytes).unwrap();
+            assert_eq!(decoded, SignedPayload::Move(m));
+        }
+    }
+
+    #[test]
+    fn sign_and_verify_move_binds_to_key_field() {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let mut m = sample_move(false);
+        m.key = *signing_key.verifying_key().as_bytes();
+        let bytes = SignedPayload::Move(m).encode();
+        let sig = signing_key.sign(&bytes);
+        let result = verify(&bytes, &sig.to_bytes(), &signing_key.verifying_key()).expect("verify");
+        assert!(matches!(result, SignedPayload::Move(_)));
+    }
+
+    #[test]
+    fn verify_rejects_move_key_mismatch() {
+        let signer = SigningKey::generate(&mut OsRng);
+        let other = SigningKey::generate(&mut OsRng);
+        let mut m = sample_move(false);
+        m.key = *signer.verifying_key().as_bytes();
+        let bytes = SignedPayload::Move(m).encode();
+        let sig = signer.sign(&bytes);
+        let result = verify(&bytes, &sig.to_bytes(), &other.verifying_key());
+        assert!(matches!(result, Err(VerifyError::AuthorMismatch)));
+    }
+
+    fn sample_admin_removal(with_reason: bool) -> AdminRemoval {
+        AdminRemoval {
+            post_id: [0xa0; 16],
+            target_author: [0xa1; 32],
+            signing_instance: "instance-a.example".to_string(),
+            created_at: 1_700_000_200_000,
+            reason: if with_reason {
+                Some("spam".to_string())
+            } else {
+                None
+            },
+        }
+    }
+
+    #[test]
+    fn admin_removal_round_trip_minimal_and_with_reason() {
+        for with_reason in [false, true] {
+            let a = sample_admin_removal(with_reason);
+            let bytes = SignedPayload::AdminRemoval(a.clone()).encode();
+            let decoded = SignedPayload::parse(&bytes).unwrap();
+            assert_eq!(decoded, SignedPayload::AdminRemoval(a));
+        }
+    }
+
+    #[test]
+    fn verify_admin_removal_accepts_any_claimed_key() {
+        // admin-rm has no inner key field; the caller supplies the
+        // instance signing key as `claimed_key`. So verify() must
+        // never raise AuthorMismatch for this class — only signature
+        // validity matters.
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let a = sample_admin_removal(false);
+        let bytes = SignedPayload::AdminRemoval(a).encode();
+        let sig = signing_key.sign(&bytes);
+        let result = verify(&bytes, &sig.to_bytes(), &signing_key.verifying_key()).expect("verify");
+        assert!(matches!(result, SignedPayload::AdminRemoval(_)));
+    }
+
+    fn sample_fed_envelope(with_body: bool) -> FedEnvelope {
+        FedEnvelope {
+            sender: [0xc0; 32],
+            receiver: [0xc1; 32],
+            method: "POST".to_string(),
+            path: "/federation/v1/content".to_string(),
+            body_hash: if with_body { Some([0xc2; 32]) } else { None },
+            created_at: 1_700_000_300_000,
+            nonce: [0xc3; 16],
+        }
+    }
+
+    #[test]
+    fn fed_envelope_round_trip_with_and_without_body() {
+        for with_body in [false, true] {
+            let e = sample_fed_envelope(with_body);
+            let bytes = SignedPayload::FedEnvelope(e.clone()).encode();
+            let decoded = SignedPayload::parse(&bytes).unwrap();
+            assert_eq!(decoded, SignedPayload::FedEnvelope(e));
+        }
+    }
+
+    #[test]
+    fn sign_and_verify_fed_envelope_binds_to_sender() {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let mut e = sample_fed_envelope(false);
+        e.sender = *signing_key.verifying_key().as_bytes();
+        let bytes = SignedPayload::FedEnvelope(e).encode();
+        let sig = signing_key.sign(&bytes);
+        let result = verify(&bytes, &sig.to_bytes(), &signing_key.verifying_key()).expect("verify");
+        assert!(matches!(result, SignedPayload::FedEnvelope(_)));
+    }
+
+    fn sample_attestation(with_expiry: bool) -> Attestation {
+        Attestation {
+            subject: [0xd0; 32],
+            plugin_id: "steam".to_string(),
+            attestation: "half_life".to_string(),
+            issued_at: 1_700_000_400_000,
+            expires_at: if with_expiry {
+                Some(1_700_000_500_000)
+            } else {
+                None
+            },
+            issuer: "instance-a.example".to_string(),
+        }
+    }
+
+    #[test]
+    fn attestation_round_trip_with_and_without_expiry() {
+        for with_expiry in [false, true] {
+            let a = sample_attestation(with_expiry);
+            let bytes = SignedPayload::Attestation(a.clone()).encode();
+            let decoded = SignedPayload::parse(&bytes).unwrap();
+            assert_eq!(decoded, SignedPayload::Attestation(a));
+        }
+    }
+
+    fn sample_registration_challenge() -> RegistrationChallenge {
+        RegistrationChallenge {
+            user_key: [0xe0; 32],
+            dest_instance_key: [0xe1; 32],
+            dest_domain: "dest.example".to_string(),
+            nonce: [0xe2; 32],
+            created_at: 1_700_000_600_000,
+        }
+    }
+
+    #[test]
+    fn registration_challenge_round_trip() {
+        let c = sample_registration_challenge();
+        let bytes = SignedPayload::RegistrationChallenge(c.clone()).encode();
+        let decoded = SignedPayload::parse(&bytes).unwrap();
+        assert_eq!(decoded, SignedPayload::RegistrationChallenge(c));
+    }
+
+    fn sample_recovery_challenge() -> RecoveryChallenge {
+        RecoveryChallenge {
+            responder_instance_key: [0xf0; 32],
+            subject_key: [0xf1; 32],
+            operation: RecoveryOperation::ContentByKey,
+            nonce: [0xf2; 32],
+            created_at: 1_700_000_700_000,
+            expires_at: 1_700_000_760_000,
+        }
+    }
+
+    #[test]
+    fn recovery_challenge_round_trip_both_operations() {
+        for op in [
+            RecoveryOperation::ContentByKey,
+            RecoveryOperation::InboundEdgesByKey,
+        ] {
+            let mut c = sample_recovery_challenge();
+            c.operation = op;
+            let bytes = SignedPayload::RecoveryChallenge(c.clone()).encode();
+            let decoded = SignedPayload::parse(&bytes).unwrap();
+            assert_eq!(decoded, SignedPayload::RecoveryChallenge(c));
+        }
+    }
+
+    #[test]
+    fn recovery_challenge_rejects_unknown_operation() {
+        // Build a valid challenge, swap the operation string for an
+        // unknown one (matching byte length to leave the rest of the
+        // canonical form intact).
+        let c = sample_recovery_challenge();
+        let bytes_ok = SignedPayload::RecoveryChallenge(c).encode();
+        // "content-by-key" is 14 chars; replace with another 14-char
+        // string so the surrounding CBOR length prefix stays correct.
+        let mut bytes = bytes_ok.clone();
+        let needle = b"content-by-key";
+        let pos = bytes
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .expect("operation value");
+        bytes[pos..pos + needle.len()].copy_from_slice(b"bogus-operatio");
+        let result = SignedPayload::parse(&bytes);
+        assert!(matches!(result, Err(ParseError::InvalidOperation(_))));
+    }
+
+    fn sample_recovery_response() -> RecoveryResponse {
+        RecoveryResponse {
+            subject_key: [0xf1; 32],
+            challenge_hash: [0xf3; 32],
+            created_at: 1_700_000_710_000,
+        }
+    }
+
+    #[test]
+    fn recovery_response_round_trip() {
+        let r = sample_recovery_response();
+        let bytes = SignedPayload::RecoveryResponse(r.clone()).encode();
+        let decoded = SignedPayload::parse(&bytes).unwrap();
+        assert_eq!(decoded, SignedPayload::RecoveryResponse(r));
+    }
+
+    fn sample_thread_create(with_link: bool) -> ThreadCreate {
+        ThreadCreate {
+            thread_id: [0x10; 16],
+            author: [0x11; 32],
+            room_slug: "politics".to_string(),
+            title: "What about this?".to_string(),
+            link_url: if with_link {
+                Some("https://example.com/article".to_string())
+            } else {
+                None
+            },
+            op_post_id: [0x12; 16],
+            created_at: 1_700_000_800_000,
+        }
+    }
+
+    #[test]
+    fn thread_create_round_trip_with_and_without_link() {
+        for with_link in [false, true] {
+            let t = sample_thread_create(with_link);
+            let bytes = SignedPayload::ThreadCreate(t.clone()).encode();
+            let decoded = SignedPayload::parse(&bytes).unwrap();
+            assert_eq!(decoded, SignedPayload::ThreadCreate(t));
+        }
+    }
+
+    #[test]
+    fn thread_create_rejects_oversized_title() {
+        let mut t = sample_thread_create(false);
+        t.title = "a".repeat(MAX_THREAD_TITLE_LEN + 1);
+        let bytes = SignedPayload::ThreadCreate(t).encode();
+        let result = SignedPayload::parse(&bytes);
+        assert!(matches!(
+            result,
+            Err(ParseError::TextTooLong {
+                field: "title",
+                max: MAX_THREAD_TITLE_LEN,
+                got,
+            }) if got == MAX_THREAD_TITLE_LEN + 1
+        ));
+    }
+
+    fn sample_user_status(
+        status: UserStatusKind,
+        with_until: bool,
+        with_prior: bool,
+    ) -> UserStatus {
+        UserStatus {
+            subject: [0x20; 32],
+            status,
+            suspended_until: if with_until {
+                Some(1_700_000_900_000)
+            } else {
+                None
+            },
+            signing_instance: "instance-a.example".to_string(),
+            reason: Some("spamming threads".to_string()),
+            created_at: 1_700_000_850_000,
+            prior_status_hash: if with_prior { Some([0x21; 32]) } else { None },
+        }
+    }
+
+    #[test]
+    fn user_status_round_trip_each_kind() {
+        for kind in [
+            UserStatusKind::Active,
+            UserStatusKind::Suspended,
+            UserStatusKind::Banned,
+        ] {
+            // No suspended_until except when allowed; with prior to
+            // exercise both optional fields.
+            let with_until = kind == UserStatusKind::Suspended;
+            let s = sample_user_status(kind, with_until, true);
+            let bytes = SignedPayload::UserStatus(s.clone()).encode();
+            let decoded = SignedPayload::parse(&bytes).unwrap();
+            assert_eq!(decoded, SignedPayload::UserStatus(s));
+        }
+    }
+
+    #[test]
+    fn user_status_suspended_without_until_is_indefinite() {
+        // Suspended + None suspended_until is the indefinite-suspension
+        // case per spec §5.10. Must round-trip cleanly.
+        let s = sample_user_status(UserStatusKind::Suspended, false, false);
+        let bytes = SignedPayload::UserStatus(s.clone()).encode();
+        let decoded = SignedPayload::parse(&bytes).unwrap();
+        assert_eq!(decoded, SignedPayload::UserStatus(s));
+    }
+
+    #[test]
+    fn user_status_rejects_suspended_until_on_non_suspended() {
+        // Spec §5.10: suspended_until MUST be absent unless status ==
+        // suspended. Sneak it in on a Banned status and confirm the
+        // parser trips IllegalSuspendedUntil.
+        let s = sample_user_status(UserStatusKind::Banned, true, false);
+        let bytes = SignedPayload::UserStatus(s).encode();
+        let result = SignedPayload::parse(&bytes);
+        assert!(matches!(result, Err(ParseError::IllegalSuspendedUntil)));
+    }
+
+    fn sample_deactivation() -> Deactivation {
+        Deactivation {
+            user: [0x30; 32],
+            created_at: 1_700_001_000_000,
+        }
+    }
+
+    #[test]
+    fn deactivation_round_trip() {
+        let d = sample_deactivation();
+        let bytes = SignedPayload::Deactivation(d.clone()).encode();
+        let decoded = SignedPayload::parse(&bytes).unwrap();
+        assert_eq!(decoded, SignedPayload::Deactivation(d));
+    }
+
+    fn sample_thread_status(status: ThreadStatusKind, with_prior: bool) -> ThreadStatus {
+        ThreadStatus {
+            thread_id: [0x40; 16],
+            status,
+            signing_instance: "instance-a.example".to_string(),
+            reason: if status == ThreadStatusKind::Locked {
+                Some("off-topic".to_string())
+            } else {
+                None
+            },
+            created_at: 1_700_001_100_000,
+            prior_status_hash: if with_prior { Some([0x41; 32]) } else { None },
+        }
+    }
+
+    #[test]
+    fn thread_status_round_trip_each_kind() {
+        for kind in [ThreadStatusKind::Open, ThreadStatusKind::Locked] {
+            let s = sample_thread_status(kind, true);
+            let bytes = SignedPayload::ThreadStatus(s.clone()).encode();
+            let decoded = SignedPayload::parse(&bytes).unwrap();
+            assert_eq!(decoded, SignedPayload::ThreadStatus(s));
+        }
+    }
+
+    fn sample_report(reason: ReportReason, with_detail: bool) -> Report {
+        Report {
+            post_id: [0x50; 16],
+            target_author: [0x51; 32],
+            reporter: [0x52; 32],
+            reason,
+            detail: if with_detail {
+                Some("witnessed in #general".to_string())
+            } else {
+                None
+            },
+            created_at: 1_700_001_200_000,
+        }
+    }
+
+    #[test]
+    fn report_round_trip_each_reason() {
+        for reason in [
+            ReportReason::Spam,
+            ReportReason::RulesViolation,
+            ReportReason::IllegalContent,
+            ReportReason::Other,
+        ] {
+            let r = sample_report(reason, true);
+            let bytes = SignedPayload::Report(r.clone()).encode();
+            let decoded = SignedPayload::parse(&bytes).unwrap();
+            assert_eq!(decoded, SignedPayload::Report(r));
+        }
+    }
+
+    #[test]
+    fn report_rejects_oversized_detail() {
+        let mut r = sample_report(ReportReason::Spam, false);
+        r.detail = Some("a".repeat(MAX_REPORT_DETAIL_LEN + 1));
+        let bytes = SignedPayload::Report(r).encode();
+        let result = SignedPayload::parse(&bytes);
+        assert!(matches!(
+            result,
+            Err(ParseError::TextTooLong {
+                field: "detail",
+                max: MAX_REPORT_DETAIL_LEN,
+                got,
+            }) if got == MAX_REPORT_DETAIL_LEN + 1
+        ));
     }
 }

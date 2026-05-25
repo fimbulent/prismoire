@@ -6,8 +6,12 @@ verifier. See `docs/signed-payload-format.md` §8 for the spec.
 
 ## Layout
 
-- `post-rev/`, `retract/`, `trust-edge/` — positive fixtures. Each
-  named fixture (`<name>.{cbor,sig,key.pub,key.sec}`) holds:
+- One subdirectory per signed-object class (`post-rev/`, `retract/`,
+  `trust-edge/`, `profile/`, `move/`, `admin-rm/`, `fed-envelope/`,
+  `attest/`, `registration-challenge/`, `recovery-challenge/`,
+  `recovery-response/`, `thread-create/`, `user-status/`,
+  `deactivate/`, `thread-status/`, `report/`) — positive fixtures.
+  Each named fixture (`<name>.{cbor,sig,key.pub,key.sec}`) holds:
   - `.cbor` — canonical CBOR payload bytes (what gets signed)
   - `.sig` — 64-byte Ed25519 signature over `.cbor`
   - `.key.pub` — 32-byte Ed25519 public key (verifier input)

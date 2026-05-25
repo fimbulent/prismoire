@@ -31,8 +31,10 @@ use std::path::{Path, PathBuf};
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 
 use prismoire_server::signed::{
-    self, ParseError, PostRevision, ProfileRevision, Retraction, SignedPayload, TrustEdge,
-    TrustStance,
+    self, AdminRemoval, Attestation, Deactivation, FedEnvelope, Move, ParseError, PostRevision,
+    ProfileRevision, RecoveryChallenge, RecoveryOperation, RecoveryResponse, RegistrationChallenge,
+    Report, ReportReason, Retraction, SignedPayload, ThreadCreate, ThreadStatus, ThreadStatusKind,
+    TrustEdge, TrustStance, UserStatus, UserStatusKind,
 };
 
 // --- Pinned test keys (never use for anything real) ---
@@ -40,6 +42,13 @@ use prismoire_server::signed::{
 const KEY_ALICE_SEED: [u8; 32] = [0x11; 32];
 const KEY_BOB_SEED: [u8; 32] = [0x22; 32];
 const KEY_CAROL_SEED: [u8; 32] = [0x33; 32];
+// Pinned instance signing-key seeds. Used for instance-signed
+// classes (admin-rm, fed-envelope, attest, recovery-challenge,
+// user-status, thread-status) so the (.key.pub, .key.sec) committed
+// alongside an instance-signed fixture is a stable, distinct key
+// not reused as a user identity.
+const KEY_INSTANCE_A_SEED: [u8; 32] = [0xa1; 32];
+const KEY_INSTANCE_B_SEED: [u8; 32] = [0xb2; 32];
 
 fn signing_key(seed: &[u8; 32]) -> SigningKey {
     SigningKey::from_bytes(seed)
@@ -271,6 +280,376 @@ fn positive_fixtures() -> Vec<PositiveFixture> {
                     prior_profile_hash: None,
                 };
                 (SignedPayload::ProfileRevision(p), key)
+            },
+        },
+        // --- Federation-era classes (docs/signed-payload-format.md §5) ---
+        //
+        // For instance-signed classes (admin-rm, fed-envelope, attest,
+        // recovery-challenge, user-status, thread-status) the committed
+        // key.pub/key.sec is the instance signing key. The identity-binding
+        // check in `verify()` returns `None` for these so the caller is
+        // responsible for resolving the claimed domain → key.
+        PositiveFixture {
+            stem: "move/v1-first",
+            payload: || {
+                let key = signing_key(&KEY_ALICE_SEED);
+                let m = Move {
+                    key: *key.verifying_key().as_bytes(),
+                    from_instance: "old.example".to_string(),
+                    to_instance: "new.example".to_string(),
+                    created_at: 1_700_000_020_000,
+                    prior_move_hash: None,
+                };
+                (SignedPayload::Move(m), key)
+            },
+        },
+        // Subsequent move: prior_move_hash present. Locks in the
+        // optional-present encoding for the §5.1 map.
+        PositiveFixture {
+            stem: "move/v1-with-prior",
+            payload: || {
+                let key = signing_key(&KEY_ALICE_SEED);
+                let m = Move {
+                    key: *key.verifying_key().as_bytes(),
+                    from_instance: "new.example".to_string(),
+                    to_instance: "newer.example".to_string(),
+                    created_at: 1_700_000_021_000,
+                    prior_move_hash: Some([0x5a; 32]),
+                };
+                (SignedPayload::Move(m), key)
+            },
+        },
+        PositiveFixture {
+            stem: "admin-rm/v1-minimal",
+            payload: || {
+                let key = signing_key(&KEY_INSTANCE_A_SEED);
+                let target = signing_key(&KEY_BOB_SEED);
+                let r = AdminRemoval {
+                    post_id: [0x0a; 16],
+                    target_author: *target.verifying_key().as_bytes(),
+                    signing_instance: "moderator.example".to_string(),
+                    created_at: 1_700_000_030_000,
+                    reason: None,
+                };
+                (SignedPayload::AdminRemoval(r), key)
+            },
+        },
+        PositiveFixture {
+            stem: "admin-rm/v1-with-reason",
+            payload: || {
+                let key = signing_key(&KEY_INSTANCE_A_SEED);
+                let target = signing_key(&KEY_BOB_SEED);
+                let r = AdminRemoval {
+                    post_id: [0x0e; 16],
+                    target_author: *target.verifying_key().as_bytes(),
+                    signing_instance: "moderator.example".to_string(),
+                    created_at: 1_700_000_031_000,
+                    reason: Some("spam".to_string()),
+                };
+                (SignedPayload::AdminRemoval(r), key)
+            },
+        },
+        // fed-envelope without body_hash: typical GET (no request body).
+        PositiveFixture {
+            stem: "fed-envelope/v1-no-body",
+            payload: || {
+                let key = signing_key(&KEY_INSTANCE_A_SEED);
+                let receiver = signing_key(&KEY_INSTANCE_B_SEED);
+                let e = FedEnvelope {
+                    sender: *key.verifying_key().as_bytes(),
+                    receiver: *receiver.verifying_key().as_bytes(),
+                    method: "GET".to_string(),
+                    path: "/fed/v1/peer-info".to_string(),
+                    body_hash: None,
+                    created_at: 1_700_000_040_000,
+                    nonce: [0x11; 16],
+                };
+                (SignedPayload::FedEnvelope(e), key)
+            },
+        },
+        // fed-envelope with body_hash: typical POST.
+        PositiveFixture {
+            stem: "fed-envelope/v1-with-body",
+            payload: || {
+                let key = signing_key(&KEY_INSTANCE_A_SEED);
+                let receiver = signing_key(&KEY_INSTANCE_B_SEED);
+                let e = FedEnvelope {
+                    sender: *key.verifying_key().as_bytes(),
+                    receiver: *receiver.verifying_key().as_bytes(),
+                    method: "POST".to_string(),
+                    path: "/fed/v1/deliver".to_string(),
+                    body_hash: Some([0xbb; 32]),
+                    created_at: 1_700_000_041_000,
+                    nonce: [0x22; 16],
+                };
+                (SignedPayload::FedEnvelope(e), key)
+            },
+        },
+        PositiveFixture {
+            stem: "attest/v1-no-expiry",
+            payload: || {
+                let key = signing_key(&KEY_INSTANCE_A_SEED);
+                let subject = signing_key(&KEY_BOB_SEED);
+                let a = Attestation {
+                    subject: *subject.verifying_key().as_bytes(),
+                    plugin_id: "steam".to_string(),
+                    attestation: "half_life".to_string(),
+                    issued_at: 1_700_000_050_000,
+                    expires_at: None,
+                    issuer: "attest.example".to_string(),
+                };
+                (SignedPayload::Attestation(a), key)
+            },
+        },
+        PositiveFixture {
+            stem: "attest/v1-with-expiry",
+            payload: || {
+                let key = signing_key(&KEY_INSTANCE_A_SEED);
+                let subject = signing_key(&KEY_CAROL_SEED);
+                let a = Attestation {
+                    subject: *subject.verifying_key().as_bytes(),
+                    plugin_id: "reddit".to_string(),
+                    attestation: "account_age_4y".to_string(),
+                    issued_at: 1_700_000_051_000,
+                    expires_at: Some(1_800_000_000_000),
+                    issuer: "attest.example".to_string(),
+                };
+                (SignedPayload::Attestation(a), key)
+            },
+        },
+        PositiveFixture {
+            stem: "registration-challenge/v1",
+            payload: || {
+                let key = signing_key(&KEY_ALICE_SEED);
+                let dest = signing_key(&KEY_INSTANCE_B_SEED);
+                let c = RegistrationChallenge {
+                    user_key: *key.verifying_key().as_bytes(),
+                    dest_instance_key: *dest.verifying_key().as_bytes(),
+                    dest_domain: "newhome.example".to_string(),
+                    nonce: [0x77; 32],
+                    created_at: 1_700_000_060_000,
+                };
+                (SignedPayload::RegistrationChallenge(c), key)
+            },
+        },
+        PositiveFixture {
+            stem: "recovery-challenge/v1-content",
+            payload: || {
+                let key = signing_key(&KEY_INSTANCE_A_SEED);
+                let subject = signing_key(&KEY_BOB_SEED);
+                let c = RecoveryChallenge {
+                    responder_instance_key: *key.verifying_key().as_bytes(),
+                    subject_key: *subject.verifying_key().as_bytes(),
+                    operation: RecoveryOperation::ContentByKey,
+                    nonce: [0x88; 32],
+                    created_at: 1_700_000_070_000,
+                    expires_at: 1_700_000_070_300,
+                };
+                (SignedPayload::RecoveryChallenge(c), key)
+            },
+        },
+        PositiveFixture {
+            stem: "recovery-challenge/v1-inbound-edges",
+            payload: || {
+                let key = signing_key(&KEY_INSTANCE_A_SEED);
+                let subject = signing_key(&KEY_BOB_SEED);
+                let c = RecoveryChallenge {
+                    responder_instance_key: *key.verifying_key().as_bytes(),
+                    subject_key: *subject.verifying_key().as_bytes(),
+                    operation: RecoveryOperation::InboundEdgesByKey,
+                    nonce: [0x99; 32],
+                    created_at: 1_700_000_071_000,
+                    expires_at: 1_700_000_071_300,
+                };
+                (SignedPayload::RecoveryChallenge(c), key)
+            },
+        },
+        PositiveFixture {
+            stem: "recovery-response/v1",
+            payload: || {
+                let key = signing_key(&KEY_BOB_SEED);
+                let r = RecoveryResponse {
+                    subject_key: *key.verifying_key().as_bytes(),
+                    challenge_hash: [0xc1; 32],
+                    created_at: 1_700_000_072_000,
+                };
+                (SignedPayload::RecoveryResponse(r), key)
+            },
+        },
+        PositiveFixture {
+            stem: "thread-create/v1-discussion",
+            payload: || {
+                let key = signing_key(&KEY_ALICE_SEED);
+                let t = ThreadCreate {
+                    thread_id: [0xf1; 16],
+                    author: *key.verifying_key().as_bytes(),
+                    room_slug: "general".to_string(),
+                    title: "Welcome to the room".to_string(),
+                    link_url: None,
+                    op_post_id: [0xf2; 16],
+                    created_at: 1_700_000_080_000,
+                };
+                (SignedPayload::ThreadCreate(t), key)
+            },
+        },
+        PositiveFixture {
+            stem: "thread-create/v1-link",
+            payload: || {
+                let key = signing_key(&KEY_BOB_SEED);
+                let t = ThreadCreate {
+                    thread_id: [0xf3; 16],
+                    author: *key.verifying_key().as_bytes(),
+                    room_slug: "links".to_string(),
+                    title: "Interesting article".to_string(),
+                    link_url: Some("https://example.com/article".to_string()),
+                    op_post_id: [0xf4; 16],
+                    created_at: 1_700_000_081_000,
+                };
+                (SignedPayload::ThreadCreate(t), key)
+            },
+        },
+        PositiveFixture {
+            stem: "user-status/v1-active",
+            payload: || {
+                let key = signing_key(&KEY_INSTANCE_A_SEED);
+                let subject = signing_key(&KEY_BOB_SEED);
+                let s = UserStatus {
+                    subject: *subject.verifying_key().as_bytes(),
+                    status: UserStatusKind::Active,
+                    suspended_until: None,
+                    signing_instance: "mod.example".to_string(),
+                    reason: None,
+                    created_at: 1_700_000_090_000,
+                    prior_status_hash: None,
+                };
+                (SignedPayload::UserStatus(s), key)
+            },
+        },
+        // Indefinite suspension: status = Suspended but no suspended_until.
+        // Spec §5.10 allows absent suspended_until for indefinite holds.
+        PositiveFixture {
+            stem: "user-status/v1-suspended-indefinite",
+            payload: || {
+                let key = signing_key(&KEY_INSTANCE_A_SEED);
+                let subject = signing_key(&KEY_BOB_SEED);
+                let s = UserStatus {
+                    subject: *subject.verifying_key().as_bytes(),
+                    status: UserStatusKind::Suspended,
+                    suspended_until: None,
+                    signing_instance: "mod.example".to_string(),
+                    reason: Some("under review".to_string()),
+                    created_at: 1_700_000_091_000,
+                    prior_status_hash: Some([0xaa; 32]),
+                };
+                (SignedPayload::UserStatus(s), key)
+            },
+        },
+        // Time-bound suspension: suspended_until present.
+        PositiveFixture {
+            stem: "user-status/v1-suspended-fixed",
+            payload: || {
+                let key = signing_key(&KEY_INSTANCE_A_SEED);
+                let subject = signing_key(&KEY_CAROL_SEED);
+                let s = UserStatus {
+                    subject: *subject.verifying_key().as_bytes(),
+                    status: UserStatusKind::Suspended,
+                    suspended_until: Some(1_800_000_000_000),
+                    signing_instance: "mod.example".to_string(),
+                    reason: Some("rule violation".to_string()),
+                    created_at: 1_700_000_092_000,
+                    prior_status_hash: None,
+                };
+                (SignedPayload::UserStatus(s), key)
+            },
+        },
+        PositiveFixture {
+            stem: "user-status/v1-banned",
+            payload: || {
+                let key = signing_key(&KEY_INSTANCE_A_SEED);
+                let subject = signing_key(&KEY_CAROL_SEED);
+                let s = UserStatus {
+                    subject: *subject.verifying_key().as_bytes(),
+                    status: UserStatusKind::Banned,
+                    suspended_until: None,
+                    signing_instance: "mod.example".to_string(),
+                    reason: Some("repeat offender".to_string()),
+                    created_at: 1_700_000_093_000,
+                    prior_status_hash: Some([0xbb; 32]),
+                };
+                (SignedPayload::UserStatus(s), key)
+            },
+        },
+        PositiveFixture {
+            stem: "deactivate/v1",
+            payload: || {
+                let key = signing_key(&KEY_ALICE_SEED);
+                let d = Deactivation {
+                    user: *key.verifying_key().as_bytes(),
+                    created_at: 1_700_000_100_000,
+                };
+                (SignedPayload::Deactivation(d), key)
+            },
+        },
+        PositiveFixture {
+            stem: "thread-status/v1-locked",
+            payload: || {
+                let key = signing_key(&KEY_INSTANCE_A_SEED);
+                let s = ThreadStatus {
+                    thread_id: [0xf1; 16],
+                    status: ThreadStatusKind::Locked,
+                    signing_instance: "host.example".to_string(),
+                    reason: Some("off-topic derail".to_string()),
+                    created_at: 1_700_000_110_000,
+                    prior_status_hash: None,
+                };
+                (SignedPayload::ThreadStatus(s), key)
+            },
+        },
+        PositiveFixture {
+            stem: "thread-status/v1-open-with-prior",
+            payload: || {
+                let key = signing_key(&KEY_INSTANCE_A_SEED);
+                let s = ThreadStatus {
+                    thread_id: [0xf1; 16],
+                    status: ThreadStatusKind::Open,
+                    signing_instance: "host.example".to_string(),
+                    reason: None,
+                    created_at: 1_700_000_111_000,
+                    prior_status_hash: Some([0xcc; 32]),
+                };
+                (SignedPayload::ThreadStatus(s), key)
+            },
+        },
+        PositiveFixture {
+            stem: "report/v1-spam",
+            payload: || {
+                let key = signing_key(&KEY_CAROL_SEED);
+                let target = signing_key(&KEY_BOB_SEED);
+                let r = Report {
+                    post_id: [0x0a; 16],
+                    target_author: *target.verifying_key().as_bytes(),
+                    reporter: *key.verifying_key().as_bytes(),
+                    reason: ReportReason::Spam,
+                    detail: None,
+                    created_at: 1_700_000_120_000,
+                };
+                (SignedPayload::Report(r), key)
+            },
+        },
+        PositiveFixture {
+            stem: "report/v1-with-detail",
+            payload: || {
+                let key = signing_key(&KEY_CAROL_SEED);
+                let target = signing_key(&KEY_BOB_SEED);
+                let r = Report {
+                    post_id: [0x0a; 16],
+                    target_author: *target.verifying_key().as_bytes(),
+                    reporter: *key.verifying_key().as_bytes(),
+                    reason: ReportReason::RulesViolation,
+                    detail: Some("repeated personal attacks across threads".to_string()),
+                    created_at: 1_700_000_121_000,
+                };
+                (SignedPayload::Report(r), key)
             },
         },
     ]
