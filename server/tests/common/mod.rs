@@ -23,6 +23,8 @@
 // per-binary dead-code warnings that result.
 #![allow(dead_code)]
 
+pub mod federation;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::RwLock;

@@ -27,6 +27,7 @@ pub mod csp_report;
 pub mod display_name;
 pub mod error;
 pub mod favorites;
+pub mod federation;
 pub mod instance_config;
 pub mod invites;
 pub mod metrics;
