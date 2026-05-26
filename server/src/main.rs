@@ -5,6 +5,7 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::Notify;
 
 use prismoire_config::Config;
+use prismoire_server::federation::domain::allow_private_targets_from_env;
 use prismoire_server::federation::envelope::NonceLru;
 use prismoire_server::federation::instance_key;
 use prismoire_server::federation::transport::{FederationTransport, ReqwestTransport};
@@ -143,9 +144,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // resolution per outbound request.
     let instance_key = instance_key::load_or_generate(&pool).await?;
     let federation_nonce_lru = Arc::new(NonceLru::default());
+    // SSRF policy is read from `PRISMOIRE_FEDERATION_ALLOW_PRIVATE_TARGETS`
+    // once at boot and held as a `bool` on the transport — restart-required
+    // to flip. Tests construct their own transport with `true` directly,
+    // never via the env var, to keep process-wide state out of the harness.
     let federation_transport: Arc<dyn FederationTransport> = Arc::new(ReqwestTransport::new(
         pool.clone(),
         ReqwestTransport::default_client()?,
+        allow_private_targets_from_env(),
     ));
     // §5.2 `instance_domain` is the bare canonical domain this
     // instance serves on. The closest existing config we have is
@@ -175,6 +181,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         local_frontier: Arc::new(std::sync::RwLock::new(Arc::new(
             prismoire_server::federation::frontier::LocalFrontier::empty(),
         ))),
+        forwarding_lru: Arc::new(prismoire_server::federation::forwarder::ForwardingLru::new()),
     });
 
     // Spawn the debounced trust graph rebuild background task.

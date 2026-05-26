@@ -22,9 +22,7 @@ use std::pin::Pin;
 use axum::body::Bytes;
 use http::{HeaderName, Request, Response};
 
-use crate::federation::domain::{
-    allow_private_targets_from_env, is_blocked_ip_literal, parse_instance_domain,
-};
+use crate::federation::domain::{is_blocked_ip_literal, parse_instance_domain};
 use crate::federation::envelope::AUTH_HEADER;
 
 /// Stable identifier for a peer instance.
@@ -211,25 +209,27 @@ pub struct ReqwestTransport {
     /// outbound request — well within SQLite's WAL concurrency
     /// envelope.
     db: sqlx::SqlitePool,
-    /// Latched at construction from
-    /// `PRISMOIRE_FEDERATION_ALLOW_PRIVATE_TARGETS`. When `false`
-    /// (the production default), IP-literal targets in loopback /
-    /// link-local / RFC1918 / metadata ranges are refused before
-    /// dispatch. When `true` (the Layer-2 smoke test), the check
-    /// is bypassed so `127.0.0.1:PORT` works for the self-signed
-    /// loopback peering test.
+    /// Set explicitly by the caller. When `false` (the production
+    /// default), IP-literal targets in loopback / link-local /
+    /// RFC1918 / metadata ranges are refused before dispatch. When
+    /// `true` (the Layer-2 smoke test), the check is bypassed so
+    /// `127.0.0.1:PORT` works for the self-signed loopback peering
+    /// test. Production binaries derive this from
+    /// `PRISMOIRE_FEDERATION_ALLOW_PRIVATE_TARGETS` in `main.rs` via
+    /// [`super::domain::allow_private_targets_from_env`]; tests pass `true`
+    /// directly without touching process-wide env state.
     allow_private_targets: bool,
 }
 
 impl ReqwestTransport {
     /// Construct a [`ReqwestTransport`] over the supplied client.
-    /// The SSRF policy is sampled from the environment at this
-    /// point — restart the process to change it.
-    pub fn new(db: sqlx::SqlitePool, client: reqwest::Client) -> Self {
+    /// The SSRF policy is set explicitly by the caller — see the
+    /// `allow_private_targets` field for the rationale.
+    pub fn new(db: sqlx::SqlitePool, client: reqwest::Client, allow_private_targets: bool) -> Self {
         Self {
             client,
             db,
-            allow_private_targets: allow_private_targets_from_env(),
+            allow_private_targets,
         }
     }
 

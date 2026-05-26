@@ -8,6 +8,7 @@ use webauthn_rs::Webauthn;
 
 use crate::error::{AppError, ErrorCode};
 use crate::federation::envelope::NonceLru;
+use crate::federation::forwarder::ForwardingLru;
 use crate::federation::frontier::LocalFrontier;
 use crate::federation::instance_key::InstanceKey;
 use crate::federation::transport::FederationTransport;
@@ -97,6 +98,13 @@ pub struct AppState {
     /// Readers clone the inner `Arc<LocalFrontier>` for zero-contention
     /// concurrent access.
     pub local_frontier: Arc<std::sync::RwLock<Arc<LocalFrontier>>>,
+    /// §7.5 dedup-LRU + peer-index registry shared across the
+    /// originator path (`crate::users::set_trust_edge` /
+    /// `delete_trust_edge`) and the relay path
+    /// (`crate::federation::edges::handle_edges_push`). One process-
+    /// wide instance, keyed on `canonical_hash`, valued on a bitset
+    /// of peer indices we have already forwarded the object to.
+    pub forwarding_lru: Arc<ForwardingLru>,
 }
 
 impl AppState {

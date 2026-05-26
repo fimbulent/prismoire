@@ -1238,6 +1238,20 @@ pub async fn set_trust_edge(
 
     state.trust_graph_notify.notify_one();
 
+    // §7.5 originator-side fanout. The signer is `signed.public_key`
+    // (== the viewer's own pubkey). `arrived_from = None` since this
+    // is locally-originated. The forwarder spawns its own task and
+    // returns immediately, so local request latency is unaffected.
+    let wire = crate::federation::envelope::encode_signed_object(&payload, &signature);
+    crate::federation::forwarder::forward_signed_object(
+        state.clone(),
+        canonical_hash,
+        crate::federation::routing::ForwardingClass::TrustEdge,
+        signed.public_key.to_vec(),
+        wire,
+        None,
+    );
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1391,6 +1405,20 @@ pub async fn delete_trust_edge(
     );
 
     state.trust_graph_notify.notify_one();
+
+    // §7.5 originator-side fanout for the neutral tombstone. See the
+    // `set_trust_edge` analogue above for the rationale; tombstones
+    // are §9.1 erasure-authority objects so peers MUST observe them
+    // alongside the active trust-edges they erase.
+    let wire = crate::federation::envelope::encode_signed_object(&payload, &signature);
+    crate::federation::forwarder::forward_signed_object(
+        state.clone(),
+        canonical_hash,
+        crate::federation::routing::ForwardingClass::TrustEdge,
+        signed.public_key.to_vec(),
+        wire,
+        None,
+    );
 
     Ok(StatusCode::NO_CONTENT)
 }

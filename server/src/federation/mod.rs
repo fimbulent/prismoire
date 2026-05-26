@@ -28,10 +28,13 @@
 //! middleware, frontier sync, content propagation, …) rather than
 //! reshaping these foundations.
 
+pub mod backfill;
 pub mod bloom;
 pub mod domain;
+pub mod edges;
 pub mod envelope;
 pub mod errors;
+pub mod forwarder;
 pub mod frontier;
 pub mod identity;
 pub mod instance_key;

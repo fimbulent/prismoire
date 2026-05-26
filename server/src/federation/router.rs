@@ -1,29 +1,33 @@
 //! Assembly of the `/federation/v1/*` subrouter.
 //!
 //! Mounted by `build_app` alongside the existing `/api` surface.
-//! Phase 3 ships five routes split across three trust tiers:
+//! The router groups every federation route into one of three trust
+//! tiers; the live route table lives in [`federation_router`] below
+//! (see the `.route(...)` calls), with §-references back to
+//! `docs/federation-protocol.md` next to each entry. New phases add
+//! routes to the appropriate sub-router rather than introducing a
+//! new tier:
 //!
-//! - `GET  /federation/v1/identity`           (§5.2; unauthenticated)
-//! - `POST /federation/v1/peer-request`       (§5.4; envelope-verified, Bootstrap)
-//! - `POST /federation/v1/peer-response`      (§5.4; envelope-verified, Bootstrap)
-//! - `GET  /federation/v1/peers`              (§5.5; envelope-verified, KnownPeer)
-//! - `DELETE /federation/v1/peer-relationship` (§5.4; envelope-verified, KnownPeer)
+//! - **Unauthenticated** — only `GET /federation/v1/identity` (§5.2).
+//!   No envelope, no peer state.
+//! - **Bootstrap** — the §5.4 handshake POSTs. Sender is not yet in
+//!   `peers WHERE status = 'active'`; the verifier skips its step-5
+//!   peers lookup and each handler enforces
+//!   `envelope.sender == body.pubkey` itself.
+//! - **KnownPeer** — every other authenticated route (§5 peers list,
+//!   §8 frontier sync, §9 edges push / chain-continuity backfill,
+//!   and the routes future phases add — content push, admin-rm
+//!   reports, attachments, etc.). The verifier requires
+//!   `envelope.sender` to be in `peers WHERE status = 'active'` and
+//!   collapses an unknown sender to `401 unauthorized` on the wire.
 //!
 //! The §6.5 13-step envelope verifier is applied by the [`middleware`]
-//! layer rather than inline in each handler. Two verifier modes (and
-//! therefore two middleware functions) are mounted as separate
-//! sub-routers, then merged with the unauthenticated identity route:
-//!
-//! - `verify_bootstrap` wraps the two handshake routes whose sender
-//!   is not yet in `peers WHERE status = 'active'`.
-//! - `verify_known_peer` wraps every other authenticated route; the
-//!   verifier rejects unknown senders with `VerifyError::UnknownSender`
-//!   which the middleware collapses to a `401 unauthorized` on the
-//!   wire.
-//!
-//! The unauthenticated identity route is intentionally mounted
-//! *outside* both middleware layers — it has no envelope to verify
-//! and no peer state to consult.
+//! layer rather than inline in each handler. The Bootstrap and
+//! KnownPeer sub-routers wrap the verifier in their respective
+//! modes (`verify_bootstrap` / `verify_known_peer`) and are then
+//! merged with the unauthenticated identity route. The unauthenticated
+//! route is intentionally mounted *outside* both middleware layers —
+//! it has no envelope to verify and no peer state to consult.
 //!
 //! [`middleware`]: crate::federation::middleware
 
@@ -35,7 +39,7 @@ use axum::routing::{delete, get, post};
 
 use crate::AppState;
 use crate::federation::middleware::{verify_bootstrap, verify_known_peer};
-use crate::federation::{frontier, identity, peering};
+use crate::federation::{backfill, edges, frontier, identity, peering};
 
 /// Build the `/federation/v1/*` subrouter.
 ///
@@ -82,6 +86,20 @@ pub fn federation_router(state: Arc<AppState>) -> Router {
         .route(
             "/federation/v1/frontier",
             get(frontier::handle_frontier_get),
+        )
+        // §9.1 edge propagation push. KnownPeer-gated per §6 — only
+        // active peers may push edges. Per-edge results in §9.1's
+        // `{ canonical_hash, status, reason? }` shape; request-level
+        // errors (malformed, empty_batch, batch_too_large) collapse
+        // to a 400 with a single `{ "error": ... }` body.
+        .route("/federation/v1/edges", post(edges::handle_edges_push))
+        // §9.3 chain-continuity backfill — the narrow per-pair pull
+        // route, sibling to the §9.1 push above. Phase 8 will add the
+        // broader §10.5 bulk routes (`/backfill/by-hash`,
+        // `/backfill/by-author`); both ride this same KnownPeer layer.
+        .route(
+            "/federation/v1/edges/backfill",
+            get(backfill::handle_edges_backfill),
         )
         .layer(from_fn_with_state(state.clone(), verify_known_peer));
 

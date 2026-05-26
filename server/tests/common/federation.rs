@@ -224,3 +224,121 @@ impl MultiInstanceHarness {
         self.instances.is_empty()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Envelope-signed dispatch helpers
+//
+// Reused by phase5+ tests. Phase 4 still keeps its own near-identical
+// copies (they predate this extraction); a future cleanup pass can
+// fold those into these. The single source of truth here covers every
+// new federation handler integration test.
+// ---------------------------------------------------------------------------
+
+use http::Method;
+use prismoire_server::federation::envelope;
+use prismoire_server::federation::identity::CBOR_CONTENT_TYPE;
+use prismoire_server::federation::peering::{
+    operator_accept_peer_request, operator_initiate_peer_request,
+};
+
+/// Drive A through the §5.4 initiate → B accepts dance so a test
+/// starts from "mutual active peering" — the precondition for any
+/// `verify_known_peer` route. Mirrors the phase4 helper but lives in
+/// common so new test crates don't each copy it.
+pub async fn establish_active_peering(
+    harness: &MultiInstanceHarness,
+    initiator: &str,
+    target: &str,
+) {
+    let i = harness.instance(initiator);
+    let t = harness.instance(target);
+    let i_transport: Arc<dyn FederationTransport> = i.transport.clone();
+    let request_id = operator_initiate_peer_request(
+        &i.state.db,
+        &i.state.instance_key,
+        &i.state.instance_domain,
+        &i_transport,
+        *t.state.instance_key.public_bytes(),
+        &t.state.instance_domain,
+        vec!["edge-sync".into(), "content-sync".into()],
+        None,
+    )
+    .await
+    .expect("operator_initiate_peer_request");
+    let t_transport: Arc<dyn FederationTransport> = t.transport.clone();
+    operator_accept_peer_request(
+        &t.state.db,
+        &t.state.instance_key,
+        &t.state.instance_domain,
+        &t_transport,
+        request_id,
+    )
+    .await
+    .expect("operator_accept_peer_request");
+}
+
+/// Sign an envelope from `from` to `to`, dispatch via the shared
+/// transport, and return `(status, body_bytes)`. Mirrors phase4's
+/// private helper; lifted here so phase5+ can share it.
+pub async fn send_envelope_signed(
+    harness: &MultiInstanceHarness,
+    from: &str,
+    to: &str,
+    method: Method,
+    path: &str,
+    body: &[u8],
+) -> (http::StatusCode, Vec<u8>) {
+    send_envelope_signed_split(harness, from, to, method, path, path, body).await
+}
+
+/// Like [`send_envelope_signed`] but lets the caller sign over one
+/// path and dispatch against a different URI. The split is needed for
+/// GET routes that take query parameters: §6.5 step 9 normalises the
+/// signed path to `req.uri().path()` (no query), but the dispatched
+/// URI must carry the query so the handler's `Query` extractor sees it.
+pub async fn send_envelope_signed_split(
+    harness: &MultiInstanceHarness,
+    from: &str,
+    to: &str,
+    method: Method,
+    signed_path: &str,
+    dispatch_uri: &str,
+    body: &[u8],
+) -> (http::StatusCode, Vec<u8>) {
+    let from_h = harness.instance(from);
+    let to_h = harness.instance(to);
+
+    let header = envelope::sign_outbound(
+        &from_h.state.instance_key,
+        *to_h.state.instance_key.public_bytes(),
+        &method,
+        signed_path,
+        body,
+    );
+
+    let mut builder = http::Request::builder()
+        .method(method.clone())
+        .uri(dispatch_uri)
+        .header(envelope::AUTH_HEADER, header);
+    if method == Method::POST {
+        builder = builder.header(http::header::CONTENT_TYPE, CBOR_CONTENT_TYPE);
+    }
+    let req = builder
+        .body(Bytes::from(body.to_vec()))
+        .expect("build request");
+
+    let response = from_h
+        .transport
+        .request(
+            &PeerId::from_bytes(*to_h.state.instance_key.public_bytes()),
+            req,
+        )
+        .await
+        .expect("transport dispatch");
+    let status = response.status();
+    let body_bytes = axum::body::to_bytes(response.into_body().into(), usize::MAX)
+        .await
+        .expect("body bytes")
+        .to_vec();
+    (status, body_bytes)
+}

@@ -69,6 +69,28 @@ pulldown-cmark = { version = "0.13.4", default-features = false }
 # builds — these routes create users and mint sessions without any
 # WebAuthn ceremony. See server/src/test_support.rs and docs/handler_tests.md.
 test-auth = []
+# Layer-2 smoke tests under `tests/smoke/`. Implies `test-auth` because
+# the smoke harness uses the same `/test/*` bypass routes to seed
+# users without driving a real passkey ceremony. Gated behind its own
+# feature so the default pre-commit run (`cargo test --features
+# test-auth`) does not compile or link the smoke binaries — those
+# spawn real TLS listeners and want an explicit opt-in:
+# `cargo test -p prismoire-server --features smoke-tests`.
+# See `server/tests/smoke/` for the convention; new smoke files need
+# both a `#![cfg(feature = "smoke-tests")]` gate and a `[[test]]`
+# entry below with `required-features = ["smoke-tests"]`.
+smoke-tests = ["test-auth"]
+# Layer-4 property tests under `tests/property/`. Implies `test-auth`
+# for the same harness reason. Property tests run many parameterised
+# trials (varying N, fanout, interest membership, seeds) and assert
+# statistical / convergence-bound properties of the gossip layer; they
+# can take seconds-to-minutes, so we keep them out of the pre-commit
+# loop and behind an explicit opt-in:
+# `cargo test -p prismoire-server --features property-tests`.
+# See `server/tests/property/` for the convention; new property files
+# need both a `#![cfg(feature = "property-tests")]` gate and a
+# `[[test]]` entry below with `required-features = ["property-tests"]`.
+property-tests = ["test-auth"]
 
 [dev-dependencies]
 # `tower::ServiceExt::oneshot` drives the Axum router in-process from
@@ -76,6 +98,27 @@ test-auth = []
 tower = { version = "0.5", features = ["util"] }
 # `BodyExt::collect` to materialise response bodies for assertions.
 http-body-util = "0.1"
+# Layer-2 smoke test deps (`tests/federation_smoke.rs`, ignored by
+# default). `axum-server` provides a real TLS-terminating HTTP server
+# so the smoke test can dial actual loopback HTTPS via `reqwest`
+# instead of the in-process `tower::oneshot` short-circuit. `rcgen`
+# generates the self-signed cert each test run uses.
+#
+# `tls-rustls-no-provider` rather than the default `tls-rustls`: the
+# default pulls aws-lc-rs as the rustls crypto provider, but reqwest
+# (via the `rustls-tls-webpki-roots` feature in `[dependencies]` above)
+# already installs the *ring* provider. Two providers in the same
+# process means one of them panics at runtime when its `install_default`
+# call discovers the other won the race. The smoke test explicitly
+# installs ring via `rustls::crypto::ring::default_provider()` before
+# either reqwest or axum-server touches TLS, then both share the
+# already-installed provider.
+axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls-no-provider"] }
+rcgen = "0.14.8"
+# Pulled transitively by `reqwest` already, but we need a direct dep
+# so the smoke test can call `rustls::crypto::ring::default_provider()`
+# without leaning on a transitive re-export.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 # Integration tests under `server/tests/` exercise real HTTP handlers
 # through the test-only `/test/*` bypass routes mounted by the
@@ -85,3 +128,28 @@ http-body-util = "0.1"
 # unit tests only, and CI's `--features test-auth` pulls them in. New
 # integration tests get the same cfg gate and require no Cargo.toml
 # entry. See docs/handler_tests.md.
+
+# Layer-2 smoke tests live under `tests/smoke/`. Cargo only
+# auto-discovers integration tests at the top level of `tests/`, so
+# each smoke binary is registered explicitly with `required-features
+# = ["smoke-tests"]`. That keeps the default `cargo test --features
+# test-auth` run from compiling or linking them (they spawn real TLS
+# listeners and want an explicit opt-in) while letting `cargo test
+# --features smoke-tests` pick up the whole subdirectory at once. To
+# add a new smoke test: create `tests/smoke/<name>.rs` with
+# `#![cfg(feature = "smoke-tests")]` and add a sibling `[[test]]`
+# entry below.
+[[test]]
+name = "federation_smoke"
+path = "tests/smoke/federation_smoke.rs"
+required-features = ["smoke-tests"]
+
+# Layer-4 property tests live under `tests/property/` and follow the
+# same explicit-registration convention as `tests/smoke/`. Default
+# pre-commit (`cargo test --features test-auth`) skips them; the
+# `property-tests` feature compiles and runs them all together via
+# `cargo test --features property-tests`.
+[[test]]
+name = "frontier_convergence"
+path = "tests/property/frontier_convergence.rs"
+required-features = ["property-tests"]

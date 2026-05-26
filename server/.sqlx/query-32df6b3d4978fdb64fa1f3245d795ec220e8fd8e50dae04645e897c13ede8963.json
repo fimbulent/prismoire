@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT erased_at, (payload IS NULL) AS \"payload_null!: i64\" FROM signed_objects WHERE canonical_hash = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "erased_at",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "payload_null!: i64",
+        "ordinal": 1,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      null
+    ]
+  },
+  "hash": "32df6b3d4978fdb64fa1f3245d795ec220e8fd8e50dae04645e897c13ede8963"
+}

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT inner_class, payload FROM signed_objects WHERE canonical_hash = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "inner_class",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "payload",
+        "ordinal": 1,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "6cc072b200aa7f5b05bf2182db82d22fbf9a3113b1832c979bc767188606161f"
+}

@@ -391,7 +391,13 @@ pub(crate) fn now_unix_ms() -> u64 {
 /// Encode the §6.3 `SignedObject` wire format: a canonical CBOR
 /// map `{ "p": payload, "s": sig }`. Keys are sorted (`"p"` <
 /// `"s"` by bytewise compare).
-fn encode_signed_object(payload: &[u8], signature: &[u8]) -> Vec<u8> {
+///
+/// `pub(crate)` because §9 (`/edges`) and §10 (`/content`) both
+/// transmit object batches whose elements use the same WireFormat
+/// shape; the §6 envelope just happens to also need it. Lifting this
+/// once avoids re-implementing the encoder per route module and
+/// guarantees byte-identical framing across every federation surface.
+pub(crate) fn encode_signed_object(payload: &[u8], signature: &[u8]) -> Vec<u8> {
     let map = Value::Map(vec![
         (Value::Text("p".to_string()), Value::Bytes(payload.to_vec())),
         (
@@ -408,7 +414,12 @@ fn encode_signed_object(payload: &[u8], signature: &[u8]) -> Vec<u8> {
 /// any structural deviation (not a map, wrong keys, non-bytes
 /// values, extra entries). Callers translate `None` to
 /// [`VerifyError::BadWireFormat`].
-fn decode_signed_object(bytes: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+///
+/// `pub(crate)` for the same reason as [`encode_signed_object`]:
+/// §9 (`/edges`) and §10 (`/content`) both ingest batches of
+/// WireFormat-framed objects and need the identical structural
+/// strictness the §6 envelope path uses.
+pub(crate) fn decode_signed_object(bytes: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
     let value: Value = ciborium::de::from_reader(bytes).ok()?;
     let entries = match value {
         Value::Map(m) => m,

@@ -49,6 +49,26 @@ just install-hooks
 
 This points `core.hooksPath` at the versioned hooks directory, so future updates to the hook are picked up automatically on `git pull`.
 
+### Testing
+
+The server crate has three Cargo feature flags that control which test surfaces are compiled:
+
+```sh
+# Default: unit tests only (no handler integration tests)
+cargo test -p prismoire-server
+
+# Handler integration tests (this is what the pre-commit hook runs)
+cargo test -p prismoire-server --features test-auth
+
+# Layer-2 smoke tests: two AppStates over real loopback HTTPS
+cargo test -p prismoire-server --features smoke-tests
+
+# Layer-4 property tests: parameterised gossip-convergence trials
+cargo test -p prismoire-server --features property-tests
+```
+
+`smoke-tests` and `property-tests` both imply `test-auth`. Their test binaries live in `server/tests/smoke/` and `server/tests/property/` and are registered explicitly in `server/Cargo.toml`, so the default `cargo test` does not compile or link them. Run on demand or as a pre-release gate.
+
 ### HTTPS for Local Development
 
 WebAuthn (passkeys) requires a secure context. Generate locally-trusted TLS certs with `mkcert` (included in the Nix devShell):

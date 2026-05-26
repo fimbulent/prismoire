@@ -181,6 +181,22 @@ pub async fn test_app_with_transport_and_domain(
     instance_domain: &str,
 ) -> (Router, Arc<AppState>) {
     let pool = fresh_db().await;
+    test_app_with_pool_transport_and_domain(pool, federation_transport, instance_domain).await
+}
+
+/// Most explicit variant: caller supplies the SQLite pool *and* the
+/// transport. The Layer-2 smoke test (`tests/federation_smoke.rs`)
+/// needs this because [`ReqwestTransport`] holds its own clone of the
+/// peers-table pool — the same pool the handlers write to on inbound
+/// `/peer-request`. Sharing the pool is mandatory: a separate
+/// `:memory:` connection would see a different database entirely.
+///
+/// [`ReqwestTransport`]: prismoire_server::federation::transport::ReqwestTransport
+pub async fn test_app_with_pool_transport_and_domain(
+    pool: SqlitePool,
+    federation_transport: Arc<dyn FederationTransport>,
+    instance_domain: &str,
+) -> (Router, Arc<AppState>) {
     let trust_graph_notify = Arc::new(Notify::new());
     let trust_graph = Arc::new(RwLock::new(Arc::new(TrustGraph::empty())));
     let app_metrics = Arc::new(metrics::Metrics::new());
@@ -232,6 +248,7 @@ pub async fn test_app_with_transport_and_domain(
         local_frontier: Arc::new(std::sync::RwLock::new(Arc::new(
             prismoire_server::federation::frontier::LocalFrontier::empty(),
         ))),
+        forwarding_lru: Arc::new(prismoire_server::federation::forwarder::ForwardingLru::new()),
     });
 
     let layers = rate_limit::build_layers(&test_rate_limit_config(), false);
