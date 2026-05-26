@@ -211,6 +211,19 @@ pub async fn create_reply(
 
     tx.commit().await?;
 
+    // §7.5 originator-side fanout for the locally-originated reply
+    // post-rev. ForwardingClass::Authored, routing key = author pubkey.
+    let wire =
+        crate::federation::envelope::encode_signed_object(&signed.payload, &signed.signature);
+    crate::federation::forwarder::forward_signed_object(
+        state.clone(),
+        signed.canonical_hash,
+        crate::federation::routing::ForwardingClass::Authored,
+        signed.public_key.to_vec(),
+        wire,
+        None,
+    );
+
     Ok((
         axum::http::StatusCode::CREATED,
         Json(PostResponse {

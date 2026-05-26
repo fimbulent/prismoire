@@ -227,6 +227,36 @@ pub async fn create_thread(
 
     tx.commit().await?;
 
+    // §7.5 originator-side fanout for the two locally-originated
+    // signed objects. Both ride ForwardingClass::Authored with the
+    // author's pubkey as routing key. The OP `post-rev` and the
+    // `thread-create` are deliberately fanned out separately — they
+    // share an arrival timestamp but each gets its own §7.5 dedup-LRU
+    // entry, mirroring how peers will receive them on `/content` as
+    // independent batch elements.
+    let post_rev_wire =
+        crate::federation::envelope::encode_signed_object(&signed.payload, &signed.signature);
+    crate::federation::forwarder::forward_signed_object(
+        state.clone(),
+        signed.canonical_hash,
+        crate::federation::routing::ForwardingClass::Authored,
+        signed.public_key.to_vec(),
+        post_rev_wire,
+        None,
+    );
+    let thread_create_wire = crate::federation::envelope::encode_signed_object(
+        &signed_thread.payload,
+        &signed_thread.signature,
+    );
+    crate::federation::forwarder::forward_signed_object(
+        state.clone(),
+        signed_thread.canonical_hash,
+        crate::federation::routing::ForwardingClass::Authored,
+        signed_thread.public_key.to_vec(),
+        thread_create_wire,
+        None,
+    );
+
     // Project the just-signed array into the response shape. The OP
     // is the only post that can carry attachments, so this is the
     // only PostResponse on the create path that gets a non-empty

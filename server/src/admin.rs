@@ -428,6 +428,23 @@ pub async fn remove_post(
 
     tx.commit().await?;
 
+    // §7.5 originator-side fanout for the admin-rm. Per §7.4 the
+    // routing key for an admin-rm is the *target post's author*, NOT
+    // the instance signer — interest filters match the user being
+    // moderated, not the moderator. ForwardingClass::Authored.
+    let wire = crate::federation::envelope::encode_signed_object(
+        &signed_admin_rm.payload,
+        &signed_admin_rm.signature,
+    );
+    crate::federation::forwarder::forward_signed_object(
+        state.clone(),
+        signed_admin_rm.canonical_hash,
+        crate::federation::routing::ForwardingClass::Authored,
+        target_author.to_vec(),
+        wire,
+        None,
+    );
+
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
@@ -1251,7 +1268,7 @@ pub async fn delete_user_by_admin(
     // with no corresponding log row.
     let mut tx = state.db.begin().await?;
 
-    crate::privacy::soft_delete_user(&mut tx, &target_id).await?;
+    let fanout = crate::privacy::soft_delete_user(&mut tx, &target_id).await?;
 
     let log_id = Uuid::new_v4().to_string();
     sqlx::query!(
@@ -1266,6 +1283,11 @@ pub async fn delete_user_by_admin(
     .await?;
 
     tx.commit().await?;
+
+    // §7.5 originator-side fanout: ship every per-post retract and the
+    // umbrella deactivate to interested peers. Strictly after commit so
+    // a rollback can't leak ghosts.
+    crate::privacy::forward_deactivation(&state, fanout);
 
     state.trust_graph_notify.notify_one();
 

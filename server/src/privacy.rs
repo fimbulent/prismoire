@@ -1357,8 +1357,13 @@ pub async fn delete_my_account(
     user: RestrictedAuthUser,
 ) -> Result<impl IntoResponse, AppError> {
     let mut tx = state.db.begin().await?;
-    soft_delete_user(&mut tx, &user.user_id).await?;
+    let fanout = soft_delete_user(&mut tx, &user.user_id).await?;
     tx.commit().await?;
+
+    // §7.5 originator-side fanout for every signed retract + the
+    // umbrella deactivate. Fire-and-forget; happens strictly after
+    // commit so a rollback can't ship ghosts.
+    forward_deactivation(&state, fanout);
 
     // Trust graph drops the deleted user's outbound edges on the next
     // rebuild.
@@ -1368,6 +1373,47 @@ pub async fn delete_my_account(
     headers.insert(SET_COOKIE, clear_session_cookie().parse().unwrap());
 
     Ok((StatusCode::NO_CONTENT, headers))
+}
+
+/// Federation fanout payload returned by [`soft_delete_user`].
+///
+/// One per-post `retract` plus (optionally) one umbrella `deactivate`,
+/// each carrying the wire bytes + routing key + canonical hash needed
+/// to drive [`crate::federation::forwarder::forward_signed_object`].
+/// Callers MUST invoke the fanout *after* the soft-delete transaction
+/// commits — otherwise a tx rollback would ship signed objects to peers
+/// that the local instance never persisted, polluting the federated
+/// view with ghosts that pull-backfill would later 410-Gone.
+///
+/// The struct is returned even when empty (e.g. the user had no active
+/// signing key to sign retractions / deactivate with); the caller
+/// passes it through unconditionally and the helper no-ops.
+pub(crate) struct DeactivationFanout {
+    pub items: Vec<FanoutItem>,
+}
+
+/// One signed object ready for §7.5 originator-side fanout.
+pub(crate) struct FanoutItem {
+    pub canonical_hash: [u8; 32],
+    pub routing_key: Vec<u8>,
+    pub wire: Vec<u8>,
+}
+
+/// Spawn §7.5 originator-side fanout tasks for every item produced by
+/// [`soft_delete_user`]. ForwardingClass::Authored for all of them
+/// (per-post `retract` and umbrella `deactivate` are both author-keyed
+/// classes per §7.4). Call this AFTER the deletion tx commits.
+pub(crate) fn forward_deactivation(state: &Arc<AppState>, fanout: DeactivationFanout) {
+    for item in fanout.items {
+        crate::federation::forwarder::forward_signed_object(
+            state.clone(),
+            item.canonical_hash,
+            crate::federation::routing::ForwardingClass::Authored,
+            item.routing_key,
+            item.wire,
+            None,
+        );
+    }
 }
 
 /// Shared soft-delete implementation used by both the self-deletion
@@ -1387,6 +1433,13 @@ pub async fn delete_my_account(
 /// transaction as the deletion, so there is no "user deleted but no
 /// audit entry written" window on a mid-flight crash.
 ///
+/// Returns a [`DeactivationFanout`] capturing the per-post `retract`
+/// and (when an active signing key exists) the umbrella `deactivate`
+/// signed objects that the caller MUST hand to
+/// [`forward_deactivation`] after committing the tx. The helper itself
+/// is federation-unaware to keep the (tx + state) coupling out of its
+/// signature.
+///
 /// Does **not** notify the trust graph or touch any session cookie —
 /// those concerns are handled by the calling endpoint, which has the
 /// request context (`AppState`, `HeaderMap`) that this helper doesn't
@@ -1394,7 +1447,7 @@ pub async fn delete_my_account(
 pub(crate) async fn soft_delete_user(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     user_id: &str,
-) -> Result<(), AppError> {
+) -> Result<DeactivationFanout, AppError> {
     // Load the active signing key first so we can sign every post
     // retraction before touching the destructive statements. This keeps
     // retraction signatures faithful to the spec ("retraction does not
@@ -1456,7 +1509,11 @@ pub(crate) async fn soft_delete_user(
     // the pool, so doing it inside the tx is fine). The optional
     // `signed_bytes` carries the canonical payload + hash for the
     // dual-write into `signed_objects` (None when no active key).
+    // We also collect a parallel `fanout_items` vec: every signed
+    // retract becomes a §7.5 originator-fanout entry; the umbrella
+    // `deactivate` is appended below once it's signed.
     type RetractionRow = (String, Vec<u8>, Option<(Vec<u8>, [u8; 32])>);
+    let mut fanout_items: Vec<FanoutItem> = Vec::new();
     let retractions: Vec<RetractionRow> = if let Some(key) = signing_key.as_ref() {
         posts_to_retract
             .into_iter()
@@ -1466,6 +1523,13 @@ pub(crate) async fn soft_delete_user(
                     AppError::code(ErrorCode::Internal)
                 })?;
                 let out = sign_retraction_with_key(key, &post_uuid, created_at_ms);
+                let wire =
+                    crate::federation::envelope::encode_signed_object(&out.payload, &out.signature);
+                fanout_items.push(FanoutItem {
+                    canonical_hash: out.canonical_hash,
+                    routing_key: out.public_key.to_vec(),
+                    wire,
+                });
                 Ok::<_, AppError>((r.id, out.signature, Some((out.payload, out.canonical_hash))))
             })
             .collect::<Result<_, _>>()?
@@ -1539,6 +1603,17 @@ pub(crate) async fn soft_delete_user(
             &signed_deactivate.canonical_hash,
         )
         .await?;
+        // Append the umbrella deactivate to the fanout queue. Routing
+        // key is the user's own pubkey (= signer = subject per §7.4).
+        let wire = crate::federation::envelope::encode_signed_object(
+            &signed_deactivate.payload,
+            &signed_deactivate.signature,
+        );
+        fanout_items.push(FanoutItem {
+            canonical_hash: signed_deactivate.canonical_hash,
+            routing_key: signed_deactivate.public_key.to_vec(),
+            wire,
+        });
     }
 
     // 1b. Belt-and-suspenders FTS cleanup. The retraction triggers
@@ -1771,7 +1846,9 @@ pub(crate) async fn soft_delete_user(
     .execute(&mut **tx)
     .await?;
 
-    Ok(())
+    Ok(DeactivationFanout {
+        items: fanout_items,
+    })
 }
 
 // ---------------------------------------------------------------------------

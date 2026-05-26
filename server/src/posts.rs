@@ -305,6 +305,21 @@ pub async fn edit_post(
 
     tx.commit().await?;
 
+    // §7.5 originator-side fanout. Locally-originated post-rev →
+    // ForwardingClass::Authored, routing key = author pubkey.
+    // `arrived_from = None` because we're the origin, not a relay.
+    // Fire-and-forget — does not gate the response.
+    let wire =
+        crate::federation::envelope::encode_signed_object(&signed.payload, &signed.signature);
+    crate::federation::forwarder::forward_signed_object(
+        state.clone(),
+        signed.canonical_hash,
+        crate::federation::routing::ForwardingClass::Authored,
+        signed.public_key.to_vec(),
+        wire,
+        None,
+    );
+
     // Project the just-signed array into the response shape. Only OP
     // posts can carry attachments, but reflecting the signed
     // `signed_attachments` here either way keeps the edit response
@@ -440,6 +455,20 @@ pub async fn retract_post(
     signing::erase_post_rev_payloads(&mut *tx, &post_id).await?;
 
     tx.commit().await?;
+
+    // §7.5 originator-side fanout for the retract. ForwardingClass::Authored,
+    // routing key = author pubkey. Fire-and-forget after commit so a tx
+    // rollback can't leak a retract that never landed locally.
+    let wire =
+        crate::federation::envelope::encode_signed_object(&signed.payload, &signed.signature);
+    crate::federation::forwarder::forward_signed_object(
+        state.clone(),
+        signed.canonical_hash,
+        crate::federation::routing::ForwardingClass::Authored,
+        signed.public_key.to_vec(),
+        wire,
+        None,
+    );
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }

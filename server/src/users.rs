@@ -1090,6 +1090,21 @@ pub async fn update_bio(
 
     tx.commit().await?;
 
+    // §7.5 originator-side fanout for the profile revision.
+    // ForwardingClass::Authored, routing key = user pubkey (= signer
+    // pubkey, since `profile` is self-signed). Mirrors the trust-edge
+    // fanout below; fire-and-forget so the response isn't gated on
+    // peer reachability.
+    let wire = crate::federation::envelope::encode_signed_object(&payload, &signature);
+    crate::federation::forwarder::forward_signed_object(
+        state.clone(),
+        canonical_hash,
+        crate::federation::routing::ForwardingClass::Authored,
+        signed.public_key.to_vec(),
+        wire,
+        None,
+    );
+
     Ok(StatusCode::NO_CONTENT)
 }
 
