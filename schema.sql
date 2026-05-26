@@ -667,3 +667,95 @@ CREATE TABLE IF NOT EXISTS "peer_frontiers" (
     FOREIGN KEY (peer_pubkey) REFERENCES peers(instance_pubkey)
         ON DELETE CASCADE
 );
+CREATE TABLE admin_rm_authorities (
+    -- Target post UUID (raw 16 bytes), matching the `post_id` field
+    -- of the signed admin-rm payload (signed-payload-format.md §5.2).
+    -- Same identity used by `posts.id` (stored as text-uuid in that
+    -- table; this table uses the raw 16-byte form because §10.4
+    -- receive-time lookups compare against the wire payload).
+    post_id BLOB PRIMARY KEY NOT NULL
+            CHECK (length(post_id) = 16),
+
+    -- Ed25519 pubkey of the targeted post's author (raw 32 bytes).
+    -- Persisted so an operator dashboard can render the affected
+    -- user without a JOIN through `posts`/`users`, and so
+    -- receive-time checks can short-circuit when the post itself
+    -- isn't locally known (only the authority matters).
+    target_author BLOB NOT NULL
+            CHECK (length(target_author) = 32),
+
+    -- Bare canonical domain of the issuing (signing) instance — must
+    -- equal the home instance of `target_author` at the time the
+    -- admin-rm was signed. Persisted for operator audit; the
+    -- authoritative-vs-advisory routing decision happens at ingest
+    -- time, so this field is informational here.
+    signing_instance TEXT NOT NULL,
+
+    -- Removal time, Unix milliseconds UTC, copied verbatim from the
+    -- admin-rm payload. Lets the dashboard sort by recency without
+    -- re-parsing canonical bytes.
+    created_at INTEGER NOT NULL,
+
+    -- SHA-256 of the admin-rm's canonical payload bytes (32 bytes).
+    -- Joins back to `signed_objects.canonical_hash` so a §10.5
+    -- backfill request for an admin-removed post can serve the
+    -- admin-rm bytes as the `410 Gone` body without a content scan.
+    canonical_hash BLOB NOT NULL
+            CHECK (length(canonical_hash) = 32),
+
+    -- ISO-8601 timestamp of the row write. Operator-visible only;
+    -- distinct from `created_at` (wire timestamp from the signer)
+    -- because clock skew between instances is real and we want to
+    -- know when *we* learned about the removal.
+    received_at TEXT NOT NULL
+            DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE TABLE admin_rm_reports (
+    -- Stable row identity for log references and a future "dismiss
+    -- this report" admin action. Text UUID matches the convention
+    -- used by `admin_log.id` and the rest of the moderation tables.
+    id TEXT PRIMARY KEY NOT NULL,
+
+    -- Target post UUID (raw 16 bytes), matching the `post_id` field
+    -- of the signed admin-rm payload. Also the per-post dedup key —
+    -- enforced via UNIQUE rather than PK so the surrogate `id` can
+    -- be used for foreign-key references from future admin tables.
+    post_id BLOB NOT NULL UNIQUE
+            CHECK (length(post_id) = 16),
+
+    -- Ed25519 pubkey of the post's author (raw 32 bytes). The home
+    -- of this user is, by construction, the local instance — the
+    -- handler rejects advisories where the receiver isn't the
+    -- author's current home with `not_authoritative_home` before
+    -- inserting here.
+    target_author BLOB NOT NULL
+            CHECK (length(target_author) = 32),
+
+    -- Bare canonical domain of the moderator's instance (the
+    -- envelope sender and the admin-rm signer; the §10.4 handler
+    -- verifies both equal this string before insert). Per-source
+    -- rate limiting groups rows by this field, so it gets an index.
+    signing_instance TEXT NOT NULL,
+
+    -- Optional human-readable justification, copied verbatim from
+    -- the admin-rm payload's `reason` field. NULL when the signer
+    -- omitted it. Length-bounded at write time by the same per-field
+    -- cap that gates local admin-rm origination.
+    reason TEXT,
+
+    -- SHA-256 of the admin-rm's canonical payload bytes (32 bytes).
+    -- The bytes themselves live in `signed_objects`; we keep the
+    -- hash here so an operator action like "see the original
+    -- signature" can join back without scanning by signer pubkey.
+    canonical_hash BLOB NOT NULL
+            CHECK (length(canonical_hash) = 32),
+
+    -- ISO-8601 timestamp of the row write. Drives the
+    -- per-source-instance rate-limit window
+    -- (MAX_ADVISORY_REPORTS_PER_HOUR per §10.6) and the admin queue
+    -- display order ("oldest pending first").
+    received_at TEXT NOT NULL
+            DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX idx_admin_rm_reports_source_received
+    ON admin_rm_reports(signing_instance, received_at);

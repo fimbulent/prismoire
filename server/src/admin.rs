@@ -385,6 +385,31 @@ pub async fn remove_post(
     )
     .await?;
 
+    // Project the admin-rm into the §10.4 receive-time precedence
+    // table. Local origination is always authoritative (this instance
+    // is, by construction, the home of any user whose posts it admin-
+    // removes), so the row goes into `admin_rm_authorities` rather
+    // than `admin_rm_reports`. The PRIMARY KEY on `post_id` enforces
+    // first-and-only semantics — the `post.retracted_at.is_some()`
+    // guard above prevents a second admin-rm against the same post
+    // from getting this far, so a PK collision here would be a bug.
+    let post_id_bytes: Vec<u8> = post_uuid.as_bytes().to_vec();
+    let target_author_db: Vec<u8> = target_author.to_vec();
+    let canonical_hash_db: Vec<u8> = signed_admin_rm.canonical_hash.to_vec();
+    let created_at_ms_db = created_at_ms as i64;
+    sqlx::query!(
+        "INSERT INTO admin_rm_authorities \
+         (post_id, target_author, signing_instance, created_at, canonical_hash) \
+         VALUES (?, ?, ?, ?, ?)",
+        post_id_bytes,
+        target_author_db,
+        state.instance_domain,
+        created_at_ms_db,
+        canonical_hash_db,
+    )
+    .execute(&mut *tx)
+    .await?;
+
     // Audit row commits with the rest of the removal — without this
     // co-commit, an `insert_admin_log` failure after `tx.commit()`
     // would ship the signed `admin-rm` to peers while leaving the

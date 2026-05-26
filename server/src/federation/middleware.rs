@@ -78,6 +78,28 @@ pub const FRONTIER_BODY_CAP: usize = 16 * 1024 * 1024;
 /// don't need a special-case entry until batched-push lands.
 pub const EDGES_BODY_CAP: usize = 64 * 1024;
 
+/// Body cap for `/federation/v1/content` (push) — Phase 6.
+///
+/// Matches the protocol's `MAX_CONTENT_BODY` default
+/// (`docs/federation-protocol.md` §10.6 — "covers a full
+/// MAX_CONTENT_BATCH=64 batch where every object is at the
+/// per-object MAX_POSTREV_SIZE ceiling"). The handler enforces
+/// per-batch (≤ 64 objects) and per-object (≤ 512 KiB post-rev,
+/// smaller for other classes) caps independently; this is the outer
+/// envelope-level ceiling that bounds how many bytes the middleware
+/// will even drain before the handler gets a chance to look.
+pub const CONTENT_BODY_CAP: usize = 16 * 1024 * 1024;
+
+/// Body cap for `/federation/v1/admin-rm-report` (advisory) — Phase 6.
+///
+/// One report body carries a single signed `admin-rm` payload — the
+/// same shape that travels inside a `/content` batch as a single
+/// object, with a small wrapping envelope. The payload itself is
+/// bounded by `MAX_REASON_LEN` (≈ 1 KiB plus fixed fields) plus the
+/// §6 envelope; 8 KiB is comfortably above that without giving a
+/// hostile non-home moderator room to amplify advisory traffic.
+pub const ADMIN_RM_REPORT_BODY_CAP: usize = 8 * 1024;
+
 /// Resolve the body cap for a given federation path.
 ///
 /// Match is path-prefix-aware but anchored on a trailing slash (or
@@ -97,6 +119,18 @@ fn route_body_cap(path: &str) -> usize {
     // single signed trust-edge object.
     } else if path == "/federation/v1/edges" || path.starts_with("/federation/v1/edges/") {
         EDGES_BODY_CAP
+    // `/content` carries a batched push (up to MAX_CONTENT_BATCH
+    // signed objects); the handler enforces per-object + per-batch
+    // caps inside this outer ceiling.
+    } else if path == "/federation/v1/content" || path.starts_with("/federation/v1/content/") {
+        CONTENT_BODY_CAP
+    // `/admin-rm-report` carries one signed admin-rm payload. Tight
+    // cap because there's no batching here and the inner payload is
+    // length-bounded.
+    } else if path == "/federation/v1/admin-rm-report"
+        || path.starts_with("/federation/v1/admin-rm-report/")
+    {
+        ADMIN_RM_REPORT_BODY_CAP
     } else {
         DEFAULT_FEDERATION_BODY_CAP
     }
@@ -247,6 +281,19 @@ mod tests {
     }
 
     #[test]
+    fn route_body_cap_picks_content_cap_for_content_route() {
+        assert_eq!(route_body_cap("/federation/v1/content"), CONTENT_BODY_CAP);
+    }
+
+    #[test]
+    fn route_body_cap_picks_admin_rm_report_cap_for_advisory_route() {
+        assert_eq!(
+            route_body_cap("/federation/v1/admin-rm-report"),
+            ADMIN_RM_REPORT_BODY_CAP,
+        );
+    }
+
+    #[test]
     fn route_body_cap_falls_through_to_default_for_handshake_routes() {
         assert_eq!(
             route_body_cap("/federation/v1/peer-request"),
@@ -286,6 +333,14 @@ mod tests {
         );
         assert_eq!(
             route_body_cap("/federation/v1/frontier-extra"),
+            DEFAULT_FEDERATION_BODY_CAP,
+        );
+        assert_eq!(
+            route_body_cap("/federation/v1/content-foo"),
+            DEFAULT_FEDERATION_BODY_CAP,
+        );
+        assert_eq!(
+            route_body_cap("/federation/v1/admin-rm-report-foo"),
             DEFAULT_FEDERATION_BODY_CAP,
         );
     }

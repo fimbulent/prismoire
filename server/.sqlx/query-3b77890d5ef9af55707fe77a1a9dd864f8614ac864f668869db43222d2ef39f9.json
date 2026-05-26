@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO admin_rm_authorities (post_id, target_author, signing_instance, created_at, canonical_hash) VALUES (?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "3b77890d5ef9af55707fe77a1a9dd864f8614ac864f668869db43222d2ef39f9"
+}
