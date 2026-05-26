@@ -213,6 +213,35 @@ impl MultiInstanceHarness {
             .unwrap_or_else(|| panic!("no harness instance labelled {label:?}"))
     }
 
+    /// Remove the instance's router from the shared transport
+    /// registry. The instance itself stays alive (its `AppState`,
+    /// router, and DB are still reachable from the test) but any
+    /// outbound transport call targeting it now returns
+    /// [`TransportError::UnknownPeer`]. Used by Phase 6.4 tests to
+    /// simulate a peer going offline mid-fanout. See [`reconnect`].
+    pub async fn disconnect(&self, label: &str) {
+        let h = self
+            .instances
+            .get(label)
+            .unwrap_or_else(|| panic!("no harness instance labelled {label:?}"));
+        self.registry.write().await.remove(&h.peer_id);
+    }
+
+    /// Re-register a previously-disconnected instance's router with
+    /// the shared transport registry. Idempotent: re-inserting an
+    /// already-present entry just overwrites the router handle (same
+    /// `Router` Arc).
+    pub async fn reconnect(&self, label: &str) {
+        let h = self
+            .instances
+            .get(label)
+            .unwrap_or_else(|| panic!("no harness instance labelled {label:?}"));
+        self.registry
+            .write()
+            .await
+            .insert(h.peer_id, h.router.clone());
+    }
+
     /// How many instances are currently registered.
     pub fn len(&self) -> usize {
         self.instances.len()
@@ -223,6 +252,28 @@ impl MultiInstanceHarness {
     pub fn is_empty(&self) -> bool {
         self.instances.is_empty()
     }
+}
+
+/// Give the forwarder's spawned candidate-lookup task a chance to
+/// call `OutboundQueues::enqueue` before the test reads queue state.
+///
+/// Phase 6.4 sites: `forward_signed_object` wraps its async
+/// candidate-selection in `tokio::spawn`, so the originating handler
+/// can return before any item lands in the queue. Tests that call
+/// `wait_idle()` right after the handler would otherwise observe an
+/// "already idle" queue (empty because nothing has been enqueued yet)
+/// and skip the actual drain. This helper yields several times to let
+/// the spawn start, then sleeps 20ms to let the DB query complete and
+/// the enqueue land.
+///
+/// Removed in Phase 6.4.1, which lifts the spawn out of
+/// `forward_signed_object` so enqueue is synchronous with the
+/// handler's response and `wait_idle()` is genuinely deterministic.
+pub async fn settle_forwarder_spawn() {
+    for _ in 0..5 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 }
 
 // ---------------------------------------------------------------------------

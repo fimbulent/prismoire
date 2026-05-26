@@ -153,6 +153,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ReqwestTransport::default_client()?,
         allow_private_targets_from_env(),
     ));
+    // §7.3 per-peer outbound FIFO queues (Phase 6.4). One process-wide
+    // collection of per-peer FIFOs + drain workers; bound by the §7.5
+    // queue-sizing caps held as `const` on the module for Phase 6.4
+    // (Phase 6.4.1 will lift them into instance config).
+    let outbound_queues = prismoire_server::federation::outbound_queue::OutboundQueues::new(
+        prismoire_server::federation::outbound_queue::OutboundQueueConfig::defaults(),
+        federation_transport.clone(),
+        instance_key.clone(),
+    );
     // §5.2 `instance_domain` is the bare canonical domain this
     // instance serves on. The closest existing config we have is
     // `webauthn.rp_id`, which is the *same* concept by design (both
@@ -182,6 +191,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             prismoire_server::federation::frontier::LocalFrontier::empty(),
         ))),
         forwarding_lru: Arc::new(prismoire_server::federation::forwarder::ForwardingLru::new()),
+        outbound_queues,
     });
 
     // Spawn the debounced trust graph rebuild background task.

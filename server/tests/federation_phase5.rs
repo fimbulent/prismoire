@@ -727,12 +727,16 @@ fn announce_with_edge_origin_keys(interested_keys: &[&[u8; 32]]) -> FrontierAnno
     }
 }
 
-/// Wait up to `timeout_ms` for `predicate` to return `true`. The
-/// forwarder's dispatch happens on a `tokio::spawn`ed task, so the
-/// downstream peer's DB does not have the projected row by the time
-/// `send_envelope_signed` returns from the upstream push. Polling with
-/// a short backoff (rather than a single `sleep`) keeps the test fast
-/// in the happy case and only burns the full budget on a real failure.
+/// Wait up to `timeout_ms` for `predicate` to return `true`. Phase
+/// 6.4 moved per-peer dispatch off `tokio::spawn` and onto a per-peer
+/// drain worker, but the egress is still asynchronous from the
+/// upstream push's perspective — the downstream peer's DB does not
+/// have the projected row by the time `send_envelope_signed` returns.
+/// Polling with a short backoff (rather than a single `sleep`) keeps
+/// the test fast in the happy case and only burns the full budget on
+/// a real failure. Phase-6 tests prefer `wait_outbound_idle` via the
+/// `OutboundQueues::idle_notify` signal; this Phase-5 helper predates
+/// that and is kept as-is to avoid churn.
 async fn poll_until<F, Fut>(timeout_ms: u64, mut predicate: F) -> bool
 where
     F: FnMut() -> Fut,
@@ -815,9 +819,10 @@ async fn forwarder_relays_applied_edge_to_interested_peer() {
     assert_eq!(status, StatusCode::OK, "A → B push must apply");
     assert_eq!(parse_results_body(&resp_body)[0].1, "applied");
 
-    // B's `forward_signed_object` runs on a `tokio::spawn`ed task, so
-    // the row on C appears asynchronously. Poll for up to 2s before
-    // failing — happy path resolves in single-digit ms.
+    // B's `forward_signed_object` enqueues onto B's per-peer outbound
+    // queue (Phase 6.4) and the drain worker dispatches to C
+    // asynchronously, so C's row appears after this push returns. Poll
+    // for up to 2s before failing — happy path resolves in single-digit ms.
     let c_db = c.state.db.clone();
     let hash_slice = signed.canonical_hash.to_vec();
     let arrived = poll_until(2_000, || {

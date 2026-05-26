@@ -41,6 +41,7 @@ pub mod frontier;
 pub mod identity;
 pub mod instance_key;
 pub mod middleware;
+pub mod outbound_queue;
 pub mod peering;
 pub mod router;
 pub mod routing;

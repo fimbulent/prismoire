@@ -220,6 +220,15 @@ pub async fn test_app_with_pool_transport_and_domain(
         .await
         .expect("load_or_generate on fresh test pool");
 
+    // The outbound-queues collection (Phase 6.4) needs clones of the
+    // transport + instance key before they get moved into AppState,
+    // so build it here and slot it in.
+    let outbound_queues = prismoire_server::federation::outbound_queue::OutboundQueues::new(
+        prismoire_server::federation::outbound_queue::OutboundQueueConfig::test_fast(),
+        federation_transport.clone(),
+        instance_key.clone(),
+    );
+
     let state = Arc::new(AppState {
         db: pool,
         webauthn: test_webauthn(),
@@ -249,6 +258,7 @@ pub async fn test_app_with_pool_transport_and_domain(
             prismoire_server::federation::frontier::LocalFrontier::empty(),
         ))),
         forwarding_lru: Arc::new(prismoire_server::federation::forwarder::ForwardingLru::new()),
+        outbound_queues,
     });
 
     let layers = rate_limit::build_layers(&test_rate_limit_config(), false);

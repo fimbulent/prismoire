@@ -11,6 +11,7 @@ use crate::federation::envelope::NonceLru;
 use crate::federation::forwarder::ForwardingLru;
 use crate::federation::frontier::LocalFrontier;
 use crate::federation::instance_key::InstanceKey;
+use crate::federation::outbound_queue::OutboundQueues;
 use crate::federation::transport::FederationTransport;
 use crate::instance_config::AttachmentBudget;
 use crate::metrics::Metrics;
@@ -105,6 +106,12 @@ pub struct AppState {
     /// wide instance, keyed on `canonical_hash`, valued on a bitset
     /// of peer indices we have already forwarded the object to.
     pub forwarding_lru: Arc<ForwardingLru>,
+    /// §7.3 per-peer outbound FIFO queues + drain workers
+    /// (Phase 6.4). The forwarder pushes wire-ready singleton blobs in
+    /// via `enqueue(...)`; each peer's drain worker coalesces up to
+    /// `MAX_CONTENT_BATCH_OUTBOUND = 64` items into a single signed
+    /// HTTP push, with exponential backoff on transient failure.
+    pub outbound_queues: Arc<OutboundQueues>,
 }
 
 impl AppState {

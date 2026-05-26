@@ -14,17 +14,18 @@
 //! / overflow / backoff) lands with Phase 6.4 when the per-peer
 //! outbound queue provides a deterministic drain hook.
 //!
-//! Polling-with-timeout is used because the current forwarder
-//! dispatches on a `tokio::spawn`ed task with no completion handle —
-//! see the matching pattern in `federation_phase5.rs`. Happy paths
-//! resolve in single-digit ms; the 2-second cap only burns on a real
-//! failure.
+//! Phase 6.4 rewrite: the polling-with-timeout loop has been replaced
+//! with a single `state.outbound_queues.wait_idle(...)` call. The
+//! per-peer outbound queue provides a deterministic "everything
+//! drained" hook (worker marks idle + signals an `idle_notify`) so we
+//! no longer need to poll the receiver's `signed_objects` table at
+//! 10ms intervals waiting for the spawned dispatch task to land.
 
 #![cfg(feature = "test-auth")]
 
 mod common;
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::http::{Method, StatusCode};
 use http::Request;
@@ -33,7 +34,9 @@ use prismoire_server::federation::frontier::{FilterSpec, FrontierAnnounce};
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
 
-use common::federation::{MultiInstanceHarness, establish_active_peering, send_envelope_signed};
+use common::federation::{
+    MultiInstanceHarness, establish_active_peering, send_envelope_signed, settle_forwarder_spawn,
+};
 use common::{body_json, json_request, send, setup_admin};
 
 // ---------------------------------------------------------------------------
@@ -55,27 +58,6 @@ fn announce_all_ones() -> FrontierAnnounce {
     }
 }
 
-/// Wait up to `timeout_ms` for `predicate` to return `true`. Mirrors
-/// the `poll_until` helper in `federation_phase5.rs` — the duplication
-/// is deliberate so this tripwire file stays self-contained until a
-/// future cleanup pass folds both into `common/federation.rs`.
-async fn poll_until<F, Fut>(timeout_ms: u64, mut predicate: F) -> bool
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = bool>,
-{
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-    loop {
-        if predicate().await {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-}
-
 /// Count `signed_objects` rows of a given inner class on a peer's DB.
 async fn count_class(db: &SqlitePool, class: &str) -> i64 {
     sqlx::query_scalar!(
@@ -87,17 +69,27 @@ async fn count_class(db: &SqlitePool, class: &str) -> i64 {
     .expect("count signed_objects by class")
 }
 
-/// Poll until `count_class(db, class)` reaches at least `target`, or
-/// the 2-second deadline expires. Returns the final observed count so
-/// the caller can include it in the failure message.
-async fn wait_for_class_count(db: &SqlitePool, class: &str, target: i64) -> i64 {
-    let _ = poll_until(2_000, || {
-        let db = db.clone();
-        let class = class.to_string();
-        async move { count_class(&db, &class).await >= target }
-    })
-    .await;
-    count_class(db, class).await
+/// Wait for A's outbound queue to fully drain, then return. Asserts
+/// that drain completed within the timeout. Phase 6.4 hook: the
+/// per-peer drain worker marks itself idle (empty + no in-flight)
+/// after the egress write completes, and `wait_idle` rides the
+/// `OutboundQueues::idle_notify` signal rather than polling.
+///
+/// The leading `settle_forwarder_spawn()` is there because
+/// `forward_signed_object` wraps its candidate-lookup in
+/// `tokio::spawn` — without the settle, `wait_idle()` can observe an
+/// empty queue (nothing enqueued yet) and return immediately. Phase
+/// 6.4.1 removes the spawn and the settle helper along with it.
+async fn wait_outbound_idle(harness: &MultiInstanceHarness, label: &str) {
+    let a = harness.instance(label);
+    settle_forwarder_spawn().await;
+    assert!(
+        a.state
+            .outbound_queues
+            .wait_idle(Duration::from_secs(2))
+            .await,
+        "outbound queue from {label} did not drain within 2s",
+    );
 }
 
 /// Build a two-instance harness with active peering and B's all-ones
@@ -187,14 +179,15 @@ async fn create_thread_fans_out_post_rev_and_thread_create() {
 
     let _ = create_thread_as(&a.router, &alice.cookie, "general", "tripwire", "hello").await;
 
-    let post_rev = wait_for_class_count(&b.state.db, "post-rev", 1).await;
-    assert!(
-        post_rev >= 1,
+    wait_outbound_idle(&harness, "a").await;
+    let post_rev = count_class(&b.state.db, "post-rev").await;
+    assert_eq!(
+        post_rev, 1,
         "post-rev did not fan out to B (count={post_rev})"
     );
-    let thread_create = wait_for_class_count(&b.state.db, "thread-create", 1).await;
-    assert!(
-        thread_create >= 1,
+    let thread_create = count_class(&b.state.db, "thread-create").await;
+    assert_eq!(
+        thread_create, 1,
         "thread-create did not fan out to B (count={thread_create})",
     );
 }
@@ -213,9 +206,10 @@ async fn create_reply_fans_out_post_rev() {
         create_thread_as(&a.router, &alice.cookie, "general", "with-reply", "op body").await;
     let _ = create_reply_as(&a.router, &alice.cookie, &thread_id, &op_id, "reply body").await;
 
-    let post_rev = wait_for_class_count(&b.state.db, "post-rev", 2).await;
-    assert!(
-        post_rev >= 2,
+    wait_outbound_idle(&harness, "a").await;
+    let post_rev = count_class(&b.state.db, "post-rev").await;
+    assert_eq!(
+        post_rev, 2,
         "reply post-rev did not fan out to B (count={post_rev})",
     );
 }
@@ -244,9 +238,10 @@ async fn edit_post_fans_out_post_rev() {
     .await;
     assert_eq!(response.status(), StatusCode::OK, "edit_post failed");
 
-    let post_rev = wait_for_class_count(&b.state.db, "post-rev", 2).await;
-    assert!(
-        post_rev >= 2,
+    wait_outbound_idle(&harness, "a").await;
+    let post_rev = count_class(&b.state.db, "post-rev").await;
+    assert_eq!(
+        post_rev, 2,
         "edit post-rev did not fan out to B (count={post_rev})",
     );
 }
@@ -279,11 +274,9 @@ async fn retract_post_fans_out_retract() {
     .await;
     assert_eq!(response.status(), StatusCode::NO_CONTENT, "retract failed");
 
-    let retract = wait_for_class_count(&b.state.db, "retract", 1).await;
-    assert!(
-        retract >= 1,
-        "retract did not fan out to B (count={retract})"
-    );
+    wait_outbound_idle(&harness, "a").await;
+    let retract = count_class(&b.state.db, "retract").await;
+    assert_eq!(retract, 1, "retract did not fan out to B (count={retract})");
 }
 
 /// `PATCH /api/users/{username}` (update_bio) must fan out a
@@ -311,11 +304,9 @@ async fn update_bio_fans_out_profile() {
         "update_bio failed",
     );
 
-    let profile = wait_for_class_count(&b.state.db, "profile", 1).await;
-    assert!(
-        profile >= 1,
-        "profile did not fan out to B (count={profile})"
-    );
+    wait_outbound_idle(&harness, "a").await;
+    let profile = count_class(&b.state.db, "profile").await;
+    assert_eq!(profile, 1, "profile did not fan out to B (count={profile})");
 }
 
 /// `DELETE /api/admin/posts/{id}` (admin-rm) must fan out an
@@ -355,9 +346,10 @@ async fn admin_remove_post_fans_out_admin_rm() {
         "admin remove_post failed: {status}",
     );
 
-    let admin_rm = wait_for_class_count(&b.state.db, "admin-rm", 1).await;
-    assert!(
-        admin_rm >= 1,
+    wait_outbound_idle(&harness, "a").await;
+    let admin_rm = count_class(&b.state.db, "admin-rm").await;
+    assert_eq!(
+        admin_rm, 1,
         "admin-rm did not fan out to B (count={admin_rm})",
     );
 }
@@ -390,9 +382,10 @@ async fn deactivate_fans_out_deactivate() {
         "delete_my_account failed: {status}",
     );
 
-    let deactivate = wait_for_class_count(&b.state.db, "deactivate", 1).await;
-    assert!(
-        deactivate >= 1,
+    wait_outbound_idle(&harness, "a").await;
+    let deactivate = count_class(&b.state.db, "deactivate").await;
+    assert_eq!(
+        deactivate, 1,
         "deactivate did not fan out to B (count={deactivate})",
     );
 }

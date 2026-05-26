@@ -38,29 +38,27 @@
 //!   it as a miss and create a fresh entry. The size bound and time
 //!   bound work whichever fires first, per the spec.
 //!
-//! ## Fire-and-forget dispatch
+//! ## Dispatch via per-peer outbound queues
 //!
-//! [`forward_signed_object`] spawns a Tokio task and returns
-//! immediately: §7.5 mandates "The local write path NEVER blocks on
-//! outbound queue pressure". Dispatches happen on the spawned task;
-//! per-peer transport failures are logged but not retried inline —
-//! the §10.5 pull-backfill is the correctness backstop for dropped
-//! sends.
+//! [`forward_signed_object`] returns immediately after enqueueing a
+//! singleton wire-bytes blob onto each selected peer's outbound queue
+//! (see [`super::outbound_queue::OutboundQueues`]). Per §7.5 "The
+//! local write path NEVER blocks on outbound queue pressure"; the
+//! enqueue path is lock-bounded and never awaits. The per-peer drain
+//! worker owns retries with exponential backoff (5xx/429/transport
+//! → transient, 4xx → terminal-drop) and coalesces queued items into
+//! batched `/content` or `/edges` pushes. This replaces the Phase 6.3
+//! `tokio::spawn(dispatch_one)` fire-and-forget pattern that had no
+//! retry path at all.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use axum::body::Bytes;
-use ciborium::value::Value;
-use http::{Method, Request};
 use quick_cache::sync::Cache;
 
 use crate::AppState;
-use crate::federation::envelope::{AUTH_HEADER, sign_outbound};
-use crate::federation::identity::CBOR_CONTENT_TYPE;
 use crate::federation::routing::{ForwardingClass, REDUNDANCY_K, peers_interested_in};
-use crate::federation::transport::PeerId;
 
 /// §7.5 dedup-LRU time bound (`T_propagate_max`, default 1h).
 /// An entry older than this is treated as a miss and re-initialised
@@ -86,7 +84,10 @@ const CONTENT_PATH: &str = "/federation/v1/content";
 /// Per-class dispatch: which downstream route + which body-wrapper
 /// CBOR key to use. Trust-edges go to `/edges` and wrap each
 /// WireFormat blob as `{ "edges": [bstr] }`; every Authored class
-/// goes to `/content` and wraps as `{ "objects": [bstr] }`.
+/// goes to `/content` and wraps as `{ "objects": [bstr] }`. The
+/// returned values are what we hand to
+/// [`super::outbound_queue::OutboundQueues::enqueue`] so the per-peer
+/// drain worker knows how to batch + encode the wire body.
 fn route_and_body_key(class: ForwardingClass) -> (&'static str, &'static str) {
     match class {
         ForwardingClass::TrustEdge => (EDGES_PATH, "edges"),
@@ -248,8 +249,15 @@ impl Default for ForwardingLru {
 // ---------------------------------------------------------------------------
 
 /// §7.5 forward a freshly-applied or freshly-originated signed object
-/// to up to `REDUNDANCY_K` interested peers. Fire-and-forget: returns
-/// immediately and dispatches happen on a spawned task.
+/// to up to `REDUNDANCY_K` interested peers. Returns immediately.
+///
+/// The selection logic (interest filter + dedup-LRU + `REDUNDANCY_K`
+/// cap) runs on a spawned task because the candidate query is async;
+/// the actual egress writes are handed off to the per-peer outbound
+/// queues (one queue + one drain worker per peer, see
+/// [`super::outbound_queue::OutboundQueues`]) which own retries with
+/// exponential backoff. Per §7.5 the local write path never blocks on
+/// outbound queue pressure.
 ///
 /// `arrived_from` is `Some(sender_pubkey)` for relayed objects (skip
 /// pushing back to the source) and `None` for originator pushes.
@@ -330,65 +338,20 @@ async fn forward_inner(
     }
 
     let (path, body_key) = route_and_body_key(class);
-    let body = encode_singleton_body(body_key, &wire_bytes);
+    // Hand each selected peer a singleton wire-bytes copy. The
+    // per-peer outbound queue is responsible for any batching across
+    // multiple queued items destined for the same peer; we deliberately
+    // don't try to batch here because the candidate set for a single
+    // origin event is just `REDUNDANCY_K` peers (default 2) and the
+    // queue will fold sub-batches together when actual fanout pressure
+    // arrives.
     for peer_pk in to_send {
-        let state_for_task = state.clone();
-        let body = body.clone();
-        tokio::spawn(async move {
-            dispatch_one(&state_for_task, peer_pk, path, body).await;
-        });
+        state
+            .outbound_queues
+            .enqueue(peer_pk, path, body_key, wire_bytes.clone());
     }
 
     Ok(())
-}
-
-/// Build a §9.1 / §10.1 push body wrapping a single WireFormat blob
-/// under the given top-level key (`"edges"` or `"objects"`). The
-/// fanout always sends one object per push — the per-peer push paths
-/// are independent and there's nothing to batch on the relay side.
-fn encode_singleton_body(key: &str, wire: &[u8]) -> Vec<u8> {
-    let body = Value::Map(vec![(
-        Value::Text(key.into()),
-        Value::Array(vec![Value::Bytes(wire.to_vec())]),
-    )]);
-    let mut buf = Vec::with_capacity(wire.len() + 32);
-    ciborium::ser::into_writer(&body, &mut buf).expect("ciborium ser is infallible");
-    buf
-}
-
-/// Build and dispatch one §9.1 push to one downstream peer. Failure
-/// is logged at `warn` and dropped: the §10.5 pull-backfill is the
-/// correctness backstop for any sends the forwarder can't get
-/// through.
-async fn dispatch_one(state: &Arc<AppState>, peer_pk: [u8; 32], path: &'static str, body: Vec<u8>) {
-    let header = sign_outbound(&state.instance_key, peer_pk, &Method::POST, path, &body);
-    let req = match Request::builder()
-        .method(Method::POST)
-        .uri(path)
-        .header(http::header::CONTENT_TYPE, CBOR_CONTENT_TYPE)
-        .header(AUTH_HEADER, header)
-        .body(Bytes::from(body))
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!(error = %e, "forwarder failed to build outbound request");
-            return;
-        }
-    };
-    let peer_id = PeerId::from_bytes(peer_pk);
-    match state.federation_transport.request(&peer_id, req).await {
-        Ok(resp) if resp.status().is_success() => {}
-        Ok(resp) => {
-            tracing::warn!(
-                peer = %peer_id,
-                status = %resp.status(),
-                "forwarder peer returned non-2xx",
-            );
-        }
-        Err(e) => {
-            tracing::warn!(peer = %peer_id, error = %e, "forwarder dispatch failed");
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -444,30 +407,9 @@ mod tests {
         assert!(Arc::ptr_eq(&e1, &e2));
     }
 
-    #[test]
-    fn encode_singleton_body_round_trips_to_cbor_map() {
-        let wire = b"hello".to_vec();
-        let body = encode_singleton_body("edges", &wire);
-        let v: Value = ciborium::de::from_reader(body.as_slice()).expect("cbor");
-        let Value::Map(m) = v else {
-            panic!("not a map");
-        };
-        let edges = m
-            .into_iter()
-            .find_map(|(k, v)| match k {
-                Value::Text(t) if t == "edges" => Some(v),
-                _ => None,
-            })
-            .expect("edges key");
-        let Value::Array(arr) = edges else {
-            panic!("edges not array");
-        };
-        assert_eq!(arr.len(), 1);
-        let Value::Bytes(b) = &arr[0] else {
-            panic!("not bytes");
-        };
-        assert_eq!(b, &wire);
-    }
+    // `encode_singleton_body` moved to `outbound_queue::encode_batch_body`
+    // (it's the N=1 case of the new batched encoder); the round-trip
+    // assertion lives there now.
 
     #[test]
     fn route_and_body_key_picks_per_class() {
