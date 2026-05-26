@@ -74,11 +74,25 @@ pub const T_PROPAGATE_MAX: Duration = Duration::from_secs(3600);
 /// (~32-byte key + ~7-byte bitset + LRU overhead per entry).
 pub const DEDUP_LRU_MAX_ENTRIES: usize = 1_000_000;
 
-/// Path the forwarder pushes wire bytes to on each downstream peer.
-/// Pinned to the §9.1 push route since today the forwarder only
-/// carries trust-edges; subsequent phases (content, admin-rm, …)
-/// will add their own dispatch paths.
+/// Path the forwarder pushes wire bytes to on each downstream peer
+/// for the §9.1 edges class.
 const EDGES_PATH: &str = "/federation/v1/edges";
+
+/// Path the forwarder pushes wire bytes to on each downstream peer
+/// for the §10.1 content classes (post-rev, retract, admin-rm,
+/// profile, thread-create, deactivate).
+const CONTENT_PATH: &str = "/federation/v1/content";
+
+/// Per-class dispatch: which downstream route + which body-wrapper
+/// CBOR key to use. Trust-edges go to `/edges` and wrap each
+/// WireFormat blob as `{ "edges": [bstr] }`; every Authored class
+/// goes to `/content` and wraps as `{ "objects": [bstr] }`.
+fn route_and_body_key(class: ForwardingClass) -> (&'static str, &'static str) {
+    match class {
+        ForwardingClass::TrustEdge => (EDGES_PATH, "edges"),
+        ForwardingClass::Authored => (CONTENT_PATH, "objects"),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Bitset
@@ -315,25 +329,26 @@ async fn forward_inner(
         return Ok(());
     }
 
-    let body = encode_edges_body(&wire_bytes);
+    let (path, body_key) = route_and_body_key(class);
+    let body = encode_singleton_body(body_key, &wire_bytes);
     for peer_pk in to_send {
         let state_for_task = state.clone();
         let body = body.clone();
         tokio::spawn(async move {
-            dispatch_one(&state_for_task, peer_pk, body).await;
+            dispatch_one(&state_for_task, peer_pk, path, body).await;
         });
     }
 
     Ok(())
 }
 
-/// Build a §9.1 push body wrapping a single WireFormat blob.
-/// Mirrors the test-side `encode_edges_body` in
-/// `tests/federation_phase5.rs` — kept in this module too so the
-/// forwarder doesn't reach into test helpers.
-fn encode_edges_body(wire: &[u8]) -> Vec<u8> {
+/// Build a §9.1 / §10.1 push body wrapping a single WireFormat blob
+/// under the given top-level key (`"edges"` or `"objects"`). The
+/// fanout always sends one object per push — the per-peer push paths
+/// are independent and there's nothing to batch on the relay side.
+fn encode_singleton_body(key: &str, wire: &[u8]) -> Vec<u8> {
     let body = Value::Map(vec![(
-        Value::Text("edges".into()),
+        Value::Text(key.into()),
         Value::Array(vec![Value::Bytes(wire.to_vec())]),
     )]);
     let mut buf = Vec::with_capacity(wire.len() + 32);
@@ -345,17 +360,11 @@ fn encode_edges_body(wire: &[u8]) -> Vec<u8> {
 /// is logged at `warn` and dropped: the §10.5 pull-backfill is the
 /// correctness backstop for any sends the forwarder can't get
 /// through.
-async fn dispatch_one(state: &Arc<AppState>, peer_pk: [u8; 32], body: Vec<u8>) {
-    let header = sign_outbound(
-        &state.instance_key,
-        peer_pk,
-        &Method::POST,
-        EDGES_PATH,
-        &body,
-    );
+async fn dispatch_one(state: &Arc<AppState>, peer_pk: [u8; 32], path: &'static str, body: Vec<u8>) {
+    let header = sign_outbound(&state.instance_key, peer_pk, &Method::POST, path, &body);
     let req = match Request::builder()
         .method(Method::POST)
-        .uri(EDGES_PATH)
+        .uri(path)
         .header(http::header::CONTENT_TYPE, CBOR_CONTENT_TYPE)
         .header(AUTH_HEADER, header)
         .body(Bytes::from(body))
@@ -436,9 +445,9 @@ mod tests {
     }
 
     #[test]
-    fn encode_edges_body_round_trips_to_cbor_map() {
+    fn encode_singleton_body_round_trips_to_cbor_map() {
         let wire = b"hello".to_vec();
-        let body = encode_edges_body(&wire);
+        let body = encode_singleton_body("edges", &wire);
         let v: Value = ciborium::de::from_reader(body.as_slice()).expect("cbor");
         let Value::Map(m) = v else {
             panic!("not a map");
@@ -458,5 +467,15 @@ mod tests {
             panic!("not bytes");
         };
         assert_eq!(b, &wire);
+    }
+
+    #[test]
+    fn route_and_body_key_picks_per_class() {
+        let (path, key) = route_and_body_key(ForwardingClass::TrustEdge);
+        assert_eq!(path, "/federation/v1/edges");
+        assert_eq!(key, "edges");
+        let (path, key) = route_and_body_key(ForwardingClass::Authored);
+        assert_eq!(path, "/federation/v1/content");
+        assert_eq!(key, "objects");
     }
 }

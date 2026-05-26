@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO admin_rm_reports (id, post_id, target_author, signing_instance, reason, canonical_hash) VALUES (?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "eb224fcec73f50241ccb4b9d811321cf63b2efc7e552fb792cc26928e460e8a4"
+}

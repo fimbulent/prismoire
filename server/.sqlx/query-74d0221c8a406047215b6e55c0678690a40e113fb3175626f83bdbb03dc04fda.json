@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"n!: i64\" FROM admin_rm_reports WHERE signing_instance = ? AND received_at >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1 hour')",
+  "describe": {
+    "columns": [
+      {
+        "name": "n!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "74d0221c8a406047215b6e55c0678690a40e113fb3175626f83bdbb03dc04fda"
+}

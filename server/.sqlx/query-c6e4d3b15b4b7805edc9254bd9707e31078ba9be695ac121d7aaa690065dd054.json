@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT payload, erased_at FROM signed_objects WHERE canonical_hash = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "payload",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "erased_at",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "c6e4d3b15b4b7805edc9254bd9707e31078ba9be695ac121d7aaa690065dd054"
+}

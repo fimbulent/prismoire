@@ -28,8 +28,10 @@
 //! middleware, frontier sync, content propagation, …) rather than
 //! reshaping these foundations.
 
+pub mod admin_rm;
 pub mod backfill;
 pub mod bloom;
+pub mod content;
 pub mod domain;
 pub mod edges;
 pub mod envelope;

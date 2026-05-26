@@ -39,7 +39,7 @@ use axum::routing::{delete, get, post};
 
 use crate::AppState;
 use crate::federation::middleware::{verify_bootstrap, verify_known_peer};
-use crate::federation::{backfill, edges, frontier, identity, peering};
+use crate::federation::{admin_rm, backfill, content, edges, frontier, identity, peering};
 
 /// Build the `/federation/v1/*` subrouter.
 ///
@@ -100,6 +100,19 @@ pub fn federation_router(state: Arc<AppState>) -> Router {
         .route(
             "/federation/v1/edges/backfill",
             get(backfill::handle_edges_backfill),
+        )
+        // §10.1 content push: the 6 inner signed classes (post-rev,
+        // retract, admin-rm, profile, thread-create, deactivate)
+        // batch-pushed by an author's home or by a forwarder along
+        // the §7 routing fan-out. Per-object results follow the §10.1
+        // `{ canonical_hash, status, reason? }` shape.
+        .route("/federation/v1/content", post(content::handle_content_push))
+        // §10.4 admin-rm advisory channel: a single signed `admin-rm`
+        // from a non-home moderator, reporting a post hosted by us.
+        // No propagation; queued for operator review.
+        .route(
+            "/federation/v1/admin-rm-report",
+            post(admin_rm::handle_admin_rm_report),
         )
         .layer(from_fn_with_state(state.clone(), verify_known_peer));
 

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT signing_instance, reason FROM admin_rm_reports WHERE post_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "signing_instance",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "reason",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "d7fc7664b521a30d2d3c566281c17b6b4bd1472e3a1cccae08822f0f6892a71f"
+}

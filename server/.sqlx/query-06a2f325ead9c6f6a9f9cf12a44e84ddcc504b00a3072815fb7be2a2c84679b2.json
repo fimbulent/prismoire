@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO admin_rm_authorities (post_id, target_author, signing_instance, created_at, canonical_hash) VALUES (?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "06a2f325ead9c6f6a9f9cf12a44e84ddcc504b00a3072815fb7be2a2c84679b2"
+}
