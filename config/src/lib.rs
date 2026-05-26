@@ -16,6 +16,8 @@ pub struct Config {
     pub rate_limit: RateLimitConfig,
     #[serde(default)]
     pub attachments: AttachmentsConfig,
+    #[serde(default)]
+    pub federation: FederationConfig,
 }
 
 /// Server configuration (`[server]` section).
@@ -158,6 +160,100 @@ impl Default for AttachmentsConfig {
     }
 }
 
+/// Federation configuration (`[federation]` section).
+///
+/// Parent for nested federation subsections. Empty when no
+/// `[federation.*]` sections are present in the TOML, in which case
+/// every nested struct picks up its `defaults()`.
+#[derive(Default, Deserialize)]
+pub struct FederationConfig {
+    #[serde(default)]
+    pub outbound_queue: OutboundQueueConfig,
+}
+
+/// §7.3 / §7.5 outbound-queue sizing + drain-worker backoff
+/// (`[federation.outbound_queue]` section).
+///
+/// These knobs are federation-inert: they shape how the local instance
+/// retains and retries pushes to its immediate peers (memory budget,
+/// staleness cap, exponential-backoff schedule). They have no
+/// federation-visible effect — peer instances do not know or care what
+/// values are in effect locally — and there is no compliance audit need
+/// for changes. A restart cleanly resets queue state, which is arguably
+/// *cleaner* than a live-tune that would have to decide what to do with
+/// already-queued bytes that newly violate a shrunken cap.
+///
+/// Live alongside the other deployment-shaped knobs rather than in
+/// `instance_config` because changing them requires no audit log and
+/// applies on restart, not live — same rationale as [`AttachmentsConfig`].
+///
+/// Wire-canonical constants (`MAX_CONTENT_BATCH = 64`,
+/// `REDUNDANCY_K = 2`, etc.) are §10.6 / §7.4 protocol invariants and
+/// live in `server/src/federation/...` as `const` — NOT here.
+#[derive(Clone, Deserialize)]
+#[serde(default)]
+pub struct OutboundQueueConfig {
+    /// Process-wide outbound byte budget summed across every per-peer
+    /// queue. Caps total resident memory so operators can size hosts
+    /// predictably regardless of peer count. Default: 512 MiB.
+    pub total_bytes: usize,
+    /// Per-peer byte cap. Hard ceiling on any single peer's queue so
+    /// one slow or dead peer cannot monopolize the global byte budget.
+    /// Default: 32 MiB.
+    pub bytes_per_peer: usize,
+    /// Per-peer object-count cap. Default: 50,000.
+    pub objects_per_peer: usize,
+    /// Staleness cap (seconds). Queued objects older than this are
+    /// dropped on drain before the egress write — matching the §7.5
+    /// `T_propagate_max` guarantee that no object is ever delivered
+    /// after this window from origination. Default: 3600 (1 hour).
+    pub object_max_age_secs: u64,
+    /// Drain-worker exponential-backoff schedule applied on transient
+    /// failures (5xx, 429, transport error, UnknownPeer).
+    pub backoff: BackoffConfig,
+}
+
+impl Default for OutboundQueueConfig {
+    fn default() -> Self {
+        Self {
+            total_bytes: 512 * 1024 * 1024,
+            bytes_per_peer: 32 * 1024 * 1024,
+            objects_per_peer: 50_000,
+            object_max_age_secs: 3600,
+            backoff: BackoffConfig::default(),
+        }
+    }
+}
+
+/// Backoff schedule for the per-peer drain worker
+/// (`[federation.outbound_queue.backoff]` section).
+///
+/// Full-jitter (AWS 2015 "Exponential Backoff And Jitter") with a
+/// small absolute floor applied in the runtime to bound the worst-case
+/// burst after consecutive transient failures. The jitter scheme is
+/// not currently configurable: one strategy is implemented, so a knob
+/// would be configurability without a choice.
+#[derive(Clone, Deserialize)]
+#[serde(default)]
+pub struct BackoffConfig {
+    /// First retry delay (ms) after a transient failure. Default: 1000.
+    pub initial_ms: u64,
+    /// Cap on the exponentiated delay (ms). Default: 300000 (5 min).
+    pub max_ms: u64,
+    /// Multiplier applied per failed attempt. Default: 2.0.
+    pub multiplier: f64,
+}
+
+impl Default for BackoffConfig {
+    fn default() -> Self {
+        Self {
+            initial_ms: 1000,
+            max_ms: 300_000,
+            multiplier: 2.0,
+        }
+    }
+}
+
 /// Resolve the config file path.
 ///
 /// Priority: explicit `--config` argument > `PRISMOIRE_CONFIG` env var >
@@ -215,6 +311,78 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
             config.webauthn.rp_origin
         ))
     })?;
+    validate_outbound_queue_config(&config.federation.outbound_queue)?;
+    Ok(())
+}
+
+/// `[federation.outbound_queue]` cross-field validation. Catches the
+/// misconfigurations that would otherwise surface as either a panic
+/// (zero values divide by) or a silent violation of the §7.5
+/// `T_propagate_max` delivery guarantee.
+///
+/// The hard `T_propagate_max` value (3600s, §7.5) is duplicated here as
+/// a literal rather than imported from the server crate so the config
+/// crate can stay dependency-free. If §7.5 ever raises the bound, this
+/// constant must move in lockstep with it; the runtime caps that
+/// enforce it live in `server/src/federation/outbound_queue.rs`.
+fn validate_outbound_queue_config(cfg: &OutboundQueueConfig) -> Result<(), ConfigError> {
+    /// §7.5 `T_propagate_max` (seconds). Upper bound on
+    /// `object_max_age_secs` — past this, the dedup-LRU at downstream
+    /// peers has already expired the entry, and a late delivery could
+    /// trigger a slow-loop. See `docs/federation-protocol.md` §7.5.
+    const T_PROPAGATE_MAX_SECS: u64 = 3600;
+
+    if cfg.total_bytes == 0 {
+        return Err(ConfigError(
+            "federation.outbound_queue.total_bytes must be > 0".into(),
+        ));
+    }
+    if cfg.bytes_per_peer == 0 {
+        return Err(ConfigError(
+            "federation.outbound_queue.bytes_per_peer must be > 0".into(),
+        ));
+    }
+    if cfg.objects_per_peer == 0 {
+        return Err(ConfigError(
+            "federation.outbound_queue.objects_per_peer must be > 0".into(),
+        ));
+    }
+    if cfg.object_max_age_secs == 0 {
+        return Err(ConfigError(
+            "federation.outbound_queue.object_max_age_secs must be > 0".into(),
+        ));
+    }
+    if cfg.bytes_per_peer > cfg.total_bytes {
+        return Err(ConfigError(format!(
+            "federation.outbound_queue.bytes_per_peer ({}) must be ≤ total_bytes ({})",
+            cfg.bytes_per_peer, cfg.total_bytes,
+        )));
+    }
+    if cfg.object_max_age_secs > T_PROPAGATE_MAX_SECS {
+        return Err(ConfigError(format!(
+            "federation.outbound_queue.object_max_age_secs ({}) must be ≤ T_propagate_max ({}s) — \
+             past this, downstream dedup-LRU entries have expired and late deliveries \
+             can trigger slow-loops (§7.5)",
+            cfg.object_max_age_secs, T_PROPAGATE_MAX_SECS,
+        )));
+    }
+    if cfg.backoff.initial_ms == 0 {
+        return Err(ConfigError(
+            "federation.outbound_queue.backoff.initial_ms must be > 0".into(),
+        ));
+    }
+    if cfg.backoff.max_ms < cfg.backoff.initial_ms {
+        return Err(ConfigError(format!(
+            "federation.outbound_queue.backoff.max_ms ({}) must be ≥ initial_ms ({})",
+            cfg.backoff.max_ms, cfg.backoff.initial_ms,
+        )));
+    }
+    if !(cfg.backoff.multiplier > 1.0 && cfg.backoff.multiplier.is_finite()) {
+        return Err(ConfigError(format!(
+            "federation.outbound_queue.backoff.multiplier ({}) must be > 1.0 and finite",
+            cfg.backoff.multiplier,
+        )));
+    }
     Ok(())
 }
 
@@ -278,3 +446,121 @@ impl std::fmt::Display for ConfigError {
 }
 
 impl std::error::Error for ConfigError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outbound_queue_defaults_validate() {
+        validate_outbound_queue_config(&OutboundQueueConfig::default())
+            .expect("documented defaults must validate");
+    }
+
+    #[test]
+    fn outbound_queue_per_peer_must_fit_total() {
+        let mut cfg = OutboundQueueConfig::default();
+        cfg.bytes_per_peer = cfg.total_bytes + 1;
+        let err = validate_outbound_queue_config(&cfg).expect_err("must reject");
+        assert!(err.0.contains("bytes_per_peer"));
+        assert!(err.0.contains("total_bytes"));
+    }
+
+    #[test]
+    fn outbound_queue_rejects_zero_total_bytes() {
+        let cfg = OutboundQueueConfig {
+            total_bytes: 0,
+            ..OutboundQueueConfig::default()
+        };
+        let err = validate_outbound_queue_config(&cfg).expect_err("must reject");
+        assert!(err.0.contains("total_bytes"));
+    }
+
+    #[test]
+    fn outbound_queue_rejects_zero_objects_per_peer() {
+        let cfg = OutboundQueueConfig {
+            objects_per_peer: 0,
+            ..OutboundQueueConfig::default()
+        };
+        let err = validate_outbound_queue_config(&cfg).expect_err("must reject");
+        assert!(err.0.contains("objects_per_peer"));
+    }
+
+    #[test]
+    fn outbound_queue_rejects_object_max_age_past_t_propagate_max() {
+        let cfg = OutboundQueueConfig {
+            object_max_age_secs: 3601,
+            ..OutboundQueueConfig::default()
+        };
+        let err = validate_outbound_queue_config(&cfg).expect_err("must reject");
+        assert!(err.0.contains("T_propagate_max"));
+    }
+
+    #[test]
+    fn outbound_queue_rejects_backoff_max_below_initial() {
+        let cfg = OutboundQueueConfig {
+            backoff: BackoffConfig {
+                initial_ms: 1000,
+                max_ms: 999,
+                multiplier: 2.0,
+            },
+            ..OutboundQueueConfig::default()
+        };
+        let err = validate_outbound_queue_config(&cfg).expect_err("must reject");
+        assert!(err.0.contains("max_ms"));
+    }
+
+    #[test]
+    fn outbound_queue_rejects_multiplier_le_one() {
+        let cfg = OutboundQueueConfig {
+            backoff: BackoffConfig {
+                initial_ms: 1000,
+                max_ms: 2000,
+                multiplier: 1.0,
+            },
+            ..OutboundQueueConfig::default()
+        };
+        let err = validate_outbound_queue_config(&cfg).expect_err("must reject");
+        assert!(err.0.contains("multiplier"));
+    }
+
+    #[test]
+    fn outbound_queue_round_trips_from_toml() {
+        let toml = r#"
+[federation.outbound_queue]
+total_bytes = 16777216
+bytes_per_peer = 8388608
+objects_per_peer = 100
+object_max_age_secs = 60
+
+[federation.outbound_queue.backoff]
+initial_ms = 50
+max_ms = 5000
+multiplier = 1.5
+"#;
+        let parsed: Config = toml::from_str(toml).expect("parses");
+        let q = &parsed.federation.outbound_queue;
+        assert_eq!(q.total_bytes, 16 * 1024 * 1024);
+        assert_eq!(q.bytes_per_peer, 8 * 1024 * 1024);
+        assert_eq!(q.objects_per_peer, 100);
+        assert_eq!(q.object_max_age_secs, 60);
+        assert_eq!(q.backoff.initial_ms, 50);
+        assert_eq!(q.backoff.max_ms, 5000);
+        assert_eq!(q.backoff.multiplier, 1.5);
+        validate_outbound_queue_config(q).expect("round-trip values validate");
+    }
+
+    #[test]
+    fn missing_federation_section_uses_defaults() {
+        let parsed: Config = toml::from_str("").expect("empty config parses");
+        let q = &parsed.federation.outbound_queue;
+        let d = OutboundQueueConfig::default();
+        assert_eq!(q.total_bytes, d.total_bytes);
+        assert_eq!(q.bytes_per_peer, d.bytes_per_peer);
+        assert_eq!(q.objects_per_peer, d.objects_per_peer);
+        assert_eq!(q.object_max_age_secs, d.object_max_age_secs);
+        assert_eq!(q.backoff.initial_ms, d.backoff.initial_ms);
+        assert_eq!(q.backoff.max_ms, d.backoff.max_ms);
+        assert_eq!(q.backoff.multiplier, d.backoff.multiplier);
+    }
+}

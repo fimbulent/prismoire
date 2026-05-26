@@ -37,7 +37,7 @@ use serde_json::json;
 use sqlx::SqlitePool;
 
 use common::federation::{
-    MultiInstanceHarness, establish_active_peering, send_envelope_signed, settle_forwarder_spawn,
+    FlakeyTransport, MultiInstanceHarness, establish_active_peering, send_envelope_signed,
 };
 use common::{body_json, json_request, send, setup_admin};
 
@@ -153,7 +153,6 @@ async fn kill_and_restart_peer_drains_backlog() {
         create_thread_as(&a.router, &alice.cookie, "general", "backlog", "op body").await;
 
     // Drain whatever's already in flight from the create_thread call.
-    settle_forwarder_spawn().await;
     assert!(
         a.state
             .outbound_queues
@@ -178,7 +177,6 @@ async fn kill_and_restart_peer_drains_backlog() {
         )
         .await;
     }
-    settle_forwarder_spawn().await;
 
     // Reconnect B and let the queue drain. The drain-worker backoff
     // window is at most `BackoffPolicy::test_fast().max` = 100ms, so
@@ -205,33 +203,134 @@ async fn kill_and_restart_peer_drains_backlog() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 2: queue stays within caps under sustained flood
+// Test 2: backoff retries until the inner transport recovers
 // ---------------------------------------------------------------------------
 
-/// Disconnect B and originate ~25 posts on A. With the `test_fast`
-/// config still using prod-default caps (50k objects, 32 MiB per
-/// peer, 512 MiB total), this volume does NOT actually trigger
-/// drop-oldest eviction — overflow at realistic numbers needs the
-/// config-injection plumbing landing in Phase 6.4.1.
-///
-/// What this test does verify is the no-panic + accounting-stays-
-/// consistent path: `depth_for()` and `total_bytes()` both report
-/// values under their respective caps after the flood, the drain
-/// worker continues to function across the disconnect, and
-/// `wait_idle()` returns true after reconnect even though dozens of
-/// objects went through the requeue-on-transient-failure path.
-///
-/// Phase 6.4.1 supersedes this with the sharpened "set per-peer-
-/// objects = 5, originate 10, assert ≤ 5 retained" eviction test.
+/// A Layer-1 reproduction of the deterministic Layer-0
+/// `backoff_grows_until_success` unit test in `outbound_queue.rs`.
+/// Scripts A's outbound transport to return 503 for the first three
+/// drain attempts, then proxies through to B's real router. With the
+/// `test_fast` backoff (initial=10ms, max=100ms) the worker reaches
+/// success in well under the 5-second cap; we assert that all three
+/// scripted failures were consumed (i.e. the retry path actually ran)
+/// and that B ultimately received the post-rev.
 #[tokio::test]
-async fn queue_stays_within_caps_under_flood() {
-    let harness = setup_a_to_b().await;
+async fn backoff_retries_then_succeeds() {
+    use prismoire_server::federation::outbound_queue::OutboundQueueConfig;
+
+    // Build A with a FlakeyTransport wrapping its InProcessTransport.
+    // The script starts empty so the active-peering handshake proxies
+    // through cleanly; we push 503s only after handshake completes.
+    let mut harness = MultiInstanceHarness::new(0).await;
+    let script = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let script_setter = script.clone();
+    harness
+        .spawn_with_outbound_config_and_transport(
+            "a",
+            OutboundQueueConfig::test_fast(),
+            move |inner| {
+                let (flakey, handle) = FlakeyTransport::new(inner);
+                *script_setter.lock().unwrap() = Some(handle);
+                std::sync::Arc::new(flakey)
+            },
+        )
+        .await;
+    harness.spawn("b").await;
+    let script = script.lock().unwrap().clone().expect("flakey script set");
+
+    establish_active_peering(&harness, "a", "b").await;
+    let (status, _) = send_envelope_signed(
+        &harness,
+        "b",
+        "a",
+        Method::POST,
+        "/federation/v1/frontier/announce",
+        &announce_all_ones().encode(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let a = harness.instance("a");
+    let alice = setup_admin(&a.router, "alice").await;
+
+    // Script three transient failures BEFORE originating the post.
+    // The outbound queue worker will then see 503 → backoff → 503 →
+    // backoff → 503 → backoff → real dispatch. Pushing after the
+    // create-thread call would race the worker, which usually
+    // succeeds in the first dispatch before the test code wakes up.
+    script.push_n(3, StatusCode::SERVICE_UNAVAILABLE);
+
+    let (_thread_id, _op_id) =
+        create_thread_as(&a.router, &alice.cookie, "general", "retry", "op body").await;
+
+    // The thread-create call enqueued the post-rev push; wait_idle
+    // covers the retry + backoff cycle.
+    assert!(
+        a.state
+            .outbound_queues
+            .wait_idle(Duration::from_secs(5))
+            .await,
+        "queue did not drain under scripted-503 retries",
+    );
+
+    assert_eq!(
+        script.remaining(),
+        0,
+        "all three scripted 503s should have been consumed by retries",
+    );
+
+    let b = harness.instance("b");
+    let post_rev = count_class(&b.state.db, "post-rev").await;
+    assert_eq!(
+        post_rev, 1,
+        "B should have received the OP post-rev after retries succeeded",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 3: per-peer object cap evicts oldest under sustained flood
+// ---------------------------------------------------------------------------
+
+/// Sharpened overflow test (Phase 6.4.1 supersedes Phase 6.4's soft
+/// tripwire). Builds a harness with `objects_per_peer = 5`, disconnects
+/// B, originates 10 replies on A, asserts:
+///   1. A's queue depth to B never exceeds 5 (the per-peer cap).
+///   2. After reconnect, B receives at most 5 of the 10 replies
+///      (drop-oldest semantics — the first replies are evicted as
+///      newer ones arrive past the cap).
+///   3. The §10.5 pull-backfill backstop heals the gap (deferred to
+///      Phase 8 — until then, the dropped items are simply lost from
+///      this test's vantage point, which is acceptable for the eviction
+///      assertion).
+#[tokio::test]
+async fn overflow_evicts_oldest_per_peer() {
+    use prismoire_server::federation::outbound_queue::OutboundQueueConfig;
+
+    // Shrunken cap: only 5 queued objects per peer. Everything else
+    // stays at the spec defaults (translated through the TOML config
+    // type) so this remains a realistic shape minus the one knob.
+    let mut shrunken = OutboundQueueConfig::test_fast();
+    shrunken.objects_per_peer = 5;
+
+    let harness =
+        common::federation::MultiInstanceHarness::new_with_outbound_config(2, shrunken).await;
+    establish_active_peering(&harness, "a", "b").await;
+    let (status, _) = send_envelope_signed(
+        &harness,
+        "b",
+        "a",
+        Method::POST,
+        "/federation/v1/frontier/announce",
+        &announce_all_ones().encode(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
     let a = harness.instance("a");
     let b_peer_id = harness.instance("b").peer_id;
     let alice = setup_admin(&a.router, "alice").await;
     let (thread_id, op_id) =
         create_thread_as(&a.router, &alice.cookie, "general", "overflow", "op body").await;
-    settle_forwarder_spawn().await;
     let _ = a
         .state
         .outbound_queues
@@ -240,67 +339,100 @@ async fn queue_stays_within_caps_under_flood() {
 
     harness.disconnect("b").await;
 
-    // Originate ~25 replies. At default test_fast() caps (50k
-    // objects, 32 MiB) we don't actually overflow — but the tripwire
-    // is that the queue stays bounded and the process keeps running.
-    const N: usize = 25;
+    // Originate 10 replies — twice the cap. Each new enqueue past the
+    // 5th must drop the oldest pending item from A's queue to B.
+    const N: usize = 10;
     for i in 0..N {
         create_reply_as(
             &a.router,
             &alice.cookie,
             &thread_id,
             &op_id,
-            &format!("flood {i}"),
+            &format!("evict {i}"),
         )
         .await;
     }
-    settle_forwarder_spawn().await;
 
-    let (depth_objects, depth_bytes) = a.state.outbound_queues.depth_for(b_peer_id.as_bytes());
-    let total_bytes = a.state.outbound_queues.total_bytes();
-
-    // Hard tripwire: per-peer cap and global cap held.
-    let cfg_per_peer_objects =
-        prismoire_server::federation::outbound_queue::MAX_OUTBOUND_QUEUE_OBJECTS_PER_PEER;
-    let cfg_per_peer_bytes =
-        prismoire_server::federation::outbound_queue::MAX_OUTBOUND_QUEUE_BYTES_PER_PEER;
-    let cfg_total_bytes =
-        prismoire_server::federation::outbound_queue::MAX_OUTBOUND_QUEUE_TOTAL_BYTES;
+    let (depth_objects, _) = a.state.outbound_queues.depth_for(b_peer_id.as_bytes());
     assert!(
-        depth_objects <= cfg_per_peer_objects,
-        "per-peer object cap violated: {depth_objects} > {cfg_per_peer_objects}",
-    );
-    assert!(
-        depth_bytes <= cfg_per_peer_bytes,
-        "per-peer byte cap violated: {depth_bytes} > {cfg_per_peer_bytes}",
-    );
-    assert!(
-        total_bytes <= cfg_total_bytes,
-        "global byte cap violated: {total_bytes} > {cfg_total_bytes}",
+        depth_objects <= 5,
+        "per-peer object cap (5) violated: depth={depth_objects}",
     );
 
-    // Reconnect B and confirm the queue drains cleanly even after
-    // the flood (no orphaned in-flight state).
+    // Reconnect B and let what's left drain. With the cap at 5, B
+    // sees at most 5 post-revs (plus the OP from before the
+    // disconnect). The dropped replies are lost until Phase 8's
+    // §10.5 pull-backfill lands.
     harness.reconnect("b").await;
     assert!(
         a.state
             .outbound_queues
-            .wait_idle(Duration::from_secs(10))
+            .wait_idle(Duration::from_secs(5))
             .await,
-        "queue did not drain after overflow flood",
+        "queue did not drain after reconnect",
+    );
+
+    let b = harness.instance("b");
+    let post_rev = count_class(&b.state.db, "post-rev").await;
+    assert!(
+        post_rev <= 6,
+        "B should receive at most cap+OP = 6 post-revs (got {post_rev}); \
+         the cap evicted older replies before B reconnected",
+    );
+    assert!(
+        post_rev >= 1,
+        "B should at minimum still have the OP from before the disconnect (got {post_rev})",
+    );
+
+    // The load-bearing claim is drop-OLDEST, not just "stays under
+    // the cap". With objects_per_peer = 5 and N = 10, the queue
+    // should retain the last 5 replies ("evict 5".."evict 9") and
+    // evict the first 5 ("evict 0".."evict 4"). Phase 6 doesn't
+    // project post_revisions on receivers (the wire bytes land in
+    // signed_objects but remote-user hydration is deferred), so map
+    // body → canonical_hash on A (origin) then check which of those
+    // hashes arrived in B's signed_objects.
+    let body_to_hash: Vec<(String, Vec<u8>)> = sqlx::query!(
+        "SELECT pr.body AS \"body!: String\", pr.canonical_hash AS \"canonical_hash!: Vec<u8>\" \
+         FROM post_revisions pr \
+         JOIN posts p ON p.id = pr.post_id \
+         WHERE p.parent IS NOT NULL AND pr.body LIKE 'evict %'",
+    )
+    .fetch_all(&a.state.db)
+    .await
+    .expect("query A's reply hashes")
+    .into_iter()
+    .map(|r| (r.body, r.canonical_hash))
+    .collect();
+    assert_eq!(
+        body_to_hash.len(),
+        N,
+        "A should hold all 10 originated replies"
+    );
+
+    let mut survivors: Vec<usize> = Vec::new();
+    for (body, hash) in &body_to_hash {
+        let n: usize = body
+            .strip_prefix("evict ")
+            .and_then(|n| n.parse().ok())
+            .expect("evict-N body");
+        let arrived = sqlx::query_scalar!(
+            "SELECT 1 AS \"x!: i64\" FROM signed_objects \
+             WHERE canonical_hash = ? AND inner_class = 'post-rev'",
+            hash,
+        )
+        .fetch_optional(&b.state.db)
+        .await
+        .expect("query B for reply hash")
+        .is_some();
+        if arrived {
+            survivors.push(n);
+        }
+    }
+    survivors.sort_unstable();
+    assert_eq!(
+        survivors,
+        vec![5, 6, 7, 8, 9],
+        "drop-oldest should retain the newer 5 replies, not the older 5",
     );
 }
-
-// ---------------------------------------------------------------------------
-// TODO: Layer-1 backoff test
-//
-// A faithful Layer-1 "retries-then-succeeds" assertion would require
-// wrapping `InProcessTransport` in a `FlakeyTransport` decorator that
-// returns 503 for the first N calls then proxies through. The
-// Layer-0 `backoff_grows_until_success` unit test inside
-// `outbound_queue.rs` already covers the worker's retry-and-backoff
-// semantics against a stub transport with deterministic statuses;
-// duplicating that here would just re-test the same code path through
-// a thicker harness. Revisit once the decorator infra is needed for
-// another scenario (e.g. Phase 6.4.1 operator-tunable backoff).
-// ---------------------------------------------------------------------------

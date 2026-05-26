@@ -153,12 +153,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ReqwestTransport::default_client()?,
         allow_private_targets_from_env(),
     ));
-    // §7.3 per-peer outbound FIFO queues (Phase 6.4). One process-wide
-    // collection of per-peer FIFOs + drain workers; bound by the §7.5
-    // queue-sizing caps held as `const` on the module for Phase 6.4
-    // (Phase 6.4.1 will lift them into instance config).
+    // §7.3 per-peer outbound FIFO queues (Phase 6.4 / 6.4.1). One
+    // process-wide collection of per-peer FIFOs + drain workers; the
+    // §7.5 sizing caps and the drain-worker backoff schedule come from
+    // the `[federation.outbound_queue]` TOML section. Defaults match
+    // the spec when the section is omitted.
     let outbound_queues = prismoire_server::federation::outbound_queue::OutboundQueues::new(
-        prismoire_server::federation::outbound_queue::OutboundQueueConfig::defaults(),
+        (&config.federation.outbound_queue).into(),
         federation_transport.clone(),
         instance_key.clone(),
     );

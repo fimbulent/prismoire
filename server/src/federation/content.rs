@@ -563,7 +563,8 @@ async fn apply_one_object(
             routing_key,
             wire_bytes.to_vec(),
             Some(arrived_from),
-        );
+        )
+        .await;
     }
 
     Ok(ContentResult {

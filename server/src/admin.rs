@@ -443,7 +443,8 @@ pub async fn remove_post(
         target_author.to_vec(),
         wire,
         None,
-    );
+    )
+    .await;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -1287,7 +1288,7 @@ pub async fn delete_user_by_admin(
     // §7.5 originator-side fanout: ship every per-post retract and the
     // umbrella deactivate to interested peers. Strictly after commit so
     // a rollback can't leak ghosts.
-    crate::privacy::forward_deactivation(&state, fanout);
+    crate::privacy::forward_deactivation(&state, fanout).await;
 
     state.trust_graph_notify.notify_one();
 

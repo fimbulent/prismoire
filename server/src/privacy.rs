@@ -1361,9 +1361,9 @@ pub async fn delete_my_account(
     tx.commit().await?;
 
     // §7.5 originator-side fanout for every signed retract + the
-    // umbrella deactivate. Fire-and-forget; happens strictly after
-    // commit so a rollback can't ship ghosts.
-    forward_deactivation(&state, fanout);
+    // umbrella deactivate. Happens strictly after commit so a rollback
+    // can't ship ghosts.
+    forward_deactivation(&state, fanout).await;
 
     // Trust graph drops the deleted user's outbound edges on the next
     // rebuild.
@@ -1399,11 +1399,15 @@ pub(crate) struct FanoutItem {
     pub wire: Vec<u8>,
 }
 
-/// Spawn §7.5 originator-side fanout tasks for every item produced by
+/// Run §7.5 originator-side fanout for every item produced by
 /// [`soft_delete_user`]. ForwardingClass::Authored for all of them
 /// (per-post `retract` and umbrella `deactivate` are both author-keyed
 /// classes per §7.4). Call this AFTER the deletion tx commits.
-pub(crate) fn forward_deactivation(state: &Arc<AppState>, fanout: DeactivationFanout) {
+///
+/// Phase 6.4.1: awaited inline by callers — the per-item enqueue is
+/// `Mutex` + `Notify` and never blocks on egress, so handler latency
+/// is bounded by the candidate-selection DB queries (one per item).
+pub(crate) async fn forward_deactivation(state: &Arc<AppState>, fanout: DeactivationFanout) {
     for item in fanout.items {
         crate::federation::forwarder::forward_signed_object(
             state.clone(),
@@ -1412,7 +1416,8 @@ pub(crate) fn forward_deactivation(state: &Arc<AppState>, fanout: DeactivationFa
             item.routing_key,
             item.wire,
             None,
-        );
+        )
+        .await;
     }
 }
 

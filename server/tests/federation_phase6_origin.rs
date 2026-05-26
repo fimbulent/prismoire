@@ -34,9 +34,7 @@ use prismoire_server::federation::frontier::{FilterSpec, FrontierAnnounce};
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
 
-use common::federation::{
-    MultiInstanceHarness, establish_active_peering, send_envelope_signed, settle_forwarder_spawn,
-};
+use common::federation::{MultiInstanceHarness, establish_active_peering, send_envelope_signed};
 use common::{body_json, json_request, send, setup_admin};
 
 // ---------------------------------------------------------------------------
@@ -75,14 +73,12 @@ async fn count_class(db: &SqlitePool, class: &str) -> i64 {
 /// after the egress write completes, and `wait_idle` rides the
 /// `OutboundQueues::idle_notify` signal rather than polling.
 ///
-/// The leading `settle_forwarder_spawn()` is there because
-/// `forward_signed_object` wraps its candidate-lookup in
-/// `tokio::spawn` — without the settle, `wait_idle()` can observe an
-/// empty queue (nothing enqueued yet) and return immediately. Phase
-/// 6.4.1 removes the spawn and the settle helper along with it.
+/// Phase 6.4.1 lifted the `tokio::spawn` out of `forward_signed_object`
+/// so the originating handler awaits the enqueue inline — by the time
+/// the handler call returns, every selected peer's queue is already
+/// populated and `wait_idle()` is genuinely deterministic.
 async fn wait_outbound_idle(harness: &MultiInstanceHarness, label: &str) {
     let a = harness.instance(label);
-    settle_forwarder_spawn().await;
     assert!(
         a.state
             .outbound_queues

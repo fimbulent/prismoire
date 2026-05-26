@@ -32,7 +32,7 @@ use prismoire_server::federation::transport::{
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 
-use super::test_app_with_transport_and_domain;
+use super::test_app_with_pool_transport_domain_and_outbound_config;
 
 /// Shared `PeerId -> Router` registry. Every `InProcessTransport`
 /// instantiated by the same [`MultiInstanceHarness`] points at the
@@ -152,6 +152,33 @@ impl MultiInstanceHarness {
         harness
     }
 
+    /// As [`Self::new`], but every instance is built with the supplied
+    /// [`OutboundQueueConfig`](prismoire_server::federation::outbound_queue::OutboundQueueConfig)
+    /// instead of `test_fast()`'s prod-shaped defaults. Used by Phase
+    /// 6.4.1 tests that need shrunken caps to exercise the §7.5
+    /// eviction path within a reasonable test runtime.
+    pub async fn new_with_outbound_config(
+        n: usize,
+        outbound_config: prismoire_server::federation::outbound_queue::OutboundQueueConfig,
+    ) -> Self {
+        assert!(
+            n <= 26,
+            "MultiInstanceHarness supports up to 26 labelled instances, got {n}"
+        );
+        let registry: Registry = Arc::new(RwLock::new(HashMap::new()));
+        let mut harness = MultiInstanceHarness {
+            instances: HashMap::new(),
+            registry,
+        };
+        for i in 0..n {
+            let label = char::from(b'a' + i as u8).to_string();
+            harness
+                .spawn_with_outbound_config(&label, outbound_config.clone())
+                .await;
+        }
+        harness
+    }
+
     /// Add a single instance to the harness under `label`.
     ///
     /// The new instance is immediately reachable from every existing
@@ -159,6 +186,46 @@ impl MultiInstanceHarness {
     /// `label` is already in use — the harness is small enough that
     /// re-using a label is almost always a test bug.
     pub async fn spawn(&mut self, label: &str) -> &InstanceHandle {
+        let cfg = prismoire_server::federation::outbound_queue::OutboundQueueConfig::test_fast();
+        self.spawn_with_outbound_config(label, cfg).await
+    }
+
+    /// As [`Self::spawn`] but with a caller-supplied
+    /// [`OutboundQueueConfig`](prismoire_server::federation::outbound_queue::OutboundQueueConfig).
+    /// Used by Phase 6.4.1 tests that mix shrunken-cap and
+    /// default-cap instances in the same harness — most tests should
+    /// keep using `spawn` or `new_with_outbound_config`.
+    pub async fn spawn_with_outbound_config(
+        &mut self,
+        label: &str,
+        outbound_config: prismoire_server::federation::outbound_queue::OutboundQueueConfig,
+    ) -> &InstanceHandle {
+        self.spawn_with_outbound_config_and_transport(label, outbound_config, |t| t)
+            .await
+    }
+
+    /// Most flexible spawn: caller supplies an
+    /// [`OutboundQueueConfig`](prismoire_server::federation::outbound_queue::OutboundQueueConfig)
+    /// *and* a wrap-closure that may decorate the default
+    /// [`InProcessTransport`] (e.g. via [`FlakeyTransport`]). Used by
+    /// the Layer-1 backoff test in Phase 6.4.1.
+    ///
+    /// The wrap-closure receives the bare `Arc<dyn FederationTransport>`
+    /// that points at the shared registry; whatever it returns becomes
+    /// the `AppState.federation_transport` for the new instance.
+    /// `InstanceHandle.transport` still exposes the bare
+    /// `Arc<InProcessTransport>` so test fixture helpers
+    /// (`send_envelope_signed`, etc.) bypass any decorator and talk
+    /// straight to the peer router.
+    pub async fn spawn_with_outbound_config_and_transport<F>(
+        &mut self,
+        label: &str,
+        outbound_config: prismoire_server::federation::outbound_queue::OutboundQueueConfig,
+        wrap_transport: F,
+    ) -> &InstanceHandle
+    where
+        F: FnOnce(Arc<dyn FederationTransport>) -> Arc<dyn FederationTransport>,
+    {
         assert!(
             !self.instances.contains_key(label),
             "harness already has an instance labelled {label:?}"
@@ -171,12 +238,20 @@ impl MultiInstanceHarness {
         // `Arc<InProcessTransport>` wrapper but they all point at the
         // single shared `Registry`, so registering instance B
         // immediately makes B reachable from A's transport.
-        let transport: Arc<dyn FederationTransport> =
+        let base_transport: Arc<dyn FederationTransport> =
             Arc::new(InProcessTransport::new(self.registry.clone()));
+        let transport = wrap_transport(base_transport);
         // Per-label domain so harness scenarios with N ≥ 3 instances
         // don't collide on the `peers.instance_domain` UNIQUE constraint.
         let domain = format!("{label}.test.local");
-        let (router, state) = test_app_with_transport_and_domain(transport.clone(), &domain).await;
+        let pool = super::fresh_db().await;
+        let (router, state) = test_app_with_pool_transport_domain_and_outbound_config(
+            pool,
+            transport.clone(),
+            &domain,
+            outbound_config,
+        )
+        .await;
 
         // Peer id == this instance's Ed25519 signing pubkey, as the
         // production transport will eventually use. The state's
@@ -254,26 +329,86 @@ impl MultiInstanceHarness {
     }
 }
 
-/// Give the forwarder's spawned candidate-lookup task a chance to
-/// call `OutboundQueues::enqueue` before the test reads queue state.
-///
-/// Phase 6.4 sites: `forward_signed_object` wraps its async
-/// candidate-selection in `tokio::spawn`, so the originating handler
-/// can return before any item lands in the queue. Tests that call
-/// `wait_idle()` right after the handler would otherwise observe an
-/// "already idle" queue (empty because nothing has been enqueued yet)
-/// and skip the actual drain. This helper yields several times to let
-/// the spawn start, then sleeps 20ms to let the DB query complete and
-/// the enqueue land.
-///
-/// Removed in Phase 6.4.1, which lifts the spawn out of
-/// `forward_signed_object` so enqueue is synchronous with the
-/// handler's response and `wait_idle()` is genuinely deterministic.
-pub async fn settle_forwarder_spawn() {
-    for _ in 0..5 {
-        tokio::task::yield_now().await;
+/// Shared script handle for [`FlakeyTransport`]. Tests hold this
+/// alongside the harness so they can push scripted statuses *after*
+/// the active-peering handshake has completed cleanly — wrapping the
+/// transport with a queue of 503s up front would also break the
+/// handshake calls, which is rarely what the test is asking about.
+#[derive(Default, Clone)]
+pub struct FlakeyScript(Arc<std::sync::Mutex<std::collections::VecDeque<http::StatusCode>>>);
+
+impl FlakeyScript {
+    /// Push a status to the back of the FIFO. The next call through
+    /// the wrapped [`FlakeyTransport`] returns this status (with an
+    /// empty body) instead of dispatching to the inner transport.
+    pub fn push(&self, status: http::StatusCode) {
+        self.0.lock().expect("script mutex").push_back(status);
     }
-    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    /// Push N copies of `status` for the next N calls. Convenience
+    /// for backoff scenarios that want a run of 503s.
+    pub fn push_n(&self, n: usize, status: http::StatusCode) {
+        let mut q = self.0.lock().expect("script mutex");
+        for _ in 0..n {
+            q.push_back(status);
+        }
+    }
+
+    /// How many scripted statuses are still pending. Tests use this
+    /// to assert that all scripted failures were consumed (i.e. the
+    /// worker actually retried that many times).
+    pub fn remaining(&self) -> usize {
+        self.0.lock().expect("script mutex").len()
+    }
+}
+
+/// Decorator that wraps any [`FederationTransport`] and returns a
+/// pre-programmed sequence of status codes (with empty bodies) before
+/// falling through to the inner transport.
+///
+/// Use this to inject transient failures into a Layer-1 scenario
+/// without touching the production retry path: push 503, 503 onto the
+/// [`FlakeyScript`] and the next two drain attempts return 503; the
+/// third proxies through to the real `InProcessTransport`.
+///
+/// The script is empty by default — handshake calls and other
+/// preconditions proxy through cleanly. Tests push statuses only when
+/// they want a transient-failure burst.
+pub struct FlakeyTransport {
+    inner: Arc<dyn FederationTransport>,
+    script: FlakeyScript,
+}
+
+impl FlakeyTransport {
+    /// Wrap `inner` with an initially-empty script. Returns the
+    /// transport and a clone of the script handle so the test can
+    /// push scripted statuses at the moment the scenario calls for
+    /// them.
+    pub fn new(inner: Arc<dyn FederationTransport>) -> (Self, FlakeyScript) {
+        let script = FlakeyScript::default();
+        (
+            Self {
+                inner,
+                script: script.clone(),
+            },
+            script,
+        )
+    }
+}
+
+impl FederationTransport for FlakeyTransport {
+    fn request<'a>(&'a self, target: &'a PeerId, request: Request<Bytes>) -> TransportFuture<'a> {
+        let scripted = self.script.0.lock().expect("script mutex").pop_front();
+        if let Some(status) = scripted {
+            return Box::pin(async move {
+                Ok(http::Response::builder()
+                    .status(status)
+                    .body(Bytes::new())
+                    .expect("response build"))
+            });
+        }
+        self.inner.request(target, request)
+    }
 }
 
 // ---------------------------------------------------------------------------

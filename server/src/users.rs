@@ -1103,7 +1103,8 @@ pub async fn update_bio(
         signed.public_key.to_vec(),
         wire,
         None,
-    );
+    )
+    .await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1255,8 +1256,9 @@ pub async fn set_trust_edge(
 
     // §7.5 originator-side fanout. The signer is `signed.public_key`
     // (== the viewer's own pubkey). `arrived_from = None` since this
-    // is locally-originated. The forwarder spawns its own task and
-    // returns immediately, so local request latency is unaffected.
+    // is locally-originated. Phase 6.4.1: awaited inline so the
+    // enqueue completes before the response returns — the enqueue
+    // itself is `Mutex` + `Notify`, never blocks on egress.
     let wire = crate::federation::envelope::encode_signed_object(&payload, &signature);
     crate::federation::forwarder::forward_signed_object(
         state.clone(),
@@ -1265,7 +1267,8 @@ pub async fn set_trust_edge(
         signed.public_key.to_vec(),
         wire,
         None,
-    );
+    )
+    .await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1433,7 +1436,8 @@ pub async fn delete_trust_edge(
         signed.public_key.to_vec(),
         wire,
         None,
-    );
+    )
+    .await;
 
     Ok(StatusCode::NO_CONTENT)
 }

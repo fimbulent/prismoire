@@ -197,6 +197,28 @@ pub async fn test_app_with_pool_transport_and_domain(
     federation_transport: Arc<dyn FederationTransport>,
     instance_domain: &str,
 ) -> (Router, Arc<AppState>) {
+    test_app_with_pool_transport_domain_and_outbound_config(
+        pool,
+        federation_transport,
+        instance_domain,
+        prismoire_server::federation::outbound_queue::OutboundQueueConfig::test_fast(),
+    )
+    .await
+}
+
+/// Most explicit variant + caller-supplied
+/// [`OutboundQueueConfig`](prismoire_server::federation::outbound_queue::OutboundQueueConfig).
+/// Tests that need to exercise the §7.5 caps under realistic numbers
+/// (e.g. forcing per-peer eviction by setting `objects_per_peer = 5`)
+/// use this directly rather than relying on `test_fast()`'s prod-shaped
+/// defaults. Everyone else can keep calling
+/// [`test_app_with_pool_transport_and_domain`].
+pub async fn test_app_with_pool_transport_domain_and_outbound_config(
+    pool: SqlitePool,
+    federation_transport: Arc<dyn FederationTransport>,
+    instance_domain: &str,
+    outbound_config: prismoire_server::federation::outbound_queue::OutboundQueueConfig,
+) -> (Router, Arc<AppState>) {
     let trust_graph_notify = Arc::new(Notify::new());
     let trust_graph = Arc::new(RwLock::new(Arc::new(TrustGraph::empty())));
     let app_metrics = Arc::new(metrics::Metrics::new());
@@ -224,7 +246,7 @@ pub async fn test_app_with_pool_transport_and_domain(
     // transport + instance key before they get moved into AppState,
     // so build it here and slot it in.
     let outbound_queues = prismoire_server::federation::outbound_queue::OutboundQueues::new(
-        prismoire_server::federation::outbound_queue::OutboundQueueConfig::test_fast(),
+        outbound_config,
         federation_transport.clone(),
         instance_key.clone(),
     );

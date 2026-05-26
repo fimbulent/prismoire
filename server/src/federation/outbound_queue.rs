@@ -36,7 +36,7 @@
 //!    enqueued to is itself eligible — its own newly-added bytes
 //!    count toward "largest".
 //!
-//! Drain path: `MAX_QUEUE_OBJECT_AGE` is checked when a batch is
+//! Drain path: `object_max_age_secs` is checked when a batch is
 //! taken; items older than the cap are dropped before the egress
 //! write per §7.5 "objects older than this are dropped at the moment
 //! they would otherwise be transmitted".
@@ -65,77 +65,70 @@ use crate::federation::identity::CBOR_CONTENT_TYPE;
 use crate::federation::instance_key::InstanceKey;
 use crate::federation::transport::{FederationTransport, PeerId};
 
-/// §7.5 process-wide outbound byte budget (default 512 MiB). Caps
-/// total resident memory across every per-peer queue so operators can
-/// size hosts predictably regardless of peer count.
-pub const MAX_OUTBOUND_QUEUE_TOTAL_BYTES: usize = 512 * 1024 * 1024;
-
-/// §7.5 per-peer byte cap (default 32 MiB). Hard ceiling on any single
-/// peer's queue so one slow or dead peer cannot monopolize the global
-/// byte budget.
-pub const MAX_OUTBOUND_QUEUE_BYTES_PER_PEER: usize = 32 * 1024 * 1024;
-
-/// §7.5 per-peer object-count cap (default 50,000).
-pub const MAX_OUTBOUND_QUEUE_OBJECTS_PER_PEER: usize = 50_000;
-
-/// §7.5 staleness cap (default 1 hour, matching `T_propagate_max`).
-/// Queued items older than this are dropped on drain before the
-/// egress write.
-pub const MAX_QUEUE_OBJECT_AGE: Duration = Duration::from_secs(3600);
-
 /// §10.6-mirroring outbound batch cap. Coalesce up to this many
 /// queue-head items into a single push.
+///
+/// Kept as a wire-canonical `const` rather than a TOML knob because
+/// the receiver's matching `MAX_CONTENT_BATCH = 64` (§10.6) is a
+/// protocol invariant — a batch larger than 64 would be rejected by
+/// every conforming peer.
 pub const MAX_CONTENT_BATCH_OUTBOUND: usize = 64;
 
 // ---------------------------------------------------------------------------
 // Config types
 // ---------------------------------------------------------------------------
 
-/// Operator-tunable knobs for the outbound queue. Phase 6.4 reads
-/// only the defaults; Phase 6.4.1 will surface these as instance
-/// config and pipe them through `AppState`.
+/// Runtime shape of the operator-tunable outbound-queue knobs.
+///
+/// The TOML-deserialised form lives in `prismoire-config` as
+/// [`prismoire_config::OutboundQueueConfig`]; this module's struct is
+/// what the runtime actually consumes (`Duration` instead of raw
+/// seconds/ms). Convert via the `From<&prismoire_config::OutboundQueueConfig>`
+/// impl below — `main.rs` does this once at startup before passing
+/// into [`OutboundQueues::new`].
 #[derive(Clone, Debug)]
 pub struct OutboundQueueConfig {
-    /// Process-wide byte budget. See [`MAX_OUTBOUND_QUEUE_TOTAL_BYTES`].
+    /// Process-wide byte budget. See `prismoire_config::OutboundQueueConfig::total_bytes`.
     pub total_bytes: usize,
-    /// Per-peer byte cap. See [`MAX_OUTBOUND_QUEUE_BYTES_PER_PEER`].
+    /// Per-peer byte cap.
     pub bytes_per_peer: usize,
-    /// Per-peer object-count cap. See [`MAX_OUTBOUND_QUEUE_OBJECTS_PER_PEER`].
+    /// Per-peer object-count cap.
     pub objects_per_peer: usize,
-    /// Staleness cap. See [`MAX_QUEUE_OBJECT_AGE`].
+    /// Staleness cap.
     pub object_max_age: Duration,
-    /// Max items coalesced into one HTTP push.
+    /// Max items coalesced into one HTTP push (wire-canonical, see
+    /// [`MAX_CONTENT_BATCH_OUTBOUND`]).
     pub max_batch: usize,
     /// Backoff schedule applied on transient failures.
     pub backoff: BackoffPolicy,
 }
 
-impl OutboundQueueConfig {
-    /// Spec defaults from §7.5 + §10.6. Production binaries use this.
-    pub fn defaults() -> Self {
+impl From<&prismoire_config::OutboundQueueConfig> for OutboundQueueConfig {
+    fn from(cfg: &prismoire_config::OutboundQueueConfig) -> Self {
         Self {
-            total_bytes: MAX_OUTBOUND_QUEUE_TOTAL_BYTES,
-            bytes_per_peer: MAX_OUTBOUND_QUEUE_BYTES_PER_PEER,
-            objects_per_peer: MAX_OUTBOUND_QUEUE_OBJECTS_PER_PEER,
-            object_max_age: MAX_QUEUE_OBJECT_AGE,
+            total_bytes: cfg.total_bytes,
+            bytes_per_peer: cfg.bytes_per_peer,
+            objects_per_peer: cfg.objects_per_peer,
+            object_max_age: Duration::from_secs(cfg.object_max_age_secs),
             max_batch: MAX_CONTENT_BATCH_OUTBOUND,
-            backoff: BackoffPolicy::default_prod(),
+            backoff: BackoffPolicy::from(&cfg.backoff),
         }
     }
+}
 
+#[cfg(any(test, feature = "test-auth"))]
+impl OutboundQueueConfig {
     /// Test-shaped defaults: caps stay generous (tests don't exercise
     /// the overflow paths unless they shrink the relevant cap
     /// explicitly), but the backoff is shortened so the rare retry
     /// path doesn't burn whole-second sleeps in the pre-commit run.
+    ///
+    /// Feature-gated to `test-auth` so prod code paths cannot
+    /// accidentally reference the test preset.
     pub fn test_fast() -> Self {
-        Self {
-            total_bytes: MAX_OUTBOUND_QUEUE_TOTAL_BYTES,
-            bytes_per_peer: MAX_OUTBOUND_QUEUE_BYTES_PER_PEER,
-            objects_per_peer: MAX_OUTBOUND_QUEUE_OBJECTS_PER_PEER,
-            object_max_age: MAX_QUEUE_OBJECT_AGE,
-            max_batch: MAX_CONTENT_BATCH_OUTBOUND,
-            backoff: BackoffPolicy::test_fast(),
-        }
+        let mut out = OutboundQueueConfig::from(&prismoire_config::OutboundQueueConfig::default());
+        out.backoff = BackoffPolicy::test_fast();
+        out
     }
 }
 
@@ -152,17 +145,20 @@ pub struct BackoffPolicy {
     pub multiplier: f64,
 }
 
-impl BackoffPolicy {
-    /// §7.5 production schedule: 1s → 2s → 4s → ... → 5min.
-    pub fn default_prod() -> Self {
+impl From<&prismoire_config::BackoffConfig> for BackoffPolicy {
+    fn from(cfg: &prismoire_config::BackoffConfig) -> Self {
         Self {
-            initial: Duration::from_secs(1),
-            max: Duration::from_secs(300),
-            multiplier: 2.0,
+            initial: Duration::from_millis(cfg.initial_ms),
+            max: Duration::from_millis(cfg.max_ms),
+            multiplier: cfg.multiplier,
         }
     }
+}
 
+#[cfg(any(test, feature = "test-auth"))]
+impl BackoffPolicy {
     /// Tight schedule for tests so retries don't dominate wall time.
+    /// Feature-gated to `test-auth` so prod code paths cannot reference it.
     pub fn test_fast() -> Self {
         Self {
             initial: Duration::from_millis(10),
@@ -208,6 +204,12 @@ struct PeerQueue {
     /// "queue empty AND `in_flight == false` for every peer" check is
     /// what [`OutboundQueues::wait_idle`] tests.
     in_flight: bool,
+    /// Set by [`OutboundQueues::drop_peer`] to tell the drain worker
+    /// to exit on its next wake (admin de-peering, peer-key rotation).
+    /// The worker observes this under the inner mutex and returns
+    /// after marking itself not in-flight, so `wait_idle()` doesn't
+    /// hang on a dropped peer's queue.
+    stopped: bool,
 }
 
 impl PeerQueue {
@@ -218,6 +220,7 @@ impl PeerQueue {
             wake: Arc::new(Notify::new()),
             worker_spawned: false,
             in_flight: false,
+            stopped: false,
         }
     }
 }
@@ -318,12 +321,16 @@ impl OutboundQueues {
                 {
                     let dropped = q.items.pop_front().expect("non-empty");
                     let n = dropped.wire_bytes.len();
-                    q.bytes -= n;
+                    // Saturating: a desync between the accounting and
+                    // the actual queue contents (which would be a bug
+                    // elsewhere) shouldn't take down the process via a
+                    // debug-mode underflow panic.
+                    q.bytes = q.bytes.saturating_sub(n);
                     peer_bytes_freed += n;
                     peer_dropped += 1;
                 }
             }
-            state.total_bytes -= peer_bytes_freed;
+            state.total_bytes = state.total_bytes.saturating_sub(peer_bytes_freed);
             if peer_dropped > 0 {
                 tracing::warn!(
                     peer = %PeerId::from_bytes(peer_pk),
@@ -381,8 +388,9 @@ impl OutboundQueues {
                     .get_mut(&largest_pk)
                     .expect("non-empty in iteration");
                 let dropped = q.items.pop_front().expect("filtered non-empty");
-                q.bytes -= dropped.wire_bytes.len();
-                state.total_bytes -= dropped.wire_bytes.len();
+                let n = dropped.wire_bytes.len();
+                q.bytes = q.bytes.saturating_sub(n);
+                state.total_bytes = state.total_bytes.saturating_sub(n);
                 tracing::warn!(
                     peer = %PeerId::from_bytes(largest_pk),
                     dropped_objects = 1u64,
@@ -397,6 +405,15 @@ impl OutboundQueues {
                 let q = state.peers.get_mut(&peer_pk).expect("peer entry exists");
                 q.items.push_back(object);
                 q.bytes += object_bytes;
+                // Step-1 eviction should have made room for exactly one
+                // more object; if this fires the eviction loop bound is
+                // wrong somewhere.
+                debug_assert!(
+                    q.items.len() <= self.config.objects_per_peer,
+                    "per-peer object cap violated after enqueue: {} > {}",
+                    q.items.len(),
+                    self.config.objects_per_peer,
+                );
                 let spawn_needed = !q.worker_spawned;
                 if spawn_needed {
                     q.worker_spawned = true;
@@ -466,6 +483,26 @@ impl OutboundQueues {
         let state = self.inner.lock().expect("outbound_queue poisoned");
         state.total_bytes
     }
+
+    /// Tell the per-peer drain worker for `peer_pk` to exit at its next
+    /// wake, then signal it so it does so promptly. Anything currently
+    /// queued for that peer is discarded (admin de-peering deliberately
+    /// drops pending sends — the §10.5 pull-backfill on re-peering is
+    /// what restores convergence if the peer rejoins).
+    ///
+    /// No-op if the peer has no queue (no worker was ever spawned for
+    /// it). Safe to call multiple times.
+    pub fn drop_peer(&self, peer_pk: &[u8; 32]) {
+        let wake = {
+            let mut state = self.inner.lock().expect("outbound_queue poisoned");
+            let Some(q) = state.peers.get_mut(peer_pk) else {
+                return;
+            };
+            q.stopped = true;
+            q.wake.clone()
+        };
+        wake.notify_one();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -473,18 +510,28 @@ impl OutboundQueues {
 // ---------------------------------------------------------------------------
 
 /// Spawn the long-lived per-peer drain worker. One per peer; runs
-/// forever (peer-removal stop conditions are deferred to a later
-/// phase per the Phase 6.4 plan).
+/// until [`OutboundQueues::drop_peer`] flips the per-queue `stopped`
+/// flag (admin de-peering, peer-key rotation), at which point the
+/// worker drops the queue entry and exits.
 fn spawn_drain_worker(queues: Arc<OutboundQueues>, peer_pk: [u8; 32], wake: Arc<Notify>) {
     tokio::spawn(async move {
         let mut backoff_current = queues.config.backoff.initial;
         loop {
-            // Outer wait: park until enqueue or backoff sleep wakes us.
+            // Outer wait: park until enqueue, backoff sleep, or
+            // drop_peer wakes us.
             wake.notified().await;
 
+            if check_and_remove_if_stopped(&queues, peer_pk) {
+                return;
+            }
+
             // Inner loop: keep draining batches as long as the HTTP
-            // calls succeed; back out on transient failure.
+            // calls succeed; back out on transient failure or
+            // drop_peer.
             loop {
+                if check_and_remove_if_stopped(&queues, peer_pk) {
+                    return;
+                }
                 let batch = take_batch(&queues, peer_pk);
                 if batch.is_empty() {
                     // Queue is empty or only contained stale items;
@@ -585,7 +632,7 @@ fn take_batch(queues: &Arc<OutboundQueues>, peer_pk: [u8; 32]) -> Vec<QueuedObje
         if front.enqueued_at.elapsed() > queues.config.object_max_age {
             let stale = q.items.pop_front().expect("just peeked");
             let n = stale.wire_bytes.len();
-            q.bytes -= n;
+            q.bytes = q.bytes.saturating_sub(n);
             stale_bytes_total += n;
             stale_dropped += 1;
             continue;
@@ -604,16 +651,16 @@ fn take_batch(queues: &Arc<OutboundQueues>, peer_pk: [u8; 32]) -> Vec<QueuedObje
         }
 
         let item = q.items.pop_front().expect("just peeked");
-        q.bytes -= item.wire_bytes.len();
+        q.bytes = q.bytes.saturating_sub(item.wire_bytes.len());
         batch.push(item);
     }
 
     if stale_dropped > 0 {
-        state.total_bytes -= stale_bytes_total;
+        state.total_bytes = state.total_bytes.saturating_sub(stale_bytes_total);
         tracing::debug!(
             peer = %PeerId::from_bytes(peer_pk),
             dropped_stale = stale_dropped,
-            "dropped stale items past MAX_QUEUE_OBJECT_AGE",
+            "dropped stale items past outbound_queue.object_max_age_secs",
         );
     }
 
@@ -626,7 +673,7 @@ fn take_batch(queues: &Arc<OutboundQueues>, peer_pk: [u8; 32]) -> Vec<QueuedObje
     // gone from the queue NOW. If the dispatch fails transiently and
     // we requeue, we re-add to both `q.bytes` and `state.total_bytes`.
     let batch_bytes: usize = batch.iter().map(|i| i.wire_bytes.len()).sum();
-    state.total_bytes -= batch_bytes;
+    state.total_bytes = state.total_bytes.saturating_sub(batch_bytes);
 
     // Re-borrow `q` after the `state.total_bytes` mutation.
     let q = state.peers.get_mut(&peer_pk).expect("entry exists");
@@ -673,13 +720,47 @@ fn mark_idle(queues: &Arc<OutboundQueues>, peer_pk: [u8; 32]) {
     queues.idle_notify.notify_waiters();
 }
 
-/// Full-jitter backoff: actual delay is `rand * current`. See AWS
-/// "Exponential Backoff And Jitter" (2015). With a `max` cap of e.g.
-/// 5 minutes this still tops out at 5 minutes worst-case.
+/// If `peer_pk`'s queue has been marked `stopped` (by
+/// [`OutboundQueues::drop_peer`]), refund its byte total to the
+/// global counter, remove the entry, signal the global idle notify,
+/// and return `true` so the caller knows to exit. Otherwise return
+/// `false` and let the worker continue.
+fn check_and_remove_if_stopped(queues: &Arc<OutboundQueues>, peer_pk: [u8; 32]) -> bool {
+    let mut state = queues.inner.lock().expect("outbound_queue poisoned");
+    let Some(q) = state.peers.get(&peer_pk) else {
+        return true; // already removed
+    };
+    if !q.stopped {
+        return false;
+    }
+    let bytes = q.bytes;
+    state.peers.remove(&peer_pk);
+    state.total_bytes = state.total_bytes.saturating_sub(bytes);
+    drop(state);
+    queues.idle_notify.notify_waiters();
+    true
+}
+
+/// Full-jitter backoff: actual delay is `rand * current`, floored at
+/// `max(current / 10, 1ms)`. See AWS "Exponential Backoff And Jitter"
+/// (2015). With a `max` cap of e.g. 5 minutes this still tops out at
+/// 5 minutes worst-case.
+///
+/// The floor matters because uniform `rand` can return very small
+/// values: at `initial = 1s` a `rand = 1e-6` yields a 1µs sleep,
+/// which is effectively a tight retry loop against a peer that just
+/// returned a transient error. A 10%-of-current floor scales with the
+/// backoff so even at the `test_fast` `initial = 10ms` setting tests
+/// still see jittered values (range `[1ms, 10ms)`), and at the
+/// production `initial = 1s` the floor lands at 100ms — small enough
+/// to be invisible to humans but large enough to bound the worst-case
+/// retry rate.
 fn jitter_full(current: Duration) -> Duration {
     let r: f64 = rand::random::<f64>(); // uniform [0, 1)
     let scaled = current.as_secs_f64() * r;
-    Duration::from_secs_f64(scaled.max(0.0))
+    let dur = Duration::from_secs_f64(scaled.max(0.0));
+    let floor = (current / 10).max(Duration::from_millis(1));
+    dur.max(floor)
 }
 
 // ---------------------------------------------------------------------------

@@ -128,9 +128,29 @@ request_body_overhead_bytes = 8192  # default: 8192 (8 KiB) — body-size slack 
                                     #                       above the wire-invariant 500 KiB
                                     #                       attachment cap; covers multipart
                                     #                       boundaries and form fields.
+
+[federation.outbound_queue]
+total_bytes         = 536870912     # default: 512 MiB    — process-wide byte budget across every
+                                    #                       per-peer outbound queue. Caps total
+                                    #                       resident memory; eviction picks the
+                                    #                       largest peer queue first.
+bytes_per_peer      = 33554432      # default: 32 MiB     — per-peer byte cap; one slow peer cannot
+                                    #                       monopolize the global budget.
+objects_per_peer    = 50000         # default: 50000      — per-peer object-count cap.
+object_max_age_secs = 3600          # default: 3600 (1h)  — staleness cap; a queued object older
+                                    #                       than this is dropped before the egress
+                                    #                       write. Must be ≤ T_propagate_max (1h).
+
+[federation.outbound_queue.backoff]
+initial_ms = 1000                   # default: 1000 (1s)  — first transient-failure backoff interval.
+max_ms     = 300000                 # default: 300000 (5m) — per-peer ceiling on the retry interval.
+multiplier = 2.0                    # default: 2.0        — exponent applied on each successive
+                                    #                       transient. Must be > 1.0.
 ```
 
 The `[attachments]` knobs (docs/attachments.md §10.2) are federation-inert: they shape how the local origin handles an upload (decode safety, re-encode target, sweep cadence). Per-user storage budgets — `attachment_budget_cap_bytes` and `attachment_budget_refill_bytes_per_day` — are live-tunable instance config persisted in the database, edited via the admin Config tab (or `PATCH /api/admin/config`), not TOML.
+
+The `[federation.outbound_queue]` knobs (docs/federation-protocol.md §7.5) shape how the local origin holds undelivered gossip while peers are slow or unreachable. They're deployment-shaped (RAM budget, peer outage tolerance), restart-required, and not audit-logged — raise them on hosts with more memory, lower them on resource-constrained deployments. Lowering caps shifts load from push to pull-backfill (§10.5) without compromising correctness; raising `object_max_age_secs` above `T_propagate_max` is rejected at config load. **Values are not clamped against host RAM** — a stray extra zero on `total_bytes` will be accepted at startup and only surface as memory pressure under load; size these against your actual host budget.
 
 `trust_proxy_headers` controls where the per-IP rate limiter looks for the client IP:
 

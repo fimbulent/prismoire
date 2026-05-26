@@ -40,16 +40,23 @@
 //!
 //! ## Dispatch via per-peer outbound queues
 //!
-//! [`forward_signed_object`] returns immediately after enqueueing a
-//! singleton wire-bytes blob onto each selected peer's outbound queue
-//! (see [`super::outbound_queue::OutboundQueues`]). Per §7.5 "The
-//! local write path NEVER blocks on outbound queue pressure"; the
-//! enqueue path is lock-bounded and never awaits. The per-peer drain
-//! worker owns retries with exponential backoff (5xx/429/transport
-//! → transient, 4xx → terminal-drop) and coalesces queued items into
-//! batched `/content` or `/edges` pushes. This replaces the Phase 6.3
+//! [`forward_signed_object`] awaits a single candidate-selection DB
+//! query, then enqueues a singleton wire-bytes blob onto each selected
+//! peer's outbound queue (see [`super::outbound_queue::OutboundQueues`]).
+//! The enqueue itself is `Mutex` + `Notify` — never awaits, never
+//! blocks on egress — so per §7.5 the local write path never gates on
+//! outbound queue pressure. The per-peer drain worker owns retries
+//! with exponential backoff (5xx/429/transport → transient, 4xx →
+//! terminal-drop) and coalesces queued items into batched `/content`
+//! or `/edges` pushes. This replaces the Phase 6.3
 //! `tokio::spawn(dispatch_one)` fire-and-forget pattern that had no
 //! retry path at all.
+//!
+//! Phase 6.4.1 lifted the outer `tokio::spawn` around the candidate
+//! query: handlers now `.await` `forward_signed_object` directly so
+//! the enqueue completes before the handler returns its response.
+//! Tests can therefore call `OutboundQueues::wait_idle()` immediately
+//! after a handler call and observe a deterministic queue state.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -62,7 +69,7 @@ use crate::federation::routing::{ForwardingClass, REDUNDANCY_K, peers_interested
 
 /// §7.5 dedup-LRU time bound (`T_propagate_max`, default 1h).
 /// An entry older than this is treated as a miss and re-initialised
-/// on next lookup; the matching `MAX_QUEUE_OBJECT_AGE` outbound-queue
+/// on next lookup; the matching `object_max_age_secs` outbound-queue
 /// staleness cap guarantees no object is ever delivered past this
 /// horizon, so a late re-arrival is a fresh forwarding decision.
 pub const T_PROPAGATE_MAX: Duration = Duration::from_secs(3600);
@@ -249,15 +256,17 @@ impl Default for ForwardingLru {
 // ---------------------------------------------------------------------------
 
 /// §7.5 forward a freshly-applied or freshly-originated signed object
-/// to up to `REDUNDANCY_K` interested peers. Returns immediately.
+/// to up to `REDUNDANCY_K` interested peers.
 ///
 /// The selection logic (interest filter + dedup-LRU + `REDUNDANCY_K`
-/// cap) runs on a spawned task because the candidate query is async;
-/// the actual egress writes are handed off to the per-peer outbound
-/// queues (one queue + one drain worker per peer, see
-/// [`super::outbound_queue::OutboundQueues`]) which own retries with
-/// exponential backoff. Per §7.5 the local write path never blocks on
-/// outbound queue pressure.
+/// cap) is async because the candidate query touches the DB; callers
+/// `.await` this so the enqueue completes before the handler returns
+/// its response. The actual egress writes are handed off to the
+/// per-peer outbound queues (one queue + one drain worker per peer,
+/// see [`super::outbound_queue::OutboundQueues`]) which own retries
+/// with exponential backoff. Per §7.5 the local write path never
+/// blocks on outbound queue *pressure* — the enqueue itself is
+/// `Mutex` + `Notify` and runs inline with the handler's response.
 ///
 /// `arrived_from` is `Some(sender_pubkey)` for relayed objects (skip
 /// pushing back to the source) and `None` for originator pushes.
@@ -267,7 +276,7 @@ impl Default for ForwardingLru {
 /// interest-matching peers direct-pushes K and lets gossip carry the
 /// rest. Originator vs forwarder is indistinguishable on the wire —
 /// it's purely a matter of which entry-point inserted the LRU row.
-pub fn forward_signed_object(
+pub async fn forward_signed_object(
     state: Arc<AppState>,
     canonical_hash: [u8; 32],
     class: ForwardingClass,
@@ -275,26 +284,24 @@ pub fn forward_signed_object(
     wire_bytes: Vec<u8>,
     arrived_from: Option<[u8; 32]>,
 ) {
-    tokio::spawn(async move {
-        if let Err(e) = forward_inner(
-            &state,
-            canonical_hash,
-            class,
-            &routing_key,
-            wire_bytes,
-            arrived_from,
-        )
-        .await
-        {
-            tracing::warn!(error = %e, "forwarder fanout failed");
-        }
-    });
+    if let Err(e) = forward_inner(
+        &state,
+        canonical_hash,
+        class,
+        &routing_key,
+        wire_bytes,
+        arrived_from,
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "forwarder fanout failed");
+    }
 }
 
 /// Core fanout: gather candidates, pick the next K (after exclusions),
-/// dispatch to each on its own task. Returns `Err` only for DB faults
-/// in the candidate lookup; per-peer transport failures are logged
-/// and swallowed inside the dispatch tasks.
+/// enqueue to each peer's per-peer outbound queue. Returns `Err` only
+/// for DB faults in the candidate lookup; per-peer transport failures
+/// are owned by the drain worker.
 async fn forward_inner(
     state: &Arc<AppState>,
     canonical_hash: [u8; 32],

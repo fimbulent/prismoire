@@ -222,7 +222,8 @@ pub async fn create_reply(
         signed.public_key.to_vec(),
         wire,
         None,
-    );
+    )
+    .await;
 
     Ok((
         axum::http::StatusCode::CREATED,

@@ -243,7 +243,8 @@ pub async fn create_thread(
         signed.public_key.to_vec(),
         post_rev_wire,
         None,
-    );
+    )
+    .await;
     let thread_create_wire = crate::federation::envelope::encode_signed_object(
         &signed_thread.payload,
         &signed_thread.signature,
@@ -255,7 +256,8 @@ pub async fn create_thread(
         signed_thread.public_key.to_vec(),
         thread_create_wire,
         None,
-    );
+    )
+    .await;
 
     // Project the just-signed array into the response shape. The OP
     // is the only post that can carry attachments, so this is the

@@ -487,7 +487,8 @@ async fn apply_one_edge(
             trust_edge.from_key.to_vec(),
             wire_bytes.to_vec(),
             Some(arrived_from),
-        );
+        )
+        .await;
     }
 
     Ok(EdgeResult {

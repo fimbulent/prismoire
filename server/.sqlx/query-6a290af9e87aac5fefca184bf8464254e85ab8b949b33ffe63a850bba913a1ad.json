@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT pr.body AS \"body!: String\", pr.canonical_hash AS \"canonical_hash!: Vec<u8>\" FROM post_revisions pr JOIN posts p ON p.id = pr.post_id WHERE p.parent IS NOT NULL AND pr.body LIKE 'evict %'",
+  "describe": {
+    "columns": [
+      {
+        "name": "body!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "canonical_hash!: Vec<u8>",
+        "ordinal": 1,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "6a290af9e87aac5fefca184bf8464254e85ab8b949b33ffe63a850bba913a1ad"
+}
