@@ -17,7 +17,7 @@ use common::{
 
 #[tokio::test]
 async fn create_thread_appears_in_search_results() {
-    let (app, _state) = common::test_app().await;
+    let (app, state) = common::test_app().await;
     let alice = setup_admin(&app, "alice").await;
 
     // Use a word in the title and body unlikely to collide with any
@@ -64,6 +64,42 @@ async fn create_thread_appears_in_search_results() {
     assert!(
         hits.iter().any(|t| t["id"].as_str() == Some(thread_id)),
         "search for {unique_word:?} should return the new thread; got {body}"
+    );
+
+    // Pre-Phase-6 origination: creating a thread MUST co-write a
+    // `thread-create` signed_objects row alongside the OP `post-rev`.
+    // Receivers in §10 reception require both objects as a pair, so the
+    // local origination side must mint both in the same transaction.
+    //
+    // Scope tightly: this test creates exactly one thread, so we expect
+    // exactly one row of each class. Asserting equality (rather than
+    // `>= 1`) means a future code path that emits an unrelated
+    // thread-create or post-rev into this fixture will surface as a
+    // test failure rather than slipping past.
+    let class_counts: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT inner_class, COUNT(*) FROM signed_objects \
+         WHERE inner_class IN ('post-rev', 'thread-create') GROUP BY inner_class",
+    )
+    .fetch_all(&state.db)
+    .await
+    .expect("query signed_objects");
+    let post_rev = class_counts
+        .iter()
+        .find(|(c, _)| c == "post-rev")
+        .map(|(_, n)| *n)
+        .unwrap_or(0);
+    let thread_create = class_counts
+        .iter()
+        .find(|(c, _)| c == "thread-create")
+        .map(|(_, n)| *n)
+        .unwrap_or(0);
+    assert_eq!(
+        post_rev, 1,
+        "create_thread must dual-write exactly one OP post-rev into signed_objects",
+    );
+    assert_eq!(
+        thread_create, 1,
+        "create_thread must co-sign exactly one thread-create and dual-write it",
     );
 }
 

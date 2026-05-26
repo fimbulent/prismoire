@@ -9,11 +9,21 @@ use uuid::Uuid;
 
 use crate::error::{AppError, ErrorCode};
 use crate::session::AuthUser;
+use crate::signing;
 use crate::state::AppState;
 use crate::threads::parse_cursor;
 use crate::trust::UserStatus;
 
 const LOG_PAGE_SIZE: usize = 50;
+
+/// Maximum length of an admin-action `reason` string, in bytes (after
+/// trimming). Caps the federated `admin-rm.reason` field so a single
+/// admin removal can't ship an unbounded blob to every peer that
+/// stores the resulting `signed_objects` row. 1000 bytes is roomy
+/// enough for a detailed moderation justification and consistent with
+/// the existing per-field caps (`MAX_BIO_LEN = 500`,
+/// `MAX_THREAD_TITLE_LEN = 300`).
+const MAX_REASON_LEN: usize = 1000;
 
 // ---------------------------------------------------------------------------
 // Response / request types
@@ -128,8 +138,8 @@ pub fn require_admin(user: &AuthUser) -> Result<(), AppError> {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn insert_admin_log(
-    db: &sqlx::SqlitePool,
+async fn insert_admin_log<'e, E: sqlx::sqlite::SqliteExecutor<'e>>(
+    db: E,
     admin_id: &str,
     action: &str,
     target_user: Option<&str>,
@@ -287,9 +297,25 @@ pub async fn remove_post(
     if reason.is_empty() {
         return Err(AppError::code(ErrorCode::ReasonRequired));
     }
+    // The reason is bound into the federated `admin-rm` payload and
+    // replicated to every peer holding the resulting `signed_objects`
+    // row, so an unbounded string here is a per-removal amplification
+    // vector — cap it before the bytes leave this instance.
+    if reason.len() > MAX_REASON_LEN {
+        return Err(AppError::with_message(
+            ErrorCode::ReasonTooLong,
+            format!("reason must be at most {MAX_REASON_LEN} characters"),
+        ));
+    }
 
+    // Need the target author's pubkey so the signed `admin-rm` can bind
+    // it (`target_author` per signed-payload-format.md §5.2). The post's
+    // author is the joined `users.public_key`; deleted users keep their
+    // row + pubkey for FK integrity, so the join always succeeds.
     let post = sqlx::query!(
-        "SELECT id, thread, retracted_at FROM posts WHERE id = ?",
+        "SELECT p.id, p.thread, p.retracted_at, u.public_key \
+         FROM posts p JOIN users u ON u.id = p.author \
+         WHERE p.id = ?",
         post_id,
     )
     .fetch_optional(&state.db)
@@ -300,22 +326,71 @@ pub async fn remove_post(
         return Err(AppError::code(ErrorCode::PostAlreadyRetracted));
     }
 
+    let target_author: [u8; 32] = post.public_key.as_slice().try_into().map_err(|_| {
+        tracing::error!(post_id = %post.id, "admin remove_post: author pubkey is not 32 bytes");
+        AppError::code(ErrorCode::Internal)
+    })?;
+    let post_uuid = Uuid::parse_str(&post.id).map_err(|e| {
+        tracing::error!(post_id = %post.id, error = %e, "admin remove_post: invalid post UUID");
+        AppError::code(ErrorCode::Internal)
+    })?;
+
+    // Sign the `admin-rm` outside the (short) UPDATE transaction below.
+    // Truncate the millisecond timestamp to whole seconds so the value
+    // bound into the canonical payload equals `iso_seconds * 1000`,
+    // keeping the millisecond field in `signed_objects.payload` and
+    // the second-precision `posts.retracted_at` column in lock-step.
+    // (The verifier always reads the canonical bytes from
+    // `signed_objects.payload`; the truncation is for the
+    // projection-vs-canonical consistency invariant, not for
+    // reconstruction.)
+    let now_dt = Utc::now();
+    let now_iso = now_dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let created_at_ms = (now_dt.timestamp() as u64) * 1000;
+    let signed_admin_rm = signing::sign_admin_removal_with_instance_key(
+        &state.instance_key,
+        &post_uuid,
+        &target_author,
+        &state.instance_domain,
+        created_at_ms,
+        Some(&reason),
+    );
+
+    let mut tx = state.db.begin().await?;
+
     sqlx::query!(
-        "UPDATE posts SET retracted_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
+        "UPDATE posts SET retracted_at = ? WHERE id = ?",
+        now_iso,
         post.id,
     )
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
 
     sqlx::query!(
         "UPDATE post_revisions SET body = '[removed by admin]' WHERE post_id = ?",
         post.id,
     )
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
 
+    // Dual-write the canonical `admin-rm` bytes into the federation-
+    // shared store. Phase 6 reception will read this row (and forward
+    // the bytes onto interested peers).
+    signing::store_signed_object(
+        &mut *tx,
+        "admin-rm",
+        &signed_admin_rm.payload,
+        &signed_admin_rm.signature,
+        &signed_admin_rm.canonical_hash,
+    )
+    .await?;
+
+    // Audit row commits with the rest of the removal — without this
+    // co-commit, an `insert_admin_log` failure after `tx.commit()`
+    // would ship the signed `admin-rm` to peers while leaving the
+    // local instance with no audit trail for the removal.
     insert_admin_log(
-        &state.db,
+        &mut *tx,
         &user.user_id,
         "remove_post",
         None,
@@ -325,6 +400,8 @@ pub async fn remove_post(
         Some(&reason),
     )
     .await?;
+
+    tx.commit().await?;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }

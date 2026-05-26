@@ -1519,6 +1519,28 @@ pub(crate) async fn soft_delete_user(
         crate::signing::erase_post_rev_payloads(&mut **tx, post_id).await?;
     }
 
+    // 1a. Sign + dual-write the umbrella `deactivate` authority once
+    //     all per-post retracts are persisted (federation-protocol §10
+    //     / signed-payload-format.md §5.11). The deactivate is the
+    //     account-wide erasure authority; the retracts above are the
+    //     per-post evidence chain. Both share `created_at_ms` so the
+    //     §5.11 ordering rule ("deactivate.created_at >= every prior
+    //     object by this user") holds at the millisecond. Skip
+    //     entirely when the user has no active signing key — there is
+    //     no key to sign with, and no peer would accept the resulting
+    //     unsigned bytes anyway.
+    if let Some(key) = signing_key.as_ref() {
+        let signed_deactivate = crate::signing::sign_deactivation_with_key(key, created_at_ms);
+        crate::signing::store_signed_object(
+            &mut **tx,
+            "deactivate",
+            &signed_deactivate.payload,
+            &signed_deactivate.signature,
+            &signed_deactivate.canonical_hash,
+        )
+        .await?;
+    }
+
     // 1b. Belt-and-suspenders FTS cleanup. The retraction triggers
     //     `posts_fts_after_retract` and `threads_fts_op_after_retract`
     //     (see `migrations/20260506234657_create_fts_tables.sql`)
@@ -1652,8 +1674,8 @@ pub(crate) async fn soft_delete_user(
     //    projection rows — once the rows are gone, the canonical_hash
     //    subquery has nothing to match against. Outbound only; inbound
     //    edges were signed by *other* users and are not ours to erase.
-    //    TODO: emit a signed `deactivate` once §5.11 lands so peers
-    //    can mirror this erasure on receipt.
+    //    Peers mirror this erasure via the `deactivate` object signed
+    //    in step 1a above.
     crate::signing::erase_user_trust_edge_payloads(&mut **tx, user_id).await?;
 
     sqlx::query!(
@@ -1672,8 +1694,8 @@ pub(crate) async fn soft_delete_user(
     //     `profile_revisions` are personal data, so erasure here is
     //     load-bearing for GDPR (the `users` row's display_name /
     //     bio are already anonymised by step 2).
-    //     TODO: emit a signed `deactivate` (§5.11) once it lands so
-    //     peers can mirror profile-payload erasure on receipt.
+    //     Peers mirror this erasure via the `deactivate` object signed
+    //     in step 1a above.
     crate::signing::erase_user_profile_revision_payloads(&mut **tx, user_id).await?;
 
     sqlx::query!("DELETE FROM profile_revisions WHERE user_id = ?", user_id)

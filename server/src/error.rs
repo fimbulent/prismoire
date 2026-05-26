@@ -182,6 +182,8 @@ pub enum ErrorCode {
     AdminRequired,
     /// Admin action requires a non-empty `reason`.
     ReasonRequired,
+    /// Admin action `reason` exceeds the per-field length cap.
+    ReasonTooLong,
     /// Target user is already banned.
     AlreadyBanned,
     /// Target user is not currently banned.
@@ -363,6 +365,7 @@ impl ErrorCode {
             | Self::TagTooLong
             | Self::BioTooLong
             | Self::ReasonRequired
+            | Self::ReasonTooLong
             | Self::ReportReasonInvalid
             | Self::SelfReport
             | Self::InvalidTheme
@@ -442,6 +445,7 @@ impl ErrorCode {
 
             Self::AdminRequired => "admin access required",
             Self::ReasonRequired => "reason is required",
+            Self::ReasonTooLong => "reason is too long",
             Self::AlreadyBanned => "user is already banned",
             Self::NotBanned => "user is not banned",
             Self::AlreadySuspended => "user is already suspended",

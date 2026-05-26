@@ -4,8 +4,10 @@ use sha2::Digest;
 use sqlx::{SqliteExecutor, SqlitePool};
 use uuid::Uuid;
 
+use crate::federation::instance_key::InstanceKey;
 use crate::signed::{
-    AttachmentRef, PostRevision, ProfileRevision, Retraction, SignedPayload, TrustEdge, TrustStance,
+    AdminRemoval, AttachmentRef, Deactivation, PostRevision, ProfileRevision, Retraction,
+    SignedPayload, ThreadCreate, TrustEdge, TrustStance,
 };
 
 /// Output of signing a class-specific payload.
@@ -761,6 +763,108 @@ pub async fn sign_retraction(
     Ok(sign_retraction_with_key(&key, post_id, created_at_ms))
 }
 
+/// Sign a `thread-create` canonical payload with an already-loaded key.
+///
+/// See [signed-payload-format.md] §5.9 and
+/// [federation-protocol.md] §10. The signer (`key`) is bound as
+/// `author` in the payload. `room_slug`, `title`, `link_url`, and
+/// `op_post_id` must match the values the caller persists; the
+/// canonical CBOR encoding binds all of them.
+pub fn sign_thread_create_with_key(
+    key: &SigningKey,
+    thread_id: &Uuid,
+    room_slug: &str,
+    title: &str,
+    link_url: Option<&str>,
+    op_post_id: &Uuid,
+    created_at_ms: u64,
+) -> SigningOutput {
+    let public_key = *key.verifying_key().as_bytes();
+    let payload = ThreadCreate {
+        thread_id: *thread_id.as_bytes(),
+        author: public_key,
+        room_slug: room_slug.to_string(),
+        title: title.to_string(),
+        link_url: link_url.map(str::to_string),
+        op_post_id: *op_post_id.as_bytes(),
+        created_at: created_at_ms,
+    };
+    let payload_bytes = SignedPayload::ThreadCreate(payload).encode();
+    let signature = key.sign(&payload_bytes).to_bytes().to_vec();
+    let canonical_hash: [u8; 32] = sha2::Sha256::digest(&payload_bytes).into();
+    SigningOutput {
+        payload: payload_bytes,
+        signature,
+        public_key,
+        canonical_hash,
+    }
+}
+
+/// Sign an `admin-rm` canonical payload with the instance signing key.
+///
+/// See [signed-payload-format.md] §5.2 and
+/// [federation-protocol.md] §10.4. Admin removals are *instance-signed*
+/// (not user-signed): the authority is the operator of the signing
+/// instance, expressed via the instance's long-lived signing key.
+///
+/// Takes `&InstanceKey` rather than the raw `&SigningKey` so the
+/// instance-key security boundary is not widened. [`InstanceKey::sign`]
+/// is the only privileged call needed to mint the signature.
+///
+/// `signing_instance` MUST equal the bare canonical domain whose
+/// signing key signs this object — the receiver re-derives it from
+/// `peers.instance_domain` and refuses on mismatch.
+pub fn sign_admin_removal_with_instance_key(
+    key: &InstanceKey,
+    post_id: &Uuid,
+    target_author: &[u8; 32],
+    signing_instance: &str,
+    created_at_ms: u64,
+    reason: Option<&str>,
+) -> SigningOutput {
+    let public_key = *key.public_bytes();
+    let payload = AdminRemoval {
+        post_id: *post_id.as_bytes(),
+        target_author: *target_author,
+        signing_instance: signing_instance.to_string(),
+        created_at: created_at_ms,
+        reason: reason.map(str::to_string),
+    };
+    let payload_bytes = SignedPayload::AdminRemoval(payload).encode();
+    let signature = key.sign(&payload_bytes).to_vec();
+    let canonical_hash: [u8; 32] = sha2::Sha256::digest(&payload_bytes).into();
+    SigningOutput {
+        payload: payload_bytes,
+        signature,
+        public_key,
+        canonical_hash,
+    }
+}
+
+/// Sign a `deactivate` canonical payload with an already-loaded key.
+///
+/// See [signed-payload-format.md] §5.11. Terminal authority over every
+/// signed object whose inner author key is the signer's public key.
+/// `created_at_ms` must be later than or equal to the `created_at` of
+/// every prior object by `user` for the §5.11 ordering rule to hold;
+/// callers should pass `chrono::Utc::now().timestamp_millis() as u64`.
+pub fn sign_deactivation_with_key(key: &SigningKey, created_at_ms: u64) -> SigningOutput {
+    let public_key = *key.verifying_key().as_bytes();
+    let payload = Deactivation {
+        user: public_key,
+        created_at: created_at_ms,
+    };
+    let payload_bytes = SignedPayload::Deactivation(payload).encode();
+    let signature = key.sign(&payload_bytes).to_bytes().to_vec();
+    let canonical_hash: [u8; 32] = sha2::Sha256::digest(&payload_bytes).into();
+    SigningOutput {
+        payload: payload_bytes,
+        signature,
+        public_key,
+        canonical_hash,
+    }
+}
+
 #[derive(Debug)]
 pub enum SignError {
     Db(sqlx::Error),
@@ -848,5 +952,163 @@ impl From<SignError> for crate::error::AppError {
             }
             SignError::InvalidSignature => AppError::code(ErrorCode::InvalidSignature),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Layer 0 round-trip coverage for the Pre-Phase-6 sign helpers
+    //! (`sign_thread_create_with_key`, `sign_admin_removal_with_instance_key`,
+    //! `sign_deactivation_with_key`). Each test signs a payload, parses
+    //! the canonical bytes back, asserts every bound field round-trips,
+    //! and verifies the Ed25519 signature against the signer's public
+    //! key — the same checks a receiver performs in §10 ingest.
+    use super::*;
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+    fn fixed_key_a() -> SigningKey {
+        SigningKey::from_bytes(&[0x11; 32])
+    }
+
+    fn fixed_key_b() -> SigningKey {
+        SigningKey::from_bytes(&[0x22; 32])
+    }
+
+    fn verify_sig(public_key: &[u8; 32], payload: &[u8], signature: &[u8]) {
+        let vk = VerifyingKey::from_bytes(public_key).expect("valid public key");
+        let sig_bytes: [u8; 64] = signature.try_into().expect("64-byte signature");
+        let sig = Signature::from_bytes(&sig_bytes);
+        vk.verify(payload, &sig).expect("signature verifies");
+    }
+
+    #[test]
+    fn thread_create_round_trips_through_canonical_bytes() {
+        let key = fixed_key_a();
+        let thread_uuid = Uuid::from_u128(0x1234_5678_9abc_def0_1234_5678_9abc_def0);
+        let op_uuid = Uuid::from_u128(0x0fed_cba9_8765_4321_0fed_cba9_8765_4321);
+        let title = "Hello fediverse";
+        let room_slug = "general";
+        let link = Some("https://example.invalid/post");
+        let created_at_ms: u64 = 1_700_000_000_000;
+
+        let out = sign_thread_create_with_key(
+            &key,
+            &thread_uuid,
+            room_slug,
+            title,
+            link,
+            &op_uuid,
+            created_at_ms,
+        );
+
+        // Signature verifies against the bound author key.
+        verify_sig(&out.public_key, &out.payload, &out.signature);
+        assert_eq!(out.public_key, *key.verifying_key().as_bytes());
+        // canonical_hash is exactly SHA-256(payload).
+        let recomputed: [u8; 32] = sha2::Sha256::digest(&out.payload).into();
+        assert_eq!(out.canonical_hash, recomputed);
+
+        // Parse the canonical bytes back; each bound field must equal
+        // the input value.
+        let parsed = SignedPayload::parse(&out.payload).expect("canonical parse");
+        let SignedPayload::ThreadCreate(tc) = parsed else {
+            panic!("expected ThreadCreate variant");
+        };
+        assert_eq!(tc.thread_id, *thread_uuid.as_bytes());
+        assert_eq!(tc.author, *key.verifying_key().as_bytes());
+        assert_eq!(tc.room_slug, room_slug);
+        assert_eq!(tc.title, title);
+        assert_eq!(tc.link_url.as_deref(), link);
+        assert_eq!(tc.op_post_id, *op_uuid.as_bytes());
+        assert_eq!(tc.created_at, created_at_ms);
+    }
+
+    #[test]
+    fn thread_create_without_link_omits_field() {
+        let key = fixed_key_a();
+        let out =
+            sign_thread_create_with_key(&key, &Uuid::nil(), "chatter", "", None, &Uuid::nil(), 0);
+        let parsed = SignedPayload::parse(&out.payload).expect("canonical parse");
+        let SignedPayload::ThreadCreate(tc) = parsed else {
+            panic!("expected ThreadCreate variant");
+        };
+        assert!(tc.link_url.is_none());
+        assert_eq!(tc.title, "");
+    }
+
+    #[test]
+    fn admin_removal_round_trips_under_instance_key() {
+        let signing = fixed_key_a();
+        let inst_pub = *signing.verifying_key().as_bytes();
+        let instance_key = InstanceKey::new(signing);
+
+        let target_author = *fixed_key_b().verifying_key().as_bytes();
+        let post_uuid = Uuid::from_u128(0xabcd_ef01_2345_6789_abcd_ef01_2345_6789);
+        let signing_instance = "instance.example.invalid";
+        let created_at_ms: u64 = 1_700_000_001_000;
+        let reason = Some("violates rule 4");
+
+        let out = sign_admin_removal_with_instance_key(
+            &instance_key,
+            &post_uuid,
+            &target_author,
+            signing_instance,
+            created_at_ms,
+            reason,
+        );
+
+        // Public key reported by helper is the instance key's public
+        // half — the same value a receiver looks up via peers row.
+        assert_eq!(out.public_key, inst_pub);
+        verify_sig(&out.public_key, &out.payload, &out.signature);
+
+        let parsed = SignedPayload::parse(&out.payload).expect("canonical parse");
+        let SignedPayload::AdminRemoval(ar) = parsed else {
+            panic!("expected AdminRemoval variant");
+        };
+        assert_eq!(ar.post_id, *post_uuid.as_bytes());
+        assert_eq!(ar.target_author, target_author);
+        assert_eq!(ar.signing_instance, signing_instance);
+        assert_eq!(ar.created_at, created_at_ms);
+        assert_eq!(ar.reason.as_deref(), reason);
+    }
+
+    #[test]
+    fn admin_removal_without_reason_round_trips() {
+        let instance_key = InstanceKey::new(fixed_key_a());
+        let out = sign_admin_removal_with_instance_key(
+            &instance_key,
+            &Uuid::nil(),
+            &[0u8; 32],
+            "x.invalid",
+            0,
+            None,
+        );
+        let parsed = SignedPayload::parse(&out.payload).expect("canonical parse");
+        let SignedPayload::AdminRemoval(ar) = parsed else {
+            panic!("expected AdminRemoval variant");
+        };
+        assert!(ar.reason.is_none());
+    }
+
+    #[test]
+    fn deactivation_round_trips_and_binds_signer_pubkey() {
+        let key = fixed_key_a();
+        let created_at_ms: u64 = 1_700_000_002_000;
+
+        let out = sign_deactivation_with_key(&key, created_at_ms);
+
+        // `user` field MUST be the signer's verifying key — that is
+        // the §5.11 binding that makes the object an account-wide
+        // erasure authority over everything signed by the same key.
+        assert_eq!(out.public_key, *key.verifying_key().as_bytes());
+        verify_sig(&out.public_key, &out.payload, &out.signature);
+
+        let parsed = SignedPayload::parse(&out.payload).expect("canonical parse");
+        let SignedPayload::Deactivation(d) = parsed else {
+            panic!("expected Deactivation variant");
+        };
+        assert_eq!(d.user, *key.verifying_key().as_bytes());
+        assert_eq!(d.created_at, created_at_ms);
     }
 }

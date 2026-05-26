@@ -200,6 +200,31 @@ pub async fn create_thread(
     )
     .await?;
 
+    // Co-sign a `thread-create` for the new thread (federation-protocol
+    // §10.1 / signed-payload-format.md §5.9). Receivers REQUIRE the OP
+    // `post-rev` and the thread-create as a pair — both objects defer
+    // each other once and converge after either arrives. Signed with
+    // the OP author's key (the user creating the thread) and bound to
+    // the same `created_at_ms` as the OP post-rev so the two paired
+    // objects share an identical timestamp on the wire.
+    let signed_thread = signing::sign_thread_create_with_key(
+        &signing_key,
+        &thread_uuid,
+        &slug,
+        &title,
+        link_url.as_deref(),
+        &post_uuid,
+        created_at_ms,
+    );
+    signing::store_signed_object(
+        &mut *tx,
+        "thread-create",
+        &signed_thread.payload,
+        &signed_thread.signature,
+        &signed_thread.canonical_hash,
+    )
+    .await?;
+
     tx.commit().await?;
 
     // Project the just-signed array into the response shape. The OP
