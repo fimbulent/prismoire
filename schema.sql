@@ -662,7 +662,9 @@ CREATE TABLE IF NOT EXISTS "peer_frontiers" (
     -- ISO-8601 timestamp of the last apply. Operator-visible only;
     -- not consulted by the routing path.
     updated_at TEXT NOT NULL
-                DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')), inbound_mode TEXT NOT NULL DEFAULT 'filtered'
+        CHECK (inbound_mode IN ('filtered', 'all')), outbound_mode TEXT NOT NULL DEFAULT 'filtered'
+        CHECK (outbound_mode IN ('filtered', 'all')),
 
     FOREIGN KEY (peer_pubkey) REFERENCES peers(instance_pubkey)
         ON DELETE CASCADE

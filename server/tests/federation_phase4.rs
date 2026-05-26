@@ -143,6 +143,7 @@ async fn announce_at_same_version_is_idempotent() {
         active_horizon_days: 0,
         content_filter: empty_filter_spec(),
         edge_origin_filter: empty_filter_spec(),
+        mode: Mode::Filtered,
     }
     .encode();
 
@@ -183,6 +184,7 @@ async fn delta_or_mask_updates_filter_bytes_and_version() {
         active_horizon_days: 0,
         content_filter: empty_filter_spec(),
         edge_origin_filter: empty_filter_spec(),
+        mode: Mode::Filtered,
     }
     .encode();
     let announce_resp = send_announce_envelope(&harness, "a", "b", &baseline).await;
@@ -197,6 +199,7 @@ async fn delta_or_mask_updates_filter_bytes_and_version() {
         new_version: 6,
         content_mask: Some(mask.clone()),
         edge_origin_mask: None,
+        mode: Mode::Filtered,
     }
     .encode();
     let delta_resp = send_delta_envelope(&harness, "a", "b", &delta_body).await;
@@ -232,6 +235,7 @@ async fn delta_with_stale_prev_version_returns_409_with_current() {
         active_horizon_days: 0,
         content_filter: empty_filter_spec(),
         edge_origin_filter: empty_filter_spec(),
+        mode: Mode::Filtered,
     }
     .encode();
     assert_eq!(
@@ -247,6 +251,7 @@ async fn delta_with_stale_prev_version_returns_409_with_current() {
         new_version: 11,
         content_mask: Some(vec![0u8; 8]),
         edge_origin_mask: None,
+        mode: Mode::Filtered,
     }
     .encode();
     let resp = send_delta_envelope(&harness, "a", "b", &delta).await;
@@ -286,6 +291,7 @@ async fn delta_without_prior_announce_returns_409_with_zero() {
         new_version: 1,
         content_mask: Some(vec![0u8; 8]),
         edge_origin_mask: None,
+        mode: Mode::Filtered,
     }
     .encode();
     let resp = send_delta_envelope(&harness, "a", "b", &delta).await;

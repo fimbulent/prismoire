@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT public_key AS \"public_key!: Vec<u8>\" FROM users WHERE home_instance IS NULL AND status = 'active' AND public_key IS NOT NULL AND length(public_key) = 32",
+  "describe": {
+    "columns": [
+      {
+        "name": "public_key!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f595893a82ac580820532c123ab71e5ce6efc397eea5070f3e4187fa7478ab7f"
+}

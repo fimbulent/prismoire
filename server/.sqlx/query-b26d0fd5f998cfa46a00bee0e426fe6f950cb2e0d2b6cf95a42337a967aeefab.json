@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT outbound_mode FROM peer_frontiers WHERE peer_pubkey = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "outbound_mode",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b26d0fd5f998cfa46a00bee0e426fe6f950cb2e0d2b6cf95a42337a967aeefab"
+}

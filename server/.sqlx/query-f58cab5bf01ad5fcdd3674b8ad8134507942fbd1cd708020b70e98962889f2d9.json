@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE peer_frontiers SET applied_version = ?, cf_bytes = ?, ef_bytes = ?, cursor = ?, inbound_mode = ?, outbound_mode = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE peer_pubkey = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "f58cab5bf01ad5fcdd3674b8ad8134507942fbd1cd708020b70e98962889f2d9"
+}

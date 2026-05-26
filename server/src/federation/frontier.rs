@@ -50,6 +50,7 @@ use crate::federation::errors::{bad_request, conflict, internal_error, not_found
 use crate::federation::identity::CBOR_CONTENT_TYPE;
 use crate::federation::instance_key::InstanceKey;
 use crate::federation::middleware::VerifiedBody;
+use crate::federation::routing::{self, Mode};
 use crate::federation::transport::{FederationTransport, PeerId, TransportError};
 use crate::signed::FedEnvelope;
 use crate::trust::TrustGraph;
@@ -260,6 +261,14 @@ pub struct FrontierAnnounce {
     pub content_filter: FilterSpec,
     /// 2-hop edge-origin closure.
     pub edge_origin_filter: FilterSpec,
+    /// §7.2 routing mode the sender currently uses for the
+    /// `sender → receiver` direction (Phase 6.5 fold-in: piggybacked
+    /// on the frontier announce instead of the full §7.2 POST /mode
+    /// flow). The receiver stores this as `inbound_mode` for the
+    /// sender peer. Absent on the wire is decoded as
+    /// [`Mode::Filtered`] — the conservative §7.2 default for any
+    /// peer whose build predates this field.
+    pub mode: Mode,
 }
 
 impl FrontierAnnounce {
@@ -285,6 +294,10 @@ impl FrontierAnnounce {
                 Value::Text("edge_origin_filter".into()),
                 self.edge_origin_filter.to_cbor_value(),
             ),
+            (
+                Value::Text("mode".into()),
+                Value::Text(self.mode.as_db_str().into()),
+            ),
         ]);
         let mut buf = Vec::with_capacity(256);
         ciborium::ser::into_writer(&value, &mut buf).expect("ciborium ser infallible");
@@ -302,6 +315,10 @@ impl FrontierAnnounce {
         let mut active_horizon_days: Option<u32> = None;
         let mut content_filter: Option<FilterSpec> = None;
         let mut edge_origin_filter: Option<FilterSpec> = None;
+        // §7.2 default — a sender whose build predates Phase 6.5
+        // omits the field; per the conservative-default rule we read
+        // that as `filtered`.
+        let mut mode: Mode = Mode::Filtered;
         for (k, v) in entries {
             let key = match k {
                 Value::Text(s) => s,
@@ -336,6 +353,13 @@ impl FrontierAnnounce {
                 "edge_origin_filter" => {
                     edge_origin_filter = Some(FilterSpec::from_cbor_value(v)?);
                 }
+                "mode" => {
+                    if let Value::Text(s) = v {
+                        mode = Mode::from_db_str(&s);
+                    } else {
+                        return None;
+                    }
+                }
                 _ => {}
             }
         }
@@ -345,6 +369,7 @@ impl FrontierAnnounce {
             active_horizon_days: active_horizon_days?,
             content_filter: content_filter?,
             edge_origin_filter: edge_origin_filter?,
+            mode,
         })
     }
 }
@@ -360,6 +385,13 @@ pub struct FrontierDelta {
     pub content_mask: Option<Vec<u8>>,
     /// Optional edge-origin OR-mask; `m_e / 8` bytes when present.
     pub edge_origin_mask: Option<Vec<u8>>,
+    /// §7.2 routing mode the sender currently uses for the
+    /// `sender → receiver` direction. Same Phase 6.5 fold-in
+    /// semantics as [`FrontierAnnounce::mode`]: receiver stores this
+    /// as `inbound_mode` for the sender peer and independently
+    /// recomputes the local `outbound_mode` from coverage. Absent on
+    /// the wire decodes to [`Mode::Filtered`].
+    pub mode: Mode,
 }
 
 impl FrontierDelta {
@@ -387,6 +419,10 @@ impl FrontierDelta {
                 Value::Integer(Integer::from(self.new_version)),
             ),
             (Value::Text("masks".into()), Value::Map(mask_entries)),
+            (
+                Value::Text("mode".into()),
+                Value::Text(self.mode.as_db_str().into()),
+            ),
         ]);
         let mut buf = Vec::with_capacity(128);
         ciborium::ser::into_writer(&value, &mut buf).expect("ciborium ser infallible");
@@ -403,6 +439,7 @@ impl FrontierDelta {
         let mut new_version: Option<u64> = None;
         let mut content_mask: Option<Vec<u8>> = None;
         let mut edge_origin_mask: Option<Vec<u8>> = None;
+        let mut mode: Mode = Mode::Filtered;
         for (k, v) in entries {
             let key = match k {
                 Value::Text(s) => s,
@@ -444,6 +481,13 @@ impl FrontierDelta {
                         }
                     }
                 }
+                "mode" => {
+                    if let Value::Text(s) = v {
+                        mode = Mode::from_db_str(&s);
+                    } else {
+                        return None;
+                    }
+                }
                 _ => {}
             }
         }
@@ -452,6 +496,7 @@ impl FrontierDelta {
             new_version: new_version?,
             content_mask,
             edge_origin_mask,
+            mode,
         })
     }
 }
@@ -717,6 +762,33 @@ pub async fn compute_local_frontier(
     })
 }
 
+/// Fetch the raw 32-byte `public_key` of every local active user.
+/// Used by the §7.2 mode-classification path on
+/// `handle_frontier_announce` / `handle_frontier_delta` to compute
+/// `coverage(sender.content_filter, our local users)` without
+/// running the full trust-graph closure. Skips rows whose
+/// `public_key` is NULL or not exactly 32 bytes — those keys cannot
+/// participate in routing.
+async fn fetch_local_user_pubkeys(db: &SqlitePool) -> Result<Vec<[u8; 32]>, sqlx::Error> {
+    let rows = sqlx::query!(
+        "SELECT public_key AS \"public_key!: Vec<u8>\" \
+         FROM users \
+         WHERE home_instance IS NULL \
+           AND status = 'active' \
+           AND public_key IS NOT NULL \
+           AND length(public_key) = 32",
+    )
+    .fetch_all(db)
+    .await?;
+    let mut keys = Vec::with_capacity(rows.len());
+    for row in rows {
+        if let Ok(arr) = <[u8; 32]>::try_from(row.public_key.as_slice()) {
+            keys.push(arr);
+        }
+    }
+    Ok(keys)
+}
+
 /// Resolve a set of user UUIDs to their `public_key` BLOBs. Skips
 /// rows where `public_key` is NULL or not exactly 32 bytes — those
 /// can't be used as routing keys regardless.
@@ -843,9 +915,15 @@ pub async fn handle_frontier_announce(
     // state change; the spec calls for them to be idempotent rather
     // than rejected, so we look up the existing row and short-circuit
     // a same-version replay as an OK with the current cursor.
+    //
+    // The `outbound_mode` column is read for §7.2 hysteresis on the
+    // mode classification we re-run below: a pair already in `All`
+    // demotes only when coverage drops below LOW_THRESHOLD, while a
+    // pair in `Filtered` promotes only at HIGH_THRESHOLD.
     let sender_slice: &[u8] = &envelope.sender;
     let existing = match sqlx::query!(
-        "SELECT applied_version, cursor FROM peer_frontiers WHERE peer_pubkey = ?",
+        "SELECT applied_version, cursor, outbound_mode \
+         FROM peer_frontiers WHERE peer_pubkey = ?",
         sender_slice,
     )
     .fetch_optional(&state.db)
@@ -857,6 +935,11 @@ pub async fn handle_frontier_announce(
             return internal_error();
         }
     };
+
+    let prior_outbound_mode = existing
+        .as_ref()
+        .map(|row| Mode::from_db_str(&row.outbound_mode))
+        .unwrap_or(Mode::Filtered);
 
     if let Some(ref row) = existing {
         let applied: u64 = row.applied_version as u64;
@@ -880,6 +963,22 @@ pub async fn handle_frontier_announce(
         Ok(f) => f,
         Err(code) => return bad_request(code),
     };
+
+    // §7.2 outbound-mode classification: coverage of the sender's
+    // content_filter against *our* local-user pubkeys decides what
+    // mode we use to send to them. Hysteresis uses the prior mode
+    // pulled above so a pair already in `All` doesn't oscillate just
+    // because coverage briefly dipped into [LOW, HIGH).
+    let local_keys = match fetch_local_user_pubkeys(&state.db).await {
+        Ok(k) => k,
+        Err(e) => {
+            tracing::error!(error = %e, "db error reading local users for mode classification");
+            return internal_error();
+        }
+    };
+    let new_outbound_mode = routing::classify_mode(prior_outbound_mode, &content, &local_keys);
+    let inbound_mode_str = parsed.mode.as_db_str();
+    let outbound_mode_str = new_outbound_mode.as_db_str();
 
     // Mint a server-side cursor for this apply. Same shape as
     // LocalFrontier — opaque to the peer.
@@ -907,12 +1006,12 @@ pub async fn handle_frontier_announce(
              peer_pubkey, applied_version, epoch_start, active_horizon_days, \
              cf_family, cf_k, cf_m, cf_n_est, cf_fpr_target, cf_bytes, \
              ef_family, ef_k, ef_m, ef_n_est, ef_fpr_target, ef_bytes, \
-             cursor, updated_at \
+             cursor, inbound_mode, outbound_mode, updated_at \
          ) VALUES ( \
              ?, ?, ?, ?, \
              ?, ?, ?, ?, ?, ?, \
              ?, ?, ?, ?, ?, ?, \
-             ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+             ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
          ) \
          ON CONFLICT(peer_pubkey) DO UPDATE SET \
              applied_version = excluded.applied_version, \
@@ -931,6 +1030,8 @@ pub async fn handle_frontier_announce(
              ef_fpr_target = excluded.ef_fpr_target, \
              ef_bytes = excluded.ef_bytes, \
              cursor = excluded.cursor, \
+             inbound_mode = excluded.inbound_mode, \
+             outbound_mode = excluded.outbound_mode, \
              updated_at = excluded.updated_at",
         sender_slice,
         version_i,
@@ -949,6 +1050,8 @@ pub async fn handle_frontier_announce(
         ef_fpr,
         ef_bytes_slice,
         cursor_slice,
+        inbound_mode_str,
+        outbound_mode_str,
     )
     .execute(&state.db)
     .await;
@@ -1000,7 +1103,8 @@ pub async fn handle_frontier_delta(
     let row = match sqlx::query!(
         "SELECT applied_version, epoch_start, active_horizon_days, \
                 cf_family, cf_k, cf_m, cf_n_est, cf_fpr_target, cf_bytes, \
-                ef_family, ef_k, ef_m, ef_n_est, ef_fpr_target, ef_bytes \
+                ef_family, ef_k, ef_m, ef_n_est, ef_fpr_target, ef_bytes, \
+                outbound_mode \
          FROM peer_frontiers WHERE peer_pubkey = ?",
         sender_slice,
     )
@@ -1027,11 +1131,20 @@ pub async fn handle_frontier_delta(
         return delta_version_conflict(stored_version);
     }
 
+    let prior_outbound_mode = Mode::from_db_str(&row.outbound_mode);
+    // Preserve the existing content-filter sizing for the §7.2
+    // coverage reclassification below. `k` / `m` are invariant under
+    // OR-mask apply (delta only updates bytes, not sizing) so we
+    // round-trip them through the bloom builder unchanged.
+    let cf_k_existing = row.cf_k;
+    let cf_m_existing = row.cf_m;
+    let cf_n_existing = row.cf_n_est;
+    let cf_fpr_existing = row.cf_fpr_target;
+
     // Apply each supplied mask. Either filter may be absent on the
-    // wire; absence means "leave this filter alone." `k` / `m` are
-    // invariant under OR-mask apply (delta only updates bytes, not
-    // sizing), so we don't re-read them — the table's CHECK on
-    // `length(cf_bytes) = m/8` already enforced shape at insert.
+    // wire; absence means "leave this filter alone." The table's
+    // CHECK on `length(cf_bytes) = m/8` already enforced shape at
+    // insert.
     let mut content_bytes = row.cf_bytes;
     if let Some(mask) = &parsed.content_mask {
         if mask.len() != content_bytes.len() {
@@ -1051,6 +1164,70 @@ pub async fn handle_frontier_delta(
         }
     }
 
+    // §7.2 reclassification on delta apply. OR-mask additions can
+    // only raise coverage of the content filter against our local
+    // users, so a delta can promote `Filtered → All` but never
+    // demote on its own; hysteresis against the persisted
+    // `outbound_mode` keeps an already-`All` pair stable.
+    let cf_k_u = match u32::try_from(cf_k_existing) {
+        Ok(v) => v,
+        Err(_) => {
+            tracing::error!("stored cf_k out of range; cannot reclassify mode");
+            return internal_error();
+        }
+    };
+    let cf_m_u = match u32::try_from(cf_m_existing) {
+        Ok(v) => v,
+        Err(_) => {
+            tracing::error!("stored cf_m out of range; cannot reclassify mode");
+            return internal_error();
+        }
+    };
+    let cf_n_u = match u64::try_from(cf_n_existing) {
+        Ok(v) => v,
+        Err(_) => {
+            tracing::error!("stored cf_n_est out of range; cannot reclassify mode");
+            return internal_error();
+        }
+    };
+    let new_outbound_mode = match BloomFilter::from_parts(
+        cf_k_u,
+        cf_m_u,
+        cf_n_u,
+        cf_fpr_existing as f32,
+        content_bytes.clone(),
+    ) {
+        Ok(cf) => {
+            let local_keys = match fetch_local_user_pubkeys(&state.db).await {
+                Ok(k) => k,
+                Err(e) => {
+                    tracing::error!(error = %e, "db error reading local users for mode classification");
+                    return internal_error();
+                }
+            };
+            routing::classify_mode(prior_outbound_mode, &cf, &local_keys)
+        }
+        Err(e) => {
+            // The bytes we just merged failed bloom validation. This
+            // shouldn't happen — sizing didn't change and the CHECK
+            // constraint enforces byte-length — so an `error!` here is
+            // a serious-internal-invariant signal worth paging on, not
+            // a `warn!`. We still keep the prior mode (rather than
+            // refusing the delta apply): the merged bytes themselves
+            // are valid OR-mask additions to an already-validated
+            // filter; only the mode reclassification side-channel
+            // failed, and falling back to `prior_outbound_mode` is the
+            // most conservative choice.
+            tracing::error!(
+                error = ?e,
+                "post-delta bloom reconstruction failed; keeping prior outbound_mode"
+            );
+            prior_outbound_mode
+        }
+    };
+    let inbound_mode_str = parsed.mode.as_db_str();
+    let outbound_mode_str = new_outbound_mode.as_db_str();
+
     let new_version_i = parsed.new_version as i64;
     let cursor = encode_cursor(parsed.new_version, row.epoch_start as u64);
     let cursor_slice: &[u8] = &cursor;
@@ -1059,12 +1236,15 @@ pub async fn handle_frontier_delta(
     let update = sqlx::query!(
         "UPDATE peer_frontiers \
          SET applied_version = ?, cf_bytes = ?, ef_bytes = ?, cursor = ?, \
+             inbound_mode = ?, outbound_mode = ?, \
              updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
          WHERE peer_pubkey = ?",
         new_version_i,
         cf_slice,
         ef_slice,
         cursor_slice,
+        inbound_mode_str,
+        outbound_mode_str,
         sender_slice,
     )
     .execute(&state.db)
@@ -1184,12 +1364,39 @@ pub async fn operator_announce_frontier(
 ) -> Result<u64, AnnounceError> {
     let frontier = refresh_local_frontier(state).await?;
 
+    // §7.2 mode signal: stamp our currently-confirmed `outbound_mode`
+    // for this peer into the announce body. Read from
+    // `peer_frontiers` if we have a row for them; otherwise default
+    // to `Filtered` ("fresh peering never starts in all-mode"). The
+    // mode-change wire signal piggybacks on the announce instead of
+    // the dedicated §7.2 POST /mode flow — see Phase 6.5 deviation
+    // note in `docs/federation-impl-plan.md`.
+    let peer_slice: &[u8] = &peer_pubkey;
+    let our_outbound_mode = match sqlx::query!(
+        "SELECT outbound_mode FROM peer_frontiers WHERE peer_pubkey = ?",
+        peer_slice,
+    )
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(Some(r)) => Mode::from_db_str(&r.outbound_mode),
+        Ok(None) => Mode::Filtered,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "db error reading outbound_mode; defaulting to Filtered on announce"
+            );
+            Mode::Filtered
+        }
+    };
+
     let announce = FrontierAnnounce {
         version: frontier.version,
         epoch_start: frontier.epoch_start,
         active_horizon_days: NO_TRIMMING,
         content_filter: FilterSpec::from_bloom(&frontier.content_filter),
         edge_origin_filter: FilterSpec::from_bloom(&frontier.edge_origin_filter),
+        mode: our_outbound_mode,
     };
     let body_bytes = announce.encode();
 
@@ -1246,10 +1453,41 @@ mod tests {
             active_horizon_days: 0,
             content_filter: sample_filter(),
             edge_origin_filter: sample_filter(),
+            mode: Mode::All,
         };
         let bytes = a.encode();
         let decoded = FrontierAnnounce::decode(&bytes).expect("decode");
         assert_eq!(decoded, a);
+    }
+
+    #[test]
+    fn announce_missing_mode_decodes_as_filtered() {
+        // Forward-compat: a peer whose build predates Phase 6.5
+        // omits the `mode` field; the §7.2 conservative default is
+        // `filtered`.
+        let value = Value::Map(vec![
+            (Value::Text("version".into()), Value::Integer(7.into())),
+            (
+                Value::Text("epoch_start".into()),
+                Value::Integer(1_700_000_000_000u64.into()),
+            ),
+            (
+                Value::Text("active_horizon_days".into()),
+                Value::Integer(0.into()),
+            ),
+            (
+                Value::Text("content_filter".into()),
+                sample_filter().to_cbor_value(),
+            ),
+            (
+                Value::Text("edge_origin_filter".into()),
+                sample_filter().to_cbor_value(),
+            ),
+        ]);
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&value, &mut buf).expect("ser");
+        let decoded = FrontierAnnounce::decode(&buf).expect("decode");
+        assert_eq!(decoded.mode, Mode::Filtered);
     }
 
     #[test]
@@ -1259,6 +1497,7 @@ mod tests {
             new_version: 42,
             content_mask: Some(vec![0u8; 128]),
             edge_origin_mask: Some(vec![0xFFu8; 128]),
+            mode: Mode::All,
         };
         let bytes = d.encode();
         let decoded = FrontierDelta::decode(&bytes).expect("decode");
@@ -1272,6 +1511,7 @@ mod tests {
             new_version: 42,
             content_mask: Some(vec![0xAAu8; 128]),
             edge_origin_mask: None,
+            mode: Mode::Filtered,
         };
         let bytes = d.encode();
         let decoded = FrontierDelta::decode(&bytes).expect("decode");

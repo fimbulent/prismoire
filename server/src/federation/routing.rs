@@ -7,10 +7,13 @@
 //! 1. **Per-pair routing mode** ([`Mode`]) — the §7.2 `filtered` /
 //!    `all` flag the sender uses to decide whether to consult the
 //!    peer's interest filter at all. The mode is local to the sender;
-//!    peers don't negotiate it. Today this module owns the in-memory
-//!    representation and the coverage-threshold check; the on-the-wire
-//!    `mode-promote` / `mode-demote` protocol (§7.2 mode-change
-//!    messages) is Phase 5+ work.
+//!    peers don't negotiate it. This module owns the in-memory
+//!    representation and the coverage-threshold check; Phase 6.5
+//!    persists the per-direction mode on `peer_frontiers`
+//!    (`inbound_mode` / `outbound_mode`) and piggybacks the wire
+//!    signal on `FrontierAnnounce` / `FrontierDelta` rather than
+//!    the dedicated §7.2 POST /mode protocol (see
+//!    `docs/federation-impl-plan.md` Phase 6.5 deviation note).
 //!
 //! 2. **Interest-filter dispatch** ([`ForwardingClass`],
 //!    [`peers_interested_in`]) — the §7.4 routing rule that maps a
@@ -37,12 +40,10 @@ use crate::federation::bloom::BloomFilter;
 /// §7.2 per-pair routing mode for a single direction (sender → peer).
 ///
 /// The mode is *sender-local*: A's view of mode(A→B) and B's view of
-/// mode(B→A) are independent values. Today we don't persist this —
-/// every direction starts in [`Mode::Filtered`] per §7.2 "fresh
-/// peering never starts in all-mode" and the mode-change wire protocol
-/// (§7.2 mode-promote / mode-demote) is not yet implemented. Once
-/// Phase 5+ ships the wire surface this enum becomes the value stored
-/// in a `peer_routing_mode` table.
+/// mode(B→A) are independent values. Phase 6.5 persists the
+/// per-direction modes on `peer_frontiers` (`inbound_mode`,
+/// `outbound_mode`); see [`Mode::as_db_str`] / [`Mode::from_db_str`]
+/// for the on-disk representation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     /// Consult the peer's interest filter on every outbound object.
@@ -50,10 +51,37 @@ pub enum Mode {
     /// the peer's appropriate filter are not enqueued for that peer.
     Filtered,
     /// Skip the filter check entirely and unconditionally push every
-    /// locally-routed object. Reserved for high-overlap pairs that
-    /// crossed [`HIGH_THRESHOLD`]; today no pair ever enters this
-    /// mode because the wire protocol that flips it is Phase 5+.
+    /// locally-routed object. Per §7.2 a direction is promoted to
+    /// `All` once the sender's local coverage of the receiver's
+    /// content filter crosses [`HIGH_THRESHOLD`].
     All,
+}
+
+impl Mode {
+    /// Canonical wire / on-disk string. Matches the CHECK constraint
+    /// on `peer_frontiers.inbound_mode` / `outbound_mode` and the
+    /// values used by the §7.2 wire field on `FrontierAnnounce` /
+    /// `FrontierDelta`.
+    pub fn as_db_str(self) -> &'static str {
+        match self {
+            Mode::Filtered => "filtered",
+            Mode::All => "all",
+        }
+    }
+
+    /// Parse a value stored in `peer_frontiers.inbound_mode` /
+    /// `outbound_mode` or received over the wire. Unknown strings
+    /// fall back to [`Mode::Filtered`] — the §7.2 conservative
+    /// default — and the caller is responsible for logging if the
+    /// drop matters (a CHECK constraint blocks the DB path; only
+    /// inbound wire bodies and forward-compat probes can reach this
+    /// branch).
+    pub fn from_db_str(s: &str) -> Self {
+        match s {
+            "all" => Mode::All,
+            _ => Mode::Filtered,
+        }
+    }
 }
 
 /// §7.5 per-object forwarding fanout cap. An object is forwarded to
@@ -129,21 +157,26 @@ impl ForwardingClass {
 
 /// One candidate peer to deliver an object to.
 ///
-/// The forwarder loop (Phase 5+) consumes this to mint the outbound
-/// envelope and update the dedup-LRU `forwarded_to` bitset. Carries
-/// the peer's instance pubkey (the on-the-wire identity used by
-/// `FederationTransport::request`) and the mode the sender currently
-/// uses for that direction — the mode is informational here; the
-/// filter check has already been resolved by [`peers_interested_in`].
+/// The forwarder loop consumes this to mint the outbound envelope and
+/// update the dedup-LRU `forwarded_to` bitset. Carries the peer's
+/// instance pubkey (the on-the-wire identity used by
+/// `FederationTransport::request`) and the persisted `outbound_mode`
+/// the sender uses for that direction. The mode is *load-bearing* in
+/// [`peers_interested_in`]: candidates with [`Mode::All`] reach this
+/// struct without a bloom-membership check (§7.2 short-circuit);
+/// candidates with [`Mode::Filtered`] only reach it after `key(obj)`
+/// passed the per-class filter test.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerRouting {
     /// The peer's instance signing key — the `PeerId` the federation
     /// transport routes against and the recipient of the outbound
     /// envelope.
     pub instance_pubkey: [u8; 32],
-    /// Direction-mode the sender currently uses for `self → peer`.
-    /// Always [`Mode::Filtered`] today; reserved for the Phase 5+
-    /// promote wire flow.
+    /// Direction-mode the sender currently uses for `self → peer`
+    /// (read from `peer_frontiers.outbound_mode`). When `All` the
+    /// candidate is included regardless of bloom membership; when
+    /// `Filtered` the candidate was admitted by the `key(obj)`
+    /// membership check.
     pub mode: Mode,
 }
 
@@ -165,15 +198,19 @@ pub struct PeerRouting {
 /// `from_parts` is the canonical validator and its rejection means
 /// the row is unusable for routing regardless.
 ///
-/// Every returned [`PeerRouting`] currently carries
-/// [`Mode::Filtered`]. The `peer_frontiers` row does not yet store
-/// the per-direction mode and the §7.2 promote/demote wire signal is
-/// reserved for Phase 5+; until then this function does not surface
-/// `All`-mode peers even if they would short-circuit the filter
-/// check. That is conservative — a missed `All`-mode peer falls back
-/// to the pull-backfill path, which is correctness-preserving by
-/// construction (false negatives in routing are allowed; false
-/// positives only waste bandwidth).
+/// When the persisted `peer_frontiers.outbound_mode` is `all` for a
+/// peer (i.e. the §7.2 detection rule has promoted this direction),
+/// the bloom-membership check is short-circuited and the peer is
+/// included unconditionally. The hysteresis band (`Mode::All` holds
+/// down to [`LOW_THRESHOLD`] = 0.60) means an `All`-mode peer may
+/// briefly receive objects whose `key(obj)` would have missed a
+/// fresh filter probe; that over-delivery is the deliberate §7.2
+/// trade-off (skip the per-object hash work in the common case where
+/// almost everything would pass anyway, accept some extra fanout
+/// while coverage decays toward [`LOW_THRESHOLD`] before the row
+/// flips back). The conservative `Filtered` default applies if the
+/// frontier row was inserted before Phase 6.5 or if detection has
+/// never crossed [`HIGH_THRESHOLD`].
 pub async fn peers_interested_in(
     state: &Arc<AppState>,
     class: ForwardingClass,
@@ -188,7 +225,8 @@ pub async fn peers_interested_in(
                 f.ef_k AS \"ef_k?: i64\", f.ef_m AS \"ef_m?: i64\", \
                 f.ef_n_est AS \"ef_n_est?: i64\", \
                 f.ef_fpr_target AS \"ef_fpr_target?: f64\", \
-                f.ef_bytes AS \"ef_bytes?: Vec<u8>\" \
+                f.ef_bytes AS \"ef_bytes?: Vec<u8>\", \
+                f.outbound_mode AS \"outbound_mode?: String\" \
          FROM peers p \
          LEFT JOIN peer_frontiers f ON f.peer_pubkey = p.instance_pubkey \
          WHERE p.status = 'active'",
@@ -225,11 +263,24 @@ pub async fn peers_interested_in(
         ) else {
             continue;
         };
-        let filter = class.select_filter(&cf, &ef);
-        if filter.contains(key) {
+        let outbound_mode = row
+            .outbound_mode
+            .as_deref()
+            .map(Mode::from_db_str)
+            .unwrap_or(Mode::Filtered);
+        // §7.2: All-mode skips the bloom check for this direction.
+        // Filtered falls back to the per-class membership test.
+        let admitted = match outbound_mode {
+            Mode::All => true,
+            Mode::Filtered => {
+                let filter = class.select_filter(&cf, &ef);
+                filter.contains(key)
+            }
+        };
+        if admitted {
             out.push(PeerRouting {
                 instance_pubkey: pubkey,
-                mode: Mode::Filtered,
+                mode: outbound_mode,
             });
         }
     }
@@ -271,11 +322,10 @@ fn build_filter(
 }
 
 /// §7.2 mode classification given a peer's `content_filter` and the
-/// local user pubkeys. Returns the mode this sender *would* use for
-/// this direction if it were ready to apply the §7.2 wire protocol.
-/// Today the result is purely informational (no caller flips a
-/// persisted mode based on it); Phase 5+ wires it into the
-/// mode-promote / mode-demote handshake.
+/// local user pubkeys. Returns the mode this sender should now use
+/// for the `sender → peer` direction, applied by the receiver-side
+/// handlers in `handle_frontier_announce` / `handle_frontier_delta`
+/// and persisted on `peer_frontiers.outbound_mode` (Phase 6.5).
 ///
 /// `current_mode` exists so the hysteresis check is correct: a pair
 /// in `Filtered` mode crosses to `All` only when coverage ≥
@@ -283,11 +333,24 @@ fn build_filter(
 /// `Filtered` only when coverage < [`LOW_THRESHOLD`]. Without the
 /// hysteresis branch a pair sitting at exactly 0.79 would oscillate
 /// modes every frontier refresh.
+///
+/// **Empty-local-users guard.** [`BloomFilter::coverage`] returns
+/// `1.0` over an empty key set (vacuously: all zero of the zero
+/// supplied keys hit). Without an early return that would promote
+/// every peer of a fresh-bootstrap instance to `All` on their first
+/// announce, violating §7.2's "fresh peering never starts in
+/// all-mode." When `local_user_keys` is empty we preserve
+/// `current_mode` so the conservative `Filtered` default that
+/// every row starts in stays untouched until there's actually a
+/// coverage measurement to act on.
 pub fn classify_mode(
     current_mode: Mode,
     peer_content_filter: &BloomFilter,
     local_user_keys: &[[u8; 32]],
 ) -> Mode {
+    if local_user_keys.is_empty() {
+        return current_mode;
+    }
     let coverage = peer_content_filter.coverage(local_user_keys);
     match current_mode {
         Mode::Filtered if coverage >= HIGH_THRESHOLD => Mode::All,
@@ -344,6 +407,29 @@ mod tests {
         let empty = BloomFilter::new_empty(7, 1024, 0, 0.01).unwrap();
         let alice = [1u8; 32];
         assert_eq!(classify_mode(Mode::All, &empty, &[alice]), Mode::Filtered);
+    }
+
+    #[test]
+    fn classify_empty_local_users_preserves_current_mode() {
+        // Regression for the bootstrap pitfall: BloomFilter::coverage
+        // returns 1.0 over an empty key set, which would spuriously
+        // promote every fresh-instance peer to All on first announce.
+        // Guard returns `current_mode` so the conservative `Filtered`
+        // default a fresh row carries is preserved.
+        let f = BloomFilter::new_empty(7, 1024, 0, 0.01).unwrap();
+        assert_eq!(
+            classify_mode(Mode::Filtered, &f, &[]),
+            Mode::Filtered,
+            "empty local-user set on a Filtered pair must NOT promote to All"
+        );
+        // Symmetry: an `All`-mode pair with empty local users also
+        // holds (don't demote on no signal either; wait for a real
+        // coverage measurement).
+        assert_eq!(
+            classify_mode(Mode::All, &f, &[]),
+            Mode::All,
+            "empty local-user set on an All pair must NOT demote"
+        );
     }
 
     #[test]

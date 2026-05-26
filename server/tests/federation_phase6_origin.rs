@@ -31,6 +31,7 @@ use axum::http::{Method, StatusCode};
 use http::Request;
 use prismoire_server::federation::bloom::BloomFilter;
 use prismoire_server::federation::frontier::{FilterSpec, FrontierAnnounce};
+use prismoire_server::federation::routing::Mode;
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
 
@@ -53,6 +54,7 @@ fn announce_all_ones() -> FrontierAnnounce {
         active_horizon_days: 0,
         content_filter: FilterSpec::from_bloom(&BloomFilter::all_ones_sentinel()),
         edge_origin_filter: FilterSpec::from_bloom(&BloomFilter::all_ones_sentinel()),
+        mode: Mode::Filtered,
     }
 }
 

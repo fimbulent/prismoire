@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT applied_version, epoch_start, active_horizon_days, cf_family, cf_k, cf_m, cf_n_est, cf_fpr_target, cf_bytes, ef_family, ef_k, ef_m, ef_n_est, ef_fpr_target, ef_bytes FROM peer_frontiers WHERE peer_pubkey = ?",
+  "query": "SELECT applied_version, epoch_start, active_horizon_days, cf_family, cf_k, cf_m, cf_n_est, cf_fpr_target, cf_bytes, ef_family, ef_k, ef_m, ef_n_est, ef_fpr_target, ef_bytes, outbound_mode FROM peer_frontiers WHERE peer_pubkey = ?",
   "describe": {
     "columns": [
       {
@@ -77,6 +77,11 @@
         "name": "ef_bytes",
         "ordinal": 14,
         "type_info": "Blob"
+      },
+      {
+        "name": "outbound_mode",
+        "ordinal": 15,
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -97,8 +102,9 @@
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "8dbb4a33bf771084cc330f64a4d0c50f479e8d6b8c120431b08868dd5ec11748"
+  "hash": "7ed58db69f90667254857317a7c17b77b09daadc57cafffec2631d6dfa6b24a5"
 }

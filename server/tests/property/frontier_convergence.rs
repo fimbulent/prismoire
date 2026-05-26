@@ -68,6 +68,7 @@ use ed25519_dalek::SigningKey;
 use http::{Method, StatusCode};
 use prismoire_server::federation::bloom::BloomFilter;
 use prismoire_server::federation::frontier::{FilterSpec, FrontierAnnounce};
+use prismoire_server::federation::routing::Mode;
 use prismoire_server::signed::TrustStance;
 use prismoire_server::signing::sign_trust_edge_with_key;
 use rand::SeedableRng;
@@ -130,6 +131,7 @@ fn announce_with_edge_origin_keys(interested_keys: &[[u8; 32]], version: u64) ->
         active_horizon_days: 0,
         content_filter: FilterSpec::from_bloom(&BloomFilter::all_ones_sentinel()),
         edge_origin_filter: FilterSpec::from_bloom(&edge),
+        mode: Mode::Filtered,
     }
 }
 
