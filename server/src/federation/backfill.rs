@@ -408,25 +408,38 @@ pub async fn handle_edges_backfill(
 
     // Honest "we asked for limit+1 to detect more pages" pagination.
     let has_more = (rows.len() as i64) > limit as i64;
-    let page_rows: Vec<ChainRow> = rows
-        .into_iter()
-        .take(limit as usize)
-        .filter_map(|row| {
-            // payload is `Option<Vec<u8>>` because of the schema
-            // type, but the WHERE clause filtered IS NOT NULL — so
-            // `take` here is safe. A None at this point is a real
-            // race (a concurrent erasure landed between query and
-            // map) and we skip silently rather than crash.
-            let payload = row.payload?;
-            let canonical_hash: [u8; 32] = row.canonical_hash.as_slice().try_into().ok()?;
-            Some(ChainRow {
-                payload,
-                signature: row.signature,
-                created_at: row.created_at,
-                canonical_hash,
-            })
-        })
-        .collect();
+    let mut page_rows: Vec<ChainRow> = Vec::with_capacity(limit as usize);
+    for row in rows.into_iter().take(limit as usize) {
+        // payload is `Option<Vec<u8>>` because of the schema type, but
+        // the WHERE clause filtered IS NOT NULL — so a None here is a
+        // real race (a concurrent erasure landed between query and
+        // map) and we skip silently rather than crash.
+        let Some(payload) = row.payload else {
+            continue;
+        };
+        // canonical_hash is a 32-byte BLOB by schema CHECK. A length
+        // mismatch is a corrupted DB row, not a recoverable condition:
+        // silently skipping would advance the cursor past the row that
+        // *did* fit and re-encounter the corrupt row on every page,
+        // starving the requesting peer. Fail loud so an operator
+        // notices the invariant violation.
+        let canonical_hash: [u8; 32] = match row.canonical_hash.as_slice().try_into() {
+            Ok(h) => h,
+            Err(_) => {
+                tracing::error!(
+                    "edges backfill: trust-edge row has non-32-byte canonical_hash; \
+                     refusing to advance cursor past corrupt row"
+                );
+                return internal_error();
+            }
+        };
+        page_rows.push(ChainRow {
+            payload,
+            signature: row.signature,
+            created_at: row.created_at,
+            canonical_hash,
+        });
+    }
 
     let next_cursor = if has_more && let Some(last) = page_rows.last() {
         encode_cursor(&last.created_at, &last.canonical_hash)
@@ -465,6 +478,256 @@ fn ok_response(body: Vec<u8>) -> Response {
         HeaderValue::from_static(CBOR_CONTENT_TYPE),
     );
     r
+}
+
+// ===========================================================================
+// `GET /federation/v1/moves/backfill` — §12.3 chain-continuity recovery
+// ===========================================================================
+//
+// Mirrors the `/edges/backfill` chain-walk pattern above, with three
+// differences worth flagging:
+//
+//   * Keyed on a single `key=<hex>` (the moving identity K) instead of
+//     a `(source, target)` pair. K is the natural index of
+//     `user_moves`, populated by `apply_one_move` for both `applied`
+//     and `superseded` moves (§12.5 chain evidence).
+//
+//   * `created_at` is a Unix-millisecond INTEGER, not an ISO string —
+//     the cursor packs it as 8 bytes big-endian + 32 bytes
+//     `canonical_hash` = 40 bytes (well under the §10.5.2 64-byte
+//     cap), and the SQL keyset-pagination predicate operates on
+//     INTEGER comparisons rather than text.
+//
+//   * Backfill is broadly serviceable per §12.5 ("any peer that ever
+//     held a move remains a viable backfill source") — there is no
+//     local-only carve-out like `/edges/backfill`'s "both endpoints
+//     resolved to local users" gate. The chain is served from
+//     whatever `user_moves` rows we hold for K, full stop. An empty
+//     result with no cursor is `unknown_chain`; mid-walk with no rows
+//     is `complete: true`.
+//
+// Erased rows: §12.5 declares moves "retained indefinitely" so the
+// `payload IS NULL` carve-out from `/edges/backfill` cannot fire here
+// in any legitimate flow. The query still filters `payload IS NOT
+// NULL` defensively so a corrupted local row does not crash the
+// handler.
+
+/// §12.6 `MAX_MOVE_BACKFILL_PAGE`: receiver-enforced cap on `limit`
+/// (default 100). Same shape as `MAX_EDGE_BACKFILL_PAGE`; per §12.5
+/// move chains for any one K are short, so single-page responses are
+/// the common case.
+pub const MAX_MOVE_BACKFILL_PAGE: u32 = 100;
+
+/// Raw move-cursor layout: `[ created_at i64 BE (8B) | canonical_hash (32B) ]`.
+/// 40 bytes total, base64url-encoded to 54 ASCII chars for the `since`
+/// URL parameter; the response carries the raw 40 bytes as a `bstr`.
+const MOVE_CURSOR_LEN: usize = 8 + 32;
+
+/// Query-string fields for `GET /federation/v1/moves/backfill`.
+#[derive(serde::Deserialize)]
+pub struct MovesBackfillQuery {
+    /// Hex-encoded 32-byte Ed25519 pubkey of the moving identity K.
+    /// Required.
+    pub key: Option<String>,
+    /// Opaque base64url cursor from a prior response. Absent or empty
+    /// means "from the chain root."
+    pub since: Option<String>,
+    /// Max objects to return; capped at [`MAX_MOVE_BACKFILL_PAGE`].
+    pub limit: Option<u32>,
+}
+
+/// Decoded `(created_at_ms, canonical_hash)` move cursor.
+struct MoveCursor {
+    created_at_ms: i64,
+    canonical_hash: [u8; 32],
+}
+
+fn decode_move_cursor(since: &str) -> Option<MoveCursor> {
+    let bytes = URL_SAFE_NO_PAD.decode(since.as_bytes()).ok()?;
+    if bytes.len() != MOVE_CURSOR_LEN {
+        return None;
+    }
+    let mut ts_be = [0u8; 8];
+    ts_be.copy_from_slice(&bytes[..8]);
+    let created_at_ms = i64::from_be_bytes(ts_be);
+    let mut canonical_hash = [0u8; 32];
+    canonical_hash.copy_from_slice(&bytes[8..]);
+    Some(MoveCursor {
+        created_at_ms,
+        canonical_hash,
+    })
+}
+
+fn encode_move_cursor(created_at_ms: i64, canonical_hash: &[u8; 32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(MOVE_CURSOR_LEN);
+    out.extend_from_slice(&created_at_ms.to_be_bytes());
+    out.extend_from_slice(canonical_hash);
+    out
+}
+
+/// One move chain-walk row in encode-ready form. Distinct from
+/// `ChainRow` (which carries an ISO string `created_at` for
+/// `trust_edges`) so the two pagination flows do not have to share a
+/// timestamp type.
+struct MoveChainRow {
+    payload: Vec<u8>,
+    signature: Vec<u8>,
+    created_at_ms: i64,
+    canonical_hash: [u8; 32],
+}
+
+fn encode_moves_backfill_body(
+    objects: &[MoveChainRow],
+    next_cursor: Option<Vec<u8>>,
+    complete: bool,
+) -> Vec<u8> {
+    let arr: Vec<Value> = objects
+        .iter()
+        .map(|row| Value::Bytes(encode_signed_object(&row.payload, &row.signature)))
+        .collect();
+
+    let mut entries: Vec<(Value, Value)> = Vec::with_capacity(3);
+    entries.push((Value::Text("objects".into()), Value::Array(arr)));
+    if let Some(c) = next_cursor {
+        entries.push((Value::Text("next_cursor".into()), Value::Bytes(c)));
+    }
+    entries.push((Value::Text("complete".into()), Value::Bool(complete)));
+    let body = Value::Map(entries);
+    let mut buf = Vec::with_capacity(
+        64 + objects
+            .iter()
+            .map(|r| r.payload.len() + r.signature.len() + 32)
+            .sum::<usize>(),
+    );
+    ciborium::ser::into_writer(&body, &mut buf).expect("ciborium ser is infallible");
+    buf
+}
+
+/// `GET /federation/v1/moves/backfill` (§12.3).
+pub async fn handle_moves_backfill(
+    State(state): State<Arc<AppState>>,
+    Extension(_envelope): Extension<FedEnvelope>,
+    Query(params): Query<MovesBackfillQuery>,
+) -> Response {
+    let key_hex = match params.key.as_deref() {
+        Some(s) if !s.is_empty() => s,
+        _ => return bad_request("malformed"),
+    };
+    let key_bytes = match decode_hex_pubkey(key_hex) {
+        Some(b) => b,
+        None => return bad_request("invalid_key"),
+    };
+
+    let limit = match params.limit {
+        None => MAX_MOVE_BACKFILL_PAGE,
+        Some(n) if (1..=MAX_MOVE_BACKFILL_PAGE).contains(&n) => n,
+        _ => return bad_request("limit_out_of_range"),
+    };
+
+    let cursor = match params.since.as_deref() {
+        None | Some("") => None,
+        Some(s) => match decode_move_cursor(s) {
+            Some(c) => Some(c),
+            None => return bad_request("invalid_cursor"),
+        },
+    };
+
+    // Page-fetch: `limit + 1` rows to detect a next page without a
+    // second query. Keyset pagination on
+    // `(user_moves.created_at, user_moves.canonical_hash)` —
+    // INTEGER + BLOB compares are native SQLite operations and the
+    // `idx_user_moves_chain_walk` index covers the ORDER BY.
+    let fetch_n = (limit as i64) + 1;
+    let key_slice: &[u8] = key_bytes.as_slice();
+    let cursor_ts: Option<i64> = cursor.as_ref().map(|c| c.created_at_ms);
+    let cursor_hash: Option<Vec<u8>> = cursor.as_ref().map(|c| c.canonical_hash.to_vec());
+
+    let rows = match sqlx::query!(
+        "SELECT um.canonical_hash AS \"canonical_hash!: Vec<u8>\", \
+                um.created_at AS \"created_at!: i64\", \
+                so.payload AS \"payload?: Vec<u8>\", \
+                so.signature AS \"signature!: Vec<u8>\" \
+         FROM user_moves um \
+         JOIN signed_objects so ON so.canonical_hash = um.canonical_hash \
+         WHERE um.user_key = ? \
+           AND so.payload IS NOT NULL \
+           AND ( \
+                ? IS NULL \
+                OR um.created_at > ? \
+                OR (um.created_at = ? AND um.canonical_hash > ?) \
+           ) \
+         ORDER BY um.created_at ASC, um.canonical_hash ASC \
+         LIMIT ?",
+        key_slice,
+        cursor_ts,
+        cursor_ts,
+        cursor_ts,
+        cursor_hash,
+        fetch_n,
+    )
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = %e, "db error walking move chain in backfill");
+            return internal_error();
+        }
+    };
+
+    // Without a cursor an empty result is the spec's `unknown_chain`
+    // condition (this peer has never held a move for K — §12.5
+    // retention is indefinite, so "no rows" really means "never seen").
+    // Mid-walk an empty result is the natural "you have everything"
+    // terminator and returns `complete: true` with no objects.
+    if cursor.is_none() && rows.is_empty() {
+        return bad_request("unknown_chain");
+    }
+
+    let has_more = (rows.len() as i64) > limit as i64;
+    let mut page_rows: Vec<MoveChainRow> = Vec::with_capacity(limit as usize);
+    for row in rows.into_iter().take(limit as usize) {
+        // payload is `Option<Vec<u8>>` because of the schema type but
+        // the WHERE clause filtered IS NOT NULL — a None here is a
+        // race with a concurrent erasure path that does not exist in
+        // any §12 code path; skip silently.
+        let Some(payload) = row.payload else {
+            continue;
+        };
+        // §12 moves are 32-byte canonical_hash by schema CHECK. A
+        // length mismatch is a corrupted row; silently skipping would
+        // strand the requesting peer on every page (cursor never
+        // advances past the bad row). Fail loud.
+        let canonical_hash: [u8; 32] = match row.canonical_hash.as_slice().try_into() {
+            Ok(h) => h,
+            Err(_) => {
+                tracing::error!(
+                    "moves backfill: user_moves row has non-32-byte canonical_hash; \
+                     refusing to advance cursor past corrupt row"
+                );
+                return internal_error();
+            }
+        };
+        page_rows.push(MoveChainRow {
+            payload,
+            signature: row.signature,
+            created_at_ms: row.created_at,
+            canonical_hash,
+        });
+    }
+
+    let next_cursor = if has_more && let Some(last) = page_rows.last() {
+        Some(encode_move_cursor(last.created_at_ms, &last.canonical_hash))
+    } else {
+        None
+    };
+    let complete = !has_more;
+
+    ok_response(encode_moves_backfill_body(
+        &page_rows,
+        next_cursor,
+        complete,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -562,6 +825,35 @@ mod tests {
         assert!(keys.contains(&"objects".into()));
         assert!(keys.contains(&"complete".into()));
         assert!(!keys.contains(&"next_cursor".into()));
+    }
+
+    #[test]
+    fn move_cursor_round_trip() {
+        let ts: i64 = 1_700_000_000_123;
+        let hash = [0xCDu8; 32];
+        let encoded = encode_move_cursor(ts, &hash);
+        assert_eq!(encoded.len(), MOVE_CURSOR_LEN);
+        let b64 = URL_SAFE_NO_PAD.encode(&encoded);
+        let decoded = decode_move_cursor(&b64).expect("decode");
+        assert_eq!(decoded.created_at_ms, ts);
+        assert_eq!(decoded.canonical_hash, hash);
+    }
+
+    #[test]
+    fn move_cursor_rejects_wrong_length() {
+        let raw = vec![0u8; MOVE_CURSOR_LEN - 1];
+        let b64 = URL_SAFE_NO_PAD.encode(&raw);
+        assert!(decode_move_cursor(&b64).is_none());
+
+        let raw = vec![0u8; MOVE_CURSOR_LEN + 1];
+        let b64 = URL_SAFE_NO_PAD.encode(&raw);
+        assert!(decode_move_cursor(&b64).is_none());
+    }
+
+    #[test]
+    fn move_cursor_fits_in_protocol_budget() {
+        // §10.5.2 caps cursor at 64 bytes.
+        const { assert!(MOVE_CURSOR_LEN <= 64) };
     }
 
     #[test]

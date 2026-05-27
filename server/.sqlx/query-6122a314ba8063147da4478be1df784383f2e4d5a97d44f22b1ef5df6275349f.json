@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT (payload IS NULL) AS \"payload_null!: i64\" FROM signed_objects WHERE canonical_hash = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "payload_null!: i64",
+        "ordinal": 0,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "6122a314ba8063147da4478be1df784383f2e4d5a97d44f22b1ef5df6275349f"
+}

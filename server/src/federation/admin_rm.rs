@@ -186,22 +186,61 @@ pub async fn handle_admin_rm_report(
         return bad_request("invalid_signature");
     }
 
-    // §10.4 receiver-side "are we the home of target_author" check.
-    // The advisory route is meaningful only when we host the
-    // moderated user. No local users row → return
-    // not_authoritative_home.
+    // §10.4 receiver-side "are we the current home of target_author"
+    // check. The advisory route is meaningful only when we host the
+    // moderated user *right now* — a user who registered here and
+    // later moved away (§12) is no longer ours to moderate, and a
+    // user who moved to us via §13 is ours even though their original
+    // `users` row was created on the source instance.
+    //
+    // Resolution order (§12.4 latest-wins):
+    //   1. If `user_homes` has a row for this author, that row is
+    //      authoritative — we are home iff its `current_home_key`
+    //      matches our instance pubkey.
+    //   2. Otherwise (no move ever observed for this author), fall
+    //      back to the pre-Phase-7 heuristic: any local `users` row
+    //      whose `public_key` matches means we are their implicit
+    //      home, since no move has ever superseded that anchoring.
+    //
+    // The two-step is necessary because `user_homes` is only
+    // populated when a move declaration applies (see
+    // `federation::moves::apply_one_move` and the §13 ceremony's
+    // optional move publication); non-moved local users have no row.
     let target_slice: &[u8] = admin_rm.target_author.as_slice();
-    let host_check = sqlx::query_scalar!(
-        "SELECT 1 AS \"present!: i64\" FROM users WHERE public_key = ? LIMIT 1",
+    let home_row = match sqlx::query!(
+        "SELECT current_home_key AS \"current_home_key!: Vec<u8>\" \
+         FROM user_homes WHERE user_key = ?",
         target_slice,
     )
     .fetch_optional(&state.db)
-    .await;
-    let is_home = match host_check {
-        Ok(opt) => opt.is_some(),
+    .await
+    {
+        Ok(opt) => opt,
         Err(e) => {
-            tracing::error!(error = %e, "db error checking home");
+            tracing::error!(error = %e, "db error reading user_homes");
             return internal_error();
+        }
+    };
+    let is_home = match home_row {
+        Some(row) => {
+            row.current_home_key.as_slice() == state.instance_key.public_bytes().as_slice()
+        }
+        None => {
+            // No move on record. Fall back to "do we have a local
+            // users row for this key" — pre-Phase-7 semantics.
+            let host_check = sqlx::query_scalar!(
+                "SELECT 1 AS \"present!: i64\" FROM users WHERE public_key = ? LIMIT 1",
+                target_slice,
+            )
+            .fetch_optional(&state.db)
+            .await;
+            match host_check {
+                Ok(opt) => opt.is_some(),
+                Err(e) => {
+                    tracing::error!(error = %e, "db error checking home fallback");
+                    return internal_error();
+                }
+            }
         }
     };
     if !is_home {

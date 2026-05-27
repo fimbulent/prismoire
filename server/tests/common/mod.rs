@@ -281,6 +281,14 @@ pub async fn test_app_with_pool_transport_domain_and_outbound_config(
         ))),
         forwarding_lru: Arc::new(prismoire_server::federation::forwarder::ForwardingLru::new()),
         outbound_queues,
+        content_rate_limiter: Arc::new(
+            prismoire_server::federation::content_rate_limit::ContentRateLimiter::default(),
+        ),
+        move_rate_limiter: Arc::new(
+            prismoire_server::federation::content_rate_limit::ContentRateLimiter::new(
+                prismoire_server::federation::moves::MAX_MOVE_OBJECTS_PER_HOUR,
+            ),
+        ),
     });
 
     let layers = rate_limit::build_layers(&test_rate_limit_config(), false);

@@ -7,6 +7,7 @@ use tokio::sync::Notify;
 use webauthn_rs::Webauthn;
 
 use crate::error::{AppError, ErrorCode};
+use crate::federation::content_rate_limit::ContentRateLimiter;
 use crate::federation::envelope::NonceLru;
 use crate::federation::forwarder::ForwardingLru;
 use crate::federation::frontier::LocalFrontier;
@@ -112,6 +113,20 @@ pub struct AppState {
     /// `MAX_CONTENT_BATCH_OUTBOUND = 64` items into a single signed
     /// HTTP push, with exponential backoff on transient failure.
     pub outbound_queues: Arc<OutboundQueues>,
+    /// §10.6 fold-in (Phase 7): per-source-instance rolling-hour
+    /// object counter for `POST /federation/v1/content`. Closes the
+    /// abuse surface flagged in Phase 6 — a single peer can no
+    /// longer sustain `MAX_CONTENT_BATCH = 64` objects per request
+    /// indefinitely. In-memory only; resets on restart.
+    pub content_rate_limiter: Arc<ContentRateLimiter>,
+    /// Same shape as [`AppState::content_rate_limiter`], but
+    /// parameterised with [`crate::federation::moves::MAX_MOVE_OBJECTS_PER_HOUR`]
+    /// — a much tighter ceiling than `/content` because §12 moves
+    /// are rare-per-user and indefinitely retained, and because the
+    /// unconditional-flood / `REDUNDANCY_K_MOVE = 5` amplification
+    /// makes abuse on this route disproportionately expensive
+    /// downstream.
+    pub move_rate_limiter: Arc<ContentRateLimiter>,
 }
 
 impl AppState {

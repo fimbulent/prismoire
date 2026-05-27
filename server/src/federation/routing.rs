@@ -98,6 +98,15 @@ impl Mode {
 /// runtime `instance_config` value if operators need to override it.
 pub const REDUNDANCY_K: usize = 2;
 
+/// §12.2 / §12.6 forwarding fanout cap for move declarations. Replaces
+/// the ordinary [`REDUNDANCY_K`] when the object being forwarded is a
+/// §5.1 `move` — the unconditional-flood property of §12 widens the
+/// per-object fanout from the ordinary 2 to 5 distinct downstream
+/// peers. Combined with the [`ForwardingClass::Move`] bypass of the
+/// §7.4 interest-filter dispatch, every active peer that has not yet
+/// received the move (modulo the dedup-LRU bitset) is a candidate.
+pub const REDUNDANCY_K_MOVE: usize = 5;
+
 /// §7.2 mode-promote threshold (default 80%). When the sender's local
 /// coverage scan against the peer's `content_filter` reaches or
 /// exceeds this value, the sender promotes the direction to [`Mode::All`]
@@ -142,15 +151,59 @@ pub enum ForwardingClass {
     /// (key = target_author), thread-status (key = thread OP author).
     /// Routes against the receiver's `content_filter` (§7.4).
     Authored,
+    /// §5.1 `move` declaration. §12 propagation override: every
+    /// active peer receives every move regardless of `mode(self → P)`
+    /// or any interest-filter membership, and the per-object fanout
+    /// cap is [`REDUNDANCY_K_MOVE`] (5) instead of [`REDUNDANCY_K`]
+    /// (2). The routing key is the moving identity K (the same field
+    /// the user's other signed objects key on for the §7.4 dispatch
+    /// table), but the filter check is bypassed entirely.
+    Move,
 }
 
 impl ForwardingClass {
     /// Pick the receiver-side filter to consult per the §7.4
-    /// dispatch table.
+    /// dispatch table. `Move` bypasses every filter under the §12
+    /// unconditional-flood override; callers must check
+    /// [`Self::bypasses_filters`] before reaching this method, or
+    /// the bloom path below would erroneously gate move propagation
+    /// on the per-peer interest filters.
     fn select_filter<'a>(&self, cf: &'a BloomFilter, ef: &'a BloomFilter) -> &'a BloomFilter {
         match self {
             ForwardingClass::TrustEdge => ef,
             ForwardingClass::Authored => cf,
+            // `Move` is documented to bypass §7.4 filter dispatch via
+            // [`Self::bypasses_filters`]; reaching this arm means a
+            // caller went through the bloom-membership path for a
+            // Move object, which is a programmer error (§12 mandates
+            // unconditional flood). Falling through to a filter would
+            // silently under-shoot the spec — neither an under-shoot
+            // nor an over-shoot is a defensible default for a control-
+            // plane class, so panic loudly.
+            ForwardingClass::Move => {
+                unreachable!(
+                    "select_filter called on ForwardingClass::Move; \
+                     callers must short-circuit on `bypasses_filters` first"
+                )
+            }
+        }
+    }
+
+    /// True iff §7.4's interest-filter dispatch is bypassed for this
+    /// class. Today: only [`Self::Move`] (the §12 unconditional-flood
+    /// override). Used by [`peers_interested_in`] to short-circuit
+    /// the bloom check entirely and return every active peer.
+    pub fn bypasses_filters(self) -> bool {
+        matches!(self, ForwardingClass::Move)
+    }
+
+    /// Per-class §7.5 fanout cap. Ordinary classes use
+    /// [`REDUNDANCY_K`] (= 2); moves use [`REDUNDANCY_K_MOVE`] (= 5)
+    /// per §12.2 / §12.6.
+    pub fn redundancy_cap(self) -> usize {
+        match self {
+            ForwardingClass::Move => REDUNDANCY_K_MOVE,
+            _ => REDUNDANCY_K,
         }
     }
 }
@@ -242,6 +295,26 @@ pub async fn peers_interested_in(
             tracing::warn!("peers row with non-32-byte instance_pubkey skipped");
             continue;
         };
+
+        // §12 unconditional-flood override: classes that
+        // `bypasses_filters` (today: only `Move`) reach every active
+        // peer regardless of whether a `peer_frontiers` row exists,
+        // what `outbound_mode` is recorded, or whether `key` would
+        // have hit the bloom. The dedup-LRU + `REDUNDANCY_K_MOVE`
+        // budget still bound actual fanout downstream.
+        if class.bypasses_filters() {
+            let outbound_mode = row
+                .outbound_mode
+                .as_deref()
+                .map(Mode::from_db_str)
+                .unwrap_or(Mode::Filtered);
+            out.push(PeerRouting {
+                instance_pubkey: pubkey,
+                mode: outbound_mode,
+            });
+            continue;
+        }
+
         // No frontier row yet → treat as Filtered + empty filter:
         // miss every key. The peer joins the routing population only
         // after their first §8.3 announce.

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO user_homes (user_key, current_home_key, current_home_domain, current_move_hash, current_created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_key) DO UPDATE SET current_home_key = excluded.current_home_key, current_home_domain = excluded.current_home_domain, current_move_hash = excluded.current_move_hash, current_created_at = excluded.current_created_at, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "e8a0abdad4c3b9389a44f7e6b61e9754ccd79437bf6eec51a83287a96f60863d"
+}

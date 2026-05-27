@@ -39,7 +39,7 @@ use axum::routing::{delete, get, post};
 
 use crate::AppState;
 use crate::federation::middleware::{verify_bootstrap, verify_known_peer};
-use crate::federation::{admin_rm, backfill, content, edges, frontier, identity, peering};
+use crate::federation::{admin_rm, backfill, content, edges, frontier, identity, moves, peering};
 
 /// Build the `/federation/v1/*` subrouter.
 ///
@@ -113,6 +113,19 @@ pub fn federation_router(state: Arc<AppState>) -> Router {
         .route(
             "/federation/v1/admin-rm-report",
             post(admin_rm::handle_admin_rm_report),
+        )
+        // §12.1 move push: a batch of signed `move` declarations
+        // pushed by the moving identity's home or by a forwarder along
+        // the §12.2 unconditional-flood fanout. Per-object results
+        // follow `{ canonical_hash, status, reason? }` with status in
+        // `applied | duplicate | deferred | superseded | rejected`.
+        .route("/federation/v1/moves", post(moves::handle_moves_push))
+        // §12.3 move chain-continuity backfill — narrow per-key pull
+        // so a receiver can fill a `deferred` gap by asking the home
+        // for ancestors of an unresolved `prior_move_hash`.
+        .route(
+            "/federation/v1/moves/backfill",
+            get(backfill::handle_moves_backfill),
         )
         .layer(from_fn_with_state(state.clone(), verify_known_peer));
 

@@ -20,6 +20,17 @@ use crate::trust::UserStatus;
 /// than this are abandoned browser tabs or failed flows and safe to purge.
 const AUTH_CHALLENGE_MAX_AGE_MINUTES: i64 = 10;
 
+/// Maximum age of a `registration_challenges` row (§13.1 nonce) before
+/// the sweeper deletes it. Pinned to a window comfortably wider than
+/// [`crate::federation::registration::REGISTRATION_CHALLENGE_TTL_MS`]
+/// (10 minutes) so an in-flight `complete` racing the sweep cannot lose
+/// to a clock-skew nuance. Unconsumed nonces past this age are
+/// abandoned ceremonies and safe to purge; consumed nonces are kept the
+/// same length so a replay attempt past this window surfaces as
+/// `invalid_signature` (the spec-correct rejection) rather than being
+/// silently impossible.
+const REGISTRATION_CHALLENGE_MAX_AGE_MS: u64 = 60 * 60 * 1000;
+
 /// How often the cleanup job runs.
 const CLEANUP_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
@@ -370,12 +381,19 @@ pub async fn session_middleware(
 }
 
 /// Background task: once per hour, delete expired sessions and stale
-/// auth challenges. Runs for the lifetime of the process.
+/// auth / registration challenges. Runs for the lifetime of the process.
 ///
-/// Sessions are deleted when `expires_at` is in the past. Auth challenges
-/// are deleted when `created_at` is older than [`AUTH_CHALLENGE_MAX_AGE_MINUTES`]
-/// — WebAuthn ceremonies should complete within seconds, so anything older
-/// is an abandoned flow.
+/// - **Sessions** are deleted when `expires_at` is in the past.
+/// - **Auth challenges** are deleted when `created_at` is older than
+///   [`AUTH_CHALLENGE_MAX_AGE_MINUTES`] — WebAuthn ceremonies should
+///   complete within seconds, so anything older is an abandoned flow.
+/// - **Registration challenges** (§13 cross-instance ceremony nonces)
+///   are deleted when their wire `created_at` (Unix ms) is older than
+///   [`REGISTRATION_CHALLENGE_MAX_AGE_MS`] — well past the
+///   [`crate::federation::registration::REGISTRATION_CHALLENGE_TTL_MS`]
+///   verify window. Without this, every issued nonce would persist
+///   indefinitely (the migration's GC docstring describes this sweep
+///   but it had to be wired in alongside Phase 7).
 ///
 /// Errors are logged but never propagated — a transient DB failure
 /// should not take the server down, and the next sweep will catch up.
@@ -403,5 +421,29 @@ pub async fn cleanup_loop(pool: SqlitePool) {
         {
             tracing::error!(error = %e, "auth challenge cleanup sweep failed");
         }
+
+        // §13.1 registration-challenge GC. `created_at` is the wire
+        // timestamp (Unix ms) the client signed, so the threshold is
+        // computed in the same unit; using the SQLite clock keeps the
+        // sweep consistent across timezones.
+        let cutoff_ms_i64 =
+            i64::try_from(unix_ms_now().saturating_sub(REGISTRATION_CHALLENGE_MAX_AGE_MS))
+                .unwrap_or(i64::MAX);
+        if let Err(e) = sqlx::query!(
+            "DELETE FROM registration_challenges WHERE created_at < ?",
+            cutoff_ms_i64,
+        )
+        .execute(&pool)
+        .await
+        {
+            tracing::error!(error = %e, "registration challenge cleanup sweep failed");
+        }
     }
+}
+
+fn unix_ms_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }

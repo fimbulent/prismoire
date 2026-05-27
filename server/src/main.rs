@@ -193,6 +193,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))),
         forwarding_lru: Arc::new(prismoire_server::federation::forwarder::ForwardingLru::new()),
         outbound_queues,
+        content_rate_limiter: Arc::new(
+            prismoire_server::federation::content_rate_limit::ContentRateLimiter::default(),
+        ),
+        move_rate_limiter: Arc::new(
+            prismoire_server::federation::content_rate_limit::ContentRateLimiter::new(
+                prismoire_server::federation::moves::MAX_MOVE_OBJECTS_PER_HOUR,
+            ),
+        ),
     });
 
     // Spawn the debounced trust graph rebuild background task.
@@ -217,6 +225,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Spawn the expired session and stale auth challenge cleanup sweep.
     // Runs once per hour (see `session::cleanup_loop`).
     tokio::spawn(session::cleanup_loop(shared_state.db.clone()));
+
+    // Spawn the in-memory federation rate-limiter sweeps. The two
+    // limiters are keyed on a `HashMap<peer_pubkey, _>`; without a
+    // periodic prune the map would grow O(N_distinct_peers) without
+    // bound as short-lived or departed peers churn through.
+    tokio::spawn(
+        prismoire_server::federation::content_rate_limit::cleanup_loop(
+            shared_state.content_rate_limiter.clone(),
+            "content",
+        ),
+    );
+    tokio::spawn(
+        prismoire_server::federation::content_rate_limit::cleanup_loop(
+            shared_state.move_rate_limiter.clone(),
+            "move",
+        ),
+    );
 
     // Spawn the attachment staging-expiry + orphan-blob GC sweep.
     // Cadence is the server-static `attachments.sweep_interval_seconds`

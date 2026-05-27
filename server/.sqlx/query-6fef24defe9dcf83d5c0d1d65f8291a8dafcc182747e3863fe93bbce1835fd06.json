@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT state, display_name, user_id FROM auth_challenges WHERE id = ? AND challenge_type = 'cross_instance_register'",
+  "describe": {
+    "columns": [
+      {
+        "name": "state",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "display_name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "user_id",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "6fef24defe9dcf83d5c0d1d65f8291a8dafcc182747e3863fe93bbce1835fd06"
+}

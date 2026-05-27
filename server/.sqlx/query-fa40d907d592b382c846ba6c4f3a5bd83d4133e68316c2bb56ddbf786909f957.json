@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO user_moves (user_key, canonical_hash, created_at) VALUES (?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "fa40d907d592b382c846ba6c4f3a5bd83d4133e68316c2bb56ddbf786909f957"
+}

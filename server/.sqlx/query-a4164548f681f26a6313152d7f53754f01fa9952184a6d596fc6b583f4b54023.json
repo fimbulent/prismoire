@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT um.canonical_hash AS \"canonical_hash!: Vec<u8>\", um.created_at AS \"created_at!: i64\", so.payload AS \"payload?: Vec<u8>\", so.signature AS \"signature!: Vec<u8>\" FROM user_moves um JOIN signed_objects so ON so.canonical_hash = um.canonical_hash WHERE um.user_key = ? AND so.payload IS NOT NULL AND ( ? IS NULL OR um.created_at > ? OR (um.created_at = ? AND um.canonical_hash > ?) ) ORDER BY um.created_at ASC, um.canonical_hash ASC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "canonical_hash!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "created_at!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "payload?: Vec<u8>",
+        "ordinal": 2,
+        "type_info": "Blob"
+      },
+      {
+        "name": "signature!: Vec<u8>",
+        "ordinal": 3,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "a4164548f681f26a6313152d7f53754f01fa9952184a6d596fc6b583f4b54023"
+}

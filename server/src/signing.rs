@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::federation::instance_key::InstanceKey;
 use crate::signed::{
-    AdminRemoval, AttachmentRef, Deactivation, PostRevision, ProfileRevision, Retraction,
+    AdminRemoval, AttachmentRef, Deactivation, Move, PostRevision, ProfileRevision, Retraction,
     SignedPayload, ThreadCreate, TrustEdge, TrustStance,
 };
 
@@ -832,6 +832,52 @@ pub fn sign_admin_removal_with_instance_key(
     };
     let payload_bytes = SignedPayload::AdminRemoval(payload).encode();
     let signature = key.sign(&payload_bytes).to_vec();
+    let canonical_hash: [u8; 32] = sha2::Sha256::digest(&payload_bytes).into();
+    SigningOutput {
+        payload: payload_bytes,
+        signature,
+        public_key,
+        canonical_hash,
+    }
+}
+
+/// Sign a `move` canonical payload (`signed-payload-format.md` §5.1)
+/// with an already-loaded user `SigningKey`.
+///
+/// Moves are *user-signed*: the authority is the moving identity K
+/// itself. The Phase 7 registration ceremony (`docs/federation-protocol.md`
+/// §13) calls this immediately after a successful challenge redemption
+/// to mint the §5.1 move declaration that propagates per §12.
+///
+/// `from_instance_key` / `to_instance_key` are the source and
+/// destination instances' `instance_pubkey`s as observed at signing
+/// time; `from_instance` / `to_instance` are the bare canonical domains.
+/// Both are bound jointly per the §5.1 verification rule (see also
+/// §12 "Joint binding of pubkey and domain"). `prior_move_hash` chains
+/// to K's previous move's canonical hash; `None` for the user's first
+/// move ever.
+#[allow(clippy::too_many_arguments)]
+pub fn sign_move_with_key(
+    key: &SigningKey,
+    from_instance_key: &[u8; 32],
+    from_instance: &str,
+    to_instance_key: &[u8; 32],
+    to_instance: &str,
+    created_at_ms: u64,
+    prior_move_hash: Option<&[u8; 32]>,
+) -> SigningOutput {
+    let public_key = *key.verifying_key().as_bytes();
+    let payload = Move {
+        key: public_key,
+        from_instance_key: *from_instance_key,
+        from_instance: from_instance.to_string(),
+        to_instance_key: *to_instance_key,
+        to_instance: to_instance.to_string(),
+        created_at: created_at_ms,
+        prior_move_hash: prior_move_hash.copied(),
+    };
+    let payload_bytes = SignedPayload::Move(payload).encode();
+    let signature = key.sign(&payload_bytes).to_bytes().to_vec();
     let canonical_hash: [u8; 32] = sha2::Sha256::digest(&payload_bytes).into();
     SigningOutput {
         payload: payload_bytes,

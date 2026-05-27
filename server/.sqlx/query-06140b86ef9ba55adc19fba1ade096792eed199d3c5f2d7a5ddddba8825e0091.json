@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT current_move_hash AS \"current_move_hash!: Vec<u8>\", current_home_domain AS \"current_home_domain!: String\", current_created_at AS \"current_created_at!: i64\" FROM user_homes WHERE user_key = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "current_move_hash!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "current_home_domain!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "current_created_at!: i64",
+        "ordinal": 2,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "06140b86ef9ba55adc19fba1ade096792eed199d3c5f2d7a5ddddba8825e0091"
+}

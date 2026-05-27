@@ -121,6 +121,106 @@ impl SessionResponse {
     }
 }
 
+/// Inputs to [`bootstrap_local_user`].
+///
+/// Shared across the invited-signup path (`POST /api/auth/signup/complete`)
+/// and the cross-instance registration path
+/// (`POST /api/auth/cross-instance/complete`, §13 of
+/// `docs/federation-protocol.md`). The two paths diverge in *how* they
+/// arrive at a credential + signing key (WebAuthn-generated vs.
+/// user-supplied) and in what mutual-trust / move-publication
+/// bookkeeping they do *afterwards*, but the core write-set of "create
+/// the user row, store the credential, persist the signing key" is
+/// identical and is what this struct describes.
+pub struct LocalUserBootstrap<'a> {
+    /// Pre-allocated UUID for the new `users.id` row.
+    pub user_id: &'a str,
+    /// Display name as already validated by
+    /// [`crate::display_name::validate_display_name`].
+    pub display_name: &'a str,
+    /// Confusable skeleton from
+    /// [`crate::display_name::display_name_skeleton`].
+    pub display_name_skeleton: &'a str,
+    /// One of the values allowed by the `users.signup_method` CHECK
+    /// constraint (`'invite'`, `'cross_instance_register'`, …).
+    pub signup_method: &'a str,
+    /// Raw 32-byte Ed25519 verifying key — the per-user federation
+    /// identity. Must agree with `signing_key.verifying_key()`;
+    /// [`crate::signing::store_signing_key`] re-asserts this
+    /// invariant.
+    pub public_key: &'a [u8],
+    /// Per-user Ed25519 private key. Generated locally for the
+    /// invited-signup path; supplied by the moving user for the
+    /// cross-instance path.
+    pub signing_key: &'a ed25519_dalek::SigningKey,
+    /// Pre-allocated UUID for the new `credentials.id` row.
+    pub credential_id: &'a str,
+    /// WebAuthn `credential_id` blob (the authenticator-issued
+    /// credential handle, not our internal `credentials.id`).
+    pub passkey_credential_id: &'a [u8],
+    /// Serialised [`webauthn_rs::prelude::Passkey`] bytes for the
+    /// `credentials.public_key` column.
+    pub passkey_bytes: &'a [u8],
+}
+
+/// Insert a new local user, their credential, and their signing key in
+/// one transactional sweep.
+///
+/// The three writes are tightly coupled: a user without a credential
+/// can never log in, and a user without a signing key cannot author
+/// signed objects (trust edges, posts, profile revisions). Bundling
+/// them lets every caller hold a single `BEGIN IMMEDIATE` open and
+/// commit-or-rollback the whole bootstrap atomically.
+///
+/// Callers retain responsibility for the *path-specific* follow-up:
+///   * invited signups append a mutual trust edge with the inviter and
+///     dual-write it into `signed_objects`,
+///   * cross-instance registrations optionally sign + enqueue a §12
+///     `Move` declaration.
+///
+/// `conn` is taken as `&mut SqliteConnection` (not a `&mut Transaction`)
+/// so the helper composes with `&mut *tx` from any caller already
+/// holding a transaction.
+pub async fn bootstrap_local_user(
+    conn: &mut sqlx::SqliteConnection,
+    input: &LocalUserBootstrap<'_>,
+) -> Result<(), AppError> {
+    sqlx::query!(
+        "INSERT INTO users (id, display_name, display_name_skeleton, signup_method, public_key) \
+         VALUES (?, ?, ?, ?, ?)",
+        input.user_id,
+        input.display_name,
+        input.display_name_skeleton,
+        input.signup_method,
+        input.public_key,
+    )
+    .execute(&mut *conn)
+    .await
+    .map_err(|err| {
+        tracing::error!(
+            display_name = %input.display_name,
+            error = %err,
+            "bootstrap_local_user: user creation constraint failure",
+        );
+        AppError::from(err)
+    })?;
+
+    sqlx::query!(
+        "INSERT INTO credentials (id, user_id, credential_id, public_key, sign_count) \
+         VALUES (?, ?, ?, ?, 0)",
+        input.credential_id,
+        input.user_id,
+        input.passkey_credential_id,
+        input.passkey_bytes,
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    signing::store_signing_key(conn, input.user_id, input.signing_key).await?;
+
+    Ok(())
+}
+
 /// Parse a user status string from the DB, logging and falling back to
 /// `Active` on malformed data.
 ///
@@ -308,33 +408,21 @@ pub async fn signup_complete(
     // built account.
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
 
-    if let Err(err) = sqlx::query!(
-        "INSERT INTO users (id, display_name, display_name_skeleton, signup_method, public_key) \
-         VALUES (?, ?, ?, 'invite', ?)",
-        user_id,
-        display_name,
-        skeleton,
-        public_key,
+    bootstrap_local_user(
+        &mut tx,
+        &LocalUserBootstrap {
+            user_id: &user_id,
+            display_name: &display_name,
+            display_name_skeleton: &skeleton,
+            signup_method: "invite",
+            public_key,
+            signing_key: &signing_key,
+            credential_id: &cred_id,
+            passkey_credential_id: cred_id_bytes,
+            passkey_bytes: &passkey_bytes,
+        },
     )
-    .execute(&mut *tx)
-    .await
-    {
-        tracing::error!(display_name = %display_name, error = %err, "user creation constraint failure");
-        return Err(err.into());
-    }
-
-    sqlx::query!(
-        "INSERT INTO credentials (id, user_id, credential_id, public_key, sign_count) \
-         VALUES (?, ?, ?, ?, 0)",
-        cred_id,
-        user_id,
-        cred_id_bytes,
-        passkey_bytes,
-    )
-    .execute(&mut *tx)
     .await?;
-
-    signing::store_signing_key(&mut tx, &user_id, &signing_key).await?;
 
     sqlx::query!(
         "UPDATE users SET invite_id = ? WHERE id = ?",

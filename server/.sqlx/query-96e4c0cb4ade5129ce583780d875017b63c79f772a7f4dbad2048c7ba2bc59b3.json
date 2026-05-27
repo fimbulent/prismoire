@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO auth_challenges (id, challenge_type, state, display_name, user_id) VALUES (?, 'cross_instance_register', ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "96e4c0cb4ade5129ce583780d875017b63c79f772a7f4dbad2048c7ba2bc59b3"
+}

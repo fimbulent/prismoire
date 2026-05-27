@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT nonce AS \"nonce!: Vec<u8>\",\n                  created_at AS \"created_at_ms!: i64\",\n                  consumed_at AS \"consumed_at?: String\"\n             FROM registration_challenges\n            WHERE user_key = ?\n            ORDER BY created_at ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "nonce!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "created_at_ms!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "consumed_at?: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "36dd0a64488f78a0976c913e8ea53c5594031e112439ff85a4f413e09e44f600"
+}

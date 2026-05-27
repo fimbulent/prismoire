@@ -456,12 +456,31 @@ pub struct ProfileRevision {
 ///
 /// See `docs/signed-payload-format.md` §5.1 and
 /// `docs/federation-protocol.md` §12.
+///
+/// **Joint binding of pubkey and domain.** Per `federation-protocol.md`
+/// §3 the instance trust anchor is its `instance_pubkey`; the domain
+/// is mutable metadata. Both `from_instance_key` and `to_instance_key`
+/// (and their `_instance` domain counterparts) are bound into the
+/// canonical payload so the move chain stays consistent with §3's
+/// "peer records are authoritative on key; everything else stored
+/// alongside is mutable metadata." Receivers resolving "is sender S
+/// authoritative for K?" check both fields per the §5.1 verification
+/// rule; pubkey wins on conflict.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Move {
     /// Ed25519 public key of the moving identity (the signer).
     pub key: [u8; 32],
+    /// Ed25519 `instance_pubkey` of the source instance, as
+    /// observed at signing time. The trust anchor for "where K was
+    /// hosted before this move."
+    pub from_instance_key: [u8; 32],
     /// Bare canonical domain of the source instance.
     pub from_instance: String,
+    /// Ed25519 `instance_pubkey` of the destination instance, as
+    /// observed at signing time. For moves originating from a §13
+    /// registration ceremony this MUST equal the `dest_instance_key`
+    /// of the redeemed `registration-challenge`.
+    pub to_instance_key: [u8; 32],
     /// Bare canonical domain of the destination instance.
     pub to_instance: String,
     /// Move time, Unix milliseconds, UTC.
@@ -1145,11 +1164,18 @@ fn profile_revision_to_cbor(p: &ProfileRevision) -> Value {
 // --- Federation-era encoders (`docs/signed-payload-format.md` §5) ---
 
 fn move_to_cbor(m: &Move) -> Value {
+    // Field order matters: canonical CBOR sorts by key bytes, and
+    // `build_map` re-sorts before emitting, so the literal order here
+    // is for readability only. The set of keys, however, must match
+    // the §5.1 schema exactly: any added/removed key changes the
+    // canonical_hash and therefore the chain identity.
     let mut entries: Vec<(&'static str, Value)> = vec![
         ("v", uint(V1)),
         ("t", text(TAG_MOVE)),
         ("key", bytes(&m.key)),
+        ("from_instance_key", bytes(&m.from_instance_key)),
         ("from_instance", text(&m.from_instance)),
+        ("to_instance_key", bytes(&m.to_instance_key)),
         ("to_instance", text(&m.to_instance)),
         ("created_at", uint(m.created_at)),
     ];
@@ -1680,7 +1706,9 @@ fn parse_trust_edge(fields: &BTreeMap<String, Value>) -> Result<TrustEdge, Parse
 
 fn parse_move(fields: &BTreeMap<String, Value>) -> Result<Move, ParseError> {
     let key = field_bytes_fixed::<32>(fields, "key")?;
+    let from_instance_key = field_bytes_fixed::<32>(fields, "from_instance_key")?;
     let from_instance = field_text(fields, "from_instance")?;
+    let to_instance_key = field_bytes_fixed::<32>(fields, "to_instance_key")?;
     let to_instance = field_text(fields, "to_instance")?;
     let created_at = field_uint(fields, "created_at")?;
     let prior_move_hash = if fields.contains_key("prior_move_hash") {
@@ -1690,7 +1718,9 @@ fn parse_move(fields: &BTreeMap<String, Value>) -> Result<Move, ParseError> {
     };
     Ok(Move {
         key,
+        from_instance_key,
         from_instance,
+        to_instance_key,
         to_instance,
         created_at,
         prior_move_hash,
@@ -2903,7 +2933,9 @@ mod tests {
     fn sample_move(with_prior: bool) -> Move {
         Move {
             key: [0xb0; 32],
+            from_instance_key: [0xb2; 32],
             from_instance: "old.example".to_string(),
+            to_instance_key: [0xb3; 32],
             to_instance: "new.example".to_string(),
             created_at: 1_700_000_100_000,
             prior_move_hash: if with_prior { Some([0xb1; 32]) } else { None },

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM registration_challenges WHERE user_key = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "e596e48bde82c74dec0c478b373a822e06587e1c8f7bc456f4c15cfec5bf8f18"
+}

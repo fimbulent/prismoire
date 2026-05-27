@@ -310,6 +310,22 @@ pub fn build_app(
         .route("/api/auth/login/begin", post(auth::login_begin))
         .route("/api/auth/login/complete", post(auth::login_complete))
         .route("/api/auth/discover/complete", post(auth::discover_complete))
+        // §13 cross-instance registration (account-move ceremony).
+        // Mounted alongside the rest of the unauthenticated auth
+        // surface — no session required (the user has no local account
+        // yet), and shares the auth_limiter bucket with signup/login
+        // because the failure modes (passkey ceremony abuse, brute
+        // force, etc.) are the same. The module lives under
+        // `federation::registration` because the wire format is §5.5,
+        // but per spec there is no `/federation/v1/...` route here.
+        .route(
+            "/api/auth/cross-instance/begin",
+            post(federation::registration::begin),
+        )
+        .route(
+            "/api/auth/cross-instance/complete",
+            post(federation::registration::complete),
+        )
         .layer(auth_limiter);
 
     // Test-only auth bypass routes. Mounted at the same scope as

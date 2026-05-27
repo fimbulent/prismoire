@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT consumed_at, user_key AS \"user_key!: Vec<u8>\" FROM registration_challenges WHERE nonce = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "consumed_at",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "user_key!: Vec<u8>",
+        "ordinal": 1,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "775f94f7914d1bc7c3881bcd4b0d94ef76c4b4d05c00e94d5051a6a36ad9f9c2"
+}

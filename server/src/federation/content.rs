@@ -67,13 +67,19 @@
 //!   lookup is wired in, this is a Phase 6 known limitation against
 //!   peer-on-peer abuse (operators MAY de-peer; protocol-level
 //!   prevention is Phase 7+).
-//! - **No per-source rate limit on `/content`.** Unlike
-//!   `/admin-rm-report` (which §10.6 caps at 100/hour/source), the
-//!   `/content` route has only a per-request `MAX_CONTENT_BATCH = 64`
-//!   cap and the per-object size cap. A peer can sustain
-//!   64-objects/request indefinitely. Combined with the trust-on-
-//!   first-claim issue above this is a known abuse surface;
-//!   per-source budgets land alongside the move-resolution work.
+//!
+//! ## §10.6 per-source rate limit (Phase 7 fold-in)
+//!
+//! The `/content` route is whole-batch rate-limited per source-instance
+//! via [`ContentRateLimiter`], capped at
+//! [`MAX_CONTENT_OBJECTS_PER_HOUR`] objects/hour/source. A push that
+//! would exceed the budget returns `400 { "error": "rate_limited" }`
+//! before per-object processing. Closes the Phase-6 abuse-window punt
+//! (a single peer could otherwise sustain `MAX_CONTENT_BATCH = 64`
+//! objects per request indefinitely).
+//!
+//! [`ContentRateLimiter`]: crate::federation::content_rate_limit::ContentRateLimiter
+//! [`MAX_CONTENT_OBJECTS_PER_HOUR`]: crate::federation::content_rate_limit::MAX_CONTENT_OBJECTS_PER_HOUR
 
 use std::sync::Arc;
 
@@ -294,6 +300,16 @@ pub async fn handle_content_push(
     }
     if parsed.objects.len() > MAX_CONTENT_BATCH {
         return bad_request("batch_too_large");
+    }
+    // §10.6 fold-in (Phase 7): per-source rolling-hour object cap.
+    // Whole-batch reject on overflow — simplest backpressure signal that
+    // lets a well-behaved sender drop into backoff rather than retrying
+    // object-by-object. A rejected batch does not burn budget.
+    if !state
+        .content_rate_limiter
+        .check_and_count(envelope.sender, parsed.objects.len() as u32)
+    {
+        return bad_request("rate_limited");
     }
 
     let mut results: Vec<ContentResult> = Vec::with_capacity(parsed.objects.len());

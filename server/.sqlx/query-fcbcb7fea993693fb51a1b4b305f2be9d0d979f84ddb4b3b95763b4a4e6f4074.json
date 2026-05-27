@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO registration_challenges (nonce, user_key, created_at) VALUES (?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "fcbcb7fea993693fb51a1b4b305f2be9d0d979f84ddb4b3b95763b4a4e6f4074"
+}

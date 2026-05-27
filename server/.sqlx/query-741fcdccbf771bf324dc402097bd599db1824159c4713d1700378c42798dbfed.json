@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT instance_pubkey AS \"instance_pubkey!: Vec<u8>\" FROM peers WHERE instance_domain = ? AND status = 'active' LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "instance_pubkey!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "741fcdccbf771bf324dc402097bd599db1824159c4713d1700378c42798dbfed"
+}

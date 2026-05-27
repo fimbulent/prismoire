@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT current_created_at AS \"current_created_at!: i64\", current_move_hash AS \"current_move_hash!: Vec<u8>\" FROM user_homes WHERE user_key = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "current_created_at!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "current_move_hash!: Vec<u8>",
+        "ordinal": 1,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "5e389035e6b99efcb8bd5fbf7ff95734867ff8b517ac794758653c588309ce4a"
+}

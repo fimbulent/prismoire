@@ -65,7 +65,7 @@ use std::time::{Duration, Instant};
 use quick_cache::sync::Cache;
 
 use crate::AppState;
-use crate::federation::routing::{ForwardingClass, REDUNDANCY_K, peers_interested_in};
+use crate::federation::routing::{ForwardingClass, peers_interested_in};
 
 /// §7.5 dedup-LRU time bound (`T_propagate_max`, default 1h).
 /// An entry older than this is treated as a miss and re-initialised
@@ -88,17 +88,23 @@ const EDGES_PATH: &str = "/federation/v1/edges";
 /// profile, thread-create, deactivate).
 const CONTENT_PATH: &str = "/federation/v1/content";
 
+/// Path the forwarder pushes wire bytes to on each downstream peer
+/// for the §12.1 move declarations.
+const MOVES_PATH: &str = "/federation/v1/moves";
+
 /// Per-class dispatch: which downstream route + which body-wrapper
 /// CBOR key to use. Trust-edges go to `/edges` and wrap each
 /// WireFormat blob as `{ "edges": [bstr] }`; every Authored class
-/// goes to `/content` and wraps as `{ "objects": [bstr] }`. The
-/// returned values are what we hand to
-/// [`super::outbound_queue::OutboundQueues::enqueue`] so the per-peer
-/// drain worker knows how to batch + encode the wire body.
+/// goes to `/content` and wraps as `{ "objects": [bstr] }`; moves go
+/// to `/moves` and wrap as `{ "moves": [bstr] }`. The returned values
+/// are what we hand to [`super::outbound_queue::OutboundQueues::enqueue`]
+/// so the per-peer drain worker knows how to batch + encode the wire
+/// body.
 fn route_and_body_key(class: ForwardingClass) -> (&'static str, &'static str) {
     match class {
         ForwardingClass::TrustEdge => (EDGES_PATH, "edges"),
         ForwardingClass::Authored => (CONTENT_PATH, "objects"),
+        ForwardingClass::Move => (MOVES_PATH, "moves"),
     }
 }
 
@@ -331,7 +337,7 @@ async fn forward_inner(
             if bs.contains(idx) {
                 continue;
             }
-            if (bs.popcount() as usize) >= REDUNDANCY_K {
+            if (bs.popcount() as usize) >= class.redundancy_cap() {
                 break;
             }
             bs.set(idx);

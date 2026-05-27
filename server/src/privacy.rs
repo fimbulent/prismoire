@@ -147,6 +147,21 @@ pub struct DataExport {
     /// metadata side is small and easy to read; the bytes belong in a
     /// streamable ZIP). Always set to `/api/me/export/attachments`.
     pub attachments_blob_archive: String,
+    /// Federation §12 identity-move history for this user. One entry
+    /// per row in `user_moves` keyed on the user's pubkey, ordered
+    /// oldest-first. The currently-applied move (the one whose
+    /// `to_instance_key` is reflected in `user_homes.current_home_key`)
+    /// is flagged via `is_current`. Empty for users who have never
+    /// moved between instances. Phase 7 GDPR fold-in.
+    pub home_history: Vec<UserMoveExport>,
+    /// In-flight §13.1 registration challenges keyed on the user's
+    /// pubkey. Normally empty — the row is consumed on `complete` and
+    /// otherwise GC'd within
+    /// [`crate::session::REGISTRATION_CHALLENGE_MAX_AGE_MS`](../session/index.html)
+    /// of issuance. A non-empty list here means someone (often the
+    /// user themselves, on a retry) recently started a cross-instance
+    /// registration against this user_key.
+    pub registration_challenges: Vec<RegistrationChallengeExport>,
 }
 
 #[derive(Serialize)]
@@ -313,6 +328,41 @@ pub struct PendingAttachmentExport {
     pub mime: String,
     pub expires_at: String,
     pub created_at: String,
+}
+
+/// One §12 move row from this instance's chain index.
+///
+/// Mirrors `user_moves` joined to the originating `signed_objects`
+/// row so the export carries every wire field of the move (not just
+/// the projection). `is_current` is set on the row whose
+/// `canonical_hash` matches `user_homes.current_move_hash` — the
+/// winner of §12.4 latest-wins resolution at export time.
+#[derive(Serialize)]
+pub struct UserMoveExport {
+    pub canonical_hash_b64: String,
+    /// Wire `created_at` in Unix milliseconds (copied verbatim from
+    /// the signed move payload).
+    pub created_at_ms: i64,
+    /// Signed CBOR payload, base64url (no padding). `None` only if a
+    /// downstream erasure NULL'd the row — moves are §12.5
+    /// indefinite-retention so this should be `Some` in practice.
+    pub payload_b64: Option<String>,
+    /// Detached Ed25519 signature, base64url (no padding).
+    pub signature_b64: String,
+    /// True iff this is the active home per §12.4 latest-wins (i.e.
+    /// `user_homes.current_move_hash == canonical_hash`).
+    pub is_current: bool,
+}
+
+/// One pending §13.1 registration challenge row. Surfaces the wire
+/// `created_at` (Unix ms) and whether the nonce has been consumed; the
+/// raw 32-byte nonce is base64-encoded for completeness, since the
+/// row's PII content (the user's own pubkey) is already in `user`.
+#[derive(Serialize)]
+pub struct RegistrationChallengeExport {
+    pub nonce_b64: String,
+    pub created_at_ms: i64,
+    pub consumed_at: Option<String>,
 }
 
 /// Per-user storage allowance state. Mirrors `user_storage_budgets`.
@@ -784,6 +834,75 @@ pub async fn export_my_data(
         },
     };
 
+    // §12 home history. `user_moves` rows joined back to
+    // `signed_objects` so we get payload + signature alongside the
+    // index columns. Ordered oldest-first to match the natural reading
+    // order of a migration history. `is_current` marks the row that
+    // §12.4 latest-wins resolution promoted to `user_homes`; that
+    // lookup may return no row at all (never-moved local users have no
+    // `user_homes` entry), in which case no row is flagged.
+    let public_key_bytes: &[u8] = user_row.public_key.as_slice();
+    let move_rows = sqlx::query!(
+        r#"SELECT um.canonical_hash AS "canonical_hash!: Vec<u8>",
+                  um.created_at AS "created_at_ms!: i64",
+                  so.payload AS "payload?: Vec<u8>",
+                  so.signature AS "signature!: Vec<u8>"
+             FROM user_moves um
+             JOIN signed_objects so ON so.canonical_hash = um.canonical_hash
+            WHERE um.user_key = ?
+            ORDER BY um.created_at ASC"#,
+        public_key_bytes,
+    )
+    .fetch_all(db)
+    .await?;
+    let current_move_hash_row = sqlx::query!(
+        r#"SELECT current_move_hash AS "current_move_hash!: Vec<u8>"
+             FROM user_homes WHERE user_key = ?"#,
+        public_key_bytes,
+    )
+    .fetch_optional(db)
+    .await?;
+    let current_hash = current_move_hash_row.map(|r| r.current_move_hash);
+    let home_history: Vec<UserMoveExport> = move_rows
+        .into_iter()
+        .map(|r| {
+            let is_current = current_hash
+                .as_deref()
+                .is_some_and(|cur| cur == r.canonical_hash.as_slice());
+            UserMoveExport {
+                canonical_hash_b64: b64(&r.canonical_hash),
+                created_at_ms: r.created_at_ms,
+                payload_b64: r.payload.as_deref().map(b64),
+                signature_b64: b64(&r.signature),
+                is_current,
+            }
+        })
+        .collect();
+
+    // §13.1 in-flight registration challenges keyed on the user's
+    // pubkey. Almost always empty (consumed-or-GC'd within an hour);
+    // included for completeness so the export covers every
+    // user-key-indexed row in the schema.
+    let challenge_rows = sqlx::query!(
+        r#"SELECT nonce AS "nonce!: Vec<u8>",
+                  created_at AS "created_at_ms!: i64",
+                  consumed_at AS "consumed_at?: String"
+             FROM registration_challenges
+            WHERE user_key = ?
+            ORDER BY created_at ASC"#,
+        public_key_bytes,
+    )
+    .fetch_all(db)
+    .await?;
+    let registration_challenges: Vec<RegistrationChallengeExport> = challenge_rows
+        .into_iter()
+        .map(|r| RegistrationChallengeExport {
+            nonce_b64: b64(&r.nonce),
+            created_at_ms: r.created_at_ms,
+            consumed_at: r.consumed_at,
+        })
+        .collect();
+
     let exported_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
     let export = DataExport {
@@ -822,6 +941,8 @@ pub async fn export_my_data(
         pending_attachments,
         storage_budget,
         attachments_blob_archive: ATTACHMENTS_BLOB_ARCHIVE_PATH.to_string(),
+        home_history,
+        registration_challenges,
     };
 
     // Suggest a filename to the browser so "Save as…" is one click. The
@@ -1850,6 +1971,61 @@ pub(crate) async fn soft_delete_user(
     )
     .execute(&mut **tx)
     .await?;
+
+    // 10. Federation per-key migration / registration state.
+    //     `user_homes`, `user_moves`, and `registration_challenges` are
+    //     keyed on the user's raw 32-byte public key (not `users.id`),
+    //     so they're invisible to every FK cascade above. Fetch the
+    //     pubkey from the users row to drive the targeted deletes.
+    //     `fetch_optional` rather than `fetch_one` so a row that's
+    //     already been anonymised (step 2 ran but a crash skipped step
+    //     10) replays cleanly — the deletes degrade to no-ops.
+    let pubkey_row = sqlx::query!("SELECT public_key FROM users WHERE id = ?", user_id,)
+        .fetch_optional(&mut **tx)
+        .await?;
+
+    if let Some(row) = pubkey_row {
+        let user_key: &[u8] = row.public_key.as_slice();
+
+        // 10a. Drop the §12.4 resolved-current-home projection row.
+        //      The row tells peers "for this pubkey, the current
+        //      authoritative home is X"; with the account erased the
+        //      pubkey no longer denotes a live identity here. Dropping
+        //      the projection causes the local "resolved current home"
+        //      cache to fall back to the bare `users.public_key`
+        //      lookup, which for a self-deleted local user will not
+        //      match (the anonymised row's public_key is unchanged but
+        //      the account has been deactivated via §10 deactivate).
+        sqlx::query!("DELETE FROM user_homes WHERE user_key = ?", user_key,)
+            .execute(&mut **tx)
+            .await?;
+
+        // 10b. Drop any in-flight §13.1 registration challenges this
+        //      pubkey was issued. Almost always empty (the ceremony
+        //      either consumes the nonce within minutes or the
+        //      `session::cleanup_loop` sweep GCs it within the hour),
+        //      but explicit cleanup keeps the GDPR delete free of
+        //      personal data linkage to the deleted key.
+        sqlx::query!(
+            "DELETE FROM registration_challenges WHERE user_key = ?",
+            user_key,
+        )
+        .execute(&mut **tx)
+        .await?;
+
+        // 10c. `user_moves` is intentionally NOT dropped here. Per
+        //      protocol §12.5, the move chain for a key is retained
+        //      indefinitely so peers walking §12.3 backfill see the
+        //      complete history even after the originating account
+        //      has been erased. The rows hold only canonical_hash +
+        //      timestamps (no personal data beyond the pubkey itself,
+        //      which is the chain identifier and must remain
+        //      referenceable for the chain to verify). The canonical
+        //      payload bytes already in `signed_objects` are signed
+        //      move declarations the user authored — the same
+        //      "accountability is preserved" rationale that keeps
+        //      signing-key publics around (step 9) applies here.
+    }
 
     Ok(DeactivationFanout {
         items: fanout_items,

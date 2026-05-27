@@ -293,9 +293,19 @@ fn positive_fixtures() -> Vec<PositiveFixture> {
             stem: "move/v1-first",
             payload: || {
                 let key = signing_key(&KEY_ALICE_SEED);
+                // Source / destination `instance_pubkey` are pinned
+                // to the test instance seeds — same anchors used by
+                // instance-signed fixtures (admin-rm / fed-envelope),
+                // so a downstream test wiring a Move into a
+                // multi-instance harness can correlate the move's
+                // declared homes with the harness's instance keys.
+                let from_key = signing_key(&KEY_INSTANCE_A_SEED).verifying_key().to_bytes();
+                let to_key = signing_key(&KEY_INSTANCE_B_SEED).verifying_key().to_bytes();
                 let m = Move {
                     key: *key.verifying_key().as_bytes(),
+                    from_instance_key: from_key,
                     from_instance: "old.example".to_string(),
+                    to_instance_key: to_key,
                     to_instance: "new.example".to_string(),
                     created_at: 1_700_000_020_000,
                     prior_move_hash: None,
@@ -309,9 +319,18 @@ fn positive_fixtures() -> Vec<PositiveFixture> {
             stem: "move/v1-with-prior",
             payload: || {
                 let key = signing_key(&KEY_ALICE_SEED);
+                let from_key = signing_key(&KEY_INSTANCE_B_SEED).verifying_key().to_bytes();
+                // Two-hop chain: third instance the user is moving
+                // to. Distinct pubkey from the first-move fixture so
+                // a producer test that emits both fixtures back-to-
+                // back exercises a real key rotation across the move
+                // chain.
+                let to_key = signing_key(&[0xc3; 32]).verifying_key().to_bytes();
                 let m = Move {
                     key: *key.verifying_key().as_bytes(),
+                    from_instance_key: from_key,
                     from_instance: "new.example".to_string(),
+                    to_instance_key: to_key,
                     to_instance: "newer.example".to_string(),
                     created_at: 1_700_000_021_000,
                     prior_move_hash: Some([0x5a; 32]),
