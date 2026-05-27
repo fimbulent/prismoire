@@ -568,6 +568,36 @@ async fn apply_one_move(
         )
         .execute(&mut *tx)
         .await?;
+
+        // Phase 9.5 retrofit: keep the `users.home_instance` projection
+        // in sync with `user_homes.current_home_key`. Stub rows carry
+        // their home in `users.home_instance` for visibility/dedup
+        // filters; without this UPDATE the stub drifts and reads
+        // disagree with the chain-grounded resolution. Convention:
+        // NULL means "lives here" (local), matching how local-user
+        // signups leave `home_instance` NULL — so when the move
+        // targets *our* instance key, we write NULL. The UPDATE is
+        // a no-op when no stub row exists yet (e.g., move arrived
+        // before any signed object referenced the user); a later
+        // hydrate_stub_user pass will read user_homes and seed the
+        // correct home_instance at insert time.
+        let local_key: &[u8] = state.instance_key.public_bytes().as_slice();
+        if mv.to_instance_key.as_slice() == local_key {
+            sqlx::query!(
+                "UPDATE users SET home_instance = NULL WHERE public_key = ?",
+                key_slice,
+            )
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            sqlx::query!(
+                "UPDATE users SET home_instance = ? WHERE public_key = ?",
+                to_key_db,
+                key_slice,
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
         MoveStatus::Applied
     } else {
         // §12.1: loser is stored (already done above) and reported

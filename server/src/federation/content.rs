@@ -544,13 +544,11 @@ async fn apply_one_object(
             erase_all_for_user_key(&mut tx, &user_key, &canonical_hash).await?;
             ContentStatus::Applied
         }
-        ClassAction::PostRev(_) | ClassAction::Profile | ClassAction::ThreadCreate => {
-            // Phase 6 punt: store canonical bytes only. Full local
-            // projection (post_revisions / profile_revisions /
-            // threads rows for remote authors) waits on remote-user
-            // stub hydration in a later phase. Same shape as
-            // edges.rs's "no projection target → store and call it
-            // applied".
+        ClassAction::Profile => {
+            // Phase 9.5: hydrate / refresh the remote-author stub and
+            // project the profile into `profile_revisions` so the
+            // local read paths render the remote user. Canonical bytes
+            // still go to `signed_objects` for relay / audit / dedup.
             store_signed_object(
                 &mut *tx,
                 inner_class,
@@ -559,6 +557,86 @@ async fn apply_one_object(
                 &canonical_hash,
             )
             .await?;
+            let SignedPayload::ProfileRevision(prev) = &payload else {
+                debug_assert!(false, "ClassAction::Profile from ProfileRevision");
+                return Ok(ContentResult {
+                    canonical_hash,
+                    status: ContentStatus::Rejected(ContentRejectReason::SchemaInvalid),
+                });
+            };
+            project_remote_profile(
+                state,
+                &mut tx,
+                prev,
+                &signature_bytes,
+                &canonical_hash,
+                arrived_from,
+            )
+            .await?;
+            ContentStatus::Applied
+        }
+        ClassAction::PostRev(_) => {
+            // Phase 9.5: project into `posts` + `post_revisions` when
+            // a remote-author stub already exists and the FK targets
+            // (thread / parent post) are present locally. Otherwise
+            // store canonical bytes only and let
+            // `sweep_pending_projections` retry once the missing
+            // prerequisite arrives.
+            store_signed_object(
+                &mut *tx,
+                inner_class,
+                &payload_bytes,
+                &signature_bytes,
+                &canonical_hash,
+            )
+            .await?;
+            let SignedPayload::PostRevision(prev) = &payload else {
+                debug_assert!(false, "ClassAction::PostRev from PostRevision");
+                return Ok(ContentResult {
+                    canonical_hash,
+                    status: ContentStatus::Rejected(ContentRejectReason::SchemaInvalid),
+                });
+            };
+            // Projection outcome is informational; the §10.1 wire
+            // status remains `applied` because the canonical bytes
+            // are durable regardless of whether the per-class row
+            // landed. The "deferred" status is reserved for
+            // chain-grounding gaps surfaced *before* persist, per
+            // Phase 6's pending-validation punt.
+            let _ = project_remote_post_revision(
+                state,
+                &mut tx,
+                prev,
+                &signature_bytes,
+                &canonical_hash,
+                arrived_from,
+            )
+            .await?;
+            ContentStatus::Applied
+        }
+        ClassAction::ThreadCreate => {
+            // Phase 9.5: project into `threads` (and ensure the
+            // referenced `rooms` row exists). The OP `post-rev`
+            // projection is independent and arrives via the
+            // `ClassAction::PostRev` branch; the two converge
+            // regardless of arrival order because each branch
+            // tolerates the other's row being missing.
+            store_signed_object(
+                &mut *tx,
+                inner_class,
+                &payload_bytes,
+                &signature_bytes,
+                &canonical_hash,
+            )
+            .await?;
+            let SignedPayload::ThreadCreate(tc) = &payload else {
+                debug_assert!(false, "ClassAction::ThreadCreate from ThreadCreate");
+                return Ok(ContentResult {
+                    canonical_hash,
+                    status: ContentStatus::Rejected(ContentRejectReason::SchemaInvalid),
+                });
+            };
+            let _ = project_remote_thread_create(state, &mut tx, tc, arrived_from).await?;
             ContentStatus::Applied
         }
     };
@@ -838,8 +916,520 @@ async fn erase_all_for_user_key(
         )
         .execute(&mut **tx)
         .await?;
+
+        // Projection-side cascade — mirror `privacy.rs::soft_delete_user`
+        // for the stub's local rows so read paths, attachment-serve, and
+        // visibility filters all collapse the same way a local-user
+        // erasure would. Note: signed-object payloads were already
+        // erased above; this block touches *projection* tables only.
+        //
+        // 1. Drop per-revision attachment bindings. The AFTER DELETE
+        //    trigger decrements `attachment_blobs.refcount` and the
+        //    orphan-GC sweep reaps stale federation-cache bytes; we do
+        //    not delete blob rows ourselves because other users may
+        //    still reference the same content-hash.
+        sqlx::query!(
+            "DELETE FROM post_attachments \
+             WHERE post_id IN (SELECT id FROM posts WHERE author = ?)",
+            uid,
+        )
+        .execute(&mut **tx)
+        .await?;
+
+        // 2. Retract every still-live post. Only the `retracted_at`
+        //    timestamp is set — the original retraction-signature
+        //    pipeline is local-only, and a remote-driven erasure is
+        //    not equipped to forge one. The §10.5.3 410-Gone path
+        //    keys off `signed_objects.erased_at`, which is already
+        //    populated above, so reads still surface the tombstone.
+        //
+        //    Uses `strftime(..., 'now')` to share a single SQLite
+        //    clock with the surrounding cascade — the wall-clock
+        //    `chrono::Utc::now()` we used to call here disagreed with
+        //    the SQLite clock under skew and could stamp `posts` and
+        //    `users` with timestamps that disagree by >1s.
+        sqlx::query!(
+            "UPDATE posts SET retracted_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+             WHERE author = ? AND retracted_at IS NULL",
+            uid,
+        )
+        .execute(&mut **tx)
+        .await?;
+
+        // 3. Null the projected revision bodies. `body` is NOT NULL,
+        //    so use the empty string — same convention as
+        //    `privacy.rs::soft_delete_user`. Attachments are already
+        //    gone from step 1; `post_revisions` itself has no
+        //    `attachments` column.
+        sqlx::query!(
+            "UPDATE post_revisions SET body = '' \
+             WHERE post_id IN (SELECT id FROM posts WHERE author = ?)",
+            uid,
+        )
+        .execute(&mut **tx)
+        .await?;
+
+        // 4. Flip the stub's tombstone. Closes the §11.5
+        //    attachment-serve gate (`users.deleted_at IS NULL`) and
+        //    propagates through every read-side visibility filter
+        //    that already checks `deleted_at`. Guarded against
+        //    re-stamping a prior tombstone.
+        sqlx::query!(
+            "UPDATE users SET deleted_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+             WHERE id = ? AND deleted_at IS NULL",
+            uid,
+        )
+        .execute(&mut **tx)
+        .await?;
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 9.5 — remote-author projection helpers
+// ---------------------------------------------------------------------------
+//
+// These functions translate the parsed `profile-rev` / `post-rev` /
+// `thread-create` payloads into local projection rows (`users`,
+// `profile_revisions`, `posts`, `post_revisions`, `threads`, `rooms`)
+// so the read paths render remote-authored content identically to
+// local content. Canonical bytes still land in `signed_objects` via
+// the per-class branch above — the projection here is the read-side
+// view on top of those bytes, not a replacement for them.
+//
+// All three helpers run inside the caller's `BEGIN IMMEDIATE`
+// transaction. They return per-class outcomes for telemetry / future
+// sweep logic; the §10.1 wire status remains `applied` in every case
+// because the canonical bytes are durable regardless of whether the
+// projection row landed (a missing FK target or absent stub means
+// "store the bytes, sweep later" — never "reject the receive").
+
+/// Outcome of a per-class projection attempt for remote-authored
+/// content. Telemetry / sweep informational only; the on-wire status
+/// stays `applied` per the comment above.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // variants surfaced to future sweep / metrics
+enum ProjectionOutcome {
+    /// Projection row(s) inserted.
+    Projected,
+    /// No `users` row exists for the author key. Typically a
+    /// post-rev / thread-create that arrived before the matching
+    /// profile-rev hydrated the stub; the canonical bytes remain in
+    /// `signed_objects` and Phase 9.5's `sweep_pending_projections`
+    /// (called from the profile-rev branch) catches up.
+    StubMissing,
+    /// Stub is present but a per-class FK target is missing — for a
+    /// `post-rev` revision-0 that's the `threads` row or a named
+    /// parent post; for `revision > 0` that's the `posts` row. Same
+    /// recovery shape as `StubMissing`: bytes are durable, sweep
+    /// retries once the FK target lands.
+    FkMissing,
+    /// Federation receive for a key whose currently-resolved home is
+    /// *this* instance — i.e. a §13 cross-instance-registered local
+    /// user, or a user who moved here. The local row is authoritative
+    /// and we deliberately skip projecting a federated copy of their
+    /// profile / post on top of it. Phase 9.7 (§13 stub upgrade)
+    /// covers the inverse case.
+    LocalAuthoritative,
+}
+
+/// Is `user_key` locally-authoritative on *this* instance?
+///
+/// Used by every per-class projection branch (`profile`, `post-rev`,
+/// `thread-create`) so they agree on a single predicate. The two
+/// predicates this used to mix — `resolve_current_home == self` and
+/// `signup_method != 'federated'` — could disagree in the §13
+/// cross-instance-register / §3.2 move corners and cause split-brain
+/// projections (one branch projects a federated copy on top of a
+/// locally-authoritative row, another correctly skips). The
+/// canonical signal is the row's `home_instance` column:
+///
+/// - **Row exists, `home_instance IS NULL`** → locally homed.
+///   Includes local signup, admin grant, invite redemption, §13
+///   cross-instance-registered (`home_instance` gets cleared by the
+///   register handler), and a user who moved here (handled by
+///   `moves.rs::apply_one_move`).
+/// - **Row exists, `home_instance` non-NULL** → federated stub or a
+///   user who has moved away. Either way, not locally authoritative.
+/// - **No row** → fall back to `arrived_from == self`, which catches
+///   the long-loop echo case (we forwarded our own outbound payload
+///   along a multi-hop path and it returned to us before we wrote
+///   any row).
+async fn is_local_authoritative(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    state: &Arc<AppState>,
+    user_key: &[u8; 32],
+    arrived_from: &[u8; 32],
+) -> Result<bool, sqlx::Error> {
+    let key_slice: &[u8] = user_key.as_slice();
+    let row = sqlx::query!(
+        "SELECT home_instance AS \"home_instance?: Vec<u8>\" FROM users WHERE public_key = ?",
+        key_slice,
+    )
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(r) = row {
+        return Ok(r.home_instance.is_none());
+    }
+    Ok(arrived_from == state.instance_key.public_bytes())
+}
+
+/// ISO-8601 `YYYY-MM-DDTHH:MM:SSZ` form of a Unix-millisecond
+/// timestamp. Matches the format used by `strftime('%Y-%m-%dT%H:%M:%SZ',
+/// 'now')` everywhere else in the schema for TEXT-typed `created_at`
+/// columns (`posts`, `threads`, `post_revisions`, …). On out-of-range
+/// input (negative seconds, year > 9999) returns the epoch — the
+/// canonical bytes still carry the producer's exact `created_at`, so a
+/// projection-time floor is preferable to either crashing the receive
+/// *or* leaking the receiver's wall clock into the projection (which
+/// would silently violate §16.1 frozen-at-receive: a malformed
+/// `created_at` from a remote signer would otherwise be stamped with
+/// our clock instead of a deterministic sentinel).
+fn iso8601_from_ms(ms: u64) -> String {
+    use chrono::TimeZone;
+    let secs = i64::try_from(ms / 1000).unwrap_or(0);
+    let nanos = ((ms % 1000) as u32).saturating_mul(1_000_000);
+    chrono::Utc
+        .timestamp_opt(secs, nanos)
+        .single()
+        .unwrap_or_else(|| {
+            chrono::Utc
+                .timestamp_opt(0, 0)
+                .single()
+                .expect("epoch is valid")
+        })
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string()
+}
+
+/// Hydrate / refresh the remote-author stub for a `profile-rev`, then
+/// project the row into `profile_revisions`.
+///
+/// Skipped (returns [`ProjectionOutcome::LocalAuthoritative`]) when
+/// the resolved current home of `prev.user` is this instance: the
+/// user is locally-authoritative (local signup, §13 cross-instance
+/// register, or moved here), and the federation payload is just a
+/// long-loop echo of their own work — we keep the canonical bytes
+/// in `signed_objects` but do not project a federated profile row
+/// on top of the local one.
+async fn project_remote_profile(
+    state: &Arc<AppState>,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    prev: &crate::signed::ProfileRevision,
+    signature: &[u8],
+    canonical_hash: &[u8; 32],
+    arrived_from: [u8; 32],
+) -> Result<ProjectionOutcome, sqlx::Error> {
+    if is_local_authoritative(tx, state, &prev.user, &arrived_from).await? {
+        return Ok(ProjectionOutcome::LocalAuthoritative);
+    }
+    let home_key =
+        crate::federation::remote_users::resolve_current_home(tx, &prev.user, &arrived_from)
+            .await?;
+
+    let user_id = crate::federation::remote_users::hydrate_stub_user(
+        tx,
+        &prev.user,
+        &prev.display_name,
+        &home_key,
+    )
+    .await?;
+
+    let id = Uuid::new_v4().to_string();
+    let created_at_ms_db = i64::try_from(prev.created_at).unwrap_or(i64::MAX);
+    let avatar_hash_db: Option<Vec<u8>> = prev.avatar_attachment_hash.map(|h| h.to_vec());
+    let prior_hash_db: Option<Vec<u8>> = prev.prior_profile_hash.map(|h| h.to_vec());
+    let canonical_hash_db: Vec<u8> = canonical_hash.to_vec();
+    let signature_vec: &[u8] = signature;
+
+    // No UNIQUE constraint on `profile_revisions.canonical_hash` —
+    // dedup is upstream via `signed_objects` (Step 3 of
+    // `apply_one_object`). Under the caller's BEGIN IMMEDIATE the
+    // two rows insert together-or-not-at-all.
+    sqlx::query!(
+        "INSERT INTO profile_revisions \
+            (id, user_id, display_name, bio, avatar_attachment_hash, created_at, \
+             signature, prior_profile_hash, canonical_hash) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        id,
+        user_id,
+        prev.display_name,
+        prev.bio,
+        avatar_hash_db,
+        created_at_ms_db,
+        signature_vec,
+        prior_hash_db,
+        canonical_hash_db,
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    // Newly-hydrated stub may unblock pre-arrived post-rev /
+    // thread-create orphans for this author. (Currently a no-op
+    // pending the Phase 9.5 follow-up that fills it in; see
+    // `remote_users::sweep_pending_projections`.)
+    crate::federation::remote_users::sweep_pending_projections(tx, &prev.user).await?;
+
+    Ok(ProjectionOutcome::Projected)
+}
+
+/// Project a remote-authored `post-rev` into `posts` + `post_revisions`.
+///
+/// Pre-conditions enforced:
+/// - Author stub must already exist (set up by an earlier profile-rev).
+/// - For `revision == 0`: the named `threads` row must exist and, if
+///   the post has a `parent_id`, the parent `posts` row too.
+/// - For `revision > 0`: the `posts` row must exist (from an earlier
+///   rev-0 projection).
+///
+/// Any missing precondition yields the corresponding `*Missing`
+/// outcome; the canonical bytes remain durable in `signed_objects` and
+/// the future sweep re-projects when the precondition is met.
+///
+/// **Attachment projection is deferred.** The signed payload's
+/// `attachments` array currently has no `post_attachments` rows
+/// written for remote receives — that's the impl-plan's
+/// `attachments_projection.rs` follow-up. Local reads of remote
+/// posts therefore render the body without inline attachments until
+/// that lands; the canonical bytes carry the binding so a later
+/// projection pass can fill in `post_attachments` without needing
+/// re-receive.
+async fn project_remote_post_revision(
+    state: &Arc<AppState>,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    prev: &crate::signed::PostRevision,
+    signature: &[u8],
+    canonical_hash: &[u8; 32],
+    arrived_from: [u8; 32],
+) -> Result<ProjectionOutcome, sqlx::Error> {
+    // Shared local-authoritative predicate so the profile-rev /
+    // post-rev / thread-create branches all answer the same way for
+    // the same key (avoids split-brain projections when a §13
+    // promotion or move blurs the line).
+    if is_local_authoritative(tx, state, &prev.author, &arrived_from).await? {
+        return Ok(ProjectionOutcome::LocalAuthoritative);
+    }
+    let pubkey_slice: &[u8] = prev.author.as_slice();
+    let stub = sqlx::query!(
+        "SELECT id AS \"id!: String\" FROM users WHERE public_key = ?",
+        pubkey_slice,
+    )
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(stub) = stub else {
+        return Ok(ProjectionOutcome::StubMissing);
+    };
+    let user_id = stub.id;
+
+    let post_id_text = Uuid::from_bytes(prev.post_id).to_string();
+    let thread_id_text = Uuid::from_bytes(prev.thread_id).to_string();
+    let parent_id_text = prev.parent_id.map(|p| Uuid::from_bytes(p).to_string());
+    let created_at_iso = iso8601_from_ms(prev.created_at);
+    let canonical_hash_db: Vec<u8> = canonical_hash.to_vec();
+    let revision_db = i64::try_from(prev.revision).unwrap_or(i64::MAX);
+
+    let home_at_t = crate::federation::remote_users::resolve_home_at_t(
+        tx,
+        &prev.author,
+        prev.created_at,
+        &arrived_from,
+    )
+    .await?;
+    // `posts.home_instance` is frozen-at-receive: NULL iff the post
+    // was authored locally (origin == self). For Phase 9.5 federated
+    // receives the resolved home is by construction not us (the
+    // local-authoritative branch above filtered out keys we host) —
+    // but resolve_home_at_t can fall back to arrived_from, which a
+    // long-loop topology might place at self. Defensively NULL in
+    // that case so the §11.5 attachment-serve gate behaves
+    // consistently, and log so a flood of these is visible to
+    // operators (could indicate a misbehaving forwarder).
+    let home_for_posts: Option<Vec<u8>> = if &home_at_t == state.instance_key.public_bytes() {
+        tracing::warn!(
+            author = ?prev.author,
+            post_id = %post_id_text,
+            "remote post-rev resolved home_at_t == self; long-loop echo or peer misconfig",
+        );
+        None
+    } else {
+        Some(home_at_t.to_vec())
+    };
+
+    if prev.revision == 0 {
+        // FK preflight: posts.thread → threads(id), posts.parent → posts(id).
+        let thread_present = sqlx::query_scalar!(
+            "SELECT 1 AS \"present!: i64\" FROM threads WHERE id = ? LIMIT 1",
+            thread_id_text,
+        )
+        .fetch_optional(&mut **tx)
+        .await?
+        .is_some();
+        if !thread_present {
+            return Ok(ProjectionOutcome::FkMissing);
+        }
+        if let Some(pid) = &parent_id_text {
+            let parent_present = sqlx::query_scalar!(
+                "SELECT 1 AS \"present!: i64\" FROM posts WHERE id = ? LIMIT 1",
+                pid,
+            )
+            .fetch_optional(&mut **tx)
+            .await?
+            .is_some();
+            if !parent_present {
+                return Ok(ProjectionOutcome::FkMissing);
+            }
+        }
+
+        sqlx::query!(
+            "INSERT INTO posts (id, author, thread, parent, created_at, revision_count, home_instance) \
+             VALUES (?, ?, ?, ?, ?, 1, ?)",
+            post_id_text,
+            user_id,
+            thread_id_text,
+            parent_id_text,
+            created_at_iso,
+            home_for_posts,
+        )
+        .execute(&mut **tx)
+        .await?;
+    } else {
+        let posts_row = sqlx::query_scalar!(
+            "SELECT 1 AS \"present!: i64\" FROM posts WHERE id = ? LIMIT 1",
+            post_id_text,
+        )
+        .fetch_optional(&mut **tx)
+        .await?;
+        if posts_row.is_none() {
+            return Ok(ProjectionOutcome::FkMissing);
+        }
+        // Stamp `revision_count` as the high-watermark of revisions
+        // seen so far. Out-of-order arrivals (rev 2 lands before rev 1)
+        // must not regress the counter — `MAX(existing, new+1)` keeps
+        // the count monotonic per §16.1.
+        let new_rc = revision_db.saturating_add(1);
+        sqlx::query!(
+            "UPDATE posts SET revision_count = MAX(revision_count, ?) WHERE id = ?",
+            new_rc,
+            post_id_text,
+        )
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    sqlx::query!(
+        "INSERT INTO post_revisions (post_id, revision, body, signature, canonical_hash, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+        post_id_text,
+        revision_db,
+        prev.body,
+        signature,
+        canonical_hash_db,
+        created_at_iso,
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(ProjectionOutcome::Projected)
+}
+
+/// Project a remote-authored `thread-create` into `threads` (and
+/// `rooms`, get-or-create on slug).
+///
+/// Pre-condition: the author stub must already exist. The OP
+/// `post-rev` need NOT exist yet — `posts.thread` FKs to `threads(id)`,
+/// not the other way, so a thread can land before its OP post. The OP
+/// arrives independently via the post-rev branch.
+///
+/// Room creation: if no `rooms` row exists for `tc.room_slug`, INSERT
+/// one with `created_by = <federated stub user_id>`. That ascription
+/// is semantically thin (rooms aren't owned in any deep sense — the
+/// `created_by` column is FK-required NOT NULL but doesn't gate any
+/// behaviour) but it satisfies the schema.
+async fn project_remote_thread_create(
+    state: &Arc<AppState>,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    tc: &crate::signed::ThreadCreate,
+    arrived_from: [u8; 32],
+) -> Result<ProjectionOutcome, sqlx::Error> {
+    if is_local_authoritative(tx, state, &tc.author, &arrived_from).await? {
+        return Ok(ProjectionOutcome::LocalAuthoritative);
+    }
+    let pubkey_slice: &[u8] = tc.author.as_slice();
+    let stub = sqlx::query!(
+        "SELECT id AS \"id!: String\" FROM users WHERE public_key = ?",
+        pubkey_slice,
+    )
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(stub) = stub else {
+        return Ok(ProjectionOutcome::StubMissing);
+    };
+    let user_id = stub.id;
+
+    // Get-or-create the room. Live (not soft-deleted, not merged-into)
+    // matches the `merged_into IS NULL` semantic used by
+    // `threads/create_thread.rs::get_or_create_room`.
+    let existing_room = sqlx::query!(
+        "SELECT id AS \"id!: String\" FROM rooms \
+          WHERE slug = ? AND merged_into IS NULL",
+        tc.room_slug,
+    )
+    .fetch_optional(&mut **tx)
+    .await?;
+    let room_id = if let Some(r) = existing_room {
+        r.id
+    } else {
+        let new_room_id = Uuid::new_v4().to_string();
+        sqlx::query!(
+            "INSERT INTO rooms (id, slug, created_by) VALUES (?, ?, ?)",
+            new_room_id,
+            tc.room_slug,
+            user_id,
+        )
+        .execute(&mut **tx)
+        .await?;
+        new_room_id
+    };
+
+    let thread_id_text = Uuid::from_bytes(tc.thread_id).to_string();
+    let created_at_iso = iso8601_from_ms(tc.created_at);
+
+    let home_at_t = crate::federation::remote_users::resolve_home_at_t(
+        tx,
+        &tc.author,
+        tc.created_at,
+        &arrived_from,
+    )
+    .await?;
+    let home_for_threads: Option<Vec<u8>> = if &home_at_t == state.instance_key.public_bytes() {
+        None
+    } else {
+        Some(home_at_t.to_vec())
+    };
+
+    let link_url_normalized = tc
+        .link_url
+        .as_deref()
+        .map(crate::threads::normalize_url_for_fts);
+
+    sqlx::query!(
+        "INSERT INTO threads (id, title, author, room, created_at, last_activity, \
+                              link_url, link_url_normalized, home_instance) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        thread_id_text,
+        tc.title,
+        user_id,
+        room_id,
+        created_at_iso,
+        created_at_iso,
+        tc.link_url,
+        link_url_normalized,
+        home_for_threads,
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(ProjectionOutcome::Projected)
 }
 
 fn sha256(bytes: &[u8]) -> [u8; 32] {

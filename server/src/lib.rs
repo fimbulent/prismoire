@@ -167,6 +167,10 @@ pub fn build_app(
             "/api/users/{username}",
             get(users::get_profile).patch(users::update_bio),
         )
+        .route(
+            "/api/users/{username}/resolve",
+            get(users::resolve_username),
+        )
         .route("/api/users/{username}/trust", get(users::get_trust_detail))
         .route("/api/users/{username}/activity", get(users::get_activity))
         .route(

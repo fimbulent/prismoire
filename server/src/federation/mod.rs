@@ -49,6 +49,7 @@ pub mod moves;
 pub mod outbound_queue;
 pub mod peering;
 pub mod registration;
+pub mod remote_users;
 pub mod router;
 pub mod routing;
 pub mod transport;

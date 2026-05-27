@@ -153,6 +153,42 @@ export async function searchUsers(
 	return data.users;
 }
 
+/**
+ * One match in a `/api/users/{name}/resolve` response. The
+ * `public_key_hex` is the full lowercase hex of the user's
+ * 32-byte public key; the first 8 chars form the canonical
+ * `@username.{pubkey-prefix}` suffix.
+ */
+export interface ResolveMatch {
+	id: string;
+	display_name: string;
+	public_key_hex: string;
+	/** `null` when the user is homed locally; otherwise lowercase-hex
+	 *  of the home-instance pubkey for an instance-hint badge. */
+	home_instance_hex: string | null;
+	status: 'active' | 'banned' | 'suspended' | 'deleted';
+}
+
+export type ResolveResponse =
+	| { kind: 'unique'; user: ResolveMatch }
+	| { kind: 'ambiguous'; matches: ResolveMatch[] };
+
+/**
+ * Resolve `/@username` and `/@username.{8hex}` URL shapes to either a
+ * single user (`unique`) or a candidate list (`ambiguous`). 404 when
+ * no user matches. See `docs/federation-impl-plan.md` Phase 9.5
+ * username routing.
+ */
+export async function resolveUsername(
+	username: string,
+	opts: FetchOpts = {}
+): Promise<ResolveResponse> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f(`/api/users/${encodeURIComponent(username)}/resolve`);
+	if (!res.ok) await throwApiError(res);
+	return res.json();
+}
+
 export async function getTrustDetail(
 	username: string,
 	opts: FetchOpts = {}

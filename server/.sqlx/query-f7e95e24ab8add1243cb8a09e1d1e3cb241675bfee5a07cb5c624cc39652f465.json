@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE users SET home_instance = NULL WHERE public_key = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "f7e95e24ab8add1243cb8a09e1d1e3cb241675bfee5a07cb5c624cc39652f465"
+}

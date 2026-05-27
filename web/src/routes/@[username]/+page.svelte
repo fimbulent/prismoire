@@ -420,6 +420,12 @@
 
 <svelte:head>
 	<title>{profile.display_name} — Prismoire</title>
+	<!-- Phase 9.5: emit the canonical long form so external bare-name
+	     links survive a future skeleton collision without silently
+	     changing meaning. The loader has already redirected the URL
+	     bar to this same path; the link tag is for crawlers and link
+	     unfurlers that don't follow 303s. -->
+	<link rel="canonical" href={data.canonicalPath} />
 </svelte:head>
 
 <div class="max-w-4xl mx-auto px-6 py-8">

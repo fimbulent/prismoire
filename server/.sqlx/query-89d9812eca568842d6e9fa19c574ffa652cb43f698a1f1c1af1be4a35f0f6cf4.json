@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT home_instance AS \"home_instance?: Vec<u8>\" FROM users WHERE public_key = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "home_instance?: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "89d9812eca568842d6e9fa19c574ffa652cb43f698a1f1c1af1be4a35f0f6cf4"
+}

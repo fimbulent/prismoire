@@ -412,12 +412,29 @@ CREATE TABLE user_moves (
 );
 CREATE INDEX idx_user_moves_chain_walk
     ON user_moves(user_key, created_at, canonical_hash);
+CREATE TABLE IF NOT EXISTS "auth_challenges" (
+    id TEXT PRIMARY KEY NOT NULL,
+    challenge_type TEXT NOT NULL CHECK (challenge_type IN (
+        'registration',
+        'authentication',
+        'discoverable',
+        'cross_instance_register'
+    )),
+    state BLOB NOT NULL,
+    display_name TEXT,
+    invite_code TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    user_id TEXT
+);
+CREATE INDEX idx_signed_objects_erased_by
+    ON signed_objects(erased_by)
+    WHERE erased_by IS NOT NULL;
 CREATE TABLE users (
     id TEXT PRIMARY KEY NOT NULL,
     display_name TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     signup_method TEXT NOT NULL CHECK (signup_method IN (
-        'steam_key', 'invite', 'admin', 'cross_instance_register'
+        'steam_key', 'invite', 'admin', 'cross_instance_register', 'federated'
     )),
     steam_verified INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended', 'banned')),
@@ -618,9 +635,9 @@ CREATE TABLE attachment_blobs (
     size INTEGER NOT NULL CHECK (size >= 0),
     uploader TEXT REFERENCES users(id),
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    refcount INTEGER NOT NULL DEFAULT 0 CHECK (refcount >= 0)
-, accessed_at TEXT NOT NULL
-        DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')));
+    refcount INTEGER NOT NULL DEFAULT 0 CHECK (refcount >= 0),
+    accessed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
 CREATE TABLE post_attachments (
     post_id TEXT NOT NULL,
     revision INTEGER NOT NULL,
@@ -690,6 +707,9 @@ CREATE INDEX idx_profile_revisions_user ON profile_revisions(user_id);
 CREATE INDEX idx_profile_revisions_user_recent
     ON profile_revisions(user_id, created_at DESC, id DESC);
 CREATE INDEX idx_attachment_blobs_uploader ON attachment_blobs(uploader);
+CREATE INDEX idx_attachment_blobs_accessed_at
+    ON attachment_blobs(accessed_at)
+    WHERE blob IS NOT NULL;
 CREATE INDEX idx_post_attachments_content_hash ON post_attachments(content_hash);
 CREATE INDEX idx_attachment_staging_uploader ON attachment_staging(uploader);
 CREATE INDEX idx_attachment_staging_expires_at ON attachment_staging(expires_at);
@@ -839,23 +859,3 @@ BEGIN
        SET refcount = refcount - 1
      WHERE content_hash = OLD.content_hash;
 END;
-CREATE TABLE IF NOT EXISTS "auth_challenges" (
-    id TEXT PRIMARY KEY NOT NULL,
-    challenge_type TEXT NOT NULL CHECK (challenge_type IN (
-        'registration',
-        'authentication',
-        'discoverable',
-        'cross_instance_register'
-    )),
-    state BLOB NOT NULL,
-    display_name TEXT,
-    invite_code TEXT,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    user_id TEXT
-);
-CREATE INDEX idx_signed_objects_erased_by
-    ON signed_objects(erased_by)
-    WHERE erased_by IS NOT NULL;
-CREATE INDEX idx_attachment_blobs_accessed_at
-    ON attachment_blobs(accessed_at)
-    WHERE blob IS NOT NULL;

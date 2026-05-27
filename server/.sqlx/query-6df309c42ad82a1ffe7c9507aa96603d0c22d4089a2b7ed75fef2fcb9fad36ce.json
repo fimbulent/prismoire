@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM post_attachments WHERE post_id IN (SELECT id FROM posts WHERE author = ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "6df309c42ad82a1ffe7c9507aa96603d0c22d4089a2b7ed75fef2fcb9fad36ce"
+}

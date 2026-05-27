@@ -7,8 +7,8 @@ mod list_threads;
 
 pub use by_link::get_threads_by_link;
 pub use common::{
-    AttachmentResponse, PostResponse, fetch_latest_attachments, is_thread_visible, parse_cursor,
-    validate_body,
+    AttachmentResponse, PostResponse, fetch_latest_attachments, is_thread_visible,
+    normalize_url_for_fts, parse_cursor, validate_body,
 };
 pub use create_reply::create_reply;
 pub use create_thread::create_thread;

@@ -77,6 +77,11 @@ pub enum ErrorCode {
     PasskeyCeremonyFailed,
     /// No user row matched the provided display name.
     UserNotFound,
+    /// Multiple users matched the bare display name and the caller
+    /// supplied no pubkey-prefix to disambiguate. Surfaced by handlers
+    /// that demand a unique match (most `/api/users/{name}/...` paths);
+    /// the disambiguation endpoint returns the list directly instead.
+    AmbiguousUsername,
     /// The user has no credentials registered (can happen after passkey removal).
     NoCredentials,
     /// Requested display name is malformed (empty, too long, mixed-script, etc).
@@ -299,6 +304,8 @@ impl ErrorCode {
             | Self::CannotModerateAdmin
             | Self::InvitePrivilegeRevoked => StatusCode::FORBIDDEN,
 
+            Self::AmbiguousUsername => StatusCode::MULTIPLE_CHOICES,
+
             Self::UserNotFound
             | Self::NoCredentials
             | Self::InviteNotFound
@@ -393,6 +400,7 @@ impl ErrorCode {
             Self::InvalidChallenge => "invalid or expired challenge",
             Self::PasskeyCeremonyFailed => "webauthn ceremony failed",
             Self::UserNotFound => "user not found",
+            Self::AmbiguousUsername => "username matches multiple users",
             Self::NoCredentials => "no credentials registered",
             Self::InvalidDisplayName => "display name is invalid",
             Self::DisplayNameTaken => "display name already taken",

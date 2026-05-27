@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, display_name, created_at, signup_method, bio, role, status,\n                  can_invite AS \"can_invite!: bool\", deleted_at\n             FROM users WHERE display_name = ?",
+  "query": "SELECT id, display_name, created_at, signup_method, bio, role, status,\n                  can_invite AS \"can_invite!: bool\", deleted_at,\n                  public_key, home_instance\n             FROM users WHERE display_name_skeleton = ?\n             LIMIT ?",
   "describe": {
     "columns": [
       {
@@ -47,10 +47,20 @@
         "name": "deleted_at",
         "ordinal": 8,
         "type_info": "Text"
+      },
+      {
+        "name": "public_key",
+        "ordinal": 9,
+        "type_info": "Blob"
+      },
+      {
+        "name": "home_instance",
+        "ordinal": 10,
+        "type_info": "Blob"
       }
     ],
     "parameters": {
-      "Right": 1
+      "Right": 2
     },
     "nullable": [
       false,
@@ -61,8 +71,10 @@
       false,
       false,
       false,
+      true,
+      false,
       true
     ]
   },
-  "hash": "b69187902cb0c1f9d7272020166a1fa4bd83746e13412fd44ff68cf3e8fa7245"
+  "hash": "0832540c773906c573bd209150966e4c0c9ed2a39f19bb8c64f60aea62ea6f5a"
 }

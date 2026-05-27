@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT canonical_hash AS \"canonical_hash!: Vec<u8>\" FROM user_moves WHERE user_key = ? AND created_at <= ? ORDER BY created_at DESC, canonical_hash ASC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "canonical_hash!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4844c4dc9d24d42de0b04e8f5927c577e87b8a3aaeb2fe100f10ab35971114d9"
+}

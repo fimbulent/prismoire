@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE posts SET revision_count = MAX(revision_count, ?) WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "3b00cc80600864545c7287ff5459d7b9f98fe4abe5fac573dd466d83d19d41df"
+}

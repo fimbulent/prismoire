@@ -99,8 +99,15 @@ function isAbsoluteHttpUrl(url: string): boolean {
 // inside emails (`foo@bar.com`) or nested path segments (`foo/r/bar`).
 const USERNAME_CLASS = String.raw`\p{L}\p{N}_\-`;
 const MENTION_START_RE = new RegExp(`(?<![${USERNAME_CLASS}])@[${USERNAME_CLASS}]`, 'u');
+// Mention tokens accept the bare and dotted forms (Phase 9.5):
+//   `@alice`             — bare; the profile route disambiguates if needed.
+//   `@alice.a1b2c3d4`    — long form; the 8-hex pubkey-prefix selects exactly
+//                          one user and survives a future skeleton collision.
+// The suffix is exactly 8 lowercase hex chars (canonical pubkey prefix); the
+// trailing lookahead still excludes the username class so the link doesn't
+// swallow a following letter/number.
 const MENTION_TOKEN_RE = new RegExp(
-	`^@([${USERNAME_CLASS}]{3,20})(?![${USERNAME_CLASS}])`,
+	`^@([${USERNAME_CLASS}]{3,20})(\\.[0-9a-f]{8})?(?![${USERNAME_CLASS}])`,
 	'u'
 );
 const ROOM_START_RE = /(?<![/\w])\/r\/[a-z0-9_]/;
@@ -110,6 +117,11 @@ interface MentionToken {
 	type: 'mention';
 	raw: string;
 	username: string;
+	/// Optional `.{8hex}` suffix (without the leading dot) when the
+	/// long form was written explicitly. Empty for the bare form;
+	/// the renderer routes to `/@{username}` and the profile page
+	/// disambiguates.
+	pubkeyPrefix?: string;
 }
 
 interface RoomRefToken {
@@ -246,12 +258,26 @@ function createMarked(profile: MarkdownProfile, attachments?: MarkdownAttachment
 				tokenizer(src: string): MentionToken | undefined {
 					const m = MENTION_TOKEN_RE.exec(src);
 					if (!m) return undefined;
-					return { type: 'mention', raw: m[0], username: m[1] };
+					// `m[2]` is the matched `.{8hex}` suffix (with the leading
+					// dot) when present; strip the dot for storage so the
+					// renderer can compose the link without re-parsing.
+					const pubkeyPrefix = m[2]?.slice(1);
+					return { type: 'mention', raw: m[0], username: m[1], pubkeyPrefix };
 				},
 				renderer(token) {
 					const m = token as MentionToken;
-					const href = `/@${encodeURIComponent(m.username)}`;
-					return `<a href="${href}">@${m.username}</a>`;
+					// Long form when the author wrote it; bare form
+					// otherwise. The profile page emits `<link
+					// rel="canonical">` either way, so a bare mention that
+					// later collides remains stable.
+					const path = m.pubkeyPrefix
+						? `${encodeURIComponent(m.username)}.${m.pubkeyPrefix}`
+						: encodeURIComponent(m.username);
+					const href = `/@${path}`;
+					const text = m.pubkeyPrefix
+						? `@${m.username}.${m.pubkeyPrefix}`
+						: `@${m.username}`;
+					return `<a href="${href}">${text}</a>`;
 				}
 			},
 			{

@@ -192,10 +192,240 @@ pub enum TrustEdgeType {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Full result of a unique-match `resolve_user` lookup. Carries the
+/// fields most handlers need plus the `public_key` so callers can
+/// build the canonical `/@username.{pubkey-prefix}` long form (Phase
+/// 9.5 disambiguation).
+pub struct ResolvedUserRow {
+    pub id: String,
+    pub display_name: String,
+    pub created_at: String,
+    pub signup_method: String,
+    pub bio: Option<String>,
+    pub role: String,
+    pub status: UserStatus,
+    pub can_invite: bool,
+    pub public_key: Vec<u8>,
+    /// Stub-row instance binding (NULL means homed locally). Used by
+    /// the disambiguation page to display the instance hint.
+    pub home_instance: Option<Vec<u8>>,
+}
+
+/// Compact summary used in the `Ambiguous` arm — every match's
+/// distinguishing fields without the full profile payload.
+pub struct ResolvedUserSummary {
+    pub id: String,
+    pub display_name: String,
+    pub public_key: Vec<u8>,
+    pub home_instance: Option<Vec<u8>>,
+    pub status: UserStatus,
+}
+
+/// Discriminated outcome of resolving a username from a URL path or
+/// mention. See `docs/federation-impl-plan.md` Phase 9.5 username
+/// routing.
+///
+/// - `Unique` — exactly one user matches (bare form, no other rows
+///   share the skeleton; or dotted form, the 8-hex prefix selects
+///   a single match).
+/// - `Ambiguous` — multiple users share the skeleton and the caller
+///   gave no disambiguator. The web layer renders a disambiguation
+///   page from the returned summaries; API handlers that need a
+///   single row return [`ErrorCode::AmbiguousUsername`].
+/// - `NotFound` — no row matched (bare form: skeleton has no users;
+///   dotted form: skeleton has users but none with the supplied
+///   pubkey prefix; or the suffix was malformed).
+pub enum UserResolution {
+    Unique(ResolvedUserRow),
+    Ambiguous(Vec<ResolvedUserSummary>),
+    NotFound,
+}
+
+/// Split a path segment like `alice.a1b2c3d4` into the bare name and
+/// the optional 8-hex pubkey-prefix suffix. Display names cannot
+/// contain `.` (see `display_name::classify_display_name_error`), so
+/// the dot is an unambiguous separator. Returns `(name, Some(prefix))`
+/// for a well-formed long form, `(name, None)` for the bare form.
+///
+/// Malformed suffixes (wrong length, non-hex) return `None` for the
+/// prefix and surface as `NotFound` downstream — better than silently
+/// stripping a malformed tail and routing to whatever happens to
+/// share the skeleton.
+fn parse_username_with_suffix(raw: &str) -> (&str, Option<&str>) {
+    // Find the *last* dot so a hypothetical future username scheme
+    // that allowed dots wouldn't get misinterpreted; current rules
+    // forbid dots entirely, so this is equivalent to `find('.')`
+    // today.
+    let Some(dot_idx) = raw.rfind('.') else {
+        return (raw, None);
+    };
+    let (name, dot_and_suffix) = raw.split_at(dot_idx);
+    let suffix = &dot_and_suffix[1..]; // drop the dot
+    if suffix.len() == 8 && suffix.chars().all(|c| c.is_ascii_hexdigit()) {
+        // Canonical form requires lowercase hex. Reject uppercase to
+        // keep one canonical representation per user.
+        if suffix.chars().all(|c| !c.is_ascii_uppercase()) {
+            return (name, Some(suffix));
+        }
+    }
+    // Suffix exists but is malformed — treat the whole string as the
+    // name; the lookup will then fail with NotFound rather than
+    // silently truncating.
+    (raw, None)
+}
+
+/// Resolve a username (bare or dotted) to a [`UserResolution`].
+///
+/// - Computes the confusable skeleton of the bare name part and
+///   selects every `users` row sharing it.
+/// - If a pubkey-prefix suffix was supplied, filters the set by
+///   `substr(lower(hex(public_key)), 1, 8) = ?`.
+/// - Returns `Unique` / `Ambiguous` / `NotFound` based on the final
+///   match count.
+///
+/// Status filtering is unchanged from the legacy lookup: rows for
+/// banned / suspended / deleted users still come back so callers can
+/// branch on `status` (e.g., the profile handler renders a tombstone
+/// for deleted users; trust handlers reject restricted-vs-other
+/// access via `enforce_self_only_for_restricted`).
+pub async fn resolve_user_dispatch(
+    db: &sqlx::SqlitePool,
+    raw_username: &str,
+) -> Result<UserResolution, AppError> {
+    let (bare, suffix) = parse_username_with_suffix(raw_username);
+    let skeleton = display_name_skeleton(bare);
+
+    // Skeleton-based set first; dot-form filter is applied in Rust
+    // because sqlx can't statically check the `substr(hex(...))`
+    // expression's nullability across the prepared cache.
+    //
+    // Cap the result set at `SKELETON_FETCH_LIMIT`. A hostile peer
+    // could otherwise mass-create stubs colliding with one local
+    // skeleton (no admin-grant gate, just a signed profile-rev) and
+    // turn every profile / mention / disambiguation render into an
+    // unbounded SELECT. A skeleton matching more than the limit
+    // means either a deliberate attack or an extraordinary natural
+    // collision; in both cases truncating + logging is preferable
+    // to fetching everything and degrading the read path.
+    const SKELETON_FETCH_LIMIT: i64 = 128;
+    let rows = sqlx::query!(
+        r#"SELECT id, display_name, created_at, signup_method, bio, role, status,
+                  can_invite AS "can_invite!: bool", deleted_at,
+                  public_key, home_instance
+             FROM users WHERE display_name_skeleton = ?
+             LIMIT ?"#,
+        skeleton,
+        SKELETON_FETCH_LIMIT,
+    )
+    .fetch_all(db)
+    .await?;
+    if rows.len() as i64 == SKELETON_FETCH_LIMIT {
+        tracing::warn!(
+            skeleton = %skeleton,
+            limit = SKELETON_FETCH_LIMIT,
+            "skeleton fetch hit truncation limit; possible stub-flood",
+        );
+    }
+
+    // Apply the dotted-form filter (if any). 8 hex chars = 4 bytes,
+    // so we compare the first 4 bytes of each row's public_key to
+    // the decoded suffix. Decoding once outside the loop keeps the
+    // per-row work to a slice equality.
+    let suffix_bytes: Option<[u8; 4]> = match suffix {
+        None => None,
+        Some(s) => {
+            // The parser already guaranteed length 8 lowercase-hex,
+            // but defensively re-check to avoid a panic on the
+            // `from_hex` path if the parser ever loosens.
+            let mut out = [0u8; 4];
+            for (i, chunk) in s.as_bytes().chunks_exact(2).enumerate() {
+                let hi = (chunk[0] as char).to_digit(16);
+                let lo = (chunk[1] as char).to_digit(16);
+                match (hi, lo) {
+                    (Some(h), Some(l)) => out[i] = ((h << 4) | l) as u8,
+                    _ => return Ok(UserResolution::NotFound),
+                }
+            }
+            Some(out)
+        }
+    };
+
+    let mut filtered: Vec<_> = rows
+        .into_iter()
+        .filter(|r| match suffix_bytes {
+            None => true,
+            Some(want) => r.public_key.len() >= 4 && r.public_key[..4] == want,
+        })
+        .collect();
+
+    if filtered.is_empty() {
+        return Ok(UserResolution::NotFound);
+    }
+
+    if filtered.len() == 1 {
+        let row = filtered.remove(0);
+        let raw_status = UserStatus::try_from(row.status.as_str()).map_err(|e| {
+            tracing::error!(
+                username = %raw_username,
+                error = %e,
+                "unrecognised users.status",
+            );
+            AppError::code(ErrorCode::Internal)
+        })?;
+        let status = UserStatus::effective(raw_status, row.deleted_at.as_deref());
+        return Ok(UserResolution::Unique(ResolvedUserRow {
+            id: row.id,
+            display_name: row.display_name,
+            created_at: row.created_at,
+            signup_method: row.signup_method,
+            bio: row.bio,
+            role: row.role,
+            status,
+            can_invite: row.can_invite,
+            public_key: row.public_key,
+            home_instance: row.home_instance,
+        }));
+    }
+
+    // Multi-match → ambiguous. Convert to compact summaries; the
+    // disambiguation page renders these as a row-per-match list.
+    // Propagate `UserStatus::try_from` failures as `Internal`
+    // identically to the Unique branch — an unrecognised
+    // `users.status` value is local-state corruption and silently
+    // coercing to `Active` here would render a banned/suspended
+    // user as a normal row on the disambiguation page.
+    let mut summaries: Vec<ResolvedUserSummary> = Vec::with_capacity(filtered.len());
+    for r in filtered {
+        let raw_status = UserStatus::try_from(r.status.as_str()).map_err(|e| {
+            tracing::error!(
+                username = %raw_username,
+                error = %e,
+                "unrecognised users.status in ambiguous match",
+            );
+            AppError::code(ErrorCode::Internal)
+        })?;
+        let status = UserStatus::effective(raw_status, r.deleted_at.as_deref());
+        summaries.push(ResolvedUserSummary {
+            id: r.id,
+            display_name: r.display_name,
+            public_key: r.public_key,
+            home_instance: r.home_instance,
+            status,
+        });
+    }
+    Ok(UserResolution::Ambiguous(summaries))
+}
+
 /// Look up a user by display name, returning 404 if not found.
 ///
-/// Returns `(id, display_name, created_at, signup_method, bio, role, status)`.
+/// Thin wrapper around [`resolve_user_dispatch`] that demands a
+/// unique match. Most existing handlers want a single row, so they
+/// stay on the legacy tuple shape; only the disambiguation surface
+/// reaches for the discriminated form directly.
+///
+/// Returns `(id, display_name, created_at, signup_method, bio, role, status, can_invite)`.
 /// Does not filter by status — callers decide how to handle banned/suspended users.
+#[allow(clippy::type_complexity)]
 async fn resolve_user(
     db: &sqlx::SqlitePool,
     username: &str,
@@ -212,30 +442,20 @@ async fn resolve_user(
     ),
     AppError,
 > {
-    let row = sqlx::query!(
-        r#"SELECT id, display_name, created_at, signup_method, bio, role, status,
-                  can_invite AS "can_invite!: bool", deleted_at
-             FROM users WHERE display_name = ?"#,
-        username,
-    )
-    .fetch_optional(db)
-    .await?
-    .ok_or_else(|| AppError::code(ErrorCode::UserNotFound))?;
-    let raw_status = UserStatus::try_from(row.status.as_str()).map_err(|e| {
-        tracing::error!(username = %username, error = %e, "unrecognised users.status");
-        AppError::code(ErrorCode::Internal)
-    })?;
-    let status = UserStatus::effective(raw_status, row.deleted_at.as_deref());
-    Ok((
-        row.id,
-        row.display_name,
-        row.created_at,
-        row.signup_method,
-        row.bio,
-        row.role,
-        status,
-        row.can_invite,
-    ))
+    match resolve_user_dispatch(db, username).await? {
+        UserResolution::Unique(row) => Ok((
+            row.id,
+            row.display_name,
+            row.created_at,
+            row.signup_method,
+            row.bio,
+            row.role,
+            row.status,
+            row.can_invite,
+        )),
+        UserResolution::Ambiguous(_) => Err(AppError::code(ErrorCode::AmbiguousUsername)),
+        UserResolution::NotFound => Err(AppError::code(ErrorCode::UserNotFound)),
+    }
 }
 
 /// Look up the viewer's trust stance toward `target_user`.
@@ -282,6 +502,109 @@ async fn resolve_display_names(
         }
     }
     Ok(map)
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/users/{username}/resolve — disambiguation surface
+// ---------------------------------------------------------------------------
+
+/// One match in a `Resolve` response. Carries the fields the web
+/// disambiguation page needs to render a row + canonical link.
+#[derive(Serialize)]
+pub struct ResolveMatch {
+    pub id: String,
+    pub display_name: String,
+    /// Lowercase-hex of the user's public key. The client uses the
+    /// first 8 chars as the canonical-link suffix; the full key is
+    /// returned both so the client doesn't need to ask twice and so
+    /// a future widening of the canonical form requires no API
+    /// reshape.
+    pub public_key_hex: String,
+    /// `null` when the user is homed here. Otherwise lowercase-hex
+    /// of the home-instance pubkey — the disambiguation page renders
+    /// this as an instance hint next to the row.
+    pub home_instance_hex: Option<String>,
+    /// Wire-facing `UserStatus` string (`active`, `banned`, ...).
+    pub status: String,
+}
+
+/// Wire response for `GET /api/users/{username}/resolve`.
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ResolveResponse {
+    /// One match. The web layer should `<link rel="canonical">` to
+    /// the long form and redirect bare→long for stability.
+    Unique { user: ResolveMatch },
+    /// Multiple matches. The web layer renders the disambiguation
+    /// page from this list.
+    Ambiguous { matches: Vec<ResolveMatch> },
+}
+
+/// `GET /api/users/{username}/resolve` — disambiguation lookup.
+///
+/// Returns the discriminated match list for `/@{username}` and
+/// `/@{username}.{8hex}` URL shapes. 200 for `Unique`/`Ambiguous`;
+/// 404 ([`ErrorCode::UserNotFound`]) when the username matches no
+/// rows.
+///
+/// Unlike the other `/api/users/{name}/...` handlers, this one never
+/// returns `AmbiguousUsername` — surfacing the candidate list *is*
+/// its job. Authenticated like every other read handler so the
+/// homepage / mention popovers can call it.
+pub async fn resolve_username(
+    State(state): State<Arc<AppState>>,
+    _user: AuthUser,
+    Path(username): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    match resolve_user_dispatch(&state.db, &username).await? {
+        UserResolution::NotFound => Err(AppError::code(ErrorCode::UserNotFound)),
+        UserResolution::Unique(row) => Ok(Json(ResolveResponse::Unique {
+            user: ResolveMatch {
+                id: row.id,
+                display_name: row.display_name,
+                public_key_hex: hex_lower(&row.public_key),
+                home_instance_hex: row.home_instance.as_deref().map(hex_lower),
+                status: status_wire(row.status),
+            },
+        })),
+        UserResolution::Ambiguous(matches) => Ok(Json(ResolveResponse::Ambiguous {
+            matches: matches
+                .into_iter()
+                .map(|m| ResolveMatch {
+                    id: m.id,
+                    display_name: m.display_name,
+                    public_key_hex: hex_lower(&m.public_key),
+                    home_instance_hex: m.home_instance.as_deref().map(hex_lower),
+                    status: status_wire(m.status),
+                })
+                .collect(),
+        })),
+    }
+}
+
+/// Lowercase-hex string of a byte slice. Inline rather than pulling
+/// in the `hex` crate just for this one site.
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
+/// Wire-facing string for a `UserStatus` — matches the convention
+/// used by `search_users` (mention popover) so the disambiguation
+/// page can share rendering logic.
+fn status_wire(status: UserStatus) -> String {
+    match status {
+        UserStatus::Active => "active",
+        UserStatus::Banned => "banned",
+        UserStatus::Suspended => "suspended",
+        UserStatus::Deleted => "deleted",
+    }
+    .into()
 }
 
 // ---------------------------------------------------------------------------
