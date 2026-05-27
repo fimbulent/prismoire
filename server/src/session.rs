@@ -52,6 +52,7 @@ const RENEWAL_THRESHOLD_DAYS: i64 = SESSION_DURATION_DAYS / 2;
 struct AuthSession {
     user_id: String,
     display_name: String,
+    public_key: Vec<u8>,
     role: String,
     status: UserStatus,
     suspended_until: Option<String>,
@@ -67,6 +68,7 @@ struct AuthSession {
 pub struct AuthUser {
     pub user_id: String,
     pub display_name: String,
+    pub public_key_hex: String,
     pub role: String,
 }
 
@@ -105,6 +107,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
         Ok(AuthUser {
             user_id: session.user_id.clone(),
             display_name: session.display_name.clone(),
+            public_key_hex: crate::users::hex_lower(&session.public_key),
             role: session.role.clone(),
         })
     }
@@ -134,6 +137,7 @@ impl FromRequestParts<Arc<AppState>> for OptionalAuthUser {
             .map(|session| AuthUser {
                 user_id: session.user_id.clone(),
                 display_name: session.display_name.clone(),
+                public_key_hex: crate::users::hex_lower(&session.public_key),
                 role: session.role.clone(),
             });
         Ok(OptionalAuthUser(user))
@@ -149,6 +153,7 @@ impl FromRequestParts<Arc<AppState>> for OptionalAuthUser {
 pub struct RestrictedAuthUser {
     pub user_id: String,
     pub display_name: String,
+    pub public_key_hex: String,
     pub role: String,
     pub status: UserStatus,
     pub suspended_until: Option<String>,
@@ -180,6 +185,7 @@ impl FromRequestParts<Arc<AppState>> for RestrictedAuthUser {
         Ok(RestrictedAuthUser {
             user_id: session.user_id.clone(),
             display_name: session.display_name.clone(),
+            public_key_hex: crate::users::hex_lower(&session.public_key),
             role: session.role.clone(),
             status: session.status,
             suspended_until: session.suspended_until.clone(),
@@ -281,7 +287,7 @@ pub async fn session_middleware(
         // AuthSession. Sessions are dropped as part of the delete
         // transaction, so this is belt-and-suspenders.
         let row = sqlx::query!(
-            "SELECT s.user_id, u.display_name, s.expires_at, u.status, u.role, u.suspended_until \
+            "SELECT s.user_id, u.display_name, u.public_key AS \"public_key!: Vec<u8>\", s.expires_at, u.status, u.role, u.suspended_until \
              FROM sessions s \
              JOIN users u ON u.id = s.user_id \
              WHERE s.token = ? AND u.deleted_at IS NULL",
@@ -298,6 +304,7 @@ pub async fn session_middleware(
         {
             let user_id = row.user_id;
             let display_name = row.display_name;
+            let public_key = row.public_key;
             let role = row.role;
             let mut suspended_until = row.suspended_until;
             let mut status = match UserStatus::try_from(row.status.as_str()) {
@@ -345,6 +352,7 @@ pub async fn session_middleware(
                 request.extensions_mut().insert(AuthSession {
                     user_id,
                     display_name,
+                    public_key,
                     role,
                     status,
                     suspended_until,

@@ -167,7 +167,7 @@ async fn by_link_returns_visible_dupe_then_hides_after_distrust() {
     // short-circuit should hide the thread.
     let distrust_req = json_request(
         Method::PUT,
-        "/api/users/carol/trust-edge",
+        &format!("/api/users/{}/trust-edge", carol.public_key_hex),
         Some(&alice.cookie),
         &serde_json::json!({ "type": "distrust" }),
     );

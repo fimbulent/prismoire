@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT display_name, public_key, created_at FROM users WHERE invite_id = ? ORDER BY created_at ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "display_name",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "public_key",
+        "ordinal": 1,
+        "type_info": "Blob"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "7f5eb0b75d8781021209829ad94a41dc01b8071fcf8e2acc3f041c9276f763a0"
+}

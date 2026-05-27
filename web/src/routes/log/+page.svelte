@@ -3,6 +3,7 @@
 	import { relativeTime } from '$lib/format';
 	import MoreButton from '$lib/components/ui/MoreButton.svelte';
 	import { errorMessage } from '$lib/i18n/errors';
+	import { canonicalProfilePath } from '$lib/user-url';
 
 	let { data } = $props();
 
@@ -79,8 +80,8 @@
 					<div class="flex items-start gap-2 text-sm">
 						<span class="font-semibold text-text-primary">{entry.admin_name}</span>
 						<span class="text-text-secondary">{actionLabel(entry.action)}</span>
-						{#if entry.target_user_name}
-							<a href="/@{encodeURIComponent(entry.target_user_name)}" class="font-semibold text-text-primary hover:underline">{entry.target_user_name}</a>
+						{#if entry.target_user_name && entry.target_user_public_key_hex}
+							<a href={canonicalProfilePath(entry.target_user_name, entry.target_user_public_key_hex)} class="font-semibold text-text-primary hover:underline">{entry.target_user_name}</a>
 						{/if}
 						{#if entry.thread_title}
 							<a

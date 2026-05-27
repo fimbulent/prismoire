@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "WITH RECURSIVE invite_tree(user_id, depth) AS (\n             SELECT u.id, 1 FROM users u\n             JOIN invites i ON i.id = u.invite_id\n             WHERE i.created_by = ?\n           UNION ALL\n             SELECT u.id, it.depth + 1 FROM users u\n             JOIN invites i ON i.id = u.invite_id\n             JOIN invite_tree it ON i.created_by = it.user_id\n           )\n           SELECT u.id AS \"id!\", u.display_name AS \"display_name!\",\n                  u.public_key AS \"public_key!: Vec<u8>\",\n                  u.status AS \"status!\", it.depth AS \"depth!: i64\"\n           FROM users u\n           JOIN invite_tree it ON u.id = it.user_id\n           ORDER BY it.depth ASC, u.created_at ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "display_name!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "public_key!: Vec<u8>",
+        "ordinal": 2,
+        "type_info": "Blob"
+      },
+      {
+        "name": "status!",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "depth!: i64",
+        "ordinal": 4,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "ec2aa4fc287aba40bcd4da5dc11b3fccceddfd200ff0f0c30fa9f4995574d942"
+}

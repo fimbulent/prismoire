@@ -120,7 +120,7 @@
 					-->
 					<span class="ml-auto md:ml-0 md:order-last">{relativeTime(p.created_at)}</span>
 					<div class="basis-full h-0 md:hidden" aria-hidden="true"></div>
-					<UserName name={p.author_name} viewer={p.viewer} compact muted />
+					<UserName name={p.author_name} pubkeyHex={p.author_public_key_hex} viewer={p.viewer} compact muted />
 				</div>
 				<div class="md:max-w-measure md:flex-1 md:min-w-0">
 					{#if p.is_op}

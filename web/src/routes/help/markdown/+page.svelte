@@ -142,6 +142,16 @@
 			prefix to link to the room.
 		</p>
 		{@render example('hello @alice, see /r/general for context')}
+		<p class="text-text-secondary mt-3 mb-2">
+			You can also reference users using the longer format used in
+			the address bar of their profile page. This is useful in cases
+			where two users share the same username. When referencing users
+			in this way, the link target uses the full long form, but only
+			<code class="font-mono text-[0.875em] bg-bg-surface-raised text-text-primary px-1.5 py-0.5 rounded">@username</code>
+			is rendered as visible text. Picking a user from the autocomplete
+			dropdown always inserts the long form.
+		</p>
+		{@render example('ping @alice.5a29ddb0 about the merge')}
 	</section>
 
 	<section class="mb-8">

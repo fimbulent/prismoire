@@ -21,13 +21,9 @@
 -->
 <script lang="ts">
 	import type { PageProps } from './$types';
+	import { canonicalProfilePath } from '$lib/user-url';
 
 	let { data }: PageProps = $props();
-
-	/// Build the long-form path for a match.
-	function longFormHref(name: string, pubkeyHex: string): string {
-		return `/@${encodeURIComponent(name)}.${pubkeyHex.slice(0, 8)}`;
-	}
 
 	/// Shortened instance fingerprint for the hint chip. We render 8
 	/// hex chars (32 bits) — enough for the viewer to tell two
@@ -55,7 +51,7 @@
 		{#each data.matches as match (match.id)}
 			<li>
 				<a
-					href={longFormHref(match.display_name, match.public_key_hex)}
+					href={canonicalProfilePath(match.display_name, match.public_key_hex)}
 					class="block bg-bg-surface border border-border rounded-md px-4 py-3 hover:border-accent-muted transition-colors"
 				>
 					<div class="flex items-center gap-3 flex-wrap">

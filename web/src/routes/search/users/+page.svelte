@@ -61,7 +61,7 @@
 	<ul class="space-y-2">
 		{#each users as u (u.id)}
 			<li class="bg-bg-surface border border-border rounded-md px-3 py-2">
-				<UserName name={u.display_name} viewer={u.viewer} />
+				<UserName name={u.display_name} pubkeyHex={u.public_key_hex} viewer={u.viewer} />
 			</li>
 		{/each}
 	</ul>

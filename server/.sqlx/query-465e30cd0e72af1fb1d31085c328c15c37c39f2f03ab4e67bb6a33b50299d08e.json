@@ -1,0 +1,80 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, display_name, created_at, signup_method, bio, role, status,\n                  can_invite AS \"can_invite!: bool\", deleted_at,\n                  public_key, home_instance\n             FROM users WHERE public_key = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "display_name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "signup_method",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "bio",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "role",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "status",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "can_invite!: bool",
+        "ordinal": 7,
+        "type_info": "Integer"
+      },
+      {
+        "name": "deleted_at",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "public_key",
+        "ordinal": 9,
+        "type_info": "Blob"
+      },
+      {
+        "name": "home_instance",
+        "ordinal": 10,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "465e30cd0e72af1fb1d31085c328c15c37c39f2f03ab4e67bb6a33b50299d08e"
+}

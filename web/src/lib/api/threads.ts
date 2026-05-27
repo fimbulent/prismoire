@@ -6,6 +6,8 @@ export interface ThreadSummary {
 	title: string;
 	author_id: string;
 	author_name: string;
+	/** Lowercase-hex pubkey of the thread's OP author. */
+	author_public_key_hex: string;
 	room_id: string;
 	room_slug: string;
 	created_at: string;
@@ -65,6 +67,8 @@ export interface PostResponse {
 	parent_id: string | null;
 	author_id: string;
 	author_name: string;
+	/** Lowercase-hex pubkey of the post author. */
+	author_public_key_hex: string;
 	body: string;
 	created_at: string;
 	edited_at: string | null;
@@ -90,6 +94,8 @@ export interface ThreadDetail {
 	title: string;
 	author_id: string;
 	author_name: string;
+	/** Lowercase-hex pubkey of the thread's OP author. */
+	author_public_key_hex: string;
 	room_id: string;
 	room_slug: string;
 	created_at: string;
@@ -327,6 +333,8 @@ export interface RevisionHistoryResponse {
 	post_id: string;
 	author_id: string;
 	author_name: string;
+	/** Lowercase-hex pubkey of the post author. */
+	author_public_key_hex: string;
 	retracted_at: string | null;
 	revisions: RevisionResponse[];
 }

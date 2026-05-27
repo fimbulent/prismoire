@@ -31,6 +31,11 @@ pub struct ThreadSummary {
     pub title: String,
     pub author_id: String,
     pub author_name: String,
+    /// Lowercase-hex of the author's 32-byte pubkey. Identity-stable across
+    /// display-name changes, federation moves, and instance migrations —
+    /// frontend uses this for permalink URLs (`/@name.{8hex}/...`) and any
+    /// cross-instance reference that must outlive a rename.
+    pub author_public_key_hex: String,
     pub room_id: String,
     pub room_slug: String,
     pub created_at: String,
@@ -195,6 +200,9 @@ pub struct PostResponse {
     pub parent_id: Option<String>,
     pub author_id: String,
     pub author_name: String,
+    /// Lowercase-hex of the author's 32-byte pubkey. See
+    /// [`ThreadSummary::author_public_key_hex`].
+    pub author_public_key_hex: String,
     pub body: String,
     pub created_at: String,
     pub edited_at: Option<String>,
@@ -227,6 +235,9 @@ pub struct ThreadDetailResponse {
     pub title: String,
     pub author_id: String,
     pub author_name: String,
+    /// Lowercase-hex of the author's 32-byte pubkey. See
+    /// [`ThreadSummary::author_public_key_hex`].
+    pub author_public_key_hex: String,
     pub room_id: String,
     pub room_slug: String,
     pub created_at: String,

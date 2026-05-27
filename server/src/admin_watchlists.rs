@@ -73,6 +73,8 @@ const MIN_TRUSTS_ISSUED_FOR_BAN_ADJACENT: i64 = 3;
 pub struct UserChip {
     pub id: String,
     pub display_name: String,
+    /// Lowercase-hex pubkey of the user.
+    pub public_key_hex: String,
     /// `"active"`, `"suspended"`, or `"banned"`.
     pub status: String,
 }
@@ -185,6 +187,7 @@ async fn load_most_distrusted(db: &sqlx::SqlitePool) -> Result<Vec<DistrustedUse
         SELECT
             u.id,
             u.display_name,
+            u.public_key AS "public_key!: Vec<u8>",
             u.status,
             d.distrusts AS "inbound_distrusts!: i64",
             COALESCE(t.trusts, 0) AS "inbound_trusts!: i64"
@@ -218,6 +221,7 @@ async fn load_most_distrusted(db: &sqlx::SqlitePool) -> Result<Vec<DistrustedUse
             user: UserChip {
                 id: r.id,
                 display_name: r.display_name,
+                public_key_hex: crate::users::hex_lower(&r.public_key),
                 status: r.status,
             },
             inbound_distrusts: r.inbound_distrusts,
@@ -249,6 +253,7 @@ async fn load_distrust_trust_ratio(db: &sqlx::SqlitePool) -> Result<Vec<RatioRow
         SELECT
             u.id,
             u.display_name,
+            u.public_key AS "public_key!: Vec<u8>",
             u.status,
             u.created_at,
             i.distrusts AS "inbound_distrusts!: i64",
@@ -278,6 +283,7 @@ async fn load_distrust_trust_ratio(db: &sqlx::SqlitePool) -> Result<Vec<RatioRow
             user: UserChip {
                 id: r.id,
                 display_name: r.display_name,
+                public_key_hex: crate::users::hex_lower(&r.public_key),
                 status: r.status,
             },
             inbound_distrusts: r.inbound_distrusts,
@@ -321,6 +327,7 @@ async fn load_ban_adjacent_trusters(
         SELECT
             u.id,
             u.display_name,
+            u.public_key AS "public_key!: Vec<u8>",
             u.status,
             b.banned_trusts AS "banned_trusts!: i64",
             COALESCE(t.total_trusts, 0) AS "total_trusts!: i64"
@@ -348,6 +355,7 @@ async fn load_ban_adjacent_trusters(
             user: UserChip {
                 id: r.id,
                 display_name: r.display_name,
+                public_key_hex: crate::users::hex_lower(&r.public_key),
                 status: r.status,
             },
             banned_trusts: r.banned_trusts,

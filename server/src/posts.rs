@@ -62,6 +62,8 @@ pub struct RevisionHistoryResponse {
     pub post_id: String,
     pub author_id: String,
     pub author_name: String,
+    /// Lowercase-hex pubkey of the post author.
+    pub author_public_key_hex: String,
     pub retracted_at: Option<String>,
     pub revisions: Vec<RevisionResponse>,
 }
@@ -345,6 +347,7 @@ pub async fn edit_post(
         parent_id: meta.parent_id,
         author_id: user.user_id,
         author_name: user.display_name,
+        author_public_key_hex: crate::users::hex_lower(&signed.public_key),
         body,
         created_at: meta.original_at,
         edited_at: Some(meta.edited_at),
@@ -491,7 +494,7 @@ pub async fn list_revisions(
     Path(post_id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     let post = sqlx::query!(
-        "SELECT p.author, u.display_name, p.retracted_at \
+        "SELECT p.author, u.display_name, u.public_key, p.retracted_at \
          FROM posts p \
          JOIN users u ON u.id = p.author \
          WHERE p.id = ?",
@@ -572,6 +575,7 @@ pub async fn list_revisions(
         post_id,
         author_id: post.author,
         author_name: post.display_name,
+        author_public_key_hex: crate::users::hex_lower(&post.public_key),
         retracted_at: post.retracted_at,
         revisions,
     }))

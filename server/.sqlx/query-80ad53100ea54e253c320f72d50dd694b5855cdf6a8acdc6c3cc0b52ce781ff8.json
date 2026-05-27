@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT u.display_name, u.public_key FROM current_trust_edges te JOIN users u ON u.id = te.target_user WHERE te.source_user = ? AND te.trust_type = 'trust' AND te.target_user IN (SELECT target_user FROM current_trust_edges WHERE source_user = ? AND trust_type = 'distrust')",
+  "describe": {
+    "columns": [
+      {
+        "name": "display_name",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "public_key",
+        "ordinal": 1,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "80ad53100ea54e253c320f72d50dd694b5855cdf6a8acdc6c3cc0b52ce781ff8"
+}

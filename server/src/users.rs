@@ -27,20 +27,27 @@ use unicode_segmentation::UnicodeSegmentation;
 const USER_SEARCH_MAX: i64 = 20;
 
 /// Restricted (banned/suspended) users may only interact with their own
-/// profile. Endpoints that accept a `:username` path parameter call this
+/// profile. Endpoints that accept a `:pubkey_hex` path parameter call this
 /// before the main query to reject cross-user access with 403.
 ///
-/// The comparison is on `display_name` because that is the identifier in
-/// the URL path. Display names are unique (enforced by both a UNIQUE
-/// constraint and the `display_name_skeleton` index) and not renameable,
-/// so an exact-string match is a sufficient identity check. If display-
-/// name renaming is ever introduced, switch to a user-id comparison
-/// (resolve the URL username to an id and compare against `user.user_id`).
+/// The comparison is on `public_key_hex` because that is the identifier
+/// in the URL path. Pubkeys are stable for the lifetime of the user, so
+/// an exact-string match is a sufficient identity check.
+///
+/// Input is ASCII-lowercased before comparison so a restricted user
+/// hitting their own profile via an uppercase-hex URL still passes the
+/// gate. Stored `public_key_hex` is always lowercase; malformed input
+/// (non-hex chars, wrong length) falls through and is rejected
+/// downstream by `resolve_user_by_pubkey_hex` as 404 — the right
+/// outcome, since the URL identifies no user at all. Doing the self-
+/// check first on a non-normalised string would have flipped that 404
+/// to a 403 for restricted callers, an inconsistent and misleading
+/// status code.
 fn enforce_self_only_for_restricted(
     user: &RestrictedAuthUser,
-    username: &str,
+    pubkey_hex: &str,
 ) -> Result<(), AppError> {
-    if !user.status.is_active() && user.display_name != username {
+    if !user.status.is_active() && user.public_key_hex != pubkey_hex.to_ascii_lowercase() {
         return Err(AppError::code(ErrorCode::Forbidden));
     }
     Ok(())
@@ -60,6 +67,11 @@ const TRUST_LIST_MAX: i64 = 500;
 pub struct UserProfileResponse {
     pub id: String,
     pub display_name: String,
+    /// Lowercase-hex of the profiled user's 32-byte Ed25519 public key.
+    /// Stable for the lifetime of the user — clients use this to build
+    /// the canonical `/@{name}.{8hex}` long form (Phase 9.5 routing) and
+    /// as the path parameter for pubkey-keyed user routes.
+    pub public_key_hex: String,
     pub created_at: String,
     pub signup_method: String,
     pub bio: Option<String>,
@@ -82,12 +94,19 @@ pub struct TrustPathResponse {
 #[derive(Serialize)]
 pub struct TrustUserRef {
     pub display_name: String,
+    /// Lowercase-hex pubkey of the path intermediary. See
+    /// [`UserProfileResponse::public_key_hex`].
+    pub public_key_hex: String,
     pub viewer: UserViewerInfo,
 }
 
 #[derive(Serialize)]
 pub struct ScoreReduction {
     pub display_name: String,
+    /// Lowercase-hex pubkey of the trusted-but-distrusted-by-viewer
+    /// intermediary whose presence shaved trust off the score. See
+    /// [`UserProfileResponse::public_key_hex`].
+    pub public_key_hex: String,
     pub reason: String,
 }
 
@@ -111,6 +130,9 @@ pub struct TrustDetailResponse {
 #[derive(Serialize)]
 pub struct TrustEdgeUser {
     pub display_name: String,
+    /// Lowercase-hex pubkey of the trust-edge counterpart. See
+    /// [`UserProfileResponse::public_key_hex`].
+    pub public_key_hex: String,
     pub viewer: UserViewerInfo,
 }
 
@@ -230,8 +252,8 @@ pub struct ResolvedUserSummary {
 ///   a single match).
 /// - `Ambiguous` — multiple users share the skeleton and the caller
 ///   gave no disambiguator. The web layer renders a disambiguation
-///   page from the returned summaries; API handlers that need a
-///   single row return [`ErrorCode::AmbiguousUsername`].
+///   page from the returned summaries. (Pubkey-keyed API handlers
+///   never see this case; only the name-based resolve endpoint does.)
 /// - `NotFound` — no row matched (bare form: skeleton has no users;
 ///   dotted form: skeleton has users but none with the supplied
 ///   pubkey prefix; or the suffix was malformed).
@@ -416,46 +438,66 @@ pub async fn resolve_user_dispatch(
     Ok(UserResolution::Ambiguous(summaries))
 }
 
-/// Look up a user by display name, returning 404 if not found.
+/// Look up a user by lowercase-hex public key, returning 404 if not found.
 ///
-/// Thin wrapper around [`resolve_user_dispatch`] that demands a
-/// unique match. Most existing handlers want a single row, so they
-/// stay on the legacy tuple shape; only the disambiguation surface
-/// reaches for the discriminated form directly.
-///
-/// Returns `(id, display_name, created_at, signup_method, bio, role, status, can_invite)`.
-/// Does not filter by status — callers decide how to handle banned/suspended users.
-#[allow(clippy::type_complexity)]
-async fn resolve_user(
+/// Used by the pubkey-keyed user routes (`/api/users/{pubkey_hex}/...`).
+/// The 64-char lowercase-hex form is the canonical wire identity (a
+/// 32-byte Ed25519 public key). Malformed input maps to `UserNotFound`
+/// rather than a distinct 400 because, from the client's perspective,
+/// the route is a lookup — a string that can't index any row is a
+/// missing user, same as one that decodes correctly but matches no row.
+async fn resolve_user_by_pubkey_hex(
     db: &sqlx::SqlitePool,
-    username: &str,
-) -> Result<
-    (
-        String,
-        String,
-        String,
-        String,
-        Option<String>,
-        String,
-        UserStatus,
-        bool,
-    ),
-    AppError,
-> {
-    match resolve_user_dispatch(db, username).await? {
-        UserResolution::Unique(row) => Ok((
-            row.id,
-            row.display_name,
-            row.created_at,
-            row.signup_method,
-            row.bio,
-            row.role,
-            row.status,
-            row.can_invite,
-        )),
-        UserResolution::Ambiguous(_) => Err(AppError::code(ErrorCode::AmbiguousUsername)),
-        UserResolution::NotFound => Err(AppError::code(ErrorCode::UserNotFound)),
+    pubkey_hex: &str,
+) -> Result<ResolvedUserRow, AppError> {
+    // 32-byte key = 64 hex chars; require lowercase so the canonical wire
+    // form is the only one that matches. `0..9 a..f` is the entire set.
+    if pubkey_hex.len() != 64
+        || !pubkey_hex
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(AppError::code(ErrorCode::UserNotFound));
     }
+    let mut bytes = [0u8; 32];
+    for (i, chunk) in pubkey_hex.as_bytes().chunks_exact(2).enumerate() {
+        // Validated above — these can't fail.
+        let hi = (chunk[0] as char).to_digit(16).expect("validated hex");
+        let lo = (chunk[1] as char).to_digit(16).expect("validated hex");
+        bytes[i] = ((hi << 4) | lo) as u8;
+    }
+    let bytes_slice = &bytes[..];
+    let row = sqlx::query!(
+        r#"SELECT id, display_name, created_at, signup_method, bio, role, status,
+                  can_invite AS "can_invite!: bool", deleted_at,
+                  public_key, home_instance
+             FROM users WHERE public_key = ?"#,
+        bytes_slice,
+    )
+    .fetch_optional(db)
+    .await?
+    .ok_or_else(|| AppError::code(ErrorCode::UserNotFound))?;
+    let raw_status = UserStatus::try_from(row.status.as_str()).map_err(|e| {
+        tracing::error!(
+            pubkey_hex = %pubkey_hex,
+            error = %e,
+            "unrecognised users.status",
+        );
+        AppError::code(ErrorCode::Internal)
+    })?;
+    let status = UserStatus::effective(raw_status, row.deleted_at.as_deref());
+    Ok(ResolvedUserRow {
+        id: row.id,
+        display_name: row.display_name,
+        created_at: row.created_at,
+        signup_method: row.signup_method,
+        bio: row.bio,
+        role: row.role,
+        status,
+        can_invite: row.can_invite,
+        public_key: row.public_key,
+        home_instance: row.home_instance,
+    })
 }
 
 /// Look up the viewer's trust stance toward `target_user`.
@@ -477,7 +519,18 @@ async fn get_trust_stance(
         .unwrap_or_else(|| "neutral".into()))
 }
 
-/// Build a UUID→(display_name, effective_status) map for a set of UUIDs.
+/// One row in the [`resolve_display_names`] map. Carries everything a
+/// caller needs to render a user reference: name, effective status,
+/// and the raw public-key bytes (callers hex-encode for the
+/// `public_key_hex` envelope field).
+#[derive(Clone)]
+struct ResolvedNameRow {
+    display_name: String,
+    status: UserStatus,
+    public_key: Vec<u8>,
+}
+
+/// Build a UUID→[`ResolvedNameRow`] map for a set of UUIDs.
 ///
 /// Effective status is the wire-facing projection: a user whose
 /// `deleted_at` is set surfaces as `UserStatus::Deleted` regardless of
@@ -485,12 +538,12 @@ async fn get_trust_stance(
 async fn resolve_display_names(
     db: &sqlx::SqlitePool,
     uuids: &[Uuid],
-) -> Result<std::collections::HashMap<Uuid, (String, UserStatus)>, AppError> {
+) -> Result<std::collections::HashMap<Uuid, ResolvedNameRow>, AppError> {
     let mut map = std::collections::HashMap::new();
     for uuid in uuids {
         let id_str = uuid.to_string();
         if let Some(row) = sqlx::query!(
-            "SELECT display_name, status, deleted_at FROM users WHERE id = ?",
+            "SELECT display_name, status, deleted_at, public_key FROM users WHERE id = ?",
             id_str,
         )
         .fetch_optional(db)
@@ -498,7 +551,14 @@ async fn resolve_display_names(
         {
             let raw = UserStatus::try_from(row.status.as_str()).unwrap_or(UserStatus::Active);
             let status = UserStatus::effective(raw, row.deleted_at.as_deref());
-            map.insert(*uuid, (row.display_name, status));
+            map.insert(
+                *uuid,
+                ResolvedNameRow {
+                    display_name: row.display_name,
+                    status,
+                    public_key: row.public_key,
+                },
+            );
         }
     }
     Ok(map)
@@ -547,10 +607,11 @@ pub enum ResolveResponse {
 /// 404 ([`ErrorCode::UserNotFound`]) when the username matches no
 /// rows.
 ///
-/// Unlike the other `/api/users/{name}/...` handlers, this one never
-/// returns `AmbiguousUsername` — surfacing the candidate list *is*
-/// its job. Authenticated like every other read handler so the
-/// homepage / mention popovers can call it.
+/// This is the only user route that accepts a typed display name;
+/// all other `/api/users/...` handlers take `{pubkey_hex}`. Surfacing
+/// the candidate list *is* this handler's job. Authenticated like
+/// every other read handler so the homepage / mention popovers can
+/// call it.
 pub async fn resolve_username(
     State(state): State<Arc<AppState>>,
     _user: AuthUser,
@@ -583,8 +644,10 @@ pub async fn resolve_username(
 }
 
 /// Lowercase-hex string of a byte slice. Inline rather than pulling
-/// in the `hex` crate just for this one site.
-fn hex_lower(bytes: &[u8]) -> String {
+/// in the `hex` crate just for this one site. `pub(crate)` so other
+/// modules can hex-encode user pubkeys for the `public_key_hex` field
+/// that's now part of every user-reference envelope on the wire.
+pub(crate) fn hex_lower(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for &b in bytes {
@@ -608,32 +671,31 @@ fn status_wire(status: UserStatus) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/users/:username — Core profile
+// GET /api/users/:pubkey_hex — Core profile
 // ---------------------------------------------------------------------------
 
 /// Returns basic user profile info, viewer relationship, and trust score.
 pub async fn get_profile(
     State(state): State<Arc<AppState>>,
     user: RestrictedAuthUser,
-    Path(username): Path<String>,
+    Path(pubkey_hex): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    enforce_self_only_for_restricted(&user, &username)?;
+    enforce_self_only_for_restricted(&user, &pubkey_hex)?;
 
-    let (target_id, display_name, created_at, signup_method, bio, role, target_status, can_invite) =
-        resolve_user(&state.db, &username).await?;
+    let target = resolve_user_by_pubkey_hex(&state.db, &pubkey_hex).await?;
 
-    let is_self = user.user_id == target_id;
+    let is_self = user.user_id == target.id;
     let trust_stance = if is_self {
         "neutral".to_string()
     } else {
-        get_trust_stance(&state.db, &user.user_id, &target_id).await?
+        get_trust_stance(&state.db, &user.user_id, &target.id).await?
     };
     let you_distrust = trust_stance == "distrust";
 
     let graph = state.get_trust_graph()?;
     let viewer_uuid = user.uuid();
-    let target_uuid = Uuid::parse_str(&target_id).map_err(|_| {
-        tracing::error!(target_id = %target_id, "invalid target user id");
+    let target_uuid = Uuid::parse_str(&target.id).map_err(|_| {
+        tracing::error!(target_id = %target.id, "invalid target user id");
         AppError::code(ErrorCode::Internal)
     })?;
 
@@ -643,7 +705,7 @@ pub async fn get_profile(
         sqlx::query!(
             "SELECT tag FROM user_tags WHERE viewer_id = ? AND target_id = ?",
             user.user_id,
-            target_id,
+            target.id,
         )
         .fetch_optional(&state.db)
         .await?
@@ -660,7 +722,7 @@ pub async fn get_profile(
                 UserViewerInfo {
                     distance,
                     distrusted: you_distrust,
-                    status: target_status,
+                    status: target.status,
                     tag: target_tag,
                 },
             ),
@@ -669,7 +731,7 @@ pub async fn get_profile(
                 UserViewerInfo {
                     distance: None,
                     distrusted: you_distrust,
-                    status: target_status,
+                    status: target.status,
                     tag: target_tag,
                 },
             ),
@@ -677,14 +739,15 @@ pub async fn get_profile(
     };
 
     Ok(Json(UserProfileResponse {
-        id: target_id,
-        display_name,
-        created_at,
-        signup_method,
-        bio,
-        role,
+        id: target.id,
+        display_name: target.display_name,
+        public_key_hex: hex_lower(&target.public_key),
+        created_at: target.created_at,
+        signup_method: target.signup_method,
+        bio: target.bio,
+        role: target.role,
         is_self,
-        can_invite,
+        can_invite: target.can_invite,
         trust_stance,
         viewer: trust,
         trust_score,
@@ -692,19 +755,20 @@ pub async fn get_profile(
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/users/:username/trust — Trust details
+// GET /api/users/:pubkey_hex/trust — Trust details
 // ---------------------------------------------------------------------------
 
 /// Returns trust stats, paths, score reductions, and trust edge lists.
 pub async fn get_trust_detail(
     State(state): State<Arc<AppState>>,
     user: RestrictedAuthUser,
-    Path(username): Path<String>,
+    Path(pubkey_hex): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    enforce_self_only_for_restricted(&user, &username)?;
+    enforce_self_only_for_restricted(&user, &pubkey_hex)?;
 
-    let (target_id, _display_name, _, _, _, _, target_status, _) =
-        resolve_user(&state.db, &username).await?;
+    let target = resolve_user_by_pubkey_hex(&state.db, &pubkey_hex).await?;
+    let target_id = target.id;
+    let target_status = target.status;
 
     let is_self = user.user_id == target_id;
 
@@ -800,20 +864,25 @@ pub async fn get_trust_detail(
                 },
                 TrustPath::TwoHop { via } => {
                     let id = via.to_string();
-                    let (vname, vstatus) = name_map
+                    let v = name_map
                         .get(&via)
                         .cloned()
-                        .unwrap_or_else(|| ("unknown".into(), UserStatus::Active));
+                        .unwrap_or_else(|| ResolvedNameRow {
+                            display_name: "unknown".into(),
+                            status: UserStatus::Active,
+                            public_key: Vec::new(),
+                        });
                     TrustPathResponse {
                         path_type: "2hop".into(),
                         via: Some(TrustUserRef {
-                            display_name: vname,
+                            display_name: v.display_name,
+                            public_key_hex: hex_lower(&v.public_key),
                             viewer: UserViewerInfo::build(
                                 &id,
                                 &distance_map,
                                 &distrust_set,
                                 &tag_map,
-                                vstatus,
+                                v.status,
                             ),
                         }),
                         via2: None,
@@ -822,34 +891,44 @@ pub async fn get_trust_detail(
                 TrustPath::ThreeHop { via1, via2 } => {
                     let id1 = via1.to_string();
                     let id2 = via2.to_string();
-                    let (v1name, v1status) = name_map
+                    let v1 = name_map
                         .get(&via1)
                         .cloned()
-                        .unwrap_or_else(|| ("unknown".into(), UserStatus::Active));
-                    let (v2name, v2status) = name_map
+                        .unwrap_or_else(|| ResolvedNameRow {
+                            display_name: "unknown".into(),
+                            status: UserStatus::Active,
+                            public_key: Vec::new(),
+                        });
+                    let v2 = name_map
                         .get(&via2)
                         .cloned()
-                        .unwrap_or_else(|| ("unknown".into(), UserStatus::Active));
+                        .unwrap_or_else(|| ResolvedNameRow {
+                            display_name: "unknown".into(),
+                            status: UserStatus::Active,
+                            public_key: Vec::new(),
+                        });
                     TrustPathResponse {
                         path_type: "3hop".into(),
                         via: Some(TrustUserRef {
-                            display_name: v1name,
+                            display_name: v1.display_name,
+                            public_key_hex: hex_lower(&v1.public_key),
                             viewer: UserViewerInfo::build(
                                 &id1,
                                 &distance_map,
                                 &distrust_set,
                                 &tag_map,
-                                v1status,
+                                v1.status,
                             ),
                         }),
                         via2: Some(TrustUserRef {
-                            display_name: v2name,
+                            display_name: v2.display_name,
+                            public_key_hex: hex_lower(&v2.public_key),
                             viewer: UserViewerInfo::build(
                                 &id2,
                                 &distance_map,
                                 &distrust_set,
                                 &tag_map,
-                                v2status,
+                                v2.status,
                             ),
                         }),
                     }
@@ -858,7 +937,7 @@ pub async fn get_trust_detail(
             .collect();
 
         let reductions = sqlx::query!(
-            "SELECT u.display_name FROM current_trust_edges te \
+            "SELECT u.display_name, u.public_key FROM current_trust_edges te \
              JOIN users u ON u.id = te.target_user \
              WHERE te.source_user = ? AND te.trust_type = 'trust' \
              AND te.target_user IN (SELECT target_user FROM current_trust_edges WHERE source_user = ? AND trust_type = 'distrust')",
@@ -870,6 +949,7 @@ pub async fn get_trust_detail(
         .into_iter()
         .map(|r| ScoreReduction {
             display_name: r.display_name,
+            public_key_hex: hex_lower(&r.public_key),
             reason: "distrusted by you".into(),
         })
         .collect();
@@ -901,7 +981,7 @@ pub async fn get_trust_detail(
     };
 
     let trusts_batch = sqlx::query!(
-        "SELECT u.display_name, u.id, u.status, u.deleted_at FROM current_trust_edges te \
+        "SELECT u.display_name, u.id, u.status, u.deleted_at, u.public_key FROM current_trust_edges te \
          JOIN users u ON u.id = te.target_user \
          WHERE te.source_user = ? AND te.trust_type = 'trust' \
          ORDER BY te.created_at DESC LIMIT ?",
@@ -933,6 +1013,7 @@ pub async fn get_trust_detail(
                         UserStatus::effective(raw, r.deleted_at.as_deref()),
                     ),
                     display_name: r.display_name,
+                    public_key_hex: hex_lower(&r.public_key),
                 }
             })
             .collect(),
@@ -942,7 +1023,7 @@ pub async fn get_trust_detail(
     .collect();
 
     let trusted_by_batch = sqlx::query!(
-        "SELECT u.display_name, u.id, u.status, u.deleted_at FROM current_trust_edges te \
+        "SELECT u.display_name, u.id, u.status, u.deleted_at, u.public_key FROM current_trust_edges te \
          JOIN users u ON u.id = te.source_user \
          WHERE te.target_user = ? AND te.trust_type = 'trust' \
          ORDER BY te.created_at DESC LIMIT ?",
@@ -974,6 +1055,7 @@ pub async fn get_trust_detail(
                         UserStatus::effective(raw, r.deleted_at.as_deref()),
                     ),
                     display_name: r.display_name,
+                    public_key_hex: hex_lower(&r.public_key),
                 }
             })
             .collect(),
@@ -1003,7 +1085,7 @@ pub async fn get_trust_detail(
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/users/:username/activity — Paginated activity
+// GET /api/users/:pubkey_hex/activity — Paginated activity
 // ---------------------------------------------------------------------------
 
 /// Returns paginated recent activity (threads started and replies).
@@ -1019,12 +1101,12 @@ pub async fn get_trust_detail(
 pub async fn get_activity(
     State(state): State<Arc<AppState>>,
     user: RestrictedAuthUser,
-    Path(username): Path<String>,
+    Path(pubkey_hex): Path<String>,
     Query(query): Query<ActivityQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    enforce_self_only_for_restricted(&user, &username)?;
+    enforce_self_only_for_restricted(&user, &pubkey_hex)?;
 
-    let (target_id, ..) = resolve_user(&state.db, &username).await?;
+    let target_id = resolve_user_by_pubkey_hex(&state.db, &pubkey_hex).await?.id;
 
     // Trust-gated visibility: the activity feed exposes post bodies, so it must
     // respect the author-trust-in-reader rule. Because every row shares the
@@ -1185,7 +1267,7 @@ pub async fn get_activity(
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/users/:username/trust/edges — Full trust edge list
+// GET /api/users/:pubkey_hex/trust/edges — Full trust edge list
 // ---------------------------------------------------------------------------
 
 /// Returns the full list of trust edges for a user (capped at 500),
@@ -1193,12 +1275,12 @@ pub async fn get_activity(
 pub async fn get_trust_edges(
     State(state): State<Arc<AppState>>,
     user: RestrictedAuthUser,
-    Path(username): Path<String>,
+    Path(pubkey_hex): Path<String>,
     Query(query): Query<TrustEdgesQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    enforce_self_only_for_restricted(&user, &username)?;
+    enforce_self_only_for_restricted(&user, &pubkey_hex)?;
 
-    let (target_id, ..) = resolve_user(&state.db, &username).await?;
+    let target_id = resolve_user_by_pubkey_hex(&state.db, &pubkey_hex).await?.id;
 
     let graph = state.get_trust_graph()?;
     let viewer_uuid = user.uuid();
@@ -1216,11 +1298,12 @@ pub async fn get_trust_edges(
         id: String,
         status: String,
         deleted_at: Option<String>,
+        public_key: Vec<u8>,
     }
 
     let rows: Vec<EdgeRow> = match query.direction.as_str() {
         "trusts" => sqlx::query!(
-            "SELECT u.display_name, u.id, u.status, u.deleted_at FROM current_trust_edges te \
+            "SELECT u.display_name, u.id, u.status, u.deleted_at, u.public_key FROM current_trust_edges te \
              JOIN users u ON u.id = te.target_user \
              WHERE te.source_user = ? AND te.trust_type = 'trust'",
             target_id,
@@ -1233,10 +1316,11 @@ pub async fn get_trust_edges(
             id: r.id,
             status: r.status,
             deleted_at: r.deleted_at,
+            public_key: r.public_key,
         })
         .collect(),
         "trusted_by" => sqlx::query!(
-            "SELECT u.display_name, u.id, u.status, u.deleted_at FROM current_trust_edges te \
+            "SELECT u.display_name, u.id, u.status, u.deleted_at, u.public_key FROM current_trust_edges te \
              JOIN users u ON u.id = te.source_user \
              WHERE te.target_user = ? AND te.trust_type = 'trust'",
             target_id,
@@ -1249,6 +1333,7 @@ pub async fn get_trust_edges(
             id: r.id,
             status: r.status,
             deleted_at: r.deleted_at,
+            public_key: r.public_key,
         })
         .collect(),
         _ => {
@@ -1269,6 +1354,7 @@ pub async fn get_trust_edges(
                 UserViewerInfo::build(&r.id, &distance_map, &distrust_set, &tag_map, status);
             TrustEdgeUser {
                 display_name: r.display_name,
+                public_key_hex: hex_lower(&r.public_key),
                 viewer: trust,
             }
         })
@@ -1293,7 +1379,7 @@ pub async fn get_trust_edges(
 }
 
 // ---------------------------------------------------------------------------
-// PATCH /api/users/:username — Update bio
+// PATCH /api/users/:pubkey_hex — Update bio
 // ---------------------------------------------------------------------------
 
 /// Update the authenticated user's bio. Only allowed on own profile.
@@ -1308,10 +1394,10 @@ pub async fn get_trust_edges(
 pub async fn update_bio(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
-    Path(username): Path<String>,
+    Path(pubkey_hex): Path<String>,
     Json(req): Json<UpdateBioRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    if user.display_name != username {
+    if user.public_key_hex != pubkey_hex {
         return Err(AppError::code(ErrorCode::NotOwnProfile));
     }
 
@@ -1433,17 +1519,19 @@ pub async fn update_bio(
 }
 
 // ---------------------------------------------------------------------------
-// PUT /api/users/:username/trust-edge — Set trust or distrust
+// PUT /api/users/:pubkey_hex/trust-edge — Set trust or distrust
 // ---------------------------------------------------------------------------
 
 /// Set a trust or distrust edge. Replaces any existing edge atomically.
 pub async fn set_trust_edge(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
-    Path(username): Path<String>,
+    Path(pubkey_hex): Path<String>,
     Json(req): Json<SetTrustEdgeRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let (target_id, .., status, _) = resolve_user(&state.db, &username).await?;
+    let target = resolve_user_by_pubkey_hex(&state.db, &pubkey_hex).await?;
+    let target_id = target.id;
+    let status = target.status;
 
     // Refuse trust-edge mutation toward a soft-deleted user. In practice
     // `soft_delete_user` anonymizes the display_name so this path is
@@ -1597,7 +1685,7 @@ pub async fn set_trust_edge(
 }
 
 // ---------------------------------------------------------------------------
-// DELETE /api/users/:username/trust-edge — Go neutral (signed tombstone)
+// DELETE /api/users/:pubkey_hex/trust-edge — Go neutral (signed tombstone)
 // ---------------------------------------------------------------------------
 
 /// Move the viewer's stance toward this user to `neutral`.
@@ -1616,9 +1704,11 @@ pub async fn set_trust_edge(
 pub async fn delete_trust_edge(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
-    Path(username): Path<String>,
+    Path(pubkey_hex): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let (target_id, .., status, _) = resolve_user(&state.db, &username).await?;
+    let target = resolve_user_by_pubkey_hex(&state.db, &pubkey_hex).await?;
+    let target_id = target.id;
+    let status = target.status;
 
     // See `set_trust_edge` for the rationale. Deleted users can't be
     // the target of any trust-edge mutation, including a neutral
@@ -1766,7 +1856,7 @@ pub async fn delete_trust_edge(
 }
 
 // ---------------------------------------------------------------------------
-// PUT /api/users/:username/tag — Set viewer-private tag for another user
+// PUT /api/users/:pubkey_hex/tag — Set viewer-private tag for another user
 // ---------------------------------------------------------------------------
 
 /// Maximum tag length in grapheme clusters (user-perceived characters).
@@ -1787,10 +1877,10 @@ pub struct SetUserTagRequest {
 pub async fn set_user_tag(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
-    Path(username): Path<String>,
+    Path(pubkey_hex): Path<String>,
     Json(req): Json<SetUserTagRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let (target_id, ..) = resolve_user(&state.db, &username).await?;
+    let target_id = resolve_user_by_pubkey_hex(&state.db, &pubkey_hex).await?.id;
 
     if user.user_id == target_id {
         return Err(AppError::code(ErrorCode::SelfTag));
@@ -1841,7 +1931,7 @@ pub async fn set_user_tag(
 }
 
 // ---------------------------------------------------------------------------
-// DELETE /api/users/:username/tag — Clear viewer-private tag
+// DELETE /api/users/:pubkey_hex/tag — Clear viewer-private tag
 // ---------------------------------------------------------------------------
 
 /// Explicit clear endpoint for the viewer's private tag. Idempotent —
@@ -1850,9 +1940,9 @@ pub async fn set_user_tag(
 pub async fn delete_user_tag(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
-    Path(username): Path<String>,
+    Path(pubkey_hex): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let (target_id, ..) = resolve_user(&state.db, &username).await?;
+    let target_id = resolve_user_by_pubkey_hex(&state.db, &pubkey_hex).await?.id;
 
     sqlx::query!(
         "DELETE FROM user_tags WHERE viewer_id = ? AND target_id = ?",
@@ -1872,13 +1962,24 @@ pub async fn delete_user_tag(
 /// Lightweight user chip returned by the search endpoint. Carries just
 /// enough to render an autocomplete dropdown row and drive the "selected
 /// user" preview card — callers who need the full profile should fetch
-/// `GET /api/users/:username` after the user picks a row.
+/// `GET /api/users/:pubkey_hex` after the user picks a row.
+///
+/// `viewer` carries the per-viewer trust / distrust / tag / status
+/// metadata, so callers can render a `<UserName>` directly off the
+/// response without a second fetch. The top-level `status` and `role`
+/// fields are kept for the admin moderation flow, which needs to
+/// surface them as raw strings rather than going through the
+/// trust-badge rendering path.
 #[derive(Serialize)]
 pub struct UserChip {
     pub id: String,
     pub display_name: String,
+    /// Lowercase-hex pubkey for routing / canonical-link construction
+    /// from a chip selection. See [`UserProfileResponse::public_key_hex`].
+    pub public_key_hex: String,
     pub status: String,
     pub role: String,
+    pub viewer: UserViewerInfo,
 }
 
 #[derive(Serialize)]
@@ -1896,12 +1997,15 @@ pub struct UserSearchQuery {
 
 /// GET /api/users/search?q=&limit= — prefix-match search over active users.
 ///
-/// **Admin-only.** The response carries moderation status and role,
-/// and a prefix walk would trivially enumerate the user base — both
-/// of which are information the broader authenticated user population
-/// has no business seeing. Gate here until a non-admin caller
-/// justifies widening the surface (and at that point the response
-/// shape needs to be trimmed too).
+/// Authenticated, **not admin-only**: this is the data source for both
+/// the admin moderation autocomplete and the compose-time mention
+/// popover (`@…`). The response fields (`status`, `role`) are
+/// information that is already public on the user profile, so
+/// surfacing them to any signed-in caller does not leak anything new.
+/// A prefix walk could enumerate the user base, but that is also true
+/// of the paginated `/api/search/users` endpoint — gating this on
+/// being signed in keeps unauthenticated scrapers out, which is the
+/// meaningful boundary.
 ///
 /// Matches against `display_name_skeleton`, the confusable-safe
 /// canonical form stored alongside each display name, so searches are
@@ -1912,13 +2016,13 @@ pub struct UserSearchQuery {
 ///
 /// Deleted users are excluded; banned/suspended users are included so
 /// admins performing moderation can still target them from the
-/// autocomplete.
+/// autocomplete. The compose-mention caller is expected to ignore
+/// non-active rows on the client where appropriate.
 pub async fn search_users(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
     Query(q): Query<UserSearchQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    crate::admin::require_admin(&user)?;
     let limit = q
         .limit
         .unwrap_or(USER_SEARCH_MAX / 2)
@@ -1943,7 +2047,7 @@ pub async fn search_users(
     );
 
     let rows = sqlx::query!(
-        r#"SELECT id, display_name, status, role
+        r#"SELECT id, display_name, status, role, public_key
          FROM users
          WHERE deleted_at IS NULL
            AND display_name_skeleton LIKE ? ESCAPE '\'
@@ -1959,6 +2063,18 @@ pub async fn search_users(
     .fetch_all(&state.db)
     .await?;
 
+    // Load the per-viewer trust state once and reuse it across every
+    // result row, mirroring `search_users_core` (the paginated
+    // sibling). Compose-time mention autocomplete callers use
+    // `viewer` to render a `<UserName>` chip with trust badge / tag
+    // without a follow-up fetch.
+    let reader_uuid = user.uuid();
+    let graph = state.get_trust_graph()?;
+    let reader_delta = state.pending_deltas.get(reader_uuid);
+    let trust_map = graph.distance_map_with_delta(reader_uuid, &reader_delta);
+    let distrust_set = load_distrust_set(&state.db, &user.user_id).await?;
+    let tag_map = load_tag_map(&state.db, &user.user_id).await?;
+
     let users = rows
         .into_iter()
         .map(|r| {
@@ -1973,11 +2089,14 @@ pub async fn search_users(
                 UserStatus::Suspended => "suspended",
                 UserStatus::Deleted => "deleted",
             };
+            let viewer = UserViewerInfo::build(&r.id, &trust_map, &distrust_set, &tag_map, status);
             UserChip {
                 id: r.id,
                 display_name: r.display_name,
+                public_key_hex: hex_lower(&r.public_key),
                 status: status_wire.to_string(),
                 role: r.role,
+                viewer,
             }
         })
         .collect();
@@ -2003,6 +2122,8 @@ pub struct PaginatedUserSearchQuery {
 pub struct PaginatedUserSearchHit {
     pub id: String,
     pub display_name: String,
+    /// Lowercase-hex pubkey. See [`UserProfileResponse::public_key_hex`].
+    pub public_key_hex: String,
     pub viewer: UserViewerInfo,
 }
 
@@ -2097,7 +2218,7 @@ async fn search_users_core(
     let pattern = format!("{}%", escape_like(&skeleton));
 
     let rows = sqlx::query!(
-        r#"SELECT id, display_name, status, deleted_at
+        r#"SELECT id, display_name, status, deleted_at, public_key
            FROM users
            WHERE deleted_at IS NULL
              AND display_name_skeleton LIKE ? ESCAPE '\'
@@ -2142,6 +2263,7 @@ async fn search_users_core(
             PaginatedUserSearchHit {
                 id: r.id,
                 display_name: r.display_name,
+                public_key_hex: hex_lower(&r.public_key),
                 viewer,
             }
         })

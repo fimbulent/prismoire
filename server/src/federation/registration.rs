@@ -842,6 +842,7 @@ pub async fn complete(
         Json(SessionResponse::active(
             user_id,
             display_name,
+            crate::users::hex_lower(challenge.user_key.as_slice()),
             "user".into(),
             crate::settings::DEFAULT_THEME.into(),
             crate::settings::DEFAULT_FONT.into(),

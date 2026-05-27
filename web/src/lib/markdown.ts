@@ -266,17 +266,30 @@ function createMarked(profile: MarkdownProfile, attachments?: MarkdownAttachment
 				},
 				renderer(token) {
 					const m = token as MentionToken;
-					// Long form when the author wrote it; bare form
-					// otherwise. The profile page emits `<link
+					// Long form in the `href` when the author wrote it;
+					// bare form otherwise. The profile page emits `<link
 					// rel="canonical">` either way, so a bare mention that
 					// later collides remains stable.
+					//
+					// The visible link text always omits the `.{8hex}`
+					// suffix — readers see `@alice` regardless of which
+					// form was typed. The suffix is a routing detail
+					// (collision tiebreaker), not part of the user's
+					// identity, and rendering it inline produces visual
+					// noise in mention-heavy paragraphs. The full
+					// long-form URL still survives copy-link and the
+					// address bar.
 					const path = m.pubkeyPrefix
 						? `${encodeURIComponent(m.username)}.${m.pubkeyPrefix}`
 						: encodeURIComponent(m.username);
 					const href = `/@${path}`;
-					const text = m.pubkeyPrefix
-						? `@${m.username}.${m.pubkeyPrefix}`
-						: `@${m.username}`;
+					const text = `@${m.username}`;
+					// SAFE: `m.username` is constrained by `USERNAME_CLASS` (Unicode
+					// letters/digits/`_`/`-`) in the tokenizer regex above, so it
+					// cannot contain `<`, `>`, `"`, `&`, or any other character that
+					// would let it escape the attribute or element context.
+					// `m.pubkeyPrefix` is `[0-9a-f]{8}` from the same regex.
+					// `href` further runs `m.username` through `encodeURIComponent`.
 					return `<a href="${href}">${text}</a>`;
 				}
 			},

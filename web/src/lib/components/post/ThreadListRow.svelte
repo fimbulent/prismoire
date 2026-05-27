@@ -30,6 +30,9 @@
 		id: string;
 		title: string;
 		author_name: string;
+		/** Lowercase-hex pubkey of the thread's OP author. Used to build
+		 * the canonical `/@username.{8hex}` link on the author chip. */
+		author_public_key_hex: string;
 		viewer: UserViewerInfo;
 		room_slug: string;
 		is_announcement: boolean;
@@ -126,6 +129,7 @@
 				<span class="whitespace-nowrap">
 					<UserName
 						name={thread.author_name}
+						pubkeyHex={thread.author_public_key_hex}
 						viewer={thread.viewer}
 						compact
 						muted

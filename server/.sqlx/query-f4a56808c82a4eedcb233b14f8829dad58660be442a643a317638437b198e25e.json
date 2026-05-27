@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT p.author, u.display_name, u.public_key, p.retracted_at FROM posts p JOIN users u ON u.id = p.author WHERE p.id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "author",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "display_name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "public_key",
+        "ordinal": 2,
+        "type_info": "Blob"
+      },
+      {
+        "name": "retracted_at",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "f4a56808c82a4eedcb233b14f8829dad58660be442a643a317638437b198e25e"
+}

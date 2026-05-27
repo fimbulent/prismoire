@@ -42,6 +42,8 @@ pub struct InviteResponse {
 #[derive(Serialize)]
 pub struct InviteUserResponse {
     pub display_name: String,
+    /// Lowercase-hex pubkey of the invited user.
+    pub public_key_hex: String,
     pub created_at: String,
 }
 
@@ -59,6 +61,8 @@ pub struct InviteValidationResponse {
 #[derive(Serialize)]
 pub struct InvitedUserResponse {
     pub display_name: String,
+    /// Lowercase-hex pubkey of the invited user.
+    pub public_key_hex: String,
     pub created_at: String,
     pub viewer: UserViewerInfo,
 }
@@ -261,7 +265,7 @@ pub async fn list_invited_users(
     user: AuthUser,
 ) -> Result<impl IntoResponse, AppError> {
     let rows = sqlx::query!(
-        "SELECT u.id, u.display_name, u.created_at, u.status, u.deleted_at FROM users u \
+        "SELECT u.id, u.display_name, u.public_key, u.created_at, u.status, u.deleted_at FROM users u \
          JOIN invites i ON i.id = u.invite_id \
          WHERE i.created_by = ? ORDER BY u.created_at DESC",
         user.user_id,
@@ -290,6 +294,7 @@ pub async fn list_invited_users(
                 UserViewerInfo::build(&r.id, &distance_map, &distrust_set, &tag_map, status);
             InvitedUserResponse {
                 display_name: r.display_name,
+                public_key_hex: crate::users::hex_lower(&r.public_key),
                 created_at: r.created_at,
                 viewer,
             }
@@ -392,7 +397,7 @@ async fn fetch_invite_users(
     invite_id: &str,
 ) -> Result<Vec<InviteUserResponse>, AppError> {
     let rows = sqlx::query!(
-        "SELECT display_name, created_at FROM users \
+        "SELECT display_name, public_key, created_at FROM users \
          WHERE invite_id = ? ORDER BY created_at ASC",
         invite_id,
     )
@@ -403,6 +408,7 @@ async fn fetch_invite_users(
         .into_iter()
         .map(|r| InviteUserResponse {
             display_name: r.display_name,
+            public_key_hex: crate::users::hex_lower(&r.public_key),
             created_at: r.created_at,
         })
         .collect())

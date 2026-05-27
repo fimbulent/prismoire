@@ -81,6 +81,9 @@ pub struct TestSignupAsRequest {
 pub struct TestSessionResponse {
     pub user_id: String,
     pub display_name: String,
+    /// Lowercase-hex of the new user's 32-byte signing pubkey. Tests use
+    /// this to build pubkey-keyed user-route URLs.
+    pub public_key_hex: String,
     pub session_token: String,
 }
 
@@ -110,6 +113,7 @@ async fn test_setup_admin(
     let signing_key = signing::generate_signing_key();
     let verifying_bytes = signing_key.verifying_key().to_bytes();
     let public_key: &[u8] = verifying_bytes.as_slice();
+    let public_key_hex = crate::users::hex_lower(public_key);
 
     let mut tx = state.db.begin().await?;
     sqlx::query!(
@@ -136,6 +140,7 @@ async fn test_setup_admin(
         Json(TestSessionResponse {
             user_id,
             display_name,
+            public_key_hex,
             session_token: token,
         }),
     ))
@@ -170,6 +175,7 @@ async fn test_signup_as(
     let signing_key = signing::generate_signing_key();
     let verifying_bytes = signing_key.verifying_key().to_bytes();
     let public_key: &[u8] = verifying_bytes.as_slice();
+    let public_key_hex = crate::users::hex_lower(public_key);
 
     // Mirror `signup_complete` exactly: two `trust` edges, inviter→invitee
     // and invitee→inviter. Signed under V1 server-side keys so fixtures
@@ -289,6 +295,7 @@ async fn test_signup_as(
         Json(TestSessionResponse {
             user_id,
             display_name,
+            public_key_hex,
             session_token: token,
         }),
     ))

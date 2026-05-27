@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { slide } from 'svelte/transition';
+	import TextareaWithCompletions from '$lib/components/ui/TextareaWithCompletions.svelte';
 
 	const MAX_BODY = 10_000;
 	const BODY_COUNTER_THRESHOLD = 8_000;
@@ -26,11 +27,11 @@
 </script>
 
 <div class="mt-3" transition:slide={{ duration: 150 }}>
-	<textarea
+	<TextareaWithCompletions
 		bind:value={body}
 		class="w-full min-h-24 bg-bg border border-border rounded-md text-text-primary font-prose text-prose p-3 resize-y focus:outline-none focus:border-accent-muted placeholder:text-text-muted"
 		placeholder="Reply to comment..."
-	></textarea>
+	/>
 	{#if error}
 		<div class="text-danger text-sm mt-1">{error}</div>
 	{/if}

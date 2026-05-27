@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, display_name, public_key, status, deleted_at\n           FROM users\n           WHERE deleted_at IS NULL\n             AND display_name_skeleton LIKE ? ESCAPE '\\'\n           ORDER BY (display_name_skeleton = ?) DESC,\n                    LENGTH(display_name),\n                    display_name\n           LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "display_name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "public_key",
+        "ordinal": 2,
+        "type_info": "Blob"
+      },
+      {
+        "name": "status",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "deleted_at",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "dfdf321f7482015be5a6ec6d7d3432d9c321ece78ed85fa451780bcebb10e170"
+}

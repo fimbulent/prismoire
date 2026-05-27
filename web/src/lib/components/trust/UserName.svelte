@@ -1,19 +1,26 @@
 <script lang="ts">
 	import type { UserViewerInfo } from '$lib/api/users';
 	import { session } from '$lib/stores/session.svelte';
+	import { canonicalProfilePath } from '$lib/user-url';
 	import TrustBadge from './TrustBadge.svelte';
 
 	interface Props {
 		name: string;
+		/** Lowercase-hex of the user's 32-byte Ed25519 public key. Used to
+		 * build canonical `/@username.{8hex}` profile URLs so we never link
+		 * to the bare form that would otherwise require a resolver hop.
+		 * Every user envelope on the wire already carries this. */
+		pubkeyHex: string;
 		viewer?: UserViewerInfo;
 		compact?: boolean;
 		muted?: boolean;
 		linked?: boolean;
 	}
 
-	let { name, viewer, compact = false, muted = false, linked = true }: Props = $props();
+	let { name, pubkeyHex, viewer, compact = false, muted = false, linked = true }: Props = $props();
 
 	let isSelf = $derived(session.user?.display_name === name);
+	let profileHref = $derived(canonicalProfilePath(name, pubkeyHex));
 	let status = $derived(viewer?.status);
 	// Viewer's private tag for this user (max 35 graphemes, plain text).
 	// Only rendered for non-self, non-deleted users — matches the
@@ -33,7 +40,7 @@
 	     element handles navigation. Either way, no trust badge / tag /
 	     status — none of those make sense for the viewer's own row. -->
 	{#if linked}
-		<a href="/@{encodeURIComponent(name)}" class="{nameClass} bg-bg-surface-raised px-2 py-0.5 rounded border border-border hover:border-accent-muted transition-colors">{name}</a>
+		<a href={profileHref} class="{nameClass} bg-bg-surface-raised px-2 py-0.5 rounded border border-border hover:border-accent-muted transition-colors">{name}</a>
 	{:else}
 		<span class="{nameClass} bg-bg-surface-raised px-2 py-0.5 rounded border border-border">{name}</span>
 	{/if}
@@ -50,7 +57,7 @@
 	     button); the trust badge and tag still render so the row
 	     conveys the same information density as a linked one. -->
 	{#if linked}
-		<a href="/@{encodeURIComponent(name)}" class="{nameClass} hover:underline {status ? 'line-through opacity-60' : ''}">{name}</a>
+		<a href={profileHref} class="{nameClass} hover:underline {status ? 'line-through opacity-60' : ''}">{name}</a>
 	{:else}
 		<span class="{nameClass} {status ? 'line-through opacity-60' : ''}">{name}</span>
 	{/if}

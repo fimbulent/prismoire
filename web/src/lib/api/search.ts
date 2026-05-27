@@ -19,6 +19,8 @@ export interface RoomHit {
 export interface UserHit {
 	id: string;
 	display_name: string;
+	/** Lowercase-hex pubkey of the user. */
+	public_key_hex: string;
 	viewer: UserViewerInfo;
 }
 
@@ -28,6 +30,8 @@ export interface ThreadHit {
 	title: string;
 	author_id: string;
 	author_name: string;
+	/** Lowercase-hex pubkey of the thread's OP author. */
+	author_public_key_hex: string;
 	room_id: string;
 	room_slug: string;
 	is_announcement: boolean;
@@ -131,6 +135,8 @@ export interface ThreadSearchHit {
 	title: string;
 	author_id: string;
 	author_name: string;
+	/** Lowercase-hex pubkey of the thread's OP author. */
+	author_public_key_hex: string;
 	room_id: string;
 	room_slug: string;
 	created_at: string;
@@ -186,6 +192,8 @@ export interface PostSearchHit {
 	is_announcement: boolean;
 	author_id: string;
 	author_name: string;
+	/** Lowercase-hex pubkey of the post author. */
+	author_public_key_hex: string;
 	created_at: string;
 	/**
 	 * Full post body (markdown). The frontend renders it via the
@@ -237,6 +245,8 @@ export async function searchPostsMore(
 export interface UserSearchHit {
 	id: string;
 	display_name: string;
+	/** Lowercase-hex pubkey of the user. */
+	public_key_hex: string;
 	viewer: UserViewerInfo;
 }
 

@@ -232,6 +232,7 @@ pub async fn create_reply(
             parent_id: Some(parent_id),
             author_id: user.user_id.clone(),
             author_name: user.display_name.clone(),
+            author_public_key_hex: crate::users::hex_lower(&signed.public_key),
             body,
             created_at: post_created_at,
             edited_at: None,

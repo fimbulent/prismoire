@@ -34,9 +34,13 @@ pub struct AdminLogEntry {
     pub id: String,
     pub admin_id: String,
     pub admin_name: String,
+    /// Lowercase-hex pubkey of the admin who performed the action.
+    pub admin_public_key_hex: String,
     pub action: String,
     pub target_user_id: Option<String>,
     pub target_user_name: Option<String>,
+    /// Lowercase-hex pubkey of the target user, when the action has one.
+    pub target_user_public_key_hex: Option<String>,
     pub thread_id: Option<String>,
     pub thread_title: Option<String>,
     pub post_id: Option<String>,
@@ -44,6 +48,51 @@ pub struct AdminLogEntry {
     pub room_slug: Option<String>,
     pub reason: Option<String>,
     pub created_at: String,
+}
+
+/// Internal row type for the admin-log queries: keeps pubkeys as raw
+/// bytes so they can be hex-encoded on conversion to [`AdminLogEntry`].
+struct AdminLogRow {
+    id: String,
+    admin_id: String,
+    admin_name: String,
+    admin_public_key: Vec<u8>,
+    action: String,
+    target_user_id: Option<String>,
+    target_user_name: Option<String>,
+    target_user_public_key: Option<Vec<u8>>,
+    thread_id: Option<String>,
+    thread_title: Option<String>,
+    post_id: Option<String>,
+    room_id: Option<String>,
+    room_slug: Option<String>,
+    reason: Option<String>,
+    created_at: String,
+}
+
+impl From<AdminLogRow> for AdminLogEntry {
+    fn from(row: AdminLogRow) -> Self {
+        Self {
+            id: row.id,
+            admin_id: row.admin_id,
+            admin_name: row.admin_name,
+            admin_public_key_hex: crate::users::hex_lower(&row.admin_public_key),
+            action: row.action,
+            target_user_id: row.target_user_id,
+            target_user_name: row.target_user_name,
+            target_user_public_key_hex: row
+                .target_user_public_key
+                .as_deref()
+                .map(crate::users::hex_lower),
+            thread_id: row.thread_id,
+            thread_title: row.thread_title,
+            post_id: row.post_id,
+            room_id: row.room_id,
+            room_slug: row.room_slug,
+            reason: row.reason,
+            created_at: row.created_at,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -107,6 +156,8 @@ pub struct DeleteUserRequest {
 pub struct BannedUserEntry {
     pub id: String,
     pub display_name: String,
+    /// Lowercase-hex pubkey of the banned user.
+    pub public_key_hex: String,
 }
 
 #[derive(Serialize)]
@@ -119,8 +170,32 @@ pub struct BanResponse {
 pub struct InviteTreeEntry {
     pub id: String,
     pub display_name: String,
+    /// Lowercase-hex pubkey of the user in the invite tree.
+    pub public_key_hex: String,
     pub status: String,
     pub depth: i64,
+}
+
+/// Internal row type for the invite-tree query: keeps the pubkey as
+/// raw bytes so it can be hex-encoded on conversion to [`InviteTreeEntry`].
+struct InviteTreeRow {
+    id: String,
+    display_name: String,
+    public_key: Vec<u8>,
+    status: String,
+    depth: i64,
+}
+
+impl From<InviteTreeRow> for InviteTreeEntry {
+    fn from(row: InviteTreeRow) -> Self {
+        Self {
+            id: row.id,
+            display_name: row.display_name,
+            public_key_hex: crate::users::hex_lower(&row.public_key),
+            status: row.status,
+            depth: row.depth,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -471,14 +546,16 @@ pub async fn get_admin_log(
         let (cursor_ts, cursor_id) = parse_cursor(cursor)?;
 
         sqlx::query_as!(
-            AdminLogEntry,
+            AdminLogRow,
             r#"SELECT
                    al.id,
                    al.admin AS admin_id,
                    u.display_name AS admin_name,
+                   u.public_key AS admin_public_key,
                    al.action,
                    al.target_user AS target_user_id,
                    tu.display_name AS target_user_name,
+                   tu.public_key AS target_user_public_key,
                    al.thread_id,
                    t.title AS thread_title,
                    al.post_id,
@@ -504,14 +581,16 @@ pub async fn get_admin_log(
         .await?
     } else {
         sqlx::query_as!(
-            AdminLogEntry,
+            AdminLogRow,
             r#"SELECT
                    al.id,
                    al.admin AS admin_id,
                    u.display_name AS admin_name,
+                   u.public_key AS admin_public_key,
                    al.action,
                    al.target_user AS target_user_id,
                    tu.display_name AS target_user_name,
+                   tu.public_key AS target_user_public_key,
                    al.thread_id,
                    t.title AS thread_title,
                    al.post_id,
@@ -542,6 +621,8 @@ pub async fn get_admin_log(
     } else {
         None
     };
+
+    let entries: Vec<AdminLogEntry> = entries.into_iter().map(AdminLogEntry::from).collect();
 
     Ok(Json(AdminLogResponse {
         entries,
@@ -623,15 +704,20 @@ async fn revoke_all_invites<'e, E: sqlx::sqlite::SqliteExecutor<'e>>(
     Ok(())
 }
 
-/// Look up a user by ID, returning (id, display_name, status, role).
-///
-/// Returns `UserNotFound` if no row matches.
-async fn fetch_target_user(
-    db: &sqlx::SqlitePool,
-    user_id: &str,
-) -> Result<(String, String, UserStatus, String), AppError> {
+/// Identity + moderation snapshot of a user, used by admin handlers to
+/// decide whether (and how) to act on the target.
+struct TargetUser {
+    id: String,
+    display_name: String,
+    public_key: Vec<u8>,
+    status: UserStatus,
+    role: String,
+}
+
+/// Look up a user by ID. Returns `UserNotFound` if no row matches.
+async fn fetch_target_user(db: &sqlx::SqlitePool, user_id: &str) -> Result<TargetUser, AppError> {
     let row = sqlx::query!(
-        "SELECT id, display_name, status, role FROM users WHERE id = ?",
+        "SELECT id, display_name, public_key, status, role FROM users WHERE id = ?",
         user_id,
     )
     .fetch_optional(db)
@@ -641,7 +727,13 @@ async fn fetch_target_user(
         tracing::error!(user_id = %user_id, error = %e, "unrecognised users.status");
         AppError::code(ErrorCode::Internal)
     })?;
-    Ok((row.id, row.display_name, status, row.role))
+    Ok(TargetUser {
+        id: row.id,
+        display_name: row.display_name,
+        public_key: row.public_key,
+        status,
+        role: row.role,
+    })
 }
 
 /// Parse a duration string ("1d", "3d", "1w", "2w", "1m") into a chrono Duration.
@@ -679,7 +771,13 @@ pub async fn ban_user(
         return Err(AppError::code(ErrorCode::ReasonRequired));
     }
 
-    let (target_id, target_name, status, role) = fetch_target_user(&state.db, &user_id).await?;
+    let TargetUser {
+        id: target_id,
+        display_name: target_name,
+        public_key: target_public_key,
+        status,
+        role,
+    } = fetch_target_user(&state.db, &user_id).await?;
 
     if role == "admin" {
         return Err(AppError::code(ErrorCode::CannotModerateAdmin));
@@ -688,7 +786,11 @@ pub async fn ban_user(
         return Err(AppError::code(ErrorCode::AlreadyBanned));
     }
 
-    let mut users_to_ban = vec![(target_id.clone(), target_name.clone())];
+    let mut users_to_ban = vec![(
+        target_id.clone(),
+        target_name.clone(),
+        target_public_key.clone(),
+    )];
 
     if req.ban_tree {
         let tree_users = sqlx::query!(
@@ -701,7 +803,8 @@ pub async fn ban_user(
                  JOIN invites i ON i.id = u.invite_id
                  JOIN invite_tree it ON i.created_by = it.user_id
                )
-               SELECT u.id AS "id!", u.display_name AS "display_name!", u.role AS "role!"
+               SELECT u.id AS "id!", u.display_name AS "display_name!",
+                      u.public_key AS "public_key!", u.role AS "role!"
                FROM users u
                JOIN invite_tree it ON u.id = it.user_id
                WHERE u.status != 'banned'"#,
@@ -712,7 +815,7 @@ pub async fn ban_user(
 
         for row in tree_users {
             if row.role != "admin" {
-                users_to_ban.push((row.id, row.display_name));
+                users_to_ban.push((row.id, row.display_name, row.public_key));
             }
         }
     }
@@ -721,7 +824,7 @@ pub async fn ban_user(
     let mut total_snapshot_edges: i64 = 0;
     let mut banned_entries = Vec::new();
 
-    for (uid, name) in &users_to_ban {
+    for (uid, name, pubkey) in &users_to_ban {
         sqlx::query!("UPDATE users SET status = 'banned' WHERE id = ?", uid)
             .execute(&mut *tx)
             .await?;
@@ -738,6 +841,7 @@ pub async fn ban_user(
         banned_entries.push(BannedUserEntry {
             id: uid.clone(),
             display_name: name.clone(),
+            public_key_hex: crate::users::hex_lower(pubkey),
         });
     }
 
@@ -768,7 +872,11 @@ pub async fn unban_user(
         return Err(AppError::code(ErrorCode::ReasonRequired));
     }
 
-    let (target_id, _, status, _) = fetch_target_user(&state.db, &user_id).await?;
+    let TargetUser {
+        id: target_id,
+        status,
+        ..
+    } = fetch_target_user(&state.db, &user_id).await?;
 
     if status != UserStatus::Banned {
         return Err(AppError::code(ErrorCode::NotBanned));
@@ -813,7 +921,12 @@ pub async fn suspend_user(
     }
 
     let duration = parse_duration(&req.duration)?;
-    let (target_id, _, status, role) = fetch_target_user(&state.db, &user_id).await?;
+    let TargetUser {
+        id: target_id,
+        status,
+        role,
+        ..
+    } = fetch_target_user(&state.db, &user_id).await?;
 
     if role == "admin" {
         return Err(AppError::code(ErrorCode::CannotModerateAdmin));
@@ -865,7 +978,11 @@ pub async fn unsuspend_user(
 ) -> Result<impl IntoResponse, AppError> {
     require_admin(&user)?;
 
-    let (target_id, _, status, _) = fetch_target_user(&state.db, &user_id).await?;
+    let TargetUser {
+        id: target_id,
+        status,
+        ..
+    } = fetch_target_user(&state.db, &user_id).await?;
 
     if status != UserStatus::Suspended {
         return Err(AppError::code(ErrorCode::NotSuspended));
@@ -914,7 +1031,7 @@ pub async fn admin_revoke_invites(
         return Err(AppError::code(ErrorCode::ReasonRequired));
     }
 
-    let (target_id, _, _, _) = fetch_target_user(&state.db, &user_id).await?;
+    let TargetUser { id: target_id, .. } = fetch_target_user(&state.db, &user_id).await?;
 
     // Atomic read-check-update-log: the can_invite read, the UPDATE, and the
     // audit log commit together so the privilege change and its record can't
@@ -968,7 +1085,7 @@ pub async fn admin_grant_invites(
         return Err(AppError::code(ErrorCode::ReasonRequired));
     }
 
-    let (target_id, _, _, _) = fetch_target_user(&state.db, &user_id).await?;
+    let TargetUser { id: target_id, .. } = fetch_target_user(&state.db, &user_id).await?;
 
     // Atomic read-check-update-log: the can_invite read, the UPDATE, and the
     // audit log commit together so the privilege change and its record can't
@@ -1020,8 +1137,8 @@ pub async fn get_invite_tree(
 
     let _ = fetch_target_user(&state.db, &user_id).await?;
 
-    let tree = sqlx::query_as!(
-        InviteTreeEntry,
+    let rows = sqlx::query_as!(
+        InviteTreeRow,
         r#"WITH RECURSIVE invite_tree(user_id, depth) AS (
              SELECT u.id, 1 FROM users u
              JOIN invites i ON i.id = u.invite_id
@@ -1032,6 +1149,7 @@ pub async fn get_invite_tree(
              JOIN invite_tree it ON i.created_by = it.user_id
            )
            SELECT u.id AS "id!", u.display_name AS "display_name!",
+                  u.public_key AS "public_key!: Vec<u8>",
                   u.status AS "status!", it.depth AS "depth!: i64"
            FROM users u
            JOIN invite_tree it ON u.id = it.user_id
@@ -1040,6 +1158,8 @@ pub async fn get_invite_tree(
     )
     .fetch_all(&state.db)
     .await?;
+
+    let tree: Vec<InviteTreeEntry> = rows.into_iter().map(InviteTreeEntry::from).collect();
 
     Ok(Json(tree))
 }

@@ -37,7 +37,7 @@
 		<div class="bg-bg-surface border border-border rounded-md divide-y divide-border-subtle">
 			{#each data.users as user}
 				<div class="px-4 py-2.5 flex items-center gap-2 min-w-0">
-					<UserName name={user.display_name} viewer={user.viewer} compact linked={!viewerRestricted} />
+					<UserName name={user.display_name} pubkeyHex={user.public_key_hex} viewer={user.viewer} compact linked={!viewerRestricted} />
 				</div>
 			{/each}
 		</div>

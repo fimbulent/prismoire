@@ -4,6 +4,7 @@
 	import { relativeTime } from '$lib/format';
 	import { errorMessage } from '$lib/i18n/errors';
 	import UserName from '$lib/components/trust/UserName.svelte';
+	import { canonicalProfilePath } from '$lib/user-url';
 
 	let { data } = $props();
 
@@ -204,7 +205,7 @@
 									Used by:
 									{#each invite.users as invitedUser, i}
 										<a
-											href="/@{encodeURIComponent(invitedUser.display_name)}"
+											href={canonicalProfilePath(invitedUser.display_name, invitedUser.public_key_hex)}
 											class="text-text-secondary hover:underline"
 										>{invitedUser.display_name}</a>{#if i < invite.users.length - 1},
 										{/if}
@@ -242,7 +243,7 @@
 			{#each invitedUsers as user}
 				<div class="px-4 py-2.5 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between sm:gap-3 text-sm">
 					<span class="flex items-center gap-1.5">
-						<UserName name={user.display_name} viewer={user.viewer} />
+						<UserName name={user.display_name} pubkeyHex={user.public_key_hex} viewer={user.viewer} />
 					</span>
 					<span class="text-text-muted text-xs">Joined {relativeTime(user.created_at)}</span>
 				</div>

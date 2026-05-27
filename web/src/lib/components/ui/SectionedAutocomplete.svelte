@@ -40,6 +40,7 @@
 		type ThreadHit
 	} from '$lib/api/search';
 	import UserName from '$lib/components/trust/UserName.svelte';
+	import { canonicalProfilePath } from '$lib/user-url';
 
 	interface Props {
 		placeholder?: string;
@@ -254,7 +255,7 @@
 			case 'room':
 				return `/r/${encodeURIComponent(row.item.slug)}`;
 			case 'user':
-				return `/@${encodeURIComponent(row.item.display_name)}`;
+				return canonicalProfilePath(row.item.display_name, row.item.public_key_hex);
 			case 'thread':
 				return `/r/${encodeURIComponent(row.item.room_slug)}/${encodeURIComponent(row.item.id)}`;
 			case 'see_all':
@@ -432,6 +433,7 @@
 								-->
 								<UserName
 									name={item.display_name}
+									pubkeyHex={item.public_key_hex}
 									viewer={item.viewer}
 									compact
 									linked={false}
@@ -471,6 +473,7 @@
 									in <span class="text-accent-muted">{item.room_slug}</span> ·
 									<UserName
 										name={item.author_name}
+										pubkeyHex={item.author_public_key_hex}
 										viewer={item.viewer}
 										compact
 										muted

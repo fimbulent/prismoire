@@ -3,6 +3,8 @@ import type { UserViewerInfo } from './users';
 
 export interface InviteUser {
 	display_name: string;
+	/** Lowercase-hex pubkey of the invited user. */
+	public_key_hex: string;
 	created_at: string;
 }
 
@@ -71,6 +73,8 @@ export async function validateInvite(
 
 export interface InvitedUser {
 	display_name: string;
+	/** Lowercase-hex pubkey of the invited user. */
+	public_key_hex: string;
 	created_at: string;
 	viewer: UserViewerInfo;
 }

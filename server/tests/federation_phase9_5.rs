@@ -23,11 +23,9 @@
 
 mod common;
 
+use common::{body_json, get_request, send, setup_admin, test_app};
 use http::StatusCode;
 use prismoire_server::federation::remote_users::hydrate_stub_user;
-use serde_json::Value;
-
-use common::{body_json, get_request, send, setup_admin, signup_as, test_app};
 
 /// Build a deterministic 32-byte pubkey from a seed byte. Avoids
 /// pulling in a CSPRNG just to mint test-distinct keys.
@@ -276,40 +274,4 @@ async fn resolve_endpoint_404s_unknown_skeleton() {
     let req = get_request("/api/users/nobody/resolve", Some(&admin.cookie));
     let response = send(&app, req).await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn legacy_profile_handler_returns_300_on_ambiguous() {
-    let (app, state) = test_app().await;
-    let admin = setup_admin(&app, "alice").await;
-    // Sign up a second non-colliding user just to confirm the
-    // skeleton-based logic isn't catching unrelated handles.
-    let _bob = signup_as(&app, &admin, "bob").await;
-
-    let remote_pubkey = seeded_key(0xee);
-    let remote_home = seeded_key(0xff);
-    {
-        let mut tx = state.db.begin().await.expect("begin tx");
-        hydrate_stub_user(&mut tx, &remote_pubkey, "alice", &remote_home)
-            .await
-            .expect("hydrate stub");
-        tx.commit().await.expect("commit");
-    }
-
-    // `GET /api/users/alice` (no suffix) hits the legacy handler which
-    // demands a unique row → AmbiguousUsername → 300 Multiple Choices.
-    let req = get_request("/api/users/alice", Some(&admin.cookie));
-    let response = send(&app, req).await;
-    assert_eq!(
-        response.status(),
-        StatusCode::MULTIPLE_CHOICES,
-        "legacy profile handler should surface AmbiguousUsername as 300"
-    );
-    let body = body_json(response).await;
-    // The error envelope (`code` field) should name the new variant.
-    assert_eq!(
-        body["code"],
-        Value::String("ambiguous_username".to_string()),
-        "300 body must carry the structured error code"
-    );
 }

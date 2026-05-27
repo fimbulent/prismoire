@@ -6,6 +6,7 @@
 
 import { redirect } from '@sveltejs/kit';
 import type { PageServerLoad } from './$types';
+import { canonicalProfilePath } from '$lib/user-url';
 
 export const load: PageServerLoad = async ({ parent }) => {
 	const { session } = await parent();
@@ -13,7 +14,7 @@ export const load: PageServerLoad = async ({ parent }) => {
 		// Banned and suspended users are locked out of the trust graph — send
 		// them to their own profile page where the restricted UI lives.
 		if (session.status === 'banned' || session.status === 'suspended') {
-			throw redirect(307, `/@${encodeURIComponent(session.display_name)}`);
+			throw redirect(307, canonicalProfilePath(session.display_name, session.public_key_hex));
 		}
 		throw redirect(307, '/r/all');
 	}

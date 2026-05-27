@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT display_name, status, deleted_at, public_key FROM users WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "display_name",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "status",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "deleted_at",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "public_key",
+        "ordinal": 3,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "b4026e5e0ba59af4e14e179ef1dafed20dd9710b4e4caa980e33c341600300b6"
+}

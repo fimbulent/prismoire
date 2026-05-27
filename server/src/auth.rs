@@ -57,6 +57,11 @@ pub struct AuthBeginResponse {
 pub struct SessionResponse {
     pub user_id: String,
     pub display_name: String,
+    /// Lowercase-hex of the session user's 32-byte Ed25519 public key.
+    /// Lets the frontend build canonical `/@username.{8hex}` profile
+    /// URLs without a separate resolve roundtrip — see
+    /// `web/src/lib/user-url.ts::canonicalProfilePath`.
+    pub public_key_hex: String,
     pub role: String,
     pub theme: String,
     pub font: String,
@@ -78,6 +83,7 @@ impl SessionResponse {
     pub fn active(
         user_id: String,
         display_name: String,
+        public_key_hex: String,
         role: String,
         theme: String,
         font: String,
@@ -85,6 +91,7 @@ impl SessionResponse {
         Self {
             user_id,
             display_name,
+            public_key_hex,
             role,
             theme,
             font,
@@ -96,9 +103,11 @@ impl SessionResponse {
     /// Build a [`SessionResponse`] for any status. Drops `suspended_until`
     /// for non-suspended users so the wire payload never carries a stale
     /// timestamp after a suspension has lifted or a ban has been applied.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         user_id: String,
         display_name: String,
+        public_key_hex: String,
         role: String,
         theme: String,
         font: String,
@@ -108,6 +117,7 @@ impl SessionResponse {
         Self {
             user_id,
             display_name,
+            public_key_hex,
             role,
             theme,
             font,
@@ -517,6 +527,7 @@ pub async fn signup_complete(
         Json(SessionResponse::active(
             user_id,
             display_name,
+            crate::users::hex_lower(public_key),
             "user".into(),
             crate::settings::DEFAULT_THEME.into(),
             crate::settings::DEFAULT_FONT.into(),
@@ -643,7 +654,7 @@ pub async fn login_complete(
     // are filtered out: their credentials are purged, but this closes the
     // path defensively if one somehow survived.
     let user = sqlx::query!(
-        "SELECT id, role, status, suspended_until FROM users \
+        "SELECT id, role, status, suspended_until, public_key FROM users \
          WHERE display_name = ? AND deleted_at IS NULL",
         display_name,
     )
@@ -657,6 +668,7 @@ pub async fn login_complete(
     let role = user.role;
     let suspended_until = user.suspended_until;
     let status = parse_status_or_log(&user.status, &user_id);
+    let public_key_hex = crate::users::hex_lower(&user.public_key);
 
     update_credential_counter(&state.db, &user_id, &auth_result).await?;
 
@@ -671,6 +683,7 @@ pub async fn login_complete(
         Json(SessionResponse::new(
             user_id,
             display_name,
+            public_key_hex,
             role,
             theme,
             font,
@@ -758,7 +771,7 @@ pub async fn discover_complete(
     // defensively (their credentials have been purged).
     let user_uuid_str = user_uuid.to_string();
     let user = sqlx::query!(
-        "SELECT id, display_name, role, status, suspended_until FROM users \
+        "SELECT id, display_name, role, status, suspended_until, public_key FROM users \
          WHERE id = ? AND deleted_at IS NULL",
         user_uuid_str,
     )
@@ -774,6 +787,7 @@ pub async fn discover_complete(
     let role = user.role;
     let suspended_until = user.suspended_until;
     let status = parse_status_or_log(&user.status, &user_id);
+    let public_key_hex = crate::users::hex_lower(&user.public_key);
 
     let cred_rows = sqlx::query!(
         "SELECT public_key FROM credentials WHERE user_id = ?",
@@ -809,6 +823,7 @@ pub async fn discover_complete(
         Json(SessionResponse::new(
             user_id,
             display_name,
+            public_key_hex,
             role,
             theme,
             font,
@@ -869,6 +884,7 @@ pub async fn session_info(
     Ok(Json(SessionResponse::new(
         user.user_id,
         user.display_name,
+        user.public_key_hex,
         user.role,
         theme,
         font,

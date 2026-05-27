@@ -164,25 +164,28 @@ pub fn build_app(
         .route("/api/invites/{id}", delete(invites::revoke_invite))
         .route("/api/users/search", get(users::search_users))
         .route(
-            "/api/users/{username}",
-            get(users::get_profile).patch(users::update_bio),
-        )
-        .route(
             "/api/users/{username}/resolve",
             get(users::resolve_username),
         )
-        .route("/api/users/{username}/trust", get(users::get_trust_detail))
-        .route("/api/users/{username}/activity", get(users::get_activity))
         .route(
-            "/api/users/{username}/trust/edges",
+            "/api/users/{pubkey_hex}",
+            get(users::get_profile).patch(users::update_bio),
+        )
+        .route(
+            "/api/users/{pubkey_hex}/trust",
+            get(users::get_trust_detail),
+        )
+        .route("/api/users/{pubkey_hex}/activity", get(users::get_activity))
+        .route(
+            "/api/users/{pubkey_hex}/trust/edges",
             get(users::get_trust_edges),
         )
         .route(
-            "/api/users/{username}/trust-edge",
+            "/api/users/{pubkey_hex}/trust-edge",
             put(users::set_trust_edge).delete(users::delete_trust_edge),
         )
         .route(
-            "/api/users/{username}/tag",
+            "/api/users/{pubkey_hex}/tag",
             put(users::set_user_tag).delete(users::delete_user_tag),
         )
         .route(

@@ -24,6 +24,8 @@ export interface UserViewerInfo {
 export interface UserProfile {
 	id: string;
 	display_name: string;
+	/** Lowercase-hex of the profiled user's 32-byte Ed25519 public key. */
+	public_key_hex: string;
 	created_at: string;
 	signup_method: string;
 	bio: string | null;
@@ -37,6 +39,8 @@ export interface UserProfile {
 
 export interface TrustUserRef {
 	display_name: string;
+	/** Lowercase-hex pubkey of the path intermediary. */
+	public_key_hex: string;
 	viewer: UserViewerInfo;
 }
 
@@ -48,11 +52,15 @@ export interface TrustPathResponse {
 
 export interface ScoreReduction {
 	display_name: string;
+	/** Lowercase-hex pubkey of the trusted-but-distrusted intermediary. */
+	public_key_hex: string;
 	reason: string;
 }
 
 export interface TrustEdgeUser {
 	display_name: string;
+	/** Lowercase-hex pubkey of the trust-edge counterpart. */
+	public_key_hex: string;
 	viewer: UserViewerInfo;
 }
 
@@ -106,11 +114,11 @@ interface FetchOpts {
 }
 
 export async function getUserProfile(
-	username: string,
+	pubkeyHex: string,
 	opts: FetchOpts = {}
 ): Promise<UserProfile> {
 	const f = opts.fetch ?? globalThis.fetch;
-	const res = await f(`/api/users/${encodeURIComponent(username)}`);
+	const res = await f(`/api/users/${encodeURIComponent(pubkeyHex)}`);
 	if (!res.ok) await throwApiError(res);
 	return res.json();
 }
@@ -125,8 +133,15 @@ export async function getUserProfile(
 export interface UserChip {
 	id: string;
 	display_name: string;
+	/** Lowercase-hex pubkey for routing / canonical-link construction. */
+	public_key_hex: string;
 	status: 'active' | 'banned' | 'suspended' | 'deleted';
 	role: string;
+	/** Per-viewer trust / distrust / tag / status, populated the same
+	 *  way as on the paginated `/api/search/users` endpoint. Lets a
+	 *  dropdown render a `<UserName>` chip with trust badge without a
+	 *  second round-trip. */
+	viewer: UserViewerInfo;
 }
 
 /**
@@ -190,17 +205,17 @@ export async function resolveUsername(
 }
 
 export async function getTrustDetail(
-	username: string,
+	pubkeyHex: string,
 	opts: FetchOpts = {}
 ): Promise<TrustDetailResponse> {
 	const f = opts.fetch ?? globalThis.fetch;
-	const res = await f(`/api/users/${encodeURIComponent(username)}/trust`);
+	const res = await f(`/api/users/${encodeURIComponent(pubkeyHex)}/trust`);
 	if (!res.ok) await throwApiError(res);
 	return res.json();
 }
 
 export async function getActivity(
-	username: string,
+	pubkeyHex: string,
 	filter: string = 'all',
 	cursor?: string,
 	opts: FetchOpts = {}
@@ -209,33 +224,33 @@ export async function getActivity(
 	const params = new URLSearchParams({ filter });
 	if (cursor) params.set('cursor', cursor);
 	const res = await f(
-		`/api/users/${encodeURIComponent(username)}/activity?${params.toString()}`
+		`/api/users/${encodeURIComponent(pubkeyHex)}/activity?${params.toString()}`
 	);
 	if (!res.ok) await throwApiError(res);
 	return res.json();
 }
 
 export async function getTrustEdges(
-	username: string,
+	pubkeyHex: string,
 	direction: 'trusts' | 'trusted_by',
 	opts: FetchOpts = {}
 ): Promise<TrustEdgesResponse> {
 	const f = opts.fetch ?? globalThis.fetch;
 	const params = new URLSearchParams({ direction });
 	const res = await f(
-		`/api/users/${encodeURIComponent(username)}/trust/edges?${params.toString()}`
+		`/api/users/${encodeURIComponent(pubkeyHex)}/trust/edges?${params.toString()}`
 	);
 	if (!res.ok) await throwApiError(res);
 	return res.json();
 }
 
 export async function updateBio(
-	username: string,
+	pubkeyHex: string,
 	bio: string | null,
 	opts: FetchOpts = {}
 ): Promise<void> {
 	const f = opts.fetch ?? globalThis.fetch;
-	const res = await f(`/api/users/${encodeURIComponent(username)}`, {
+	const res = await f(`/api/users/${encodeURIComponent(pubkeyHex)}`, {
 		method: 'PATCH',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ bio })
@@ -244,12 +259,12 @@ export async function updateBio(
 }
 
 export async function setTrustEdge(
-	username: string,
+	pubkeyHex: string,
 	edgeType: 'trust' | 'distrust',
 	opts: FetchOpts = {}
 ): Promise<void> {
 	const f = opts.fetch ?? globalThis.fetch;
-	const res = await f(`/api/users/${encodeURIComponent(username)}/trust-edge`, {
+	const res = await f(`/api/users/${encodeURIComponent(pubkeyHex)}/trust-edge`, {
 		method: 'PUT',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ type: edgeType })
@@ -258,31 +273,32 @@ export async function setTrustEdge(
 }
 
 export async function deleteTrustEdge(
-	username: string,
+	pubkeyHex: string,
 	opts: FetchOpts = {}
 ): Promise<void> {
 	const f = opts.fetch ?? globalThis.fetch;
-	const res = await f(`/api/users/${encodeURIComponent(username)}/trust-edge`, {
+	const res = await f(`/api/users/${encodeURIComponent(pubkeyHex)}/trust-edge`, {
 		method: 'DELETE'
 	});
 	if (!res.ok) await throwApiError(res);
 }
 
 /**
- * Attach (or replace) the viewer's private tag for `username`. Tags are
- * strictly viewer-scoped — only the caller sees them, the tagged user
- * is never told. Max 35 grapheme clusters (enforced server-side).
+ * Attach (or replace) the viewer's private tag for the user identified
+ * by `pubkeyHex`. Tags are strictly viewer-scoped — only the caller sees
+ * them, the tagged user is never told. Max 35 grapheme clusters
+ * (enforced server-side).
  *
  * Sending an empty string deletes the tag (matches the explicit
  * {@link clearUserTag} DELETE endpoint).
  */
 export async function setUserTag(
-	username: string,
+	pubkeyHex: string,
 	tag: string,
 	opts: FetchOpts = {}
 ): Promise<void> {
 	const f = opts.fetch ?? globalThis.fetch;
-	const res = await f(`/api/users/${encodeURIComponent(username)}/tag`, {
+	const res = await f(`/api/users/${encodeURIComponent(pubkeyHex)}/tag`, {
 		method: 'PUT',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ tag })
@@ -291,15 +307,15 @@ export async function setUserTag(
 }
 
 /**
- * Remove the viewer's private tag for `username`. Idempotent — succeeds
- * whether or not a tag was previously set.
+ * Remove the viewer's private tag for the user identified by `pubkeyHex`.
+ * Idempotent — succeeds whether or not a tag was previously set.
  */
 export async function clearUserTag(
-	username: string,
+	pubkeyHex: string,
 	opts: FetchOpts = {}
 ): Promise<void> {
 	const f = opts.fetch ?? globalThis.fetch;
-	const res = await f(`/api/users/${encodeURIComponent(username)}/tag`, {
+	const res = await f(`/api/users/${encodeURIComponent(pubkeyHex)}/tag`, {
 		method: 'DELETE'
 	});
 	if (!res.ok) await throwApiError(res);

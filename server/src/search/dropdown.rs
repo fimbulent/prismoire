@@ -65,6 +65,8 @@ pub struct RoomHit {
 pub struct UserHit {
     pub id: String,
     pub display_name: String,
+    /// Lowercase-hex pubkey. See `users::UserProfileResponse::public_key_hex`.
+    pub public_key_hex: String,
     pub viewer: UserViewerInfo,
 }
 
@@ -74,6 +76,8 @@ pub struct ThreadHit {
     pub title: String,
     pub author_id: String,
     pub author_name: String,
+    /// Lowercase-hex pubkey of the thread OP author.
+    pub author_public_key_hex: String,
     pub room_id: String,
     pub room_slug: String,
     pub is_announcement: bool,
@@ -243,7 +247,7 @@ async fn search_users_section(
     let candidate_limit = DROPDOWN_LIMIT * 5;
 
     let rows = sqlx::query!(
-        r#"SELECT id, display_name, status, deleted_at
+        r#"SELECT id, display_name, public_key, status, deleted_at
            FROM users
            WHERE deleted_at IS NULL
              AND display_name_skeleton LIKE ? ESCAPE '\'
@@ -284,6 +288,7 @@ async fn search_users_section(
         hits.push(UserHit {
             id: r.id,
             display_name: r.display_name,
+            public_key_hex: crate::users::hex_lower(&r.public_key),
             viewer,
         });
         if hits.len() == DROPDOWN_LIMIT as usize {
@@ -302,6 +307,7 @@ struct ThreadFtsRow {
     title: String,
     author_id: String,
     author_name: String,
+    author_public_key: Vec<u8>,
     author_status: String,
     author_deleted_at: Option<String>,
     created_at: String,
@@ -340,6 +346,7 @@ async fn search_threads_section(
                   t.title AS "title!",
                   t.author AS "author_id!",
                   u.display_name AS "author_name!",
+                  u.public_key AS "author_public_key!",
                   u.status AS "author_status!",
                   u.deleted_at AS "author_deleted_at?",
                   t.created_at AS "created_at!",
@@ -438,6 +445,7 @@ async fn search_threads_section(
             title: row.title,
             author_id: row.author_id,
             author_name: row.author_name,
+            author_public_key_hex: crate::users::hex_lower(&row.author_public_key),
             room_id: row.room_id,
             room_slug: row.room_slug,
             is_announcement: row.is_announcement,

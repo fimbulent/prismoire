@@ -10,6 +10,7 @@
 import { redirect } from '@sveltejs/kit';
 import type { LayoutServerLoad } from './$types';
 import { ApiRequestError, getSession, getSetupStatus, type SessionInfo } from '$lib/api/auth';
+import { canonicalProfilePath } from '$lib/user-url';
 import type { ThemeId } from '$lib/themes';
 import type { FontId } from '$lib/fonts';
 
@@ -18,10 +19,20 @@ import type { FontId } from '$lib/fonts';
  * sub-routes such as trust edge lists) and `/settings`. Everything else
  * is redirected back to their profile so the UI stays locked in the
  * restricted state the moderation action intended.
+ *
+ * The pathname check covers both the canonical long form
+ * (`/@alice.{8hex}`) and the bare form (`/@alice`) — the latter still
+ * exists transiently because the profile loader is what redirects bare
+ * → long form. If a restricted user types the bare URL straight into
+ * the address bar, the loader would otherwise have to run first to
+ * issue the bare-to-long redirect; allowing both here keeps the gate
+ * working in one hop.
  */
 function isAllowedForRestricted(pathname: string, session: SessionInfo): boolean {
-	const ownProfile = `/@${encodeURIComponent(session.display_name)}`;
-	if (pathname === ownProfile || pathname.startsWith(`${ownProfile}/`)) return true;
+	const bareProfile = `/@${encodeURIComponent(session.display_name)}`;
+	const longProfile = canonicalProfilePath(session.display_name, session.public_key_hex);
+	if (pathname === bareProfile || pathname.startsWith(`${bareProfile}/`)) return true;
+	if (pathname === longProfile || pathname.startsWith(`${longProfile}/`)) return true;
 	if (pathname === '/settings' || pathname.startsWith('/settings/')) return true;
 	return false;
 }
@@ -102,7 +113,7 @@ export const load: LayoutServerLoad = async ({ fetch, cookies, locals, url, setH
 	// can't accidentally be reachable to restricted users.
 	if (session && (session.status === 'banned' || session.status === 'suspended')) {
 		if (!isAllowedForRestricted(url.pathname, session)) {
-			throw redirect(307, `/@${encodeURIComponent(session.display_name)}`);
+			throw redirect(307, canonicalProfilePath(session.display_name, session.public_key_hex));
 		}
 	}
 

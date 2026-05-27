@@ -82,7 +82,7 @@
 								>
 							</div>
 							<div class="flex items-center gap-2 text-xs text-text-muted">
-								<UserName name={thread.author_name} linked={false} />
+								<UserName name={thread.author_name} pubkeyHex={thread.author_public_key_hex} linked={false} />
 								<span>&middot;</span>
 								<span>{relativeTime(thread.last_activity ?? thread.created_at)}</span>
 								<span>&middot;</span>

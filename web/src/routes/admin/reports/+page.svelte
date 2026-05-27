@@ -17,6 +17,7 @@
 	import { errorMessage } from '$lib/i18n/errors';
 	import { slide } from 'svelte/transition';
 	import { invalidate } from '$app/navigation';
+	import { canonicalProfilePath } from '$lib/user-url';
 
 	let { data } = $props();
 
@@ -245,7 +246,7 @@
 					>
 					<span>by</span>
 					<a
-						href="/@{encodeURIComponent(report.reporter_name)}"
+						href={canonicalProfilePath(report.reporter_name, report.reporter_public_key_hex)}
 						class="text-link no-underline hover:underline font-semibold">{report.reporter_name}</a
 					>
 					{#if report.report_count > 1}
@@ -269,7 +270,7 @@
 				<div class="bg-bg border border-border-subtle rounded-md p-4 mb-3">
 					<div class="flex items-center gap-2 mb-2 text-sm">
 						<a
-							href="/@{encodeURIComponent(report.post_author_name)}"
+							href={canonicalProfilePath(report.post_author_name, report.post_author_public_key_hex)}
 							class="font-semibold text-text-primary no-underline hover:underline"
 							>{report.post_author_name}</a
 						>

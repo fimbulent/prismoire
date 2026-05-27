@@ -6,6 +6,7 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { applyTheme } from '$lib/themes';
+	import { canonicalProfilePath } from '$lib/user-url';
 	import Toasts from '$lib/components/ui/Toasts.svelte';
 	import NavSearch from '$lib/components/ui/NavSearch.svelte';
 
@@ -121,7 +122,10 @@
 				{#if dropdownOpen}
 					<div class="absolute right-0 top-full mt-1 w-44 bg-bg-surface border border-border rounded-md shadow-lg py-1 z-50">
 						<button
-							onclick={() => navigateTo(`/@${encodeURIComponent(session.user?.display_name ?? '')}`)}
+							onclick={() => {
+								const u = session.user;
+								if (u) navigateTo(canonicalProfilePath(u.display_name, u.public_key_hex));
+							}}
 							class="w-full text-left px-3 py-2 text-sm text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-pointer"
 						>
 							Profile

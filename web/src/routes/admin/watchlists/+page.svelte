@@ -1,6 +1,7 @@
 <script lang="ts">
 	import type { UserChip } from '$lib/api/admin';
 	import { relativeTime } from '$lib/format';
+	import { canonicalProfilePath } from '$lib/user-url';
 
 	let { data } = $props();
 
@@ -38,7 +39,7 @@
 
 {#snippet userChip(user: UserChip)}
 	<a
-		href="/@{encodeURIComponent(user.display_name)}"
+		href={canonicalProfilePath(user.display_name, user.public_key_hex)}
 		class="text-text-primary no-underline hover:underline font-medium"
 	>
 		{user.display_name}

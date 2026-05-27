@@ -101,8 +101,8 @@ export const load: PageServerLoad = async ({ parent, fetch, params, url }) => {
 
 	try {
 		const [profile, activity] = await Promise.all([
-			getUserProfile(resolution.user.display_name, { fetch }),
-			getActivity(resolution.user.display_name, filter, undefined, { fetch })
+			getUserProfile(resolution.user.public_key_hex, { fetch }),
+			getActivity(resolution.user.public_key_hex, filter, undefined, { fetch })
 		]);
 		return {
 			profile,

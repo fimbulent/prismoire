@@ -65,6 +65,10 @@ pub const TEST_ORIGIN: &str = "http://test.local";
 pub struct Session {
     pub user_id: String,
     pub display_name: String,
+    /// Lowercase-hex of the user's 32-byte signing pubkey. Returned by
+    /// both bypass routes; tests use this to build pubkey-keyed
+    /// `/api/users/{pubkey_hex}/...` URLs.
+    pub public_key_hex: String,
     pub cookie: String,
 }
 
@@ -439,6 +443,10 @@ pub async fn setup_admin(app: &Router, display_name: &str) -> Session {
             .as_str()
             .expect("display_name")
             .to_string(),
+        public_key_hex: body["public_key_hex"]
+            .as_str()
+            .expect("public_key_hex")
+            .to_string(),
         cookie,
     }
 }
@@ -484,6 +492,10 @@ pub async fn signup_as(app: &Router, inviter: &Session, display_name: &str) -> S
         display_name: body["display_name"]
             .as_str()
             .expect("display_name")
+            .to_string(),
+        public_key_hex: body["public_key_hex"]
+            .as_str()
+            .expect("public_key_hex")
             .to_string(),
         cookie,
     }

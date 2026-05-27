@@ -84,7 +84,7 @@ async fn transitive_trust_then_direct_distrust_flips_visibility() {
     // any downstream code that consults the cached graph.
     let distrust_req = json_request(
         Method::PUT,
-        "/api/users/carol/trust-edge",
+        &format!("/api/users/{}/trust-edge", carol.public_key_hex),
         Some(&alice.cookie),
         &serde_json::json!({ "type": "distrust" }),
     );

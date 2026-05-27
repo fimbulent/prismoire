@@ -277,7 +277,7 @@ async fn retract_post_fans_out_retract() {
     assert_eq!(retract, 1, "retract did not fan out to B (count={retract})");
 }
 
-/// `PATCH /api/users/{username}` (update_bio) must fan out a
+/// `PATCH /api/users/{pubkey_hex}` (update_bio) must fan out a
 /// `profile` revision.
 #[tokio::test]
 async fn update_bio_fans_out_profile() {
@@ -290,7 +290,7 @@ async fn update_bio_fans_out_profile() {
         &a.router,
         json_request(
             Method::PATCH,
-            &format!("/api/users/{}", alice.display_name),
+            &format!("/api/users/{}", alice.public_key_hex),
             Some(&alice.cookie),
             &json!({ "bio": "new bio text" }),
         ),

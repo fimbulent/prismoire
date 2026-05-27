@@ -51,6 +51,8 @@ pub struct PostSearchHit {
     pub is_announcement: bool,
     pub author_id: String,
     pub author_name: String,
+    /// Lowercase-hex pubkey of the post author.
+    pub author_public_key_hex: String,
     pub created_at: String,
     /// Full post body (markdown). The frontend renders it via the
     /// shared `Markdown` component so the post appears in its native
@@ -80,6 +82,7 @@ struct PostFtsRow {
     is_announcement: bool,
     author_id: String,
     author_name: String,
+    author_public_key: Vec<u8>,
     author_status: String,
     author_deleted_at: Option<String>,
     created_at: String,
@@ -186,6 +189,7 @@ async fn search_posts_core(
                   (r.slug = 'announcements') AS "is_announcement!: bool",
                   p.author AS "author_id!",
                   u.display_name AS "author_name!",
+                  u.public_key AS "author_public_key!",
                   u.status AS "author_status!",
                   u.deleted_at AS "author_deleted_at?",
                   p.created_at AS "created_at!",
@@ -301,6 +305,7 @@ async fn search_posts_core(
             is_announcement: row.is_announcement,
             author_id: row.author_id,
             author_name: row.author_name,
+            author_public_key_hex: crate::users::hex_lower(&row.author_public_key),
             created_at: row.created_at,
             body: row.body,
             is_op: row.is_op,

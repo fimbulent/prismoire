@@ -5,9 +5,13 @@ export interface AdminLogEntry {
 	id: string;
 	admin_id: string;
 	admin_name: string;
+	/** Lowercase-hex pubkey of the admin who performed the action. */
+	admin_public_key_hex: string;
 	action: string;
 	target_user_id: string | null;
 	target_user_name: string | null;
+	/** Lowercase-hex pubkey of the target user, when the action has one. */
+	target_user_public_key_hex: string | null;
 	thread_id: string | null;
 	thread_title: string | null;
 	post_id: string | null;
@@ -135,17 +139,23 @@ export interface ReportResponse {
 	post_body: string;
 	post_author_id: string;
 	post_author_name: string;
+	/** Lowercase-hex pubkey of the reported post's author. */
+	post_author_public_key_hex: string;
 	post_created_at: string;
 	thread_id: string;
 	thread_title: string;
 	room_slug: string;
 	reporter_id: string;
 	reporter_name: string;
+	/** Lowercase-hex pubkey of the user who filed the report. */
+	reporter_public_key_hex: string;
 	reason: ReportReason;
 	detail: string | null;
 	status: string;
 	created_at: string;
 	resolved_by_name: string | null;
+	/** Lowercase-hex pubkey of the admin who resolved the report. */
+	resolved_by_public_key_hex: string | null;
 	resolved_at: string | null;
 	report_count: number;
 	/** Attachments bound to the reported post's latest revision. Omitted by
@@ -209,7 +219,7 @@ export async function actionReport(reportId: string, opts: FetchOpts = {}): Prom
 }
 
 export interface BanResponse {
-	banned_users: { id: string; display_name: string }[];
+	banned_users: { id: string; display_name: string; public_key_hex: string }[];
 	snapshot_edges: number;
 }
 
@@ -434,6 +444,8 @@ export async function getAdminRoutes(opts: FetchOpts = {}): Promise<RouteListRes
 export interface UserChip {
 	id: string;
 	display_name: string;
+	/** Lowercase-hex pubkey of the user. */
+	public_key_hex: string;
 	status: 'active' | 'suspended' | 'banned';
 }
 

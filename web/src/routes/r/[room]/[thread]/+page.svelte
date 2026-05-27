@@ -22,6 +22,7 @@
 	import Badge from '$lib/components/ui/Badge.svelte';
 	import Notice from '$lib/components/ui/Notice.svelte';
 	import MoreButton from '$lib/components/ui/MoreButton.svelte';
+	import TextareaWithCompletions from '$lib/components/ui/TextareaWithCompletions.svelte';
 	import { session } from '$lib/stores/session.svelte';
 	import { errorMessage } from '$lib/i18n/errors';
 	import { linkHost, linkRest } from '$lib/utils/url';
@@ -474,11 +475,11 @@
 		{#if session.isLoggedIn && !viewRoot && !thread.locked}
 		<div class="mb-6">
 			<div class="bg-bg-surface border border-border rounded-md p-3 focus-within:border-accent-muted">
-			<textarea
+			<TextareaWithCompletions
 				bind:value={topLevelBody}
 				class="block w-full max-w-measure mx-auto min-h-24 bg-transparent text-text-primary font-prose text-prose field-sizing:content resize-none focus:outline-none placeholder:text-text-muted"
 				placeholder="Reply to thread..."
-			></textarea>
+			/>
 			{#if topLevelError}
 				<div class="text-danger text-sm mt-1 max-w-measure mx-auto">{topLevelError}</div>
 			{/if}

@@ -9,6 +9,7 @@
 	import Autocomplete from '$lib/components/ui/Autocomplete.svelte';
 	import ThreadListRow from '$lib/components/post/ThreadListRow.svelte';
 	import AttachmentPicker from '$lib/components/post/AttachmentPicker.svelte';
+	import TextareaWithCompletions from '$lib/components/ui/TextareaWithCompletions.svelte';
 	import { extractImageRefs } from '$lib/markdown';
 	import { validateRoomSlug } from '$lib/validation/room-name';
 	import { errorMessage } from '$lib/i18n/errors';
@@ -395,16 +396,15 @@
 				the inline height overrides min-height and subsequent
 				kind toggles won't shrink it.
 			-->
-			<textarea
+			<TextareaWithCompletions
 				id="thread-body"
 				bind:value={body}
 				placeholder={kind === 'link'
 					? 'Optional: add context or commentary in Markdown...'
 					: 'Write your post in Markdown...'}
 				disabled={submitting}
-				class="w-full bg-bg-surface border border-border rounded-md text-text-primary text-prose font-prose px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted resize-y transition-[min-height] duration-200 ease-out {kind === 'link' ? 'min-h-40' : 'min-h-72'}"
-				class:border-danger={bodyLen > MAX_BODY}
-			></textarea>
+				class="w-full bg-bg-surface border rounded-md text-text-primary text-prose font-prose px-3 py-2 focus:outline-none focus:border-accent-muted placeholder:text-text-muted resize-y transition-[min-height] duration-200 ease-out {kind === 'link' ? 'min-h-40' : 'min-h-72'} {bodyLen > MAX_BODY ? 'border-danger' : 'border-border'}"
+			/>
 			<div class="flex items-center justify-between mt-1">
 				<p class="text-xs text-text-muted">Markdown supported</p>
 				{#if showBodyCounter}

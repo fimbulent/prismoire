@@ -18,6 +18,7 @@
 	import TrustBadge from '$lib/components/trust/TrustBadge.svelte';
 	import UserName from '$lib/components/trust/UserName.svelte';
 	import Markdown from '$lib/components/ui/Markdown.svelte';
+	import TextareaWithCompletions from '$lib/components/ui/TextareaWithCompletions.svelte';
 	import Tooltip from '$lib/components/ui/Tooltip.svelte';
 	import MoreButton from '$lib/components/ui/MoreButton.svelte';
 	import Notice from '$lib/components/ui/Notice.svelte';
@@ -44,6 +45,12 @@
 	// server data when navigating between profiles.
 	// svelte-ignore state_referenced_locally
 	let profile = $state<UserProfile>(structuredClone(data.profile));
+
+	// API endpoints under `/api/users/{pubkey_hex}/...` are pubkey-keyed,
+	// while route URLs and breadcrumbs use the typed username. Keep both
+	// available: `username` for URL construction (filter tabs,
+	// trust-edges links) and `pubkeyHex` for API calls.
+	let pubkeyHex = $derived(profile.public_key_hex);
 
 	let trustDetail = $state<TrustDetailResponse | null>(null);
 	let trustLoading = $state(false);
@@ -139,7 +146,7 @@
 		if (!activityCursor || activityLoading) return;
 		activityLoading = true;
 		try {
-			const res = await getActivity(username, activityFilter, activityCursor);
+			const res = await getActivity(pubkeyHex, activityFilter, activityCursor);
 		    // Offset pagination can return items we've already rendered if
             // the dataset shifted between fetches (new activity inserted).
             // Dedup by key to keep the keyed {#each} block happy.
@@ -165,7 +172,7 @@
 	async function refreshAfterAction() {
 		trustLoaded = false;
 		const promises: Promise<void>[] = [
-			getUserProfile(username).then((p) => {
+			getUserProfile(pubkeyHex).then((p) => {
 				profile = p;
 			})
 		];
@@ -176,7 +183,7 @@
 	async function refreshTrustDetail() {
 		trustLoading = true;
 		try {
-			trustDetail = await getTrustDetail(username);
+			trustDetail = await getTrustDetail(pubkeyHex);
 		} catch {
 			// silently fail
 		} finally {
@@ -205,9 +212,9 @@
 		actionError = null;
 		try {
 			if (stance === 'neutral') {
-				await deleteTrustEdge(username);
+				await deleteTrustEdge(pubkeyHex);
 			} else {
-				await setTrustEdge(username, stance);
+				await setTrustEdge(pubkeyHex, stance);
 			}
 			profile.trust_stance = stance;
 			await refreshAfterAction();
@@ -229,7 +236,7 @@
 		bioError = null;
 		try {
 			const value = bioText.trim() || null;
-			await updateBio(username, value);
+			await updateBio(pubkeyHex, value);
 			profile.bio = value;
 			editingBio = false;
 		} catch (e) {
@@ -261,10 +268,10 @@
 		try {
 			const value = tagText.trim();
 			if (value === '') {
-				await clearUserTag(username);
+				await clearUserTag(pubkeyHex);
 				profile.viewer = { ...profile.viewer, tag: null };
 			} else {
-				await setUserTag(username, value);
+				await setUserTag(pubkeyHex, value);
 				profile.viewer = { ...profile.viewer, tag: value };
 			}
 			editingTag = false;
@@ -332,7 +339,7 @@
 	}
 
 	async function adminRefresh() {
-		profile = await getUserProfile(username);
+		profile = await getUserProfile(pubkeyHex);
 		resetAdminForm();
 	}
 
@@ -570,13 +577,13 @@
 		<!-- Bio -->
 		{#if profile.is_self && editingBio && !viewerRestricted}
 			<div transition:slide={{ duration: 150 }} class="mb-5">
-				<textarea
+				<TextareaWithCompletions
 					bind:value={bioText}
 					class="w-full bg-bg-surface-raised border border-border-subtle rounded-md px-3 py-2 text-prose text-text-primary font-prose focus:outline-none focus:border-accent resize-none"
 					rows={3}
 					maxlength={500}
 					placeholder="Write a short bio…"
-				></textarea>
+				/>
 				<div class="flex items-center gap-2 mt-2">
 					<button
 						onclick={saveBio}
@@ -782,13 +789,13 @@
 											<span class="text-text-muted">Direct trust</span>
 										{:else if path.type === '2hop' && path.via}
 											<span class="text-text-muted">via</span>
-											<UserName name={path.via.display_name} viewer={path.via.viewer} compact linked={!viewerRestricted} />
+											<UserName name={path.via.display_name} pubkeyHex={path.via.public_key_hex} viewer={path.via.viewer} compact linked={!viewerRestricted} />
 											<span class="text-text-muted">→ {profile.display_name}</span>
 										{:else if path.type === '3hop' && path.via && path.via2}
 											<span class="text-text-muted">via</span>
-											<UserName name={path.via.display_name} viewer={path.via.viewer} compact linked={!viewerRestricted} />
+											<UserName name={path.via.display_name} pubkeyHex={path.via.public_key_hex} viewer={path.via.viewer} compact linked={!viewerRestricted} />
 											<span class="text-text-muted">→</span>
-											<UserName name={path.via2.display_name} viewer={path.via2.viewer} compact linked={!viewerRestricted} />
+											<UserName name={path.via2.display_name} pubkeyHex={path.via2.public_key_hex} viewer={path.via2.viewer} compact linked={!viewerRestricted} />
 											<span class="text-text-muted">→ {profile.display_name}</span>
 										{/if}
 									</div>
@@ -797,7 +804,7 @@
 									<div class="flex items-center gap-2 flex-wrap">
 										<span class="text-text-muted text-xs">▼</span>
 										<span class="text-text-muted">Trusts</span>
-										<UserName name={reduction.display_name} viewer={{ distance: null, distrusted: true }} compact linked={!viewerRestricted} />
+										<UserName name={reduction.display_name} pubkeyHex={reduction.public_key_hex} viewer={{ distance: null, distrusted: true }} compact linked={!viewerRestricted} />
 									</div>
 								{/each}
 							</div>
@@ -812,7 +819,7 @@
 						<div class="space-y-2">
 							{#each trustDetail.trusts as user}
 								<div class="flex items-center gap-2 min-w-0">
-									<UserName name={user.display_name} viewer={user.viewer} compact linked={!viewerRestricted} />
+									<UserName name={user.display_name} pubkeyHex={user.public_key_hex} viewer={user.viewer} compact linked={!viewerRestricted} />
 								</div>
 							{/each}
 							{#if trustDetail.trusts_total > trustDetail.trusts.length}
@@ -826,7 +833,7 @@
 						<div class="space-y-2">
 							{#each trustDetail.trusted_by as user}
 								<div class="flex items-center gap-2 min-w-0">
-									<UserName name={user.display_name} viewer={user.viewer} compact linked={!viewerRestricted} />
+									<UserName name={user.display_name} pubkeyHex={user.public_key_hex} viewer={user.viewer} compact linked={!viewerRestricted} />
 								</div>
 							{/each}
 							{#if trustDetail.trusted_by_total > trustDetail.trusted_by.length}

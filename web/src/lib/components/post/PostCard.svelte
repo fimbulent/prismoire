@@ -16,6 +16,7 @@
 	import { extractImageRefs, type MarkdownAttachments } from '$lib/markdown';
 	import AttachmentList from '$lib/components/post/AttachmentList.svelte';
 	import AttachmentPicker, { type PickerSeed } from '$lib/components/post/AttachmentPicker.svelte';
+	import TextareaWithCompletions from '$lib/components/ui/TextareaWithCompletions.svelte';
 	import { errorMessage } from '$lib/i18n/errors';
 	import { slide } from 'svelte/transition';
 
@@ -306,7 +307,7 @@
      mid-content. `gap-y-1` gives wrapped lines a small vertical
      rhythm without expanding the header when it fits on one line. -->
 <div class="flex flex-wrap items-center gap-x-2 gap-y-1 {post.parent_id === null ? 'mb-4' : 'mb-2'} text-sm">
-	<UserName name={post.author_name} viewer={post.viewer} linked={session.isLoggedIn} />
+	<UserName name={post.author_name} pubkeyHex={post.author_public_key_hex} viewer={post.viewer} linked={session.isLoggedIn} />
 	{#if post.distrust_scaffold}
 		<span
 			class="inline-flex items-center justify-center w-4 h-4 rounded-full border border-border text-text-muted text-[0.625rem] font-semibold leading-none cursor-help select-none"
@@ -363,10 +364,10 @@
 	<div class="text-text-muted italic">[retracted]</div>
 {:else if editingPostId === post.id}
 	<div class="space-y-3">
-		<textarea
+		<TextareaWithCompletions
 			bind:value={editBody}
 			class="w-full min-h-32 bg-bg border border-border rounded-md p-3 text-text-primary font-prose text-prose resize-y focus:outline-none focus:border-accent-muted placeholder:text-text-muted"
-		></textarea>
+		/>
 		{#if editError}
 			<div class="text-danger text-sm">{editError}</div>
 		{/if}

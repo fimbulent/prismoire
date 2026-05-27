@@ -3,6 +3,10 @@ export type UserStatus = 'active' | 'banned' | 'suspended';
 export interface SessionInfo {
 	user_id: string;
 	display_name: string;
+	/** Lowercase-hex of the session user's 32-byte Ed25519 public key. The
+	 * first 8 chars form the canonical `@username.{8hex}` URL suffix
+	 * (see `$lib/user-url.canonicalProfilePath`). */
+	public_key_hex: string;
 	role: string;
 	theme: string;
 	font: string;

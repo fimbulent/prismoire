@@ -275,6 +275,7 @@ pub async fn setup_complete(
         Json(SessionResponse::active(
             user_id,
             display_name,
+            crate::users::hex_lower(public_key),
             "admin".into(),
             crate::settings::DEFAULT_THEME.into(),
             crate::settings::DEFAULT_FONT.into(),
