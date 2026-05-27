@@ -859,3 +859,6 @@ BEGIN
        SET refcount = refcount - 1
      WHERE content_hash = OLD.content_hash;
 END;
+CREATE UNIQUE INDEX idx_trust_edges_canonical_hash_unique
+    ON trust_edges(canonical_hash)
+    WHERE canonical_hash IS NOT NULL;

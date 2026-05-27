@@ -62,7 +62,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::display_name::display_name_skeleton;
-use crate::signed::SignedPayload;
+use crate::signed::{SignedPayload, TrustEdge, TrustStance};
+use crate::signing::erase_trust_edge_chain;
 
 /// Strip control codepoints, bidi-override format characters, and
 /// zero-width chars from a remote-signed display name before INSERT.
@@ -370,35 +371,293 @@ pub async fn resolve_home_at_t(
     Ok(*arrived_from)
 }
 
-/// Phase 9.5 sweep: project previously-stored post-rev / thread-create
-/// objects authored by `user_key` that arrived **before** a profile-rev
-/// hydrated the stub.
+/// Outcome of a single `try_project_trust_edge` attempt. Shared
+/// between the §9.1 receive path (`edges.rs::apply_one_edge`) and the
+/// Phase 9.6 sweep path below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrustEdgeProjection {
+    /// Row inserted into `trust_edges`. If `stance == Neutral` the
+    /// helper also ran [`erase_trust_edge_chain`] for the pair.
+    Projected,
+    /// One or both endpoint pubkeys have no matching `users` row.
+    /// Caller stores the canonical bytes so a later sweep can retry.
+    EndpointMissing,
+    /// A sibling row for `(source, target, prior_edge_hash)` is
+    /// already projected — §9.4 fork: both bytes preserved, neither
+    /// is active.
+    ChainFork,
+    /// `prior_edge_hash` is `Some(h)` but `(source, target, h)` is
+    /// not yet projected. §9.1 deferral: caller does NOT persist the
+    /// signed object on the receive path (§9.3 backfill / re-push
+    /// closes the gap); on the sweep path the bytes are already
+    /// durable so deferral is a no-op for storage.
+    Deferred,
+}
+
+/// Project a verified trust-edge into the local `trust_edges` table.
 ///
-/// Per `docs/federation-impl-plan.md` Phase 9.5 the receive path may
-/// `store_signed_object` a remote post-rev (or thread-create) whose
-/// author key has no `users` row yet; the canonical bytes are durable
-/// (for relay, audit, dedup) but the per-class projection row gets
-/// deferred. When the matching profile-rev later arrives and
-/// hydrates the stub, this helper back-projects every such orphan so
-/// reads against `post_revisions` / `threads` catch up.
+/// Shared by:
+/// - `edges.rs::apply_one_edge` (the §9.1 receive path)
+/// - [`sweep_pending_projections`] (Phase 9.6 catch-up after a stub
+///   hydrates)
 ///
-/// **TODO (Phase 9.5 follow-up):** the per-class projection helpers
-/// don't exist yet — once `content.rs`'s new
-/// `ClassAction::PostRev` / `ClassAction::ThreadCreate` branches are
-/// written, this function will scan `signed_objects` for `inner_class
-/// IN ('post-rev', 'thread-create')` rows whose parsed `author` /
-/// `author` field matches `user_key`, and invoke the shared projection
-/// helper. The current no-op is correct-but-incomplete: orphans remain
-/// durable in `signed_objects`, just unprojected, so reads against a
-/// stub created from a profile-rev-arriving-second sequence will miss
-/// pre-profile content until the projection helpers land and this body
-/// is filled in.
+/// The caller is responsible for [`store_signed_object`] semantics —
+/// this helper only mutates `trust_edges` and, on neutral arrivals,
+/// the `signed_objects.payload` blanks driven by
+/// [`erase_trust_edge_chain`]. Caller MUST run inside a `BEGIN
+/// IMMEDIATE` transaction so chain-fork / chain-continuity and the
+/// INSERT observe one consistent snapshot.
+///
+/// Idempotency: a duplicate `canonical_hash` already in `trust_edges`
+/// short-circuits to `Projected` without re-inserting. This lets sweep
+/// safely re-run after a receive-path projection landed the same row.
+pub(crate) async fn try_project_trust_edge(
+    tx: &mut sqlx::SqliteConnection,
+    edge: &TrustEdge,
+    canonical_hash: &[u8; 32],
+    signature: &[u8],
+) -> Result<TrustEdgeProjection, sqlx::Error> {
+    // Resolve both endpoints to local `users.id`. A federated stub
+    // qualifies — Phase 9.5 hydration writes the same `users` table
+    // local signup writes to, so the FK target is satisfied either
+    // way.
+    let from_slice: &[u8] = edge.from_key.as_slice();
+    let to_slice: &[u8] = edge.to_key.as_slice();
+    let source_id = sqlx::query_scalar!("SELECT id FROM users WHERE public_key = ?", from_slice)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let target_id = sqlx::query_scalar!("SELECT id FROM users WHERE public_key = ?", to_slice)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let (Some(source_id), Some(target_id)) = (source_id, target_id) else {
+        return Ok(TrustEdgeProjection::EndpointMissing);
+    };
+
+    // Idempotency short-circuit. Hit when sweep re-runs over an edge
+    // the receive path already projected.
+    let canonical_slice: &[u8] = canonical_hash.as_slice();
+    let already = sqlx::query_scalar!(
+        "SELECT 1 AS \"present!: i64\" FROM trust_edges \
+         WHERE canonical_hash = ? LIMIT 1",
+        canonical_slice,
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    if already.is_some() {
+        return Ok(TrustEdgeProjection::Projected);
+    }
+
+    // §9.4 chain-fork: a sibling already applied with the same
+    // `prior_edge_hash` (NULL-matches-NULL via the OR). Caller leaves
+    // both bytes durable; neither row drives visibility.
+    let prior_for_query: Option<Vec<u8>> = edge.prior_edge_hash.map(|h| h.to_vec());
+    let fork = sqlx::query_scalar!(
+        "SELECT 1 AS \"present!: i64\" FROM trust_edges \
+         WHERE source_user = ? AND target_user = ? \
+           AND ((prior_edge_hash IS NULL AND ? IS NULL) \
+                OR prior_edge_hash = ?) \
+           AND canonical_hash IS NOT NULL \
+           AND canonical_hash != ? \
+         LIMIT 1",
+        source_id,
+        target_id,
+        prior_for_query,
+        prior_for_query,
+        canonical_slice,
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    if fork.is_some() {
+        return Ok(TrustEdgeProjection::ChainFork);
+    }
+
+    // §9.1 chain-continuity: `prior_edge_hash = Some(h)` requires the
+    // pair to already have a row with `canonical_hash = h`. If not,
+    // we're an orphan.
+    if let Some(prior) = edge.prior_edge_hash {
+        let prior_slice: &[u8] = prior.as_slice();
+        let prior_row = sqlx::query_scalar!(
+            "SELECT 1 AS \"present!: i64\" FROM trust_edges \
+             WHERE source_user = ? AND target_user = ? AND canonical_hash = ? \
+             LIMIT 1",
+            source_id,
+            target_id,
+            prior_slice,
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+        if prior_row.is_none() {
+            return Ok(TrustEdgeProjection::Deferred);
+        }
+    }
+
+    // Project. `created_at` schema type is TEXT ISO-8601; we route the
+    // wire `u64` ms through `try_from` so a >i64::MAX value falls into
+    // the now() fallback rather than silently wrapping into a bogus
+    // 1970 row. The canonical CBOR retains the signed timestamp
+    // verbatim.
+    let created_at_iso = i64::try_from(edge.created_at)
+        .ok()
+        .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
+        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+        .unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string());
+
+    let trust_type = edge.stance.as_str();
+    let id = Uuid::new_v4().to_string();
+    let prior_for_insert: Option<Vec<u8>> = edge.prior_edge_hash.map(|h| h.to_vec());
+    let canonical_for_insert: Vec<u8> = canonical_hash.to_vec();
+    let signature_for_insert: Vec<u8> = signature.to_vec();
+    sqlx::query!(
+        "INSERT INTO trust_edges \
+            (id, source_user, target_user, trust_type, created_at, signature, prior_edge_hash, canonical_hash) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        id,
+        source_id,
+        target_id,
+        trust_type,
+        created_at_iso,
+        signature_for_insert,
+        prior_for_insert,
+        canonical_for_insert,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    // §9.1 on-receipt erasure: a neutral edge is the erasure authority
+    // over the prior chain for this pair. The new neutral row itself
+    // is excluded by canonical_hash.
+    if matches!(edge.stance, TrustStance::Neutral) {
+        erase_trust_edge_chain(&mut *tx, &source_id, &target_id, canonical_hash).await?;
+    }
+
+    Ok(TrustEdgeProjection::Projected)
+}
+
+/// Phase 9.5/9.6 sweep: project previously-stored signed objects whose
+/// projection was deferred because a prerequisite (`users` stub, FK
+/// target, chain predecessor) was missing at receive time. Called from
+/// `content.rs::project_remote_profile` after a fresh profile-rev
+/// hydrates the stub for `user_key`.
+///
+/// Phase 9.6 covers `trust-edge` orphans:
+///
+/// - Scans `signed_objects` for live trust-edges that are NOT yet in
+///   `trust_edges.canonical_hash`.
+/// - Filters to entries where the just-hydrated `user_key` is either
+///   endpoint — projecting an unrelated edge wouldn't be wrong, but
+///   it'd do speculative work the next per-pair sweep is going to
+///   redo anyway.
+/// - Re-runs the §9.4 chain-fork and §9.1 chain-continuity checks at
+///   projection time. A stored edge that passed receive-time
+///   validation might still need a second look: later edges from the
+///   same pair could have arrived in the meantime and turned this
+///   edge into a fork or moved the chain head.
+/// - Loops to fixed point so an ordered chain (E1 → E2 → E3) projects
+///   in one sweep call regardless of `signed_objects` row order.
+///
+/// **TODO (Phase 9.5/9.6 follow-up):** post-rev / thread-create
+/// orphan projection still needs writing. The `content.rs` per-class
+/// branches already store-only when prerequisites are missing; the
+/// matching extension to this function will mirror the trust-edge
+/// loop below. Until then, those orphans remain durable but
+/// unprojected (reads see them only after a re-push or §9.3 backfill
+/// triggers re-receive in a state where the stub already exists).
 pub async fn sweep_pending_projections(
-    _tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    _user_key: &[u8; 32],
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    user_key: &[u8; 32],
 ) -> Result<(), sqlx::Error> {
-    // Intentionally empty for the Phase 9.5 scaffolding pass; see
-    // the doc comment for the follow-up plan.
+    // Snapshot the candidate set: live (payload-bearing) trust-edges
+    // whose canonical_hash is not yet in `trust_edges`. Parse + filter
+    // by `user_key` in app code — adding a payload-extracted index for
+    // this would need a schema change and the candidate set is bounded
+    // by recent deferrals in practice (steady-state pending count is
+    // small relative to the total federated edge corpus).
+    let rows = sqlx::query!(
+        "SELECT canonical_hash AS \"canonical_hash!: Vec<u8>\", \
+                payload        AS \"payload!: Vec<u8>\", \
+                signature      AS \"signature!: Vec<u8>\" \
+           FROM signed_objects \
+          WHERE inner_class = 'trust-edge' \
+            AND payload IS NOT NULL \
+            AND canonical_hash NOT IN ( \
+                SELECT canonical_hash FROM trust_edges \
+                 WHERE canonical_hash IS NOT NULL)",
+    )
+    .fetch_all(&mut **tx)
+    .await?;
+
+    // Parse + filter once. Each retained candidate carries its own
+    // `canonical_hash`, parsed `TrustEdge`, and signature so the
+    // fixed-point loop below can call `try_project_trust_edge`
+    // without re-touching `signed_objects`.
+    let mut pending: Vec<(TrustEdge, [u8; 32], Vec<u8>)> = Vec::new();
+    for row in rows {
+        let Ok(parsed) = SignedPayload::parse(&row.payload) else {
+            // Schema-invalid bytes shouldn't be sitting in
+            // signed_objects (the §9.1 receive path rejects them
+            // before storing), so a parse failure here is local
+            // corruption. Skip and log; don't fail the sweep.
+            tracing::warn!(
+                canonical_hash = %crate::users::hex_lower(&row.canonical_hash),
+                "stored signed_object tagged trust-edge but payload failed to parse",
+            );
+            continue;
+        };
+        let SignedPayload::TrustEdge(edge) = parsed else {
+            tracing::warn!(
+                canonical_hash = %crate::users::hex_lower(&row.canonical_hash),
+                "stored signed_object tagged trust-edge but payload class mismatched",
+            );
+            continue;
+        };
+        if &edge.from_key != user_key && &edge.to_key != user_key {
+            continue;
+        }
+        if row.canonical_hash.len() != 32 {
+            tracing::error!(
+                canonical_hash = %crate::users::hex_lower(&row.canonical_hash),
+                "signed_objects.canonical_hash has unexpected length",
+            );
+            continue;
+        }
+        let mut canonical = [0u8; 32];
+        canonical.copy_from_slice(&row.canonical_hash);
+        pending.push((edge, canonical, row.signature));
+    }
+
+    // Fixed-point loop: a successful projection in one pass may
+    // unblock a later edge in the same chain (E2 was Deferred while
+    // E1 was still pending — once E1 lands, E2 satisfies
+    // chain-continuity). `ChainFork` and `EndpointMissing` are
+    // terminal for this sweep call; `Deferred` rolls into the next
+    // pass. Loop terminates because each pass either projects at
+    // least one edge (decreasing the candidate set) or makes no
+    // progress (the break condition).
+    loop {
+        let mut progressed = false;
+        let mut still_deferred: Vec<(TrustEdge, [u8; 32], Vec<u8>)> = Vec::new();
+        for (edge, canonical, signature) in std::mem::take(&mut pending) {
+            match try_project_trust_edge(tx, &edge, &canonical, &signature).await? {
+                TrustEdgeProjection::Projected => {
+                    progressed = true;
+                }
+                TrustEdgeProjection::Deferred => {
+                    still_deferred.push((edge, canonical, signature));
+                }
+                // EndpointMissing: the *other* endpoint still has no
+                // stub. A future sweep keyed on that endpoint will
+                // catch this row. Drop from this pass.
+                // ChainFork: §9.4 evidence-only, bytes stay durable
+                // in signed_objects but never project. Drop.
+                TrustEdgeProjection::EndpointMissing | TrustEdgeProjection::ChainFork => {}
+            }
+        }
+        pending = still_deferred;
+        if !progressed {
+            break;
+        }
+    }
+
     Ok(())
 }
 
