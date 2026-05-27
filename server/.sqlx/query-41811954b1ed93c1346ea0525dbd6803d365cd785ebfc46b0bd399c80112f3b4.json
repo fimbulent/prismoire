@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT ab.content_hash AS \"content_hash!: Vec<u8>\",\n                  ab.size AS \"size!: i64\"\n             FROM attachment_blobs ab\n            WHERE ab.blob IS NOT NULL\n              AND NOT EXISTS (\n                  SELECT 1\n                    FROM post_attachments pa\n                    JOIN posts p ON p.id = pa.post_id\n                    JOIN users u ON u.id = p.author\n                   WHERE pa.content_hash = ab.content_hash\n                     AND pa.revision = p.revision_count - 1\n                     AND p.retracted_at IS NULL\n                     AND p.home_instance IS NULL\n                     AND u.deleted_at IS NULL\n              )\n            ORDER BY ab.accessed_at ASC\n            LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "content_hash!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "size!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "41811954b1ed93c1346ea0525dbd6803d365cd785ebfc46b0bd399c80112f3b4"
+}

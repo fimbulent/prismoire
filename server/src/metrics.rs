@@ -85,6 +85,31 @@ pub struct Metrics {
     /// (reads return an empty delta, writes are skipped) and bump this
     /// counter. Should be zero in healthy operation.
     pending_deltas_lock_poisoned: AtomicU64,
+
+    /// §11.5 receiver-local attachment-cache **bytes-used gauge**.
+    /// Updated by [`crate::federation::attachment_cache::run_eviction`]
+    /// once per sweep tick to the *post-sweep* sum of `size` over rows
+    /// eligible for cache eviction (i.e. excluding origin-authored
+    /// retentions). This is the gauge operators key the
+    /// `[federation.attachment_cache] max_bytes` knob on; origin
+    /// retentions don't appear here because the cache budget only
+    /// shapes federation-fetched bytes.
+    pub attachment_cache_bytes_used: AtomicU64,
+    /// §11.5 receiver-local attachment-cache **evictions counter**.
+    /// Incremented by one per row whose `blob` was nulled during a
+    /// sweep tick. Cumulative since process start so operators can
+    /// derive a rate.
+    pub attachment_cache_evictions_total: AtomicU64,
+    /// §11.5 receiver-local attachment-cache **overshoot gauge**.
+    /// `max(0, attachment_cache_bytes_used - max_bytes)` after each
+    /// sweep, where `max_bytes` is the TOML knob. Non-zero only if the
+    /// sweep ran out of evictable candidates before reaching the
+    /// budget — but the gauge is scoped to the *eligible* population,
+    /// so origin-authored bytes never contribute. In practice this
+    /// pins to zero unless a future change introduces evictable
+    /// content the sweep can't reach (e.g. a row stuck under a lock);
+    /// any persistent non-zero value is an operator escalation signal.
+    pub attachment_cache_overshoot_bytes: AtomicU64,
 }
 
 /// Key identifying a route for metrics aggregation. We key on the
@@ -264,7 +289,33 @@ impl Metrics {
             failed_auth: HourlyCounter::new(),
             trust_graph_lock_poisoned: AtomicU64::new(0),
             pending_deltas_lock_poisoned: AtomicU64::new(0),
+            attachment_cache_bytes_used: AtomicU64::new(0),
+            attachment_cache_evictions_total: AtomicU64::new(0),
+            attachment_cache_overshoot_bytes: AtomicU64::new(0),
         }
+    }
+
+    /// Set the §11.5 cache bytes-used gauge to the post-sweep total.
+    /// Called once per sweep tick from
+    /// [`crate::federation::attachment_cache::run_eviction`].
+    pub fn set_attachment_cache_bytes_used(&self, bytes: u64) {
+        self.attachment_cache_bytes_used
+            .store(bytes, Ordering::Relaxed);
+    }
+
+    /// Set the §11.5 cache overshoot gauge — bytes the sweep could not
+    /// reclaim while still over budget. Called once per sweep tick.
+    pub fn set_attachment_cache_overshoot_bytes(&self, bytes: u64) {
+        self.attachment_cache_overshoot_bytes
+            .store(bytes, Ordering::Relaxed);
+    }
+
+    /// Add `n` to the §11.5 cache evictions counter. Called once per
+    /// sweep tick with the total rows nulled this tick. Cumulative
+    /// across process lifetime.
+    pub fn add_attachment_cache_evictions(&self, n: u64) {
+        self.attachment_cache_evictions_total
+            .fetch_add(n, Ordering::Relaxed);
     }
 
     /// Increment the BFS forward-cache hit counter.

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO threads (id, title, author, room) VALUES ('t-race', 'race', 'user_race', 'general')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "56532407368fe7eeb4ddc122d8e1cedfcb1130938ca2ef07abd67ccd4f93cbb1"
+}

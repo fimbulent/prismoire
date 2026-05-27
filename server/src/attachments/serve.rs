@@ -17,6 +17,7 @@ use axum::response::{IntoResponse, Response};
 
 use super::bind::parse_hash_hex;
 use crate::error::{AppError, ErrorCode};
+use crate::federation::attachment_cache;
 use crate::session::AuthUser;
 use crate::state::AppState;
 use crate::trust::{MINIMUM_TRUST_THRESHOLD, load_distrust_set, lookup_score};
@@ -121,6 +122,15 @@ pub async fn serve_attachment(
     let Some(blob_bytes) = blob_row.blob else {
         return Err(AppError::code(ErrorCode::AttachmentNotFound));
     };
+
+    // §11.5 sloppy-LRU touch: this is the local-serve path that hands
+    // bytes to logged-in viewers (either an origin-authored upload or
+    // a federation-fetched cache entry). Bump `accessed_at` so the
+    // cache-eviction sweep treats this hash as warm. The helper applies
+    // its own staleness floor, so back-to-back serves of the same hash
+    // collapse to a single UPDATE. Failures are logged and swallowed —
+    // an LRU-bump must never fail the response.
+    attachment_cache::bump_accessed_at(&state.db, &hash_bytes).await;
 
     // Build the Content-Disposition header per RFC 6266. Inline-vs-
     // download is now derived from the blob MIME: only `image/*` is

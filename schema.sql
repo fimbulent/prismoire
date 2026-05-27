@@ -619,7 +619,8 @@ CREATE TABLE attachment_blobs (
     uploader TEXT REFERENCES users(id),
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     refcount INTEGER NOT NULL DEFAULT 0 CHECK (refcount >= 0)
-);
+, accessed_at TEXT NOT NULL
+        DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')));
 CREATE TABLE post_attachments (
     post_id TEXT NOT NULL,
     revision INTEGER NOT NULL,
@@ -855,3 +856,6 @@ CREATE TABLE IF NOT EXISTS "auth_challenges" (
 CREATE INDEX idx_signed_objects_erased_by
     ON signed_objects(erased_by)
     WHERE erased_by IS NOT NULL;
+CREATE INDEX idx_attachment_blobs_accessed_at
+    ON attachment_blobs(accessed_at)
+    WHERE blob IS NOT NULL;

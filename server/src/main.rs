@@ -253,12 +253,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
     );
 
-    // Spawn the attachment staging-expiry + orphan-blob GC sweep.
-    // Cadence is the server-static `attachments.sweep_interval_seconds`
-    // from TOML (docs/attachments.md §10.2). See `attachments::sweep`.
+    // Spawn the attachment staging-expiry + orphan-blob GC + §11.5
+    // receiver-local cache-eviction sweep. Cadence is the server-static
+    // `attachments.sweep_interval_seconds` from TOML
+    // (docs/attachments.md §10.2). The cache budget is the §11.5
+    // `[federation.attachment_cache] max_bytes` knob; eviction is
+    // federation-only by construction (origin-authored bytes are
+    // excluded from the eligibility predicate inside the eviction
+    // step). See `attachments::sweep` and
+    // `federation::attachment_cache`.
     tokio::spawn(attachments::sweep_loop(
         shared_state.db.clone(),
         config.attachments.sweep_interval_seconds,
+        shared_state.federation_attachment_cache.max_bytes,
+        shared_state.metrics.clone(),
     ));
 
     let layers = rate_limit::build_layers(&config.rate_limit, config.server.trust_proxy_headers);

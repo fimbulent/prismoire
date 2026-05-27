@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COALESCE(SUM(ab.size), 0) AS \"bytes_used!: i64\"\n             FROM attachment_blobs ab\n            WHERE ab.blob IS NOT NULL\n              AND NOT EXISTS (\n                  SELECT 1\n                    FROM post_attachments pa\n                    JOIN posts p ON p.id = pa.post_id\n                    JOIN users u ON u.id = p.author\n                   WHERE pa.content_hash = ab.content_hash\n                     AND pa.revision = p.revision_count - 1\n                     AND p.retracted_at IS NULL\n                     AND p.home_instance IS NULL\n                     AND u.deleted_at IS NULL\n              )",
+  "describe": {
+    "columns": [
+      {
+        "name": "bytes_used!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "aaf09ce89b84ea76c45c7764860cf39fff4597dd90ddf9f19d551b15b08dabe3"
+}

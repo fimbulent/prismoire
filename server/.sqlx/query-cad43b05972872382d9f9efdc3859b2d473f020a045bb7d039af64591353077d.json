@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO rooms (id, slug, created_by) VALUES ('general', 'general', 'user_race')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "cad43b05972872382d9f9efdc3859b2d473f020a045bb7d039af64591353077d"
+}

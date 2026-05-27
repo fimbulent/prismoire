@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO attachment_blobs (content_hash, blob, content_type, size, uploader, accessed_at) VALUES (?, ?, 'application/octet-stream', ?, NULL, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "3afd1e265fe45e0e94b8f7ad6b14ba54903164fac738dc01f4ee8ca39a9cb0fc"
+}

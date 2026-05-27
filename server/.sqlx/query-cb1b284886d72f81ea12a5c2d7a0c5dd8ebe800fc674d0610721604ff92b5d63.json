@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO post_revisions (post_id, revision, body, signature, canonical_hash, created_at) VALUES ('p-race', 0, '', X'00', X'00', '2026-01-01T00:00:00Z')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "cb1b284886d72f81ea12a5c2d7a0c5dd8ebe800fc674d0610721604ff92b5d63"
+}

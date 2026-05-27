@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT accessed_at FROM attachment_blobs WHERE content_hash = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "accessed_at",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a08332764668b5968afaca6a1b9dc40d390f71fde14bf50e7103bcd0ffe4cedc"
+}

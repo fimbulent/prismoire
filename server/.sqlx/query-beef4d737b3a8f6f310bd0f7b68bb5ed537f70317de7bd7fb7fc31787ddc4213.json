@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE attachment_blobs\n              SET accessed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')\n            WHERE content_hash = ?\n              AND (\n                  strftime('%s', 'now') - strftime('%s', accessed_at) >= ?\n              )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "beef4d737b3a8f6f310bd0f7b68bb5ed537f70317de7bd7fb7fc31787ddc4213"
+}

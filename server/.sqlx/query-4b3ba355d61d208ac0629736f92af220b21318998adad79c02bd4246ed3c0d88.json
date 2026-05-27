@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE attachment_blobs\n                  SET blob = NULL\n                WHERE content_hash = ?\n                  AND blob IS NOT NULL\n                  AND NOT EXISTS (\n                      SELECT 1\n                        FROM post_attachments pa\n                        JOIN posts p ON p.id = pa.post_id\n                        JOIN users u ON u.id = p.author\n                       WHERE pa.content_hash = attachment_blobs.content_hash\n                         AND pa.revision = p.revision_count - 1\n                         AND p.retracted_at IS NULL\n                         AND p.home_instance IS NULL\n                         AND u.deleted_at IS NULL\n                  )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "4b3ba355d61d208ac0629736f92af220b21318998adad79c02bd4246ed3c0d88"
+}

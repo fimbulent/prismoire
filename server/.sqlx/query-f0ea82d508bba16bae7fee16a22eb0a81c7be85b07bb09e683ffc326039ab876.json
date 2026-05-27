@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO post_attachments (post_id, revision, position, content_hash, filename) VALUES ('p-race', 0, 0, ?, 'origin.bin')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "f0ea82d508bba16bae7fee16a22eb0a81c7be85b07bb09e683ffc326039ab876"
+}
