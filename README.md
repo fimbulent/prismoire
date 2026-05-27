@@ -146,11 +146,22 @@ initial_ms = 1000                   # default: 1000 (1s)  — first transient-fa
 max_ms     = 300000                 # default: 300000 (5m) — per-peer ceiling on the retry interval.
 multiplier = 2.0                    # default: 2.0        — exponent applied on each successive
                                     #                       transient. Must be > 1.0.
+
+[federation.attachment_cache]
+max_bytes  = 1073741824             # default: 1 GiB      — byte budget for federation-fetched
+                                    #                       attachment blobs (docs/federation-protocol.md
+                                    #                       §11.5). Origin-authored blobs (bound to a
+                                    #                       current locally-addressable post) are NOT
+                                    #                       counted against this — origin retention
+                                    #                       is a protocol obligation, not a cache.
+                                    #                       Must be ≥ MAX_ATTACHMENT_SIZE (500 KiB).
 ```
 
 The `[attachments]` knobs (docs/attachments.md §10.2) are federation-inert: they shape how the local origin handles an upload (decode safety, re-encode target, sweep cadence). Per-user storage budgets — `attachment_budget_cap_bytes` and `attachment_budget_refill_bytes_per_day` — are live-tunable instance config persisted in the database, edited via the admin Config tab (or `PATCH /api/admin/config`), not TOML.
 
 The `[federation.outbound_queue]` knobs (docs/federation-protocol.md §7.5) shape how the local origin holds undelivered gossip while peers are slow or unreachable. They're deployment-shaped (RAM budget, peer outage tolerance), restart-required, and not audit-logged — raise them on hosts with more memory, lower them on resource-constrained deployments. Lowering caps shifts load from push to pull-backfill (§10.5) without compromising correctness; raising `object_max_age_secs` above `T_propagate_max` is rejected at config load. **Values are not clamped against host RAM** — a stray extra zero on `total_bytes` will be accepted at startup and only surface as memory pressure under load; size these against your actual host budget.
+
+The `[federation.attachment_cache]` knob (docs/federation-protocol.md §11.5) sets the byte budget for blobs fetched on demand from peer instances. Larger caches reduce cross-instance refetches when users re-render the same federated attachments; smaller caches free disk at the cost of more `GET /federation/v1/attachments/{hash}` round-trips. The budget covers federation-fetched bytes only — attachments authored on this instance are retained as long as a current revision binds them (a §11 protocol obligation) and are not counted against `max_bytes`. The setting is sender-local and restart-required; peers neither observe nor depend on it. **The eviction sweep that enforces the cap lands in a later phase; the budget is currently plumbed but inert** — federation-fetched bytes accumulate until a future GC phase wires the sweep against this value.
 
 `trust_proxy_headers` controls where the per-IP rate limiter looks for the client IP:
 

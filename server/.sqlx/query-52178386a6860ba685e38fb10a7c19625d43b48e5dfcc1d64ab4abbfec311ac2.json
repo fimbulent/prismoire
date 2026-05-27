@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT ab.blob,\n                  ab.content_type AS \"content_type!: String\",\n                  EXISTS (\n                      SELECT 1\n                        FROM post_attachments pa\n                        JOIN posts p ON p.id = pa.post_id\n                        JOIN users u ON u.id = p.author\n                       WHERE pa.content_hash = ab.content_hash\n                         AND pa.revision = p.revision_count - 1\n                         AND p.retracted_at IS NULL\n                         AND p.home_instance IS NULL\n                         AND u.deleted_at IS NULL\n                  ) AS \"has_local_binding!: i64\"\n             FROM attachment_blobs ab\n            WHERE ab.content_hash = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "blob",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "content_type!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "has_local_binding!: i64",
+        "ordinal": 2,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      null
+    ]
+  },
+  "hash": "52178386a6860ba685e38fb10a7c19625d43b48e5dfcc1d64ab4abbfec311ac2"
+}

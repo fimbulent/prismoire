@@ -58,6 +58,7 @@ pub const CAPABILITIES: &[&str] = &[
     "profile-sync",
     "user-status",
     "thread-status",
+    "attachment-fetch",
 ];
 
 /// Typed view of the identity card. Constructed from `AppState` at

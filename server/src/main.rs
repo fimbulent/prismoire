@@ -184,6 +184,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         source_repo_url: source_repo_url.clone(),
         attachment_budget: attachment_budget.clone(),
         attachments_config: config.attachments.clone(),
+        federation_attachment_cache: config.federation.attachment_cache.clone(),
         instance_domain,
         instance_key,
         federation_nonce_lru,

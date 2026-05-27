@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use prismoire_config::AttachmentsConfig;
+use prismoire_config::{AttachmentCacheConfig, AttachmentsConfig};
 use sqlx::SqlitePool;
 use tokio::sync::Notify;
 use webauthn_rs::Webauthn;
@@ -71,6 +71,14 @@ pub struct AppState {
     /// TTL, sweep cadence, request-body overhead. Loaded once at
     /// startup; restart-required to change.
     pub attachments_config: AttachmentsConfig,
+    /// §11.5 receiver-local attachment-cache budget from TOML
+    /// (`[federation.attachment_cache]`). Bounds the total bytes
+    /// retained for federation-fetched blobs. Sender-local — peers
+    /// never observe this value. Loaded once at startup; restart-
+    /// required to change. The eviction sweep that actually enforces
+    /// this budget lands in a later phase; the field is plumbed here
+    /// so the budget can be set in operator config today.
+    pub federation_attachment_cache: AttachmentCacheConfig,
     /// Bare canonical domain this instance presents on the wire
     /// (`docs/federation-protocol.md` §5.2 `instance_domain`). Read
     /// from `webauthn.rp_id` at boot; restart-required to change.

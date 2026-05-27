@@ -35,7 +35,7 @@ use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Method, Request, Response, StatusCode, header};
 use http_body_util::BodyExt;
-use prismoire_config::{AttachmentsConfig, RateLimitConfig};
+use prismoire_config::{AttachmentCacheConfig, AttachmentsConfig, RateLimitConfig};
 use prismoire_server::federation::envelope::NonceLru;
 use prismoire_server::federation::instance_key;
 use prismoire_server::federation::transport::{FederationTransport, NullTransport};
@@ -268,6 +268,7 @@ pub async fn test_app_with_pool_transport_domain_and_outbound_config(
         source_repo_url,
         attachment_budget,
         attachments_config: AttachmentsConfig::default(),
+        federation_attachment_cache: AttachmentCacheConfig::default(),
         // Federation glue: a fixed test domain (harness tests don't
         // care about the value beyond round-tripping it through the
         // wire); the instance signing key just loaded above; a fresh

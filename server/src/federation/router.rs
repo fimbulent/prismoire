@@ -39,7 +39,9 @@ use axum::routing::{delete, get, post};
 
 use crate::AppState;
 use crate::federation::middleware::{verify_bootstrap, verify_known_peer};
-use crate::federation::{admin_rm, backfill, content, edges, frontier, identity, moves, peering};
+use crate::federation::{
+    admin_rm, attachments, backfill, content, edges, frontier, identity, moves, peering,
+};
 
 /// Build the `/federation/v1/*` subrouter.
 ///
@@ -142,6 +144,15 @@ pub fn federation_router(state: Arc<AppState>) -> Router {
         .route(
             "/federation/v1/backfill/edges-by-key",
             get(backfill::handle_backfill_edges_by_key),
+        )
+        // §11.1 attachment fetch-on-demand (Phase 9). Origin-only
+        // serve: the blob must be currently bound to a locally-
+        // authored, non-retracted post. Success returns the raw
+        // bytes with a Content-Type from the attachment record —
+        // the only non-CBOR response on the federation surface.
+        .route(
+            "/federation/v1/attachments/{hash}",
+            get(attachments::handle_attachment_fetch),
         )
         .layer(from_fn_with_state(state.clone(), verify_known_peer));
 

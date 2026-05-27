@@ -29,6 +29,7 @@
 //! reshaping these foundations.
 
 pub mod admin_rm;
+pub mod attachments;
 pub mod backfill;
 pub mod backfill_rate_limit;
 pub mod bloom;

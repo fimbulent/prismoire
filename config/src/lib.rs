@@ -169,6 +169,44 @@ impl Default for AttachmentsConfig {
 pub struct FederationConfig {
     #[serde(default)]
     pub outbound_queue: OutboundQueueConfig,
+    #[serde(default)]
+    pub attachment_cache: AttachmentCacheConfig,
+}
+
+/// §11.5 receiver-local attachment-cache sizing
+/// (`[federation.attachment_cache]` section).
+///
+/// Bounds the total bytes the local instance retains for federation-
+/// fetched attachment blobs. The §11 wire contract is fetch-on-demand
+/// against the origin; receivers cache fetched bytes so repeat reads
+/// don't re-touch the origin, but the cache is sender-local — peers
+/// neither know nor care about the cap.
+///
+/// Eviction policy and the actual cache mechanics live in the server
+/// crate (a later phase wires the LRU sweep that honours this budget).
+/// The knob lives here so it's set once in TOML and surfaced through
+/// `AppState` to whichever subsystem ends up enforcing it.
+///
+/// Per §11.5: origin-authored blobs (those bound to a current, locally-
+/// addressable post) are NOT counted against this budget — origin
+/// retention is a §11 protocol obligation, not a cache. Only federation-
+/// fetched bytes (blobs whose `uploader` is NULL and that we received
+/// via §11.1) participate in eviction.
+#[derive(Clone, Deserialize)]
+#[serde(default)]
+pub struct AttachmentCacheConfig {
+    /// Total byte budget for federation-fetched attachment blobs.
+    /// Default: 1 GiB. Origin-authored blobs are exempt from this
+    /// budget (see struct-level rationale).
+    pub max_bytes: u64,
+}
+
+impl Default for AttachmentCacheConfig {
+    fn default() -> Self {
+        Self {
+            max_bytes: 1024 * 1024 * 1024,
+        }
+    }
 }
 
 /// §7.3 / §7.5 outbound-queue sizing + drain-worker backoff
@@ -312,6 +350,33 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
         ))
     })?;
     validate_outbound_queue_config(&config.federation.outbound_queue)?;
+    validate_attachment_cache_config(&config.federation.attachment_cache)?;
+    Ok(())
+}
+
+/// `[federation.attachment_cache]` validation. The §11 wire contract
+/// bounds an individual attachment at `MAX_ATTACHMENT_SIZE` (500 KiB);
+/// a cache budget smaller than that cannot hold even one max-sized blob,
+/// so federation-fetched attachments would be evicted faster than they
+/// could be served. Reject at load time rather than discover the
+/// thrashing under load.
+///
+/// `MAX_ATTACHMENT_SIZE` is duplicated here as a literal rather than
+/// imported from the server crate so the config crate stays
+/// dependency-free. If §11.6 ever raises the per-blob cap, this floor
+/// must move in lockstep with it.
+fn validate_attachment_cache_config(cfg: &AttachmentCacheConfig) -> Result<(), ConfigError> {
+    /// §11.6 `MAX_ATTACHMENT_SIZE` (bytes). Lower bound on the cache
+    /// budget — see function-level rationale.
+    const MAX_ATTACHMENT_SIZE: u64 = 500 * 1024;
+
+    if cfg.max_bytes < MAX_ATTACHMENT_SIZE {
+        return Err(ConfigError(format!(
+            "federation.attachment_cache.max_bytes ({}) must be ≥ MAX_ATTACHMENT_SIZE ({}B) — \
+             a cache smaller than one max-sized blob can't retain any federated attachment",
+            cfg.max_bytes, MAX_ATTACHMENT_SIZE,
+        )));
+    }
     Ok(())
 }
 
@@ -551,6 +616,36 @@ multiplier = 1.5
     }
 
     #[test]
+    fn attachment_cache_defaults_validate() {
+        validate_attachment_cache_config(&AttachmentCacheConfig::default())
+            .expect("documented defaults must validate");
+    }
+
+    #[test]
+    fn attachment_cache_rejects_below_max_attachment_size() {
+        let cfg = AttachmentCacheConfig {
+            max_bytes: 500 * 1024 - 1,
+        };
+        let err = validate_attachment_cache_config(&cfg).expect_err("must reject");
+        assert!(err.0.contains("MAX_ATTACHMENT_SIZE"));
+    }
+
+    #[test]
+    fn attachment_cache_round_trips_from_toml() {
+        let toml = r#"
+[federation.attachment_cache]
+max_bytes = 2147483648
+"#;
+        let parsed: Config = toml::from_str(toml).expect("parses");
+        assert_eq!(
+            parsed.federation.attachment_cache.max_bytes,
+            2 * 1024 * 1024 * 1024
+        );
+        validate_attachment_cache_config(&parsed.federation.attachment_cache)
+            .expect("round-trip values validate");
+    }
+
+    #[test]
     fn missing_federation_section_uses_defaults() {
         let parsed: Config = toml::from_str("").expect("empty config parses");
         let q = &parsed.federation.outbound_queue;
@@ -562,5 +657,7 @@ multiplier = 1.5
         assert_eq!(q.backoff.initial_ms, d.backoff.initial_ms);
         assert_eq!(q.backoff.max_ms, d.backoff.max_ms);
         assert_eq!(q.backoff.multiplier, d.backoff.multiplier);
+        let a = &parsed.federation.attachment_cache;
+        assert_eq!(a.max_bytes, AttachmentCacheConfig::default().max_bytes);
     }
 }
