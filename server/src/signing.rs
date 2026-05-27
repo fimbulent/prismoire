@@ -173,6 +173,13 @@ pub async fn store_signed_object<'e, E: SqliteExecutor<'e>>(
 /// subquery is a clean join. The `payload IS NOT NULL` guard makes the
 /// helper idempotent across replay.
 ///
+/// `authority_hash` records the canonical_hash of the signed object
+/// (retract / admin-rm / deactivate) that authorised the erasure, so
+/// the §10.5.3 "410 Gone" backfill path can return it without scanning.
+/// Pass `None` when no local authority is known (e.g. a self-delete
+/// path without an active signing key) — `signed_objects.erased_by` is
+/// nullable for this case.
+///
 /// No `inner_class` narrowing: `signed_objects.canonical_hash` is the
 /// primary key, and each canonical_hash uniquely identifies one row
 /// across all classes (the class is bound into the canonical bytes —
@@ -180,14 +187,19 @@ pub async fn store_signed_object<'e, E: SqliteExecutor<'e>>(
 pub async fn erase_post_rev_payloads<'e, E: SqliteExecutor<'e>>(
     executor: E,
     post_id: &str,
+    authority_hash: Option<&[u8; 32]>,
 ) -> Result<(), sqlx::Error> {
+    let authority: Option<&[u8]> = authority_hash.map(|h| h.as_slice());
     sqlx::query!(
         "UPDATE signed_objects \
-         SET payload = NULL, erased_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+         SET payload = NULL, \
+             erased_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), \
+             erased_by = COALESCE(erased_by, ?) \
          WHERE payload IS NOT NULL \
            AND canonical_hash IN ( \
                SELECT canonical_hash FROM post_revisions WHERE post_id = ? \
            )",
+        authority,
         post_id,
     )
     .execute(executor)
@@ -221,10 +233,15 @@ pub async fn erase_trust_edge_chain<'e, E: SqliteExecutor<'e>>(
     target_user_id: &str,
     except_canonical_hash: &[u8; 32],
 ) -> Result<(), sqlx::Error> {
+    // The exception hash *is* the erasure authority (the neutral edge
+    // itself), so we also stamp `erased_by` on every payload-NULLed row
+    // for the §10.5.3 410-Gone lookup.
     let except: &[u8] = except_canonical_hash.as_slice();
     sqlx::query!(
         "UPDATE signed_objects \
-         SET payload = NULL, erased_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+         SET payload = NULL, \
+             erased_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), \
+             erased_by = COALESCE(erased_by, ?) \
          WHERE payload IS NOT NULL \
            AND canonical_hash != ? \
            AND canonical_hash IN ( \
@@ -232,6 +249,7 @@ pub async fn erase_trust_edge_chain<'e, E: SqliteExecutor<'e>>(
                WHERE source_user = ? AND target_user = ? \
                  AND canonical_hash IS NOT NULL \
            )",
+        except,
         except,
         source_user_id,
         target_user_id,
@@ -260,15 +278,20 @@ pub async fn erase_trust_edge_chain<'e, E: SqliteExecutor<'e>>(
 pub async fn erase_user_trust_edge_payloads<'e, E: SqliteExecutor<'e>>(
     executor: E,
     user_id: &str,
+    authority_hash: Option<&[u8; 32]>,
 ) -> Result<(), sqlx::Error> {
+    let authority: Option<&[u8]> = authority_hash.map(|h| h.as_slice());
     sqlx::query!(
         "UPDATE signed_objects \
-         SET payload = NULL, erased_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+         SET payload = NULL, \
+             erased_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), \
+             erased_by = COALESCE(erased_by, ?) \
          WHERE payload IS NOT NULL \
            AND canonical_hash IN ( \
                SELECT canonical_hash FROM trust_edges \
                WHERE source_user = ? AND canonical_hash IS NOT NULL \
            )",
+        authority,
         user_id,
     )
     .execute(executor)
@@ -290,15 +313,20 @@ pub async fn erase_user_trust_edge_payloads<'e, E: SqliteExecutor<'e>>(
 pub async fn erase_user_profile_revision_payloads<'e, E: SqliteExecutor<'e>>(
     executor: E,
     user_id: &str,
+    authority_hash: Option<&[u8; 32]>,
 ) -> Result<(), sqlx::Error> {
+    let authority: Option<&[u8]> = authority_hash.map(|h| h.as_slice());
     sqlx::query!(
         "UPDATE signed_objects \
-         SET payload = NULL, erased_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+         SET payload = NULL, \
+             erased_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), \
+             erased_by = COALESCE(erased_by, ?) \
          WHERE payload IS NOT NULL \
            AND canonical_hash IN ( \
                SELECT canonical_hash FROM profile_revisions \
                WHERE user_id = ? \
            )",
+        authority,
         user_id,
     )
     .execute(executor)

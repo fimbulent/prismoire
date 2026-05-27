@@ -7,6 +7,7 @@ use tokio::sync::Notify;
 use webauthn_rs::Webauthn;
 
 use crate::error::{AppError, ErrorCode};
+use crate::federation::backfill_rate_limit::BackfillRateLimiter;
 use crate::federation::content_rate_limit::ContentRateLimiter;
 use crate::federation::envelope::NonceLru;
 use crate::federation::forwarder::ForwardingLru;
@@ -127,6 +128,12 @@ pub struct AppState {
     /// makes abuse on this route disproportionately expensive
     /// downstream.
     pub move_rate_limiter: Arc<ContentRateLimiter>,
+    /// §10.5.5 receiver-side per-peer per-minute request + byte
+    /// budgets gating the three Phase-8 pull-backfill routes
+    /// (`/backfill/by-hash`, `/backfill/by-author`,
+    /// `/backfill/edges-by-key`). Overflow returns `429` with
+    /// `Retry-After: 60`. In-memory only; resets on restart.
+    pub backfill_rate_limiter: Arc<BackfillRateLimiter>,
 }
 
 impl AppState {

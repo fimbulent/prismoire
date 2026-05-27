@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE signed_objects SET payload = NULL, erased_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), erased_by = COALESCE(erased_by, ?) WHERE payload IS NOT NULL AND canonical_hash != ? AND canonical_hash IN ( SELECT canonical_hash FROM trust_edges WHERE source_user = ? AND target_user = ? AND canonical_hash IS NOT NULL )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "e3cfc0c5a318c55371cd93174c5cf736359e2afb56921c070ab1d781e27381e7"
+}

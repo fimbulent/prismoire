@@ -90,6 +90,21 @@ pub const EDGES_BODY_CAP: usize = 64 * 1024;
 /// will even drain before the handler gets a chance to look.
 pub const CONTENT_BODY_CAP: usize = 16 * 1024 * 1024;
 
+/// Body cap for `/federation/v1/backfill/by-hash` — Phase 8 (§10.5.1).
+///
+/// One request body carries up to `MAX_BACKFILL_HASHES` (default 50)
+/// 32-byte canonical hashes inside a `{ "hashes": [bstr(32)*] }`
+/// CBOR map plus the §6 envelope framing. 50 × 32 = 1600 B of hash
+/// payload; even with worst-case CBOR overhead and a maximal envelope
+/// the request stays comfortably under 16 KiB. Tight cap because the
+/// handler does per-hash DB lookups against `signed_objects` and we
+/// don't want a hostile peer to inflate the work via padding.
+///
+/// The by-author and edges-by-key GET routes ride
+/// `DEFAULT_FEDERATION_BODY_CAP` — their bodies are empty and the
+/// query string is bounded by the HTTP-layer URI limit.
+pub const BACKFILL_BY_HASH_BODY_CAP: usize = 16 * 1024;
+
 /// Body cap for `/federation/v1/admin-rm-report` (advisory) — Phase 6.
 ///
 /// One report body carries a single signed `admin-rm` payload — the
@@ -131,6 +146,11 @@ fn route_body_cap(path: &str) -> usize {
         || path.starts_with("/federation/v1/admin-rm-report/")
     {
         ADMIN_RM_REPORT_BODY_CAP
+    // §10.5.1 by-hash POST: bounded by MAX_BACKFILL_HASHES × 32 B
+    // plus framing. The sibling GET routes (by-author, edges-by-key)
+    // carry no body and fall through to the default cap below.
+    } else if path == "/federation/v1/backfill/by-hash" {
+        BACKFILL_BY_HASH_BODY_CAP
     } else {
         DEFAULT_FEDERATION_BODY_CAP
     }
@@ -290,6 +310,28 @@ mod tests {
         assert_eq!(
             route_body_cap("/federation/v1/admin-rm-report"),
             ADMIN_RM_REPORT_BODY_CAP,
+        );
+    }
+
+    #[test]
+    fn route_body_cap_picks_by_hash_cap_for_backfill_route() {
+        // §10.5.1 POST /backfill/by-hash: bounded body of 32-byte
+        // canonical hashes (up to MAX_BACKFILL_HASHES = 50).
+        assert_eq!(
+            route_body_cap("/federation/v1/backfill/by-hash"),
+            BACKFILL_BY_HASH_BODY_CAP,
+        );
+        // The sibling GETs carry no body; they fall through to the
+        // default cap (the middleware drains anything sent on a GET
+        // up to the cap and then verifies — the per-route table sizes
+        // the *defensive* ceiling).
+        assert_eq!(
+            route_body_cap("/federation/v1/backfill/by-author"),
+            DEFAULT_FEDERATION_BODY_CAP,
+        );
+        assert_eq!(
+            route_body_cap("/federation/v1/backfill/edges-by-key"),
+            DEFAULT_FEDERATION_BODY_CAP,
         );
     }
 

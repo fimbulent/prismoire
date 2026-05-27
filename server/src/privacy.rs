@@ -1706,7 +1706,11 @@ pub(crate) async fn soft_delete_user(
         // is retained. This is the same erasure step that
         // `posts::retract_post` performs on a single-post retract —
         // bulk-delete just runs it per post.
-        crate::signing::erase_post_rev_payloads(&mut **tx, post_id).await?;
+        // Authority is the per-post retract canonical hash (when we
+        // have one). `None` falls through to a NULL `erased_by`, which
+        // the 410-Gone path treats as "erased without local authority".
+        let authority = signed_bytes.as_ref().map(|(_, h)| h);
+        crate::signing::erase_post_rev_payloads(&mut **tx, post_id, authority).await?;
     }
 
     // 1a. Sign + dual-write the umbrella `deactivate` authority once
@@ -1719,7 +1723,11 @@ pub(crate) async fn soft_delete_user(
     //     entirely when the user has no active signing key — there is
     //     no key to sign with, and no peer would accept the resulting
     //     unsigned bytes anyway.
-    if let Some(key) = signing_key.as_ref() {
+    // Captures the umbrella deactivate's canonical_hash so the
+    // subsequent §10.5.3 erasure passes (trust-edges / profile rows in
+    // step 6 / 6a) can record it as `erased_by`. `None` when the user
+    // has no active signing key — erased_by stays NULL for that case.
+    let deactivate_hash: Option<[u8; 32]> = if let Some(key) = signing_key.as_ref() {
         let signed_deactivate = crate::signing::sign_deactivation_with_key(key, created_at_ms);
         crate::signing::store_signed_object(
             &mut **tx,
@@ -1740,7 +1748,10 @@ pub(crate) async fn soft_delete_user(
             routing_key: signed_deactivate.public_key.to_vec(),
             wire,
         });
-    }
+        Some(signed_deactivate.canonical_hash)
+    } else {
+        None
+    };
 
     // 1b. Belt-and-suspenders FTS cleanup. The retraction triggers
     //     `posts_fts_after_retract` and `threads_fts_op_after_retract`
@@ -1877,7 +1888,8 @@ pub(crate) async fn soft_delete_user(
     //    edges were signed by *other* users and are not ours to erase.
     //    Peers mirror this erasure via the `deactivate` object signed
     //    in step 1a above.
-    crate::signing::erase_user_trust_edge_payloads(&mut **tx, user_id).await?;
+    crate::signing::erase_user_trust_edge_payloads(&mut **tx, user_id, deactivate_hash.as_ref())
+        .await?;
 
     sqlx::query!(
         "DELETE FROM trust_edges WHERE source_user = ? OR target_user = ?",
@@ -1897,7 +1909,12 @@ pub(crate) async fn soft_delete_user(
     //     bio are already anonymised by step 2).
     //     Peers mirror this erasure via the `deactivate` object signed
     //     in step 1a above.
-    crate::signing::erase_user_profile_revision_payloads(&mut **tx, user_id).await?;
+    crate::signing::erase_user_profile_revision_payloads(
+        &mut **tx,
+        user_id,
+        deactivate_hash.as_ref(),
+    )
+    .await?;
 
     sqlx::query!("DELETE FROM profile_revisions WHERE user_id = ?", user_id)
         .execute(&mut **tx)

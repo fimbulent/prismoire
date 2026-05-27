@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT payload AS \"payload?: Vec<u8>\", signature AS \"signature!: Vec<u8>\", erased_at AS \"erased_at?: String\", erased_by AS \"erased_by?: Vec<u8>\" FROM signed_objects WHERE canonical_hash = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "payload?: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "signature!: Vec<u8>",
+        "ordinal": 1,
+        "type_info": "Blob"
+      },
+      {
+        "name": "erased_at?: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "erased_by?: Vec<u8>",
+        "ordinal": 3,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "06e54ddc7c059a7112cb57562e9ae6f660e2017f6fdc2fe8519105ad6bd0e3dd"
+}

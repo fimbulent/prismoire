@@ -455,7 +455,7 @@ pub async fn retract_post(
     // retract object itself is retained verbatim above; chain
     // continuity is preserved via the canonical_hash that stays in
     // place.
-    signing::erase_post_rev_payloads(&mut *tx, &post_id).await?;
+    signing::erase_post_rev_payloads(&mut *tx, &post_id, Some(&signed.canonical_hash)).await?;
 
     tx.commit().await?;
 

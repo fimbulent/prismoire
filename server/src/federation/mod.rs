@@ -30,6 +30,7 @@
 
 pub mod admin_rm;
 pub mod backfill;
+pub mod backfill_rate_limit;
 pub mod bloom;
 pub mod content;
 pub mod content_rate_limit;

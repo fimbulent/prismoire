@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE signed_objects SET payload = NULL, erased_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), erased_by = COALESCE(erased_by, ?) WHERE canonical_hash = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "bb42996a3277b93d29a5186fef1e01f11de5f84ee98a6a13abf02a60713c75b6"
+}

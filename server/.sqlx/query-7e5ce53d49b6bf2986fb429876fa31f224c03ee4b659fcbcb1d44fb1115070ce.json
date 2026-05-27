@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE signed_objects SET payload = NULL, erased_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), erased_by = COALESCE(erased_by, ?) WHERE payload IS NOT NULL AND canonical_hash IN ( SELECT pr.canonical_hash FROM post_revisions pr JOIN posts p ON p.id = pr.post_id WHERE p.author = ? )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "7e5ce53d49b6bf2986fb429876fa31f224c03ee4b659fcbcb1d44fb1115070ce"
+}

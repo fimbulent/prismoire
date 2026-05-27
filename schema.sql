@@ -81,7 +81,8 @@ CREATE TABLE IF NOT EXISTS "signed_objects" (
     payload        BLOB,
     signature      BLOB NOT NULL,
     received_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    erased_at      TEXT,
+    erased_at      TEXT, erased_by BLOB
+    REFERENCES signed_objects(canonical_hash) ON DELETE SET NULL,
     CHECK (payload IS NOT NULL OR erased_at IS NOT NULL)
 );
 CREATE INDEX idx_signed_objects_class ON signed_objects(inner_class);
@@ -851,3 +852,6 @@ CREATE TABLE IF NOT EXISTS "auth_challenges" (
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     user_id TEXT
 );
+CREATE INDEX idx_signed_objects_erased_by
+    ON signed_objects(erased_by)
+    WHERE erased_by IS NOT NULL;

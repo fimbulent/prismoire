@@ -127,6 +127,22 @@ pub fn federation_router(state: Arc<AppState>) -> Router {
             "/federation/v1/moves/backfill",
             get(backfill::handle_moves_backfill),
         )
+        // §10.5 pull-backfill correctness backstop (Phase 8). Three
+        // routes share the KnownPeer envelope layer. by-hash is the
+        // 410-Gone-carrying reactive path; by-author and edges-by-key
+        // are bulk paginated walks for frontier-expansion.
+        .route(
+            "/federation/v1/backfill/by-hash",
+            post(backfill::handle_backfill_by_hash),
+        )
+        .route(
+            "/federation/v1/backfill/by-author",
+            get(backfill::handle_backfill_by_author),
+        )
+        .route(
+            "/federation/v1/backfill/edges-by-key",
+            get(backfill::handle_backfill_edges_by_key),
+        )
         .layer(from_fn_with_state(state.clone(), verify_known_peer));
 
     // Unauthenticated route(s) live outside both middleware layers.

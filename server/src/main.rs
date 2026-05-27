@@ -201,6 +201,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 prismoire_server::federation::moves::MAX_MOVE_OBJECTS_PER_HOUR,
             ),
         ),
+        backfill_rate_limiter: Arc::new(
+            prismoire_server::federation::backfill_rate_limit::BackfillRateLimiter::default(),
+        ),
     });
 
     // Spawn the debounced trust graph rebuild background task.
@@ -240,6 +243,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         prismoire_server::federation::content_rate_limit::cleanup_loop(
             shared_state.move_rate_limiter.clone(),
             "move",
+        ),
+    );
+    tokio::spawn(
+        prismoire_server::federation::backfill_rate_limit::cleanup_loop(
+            shared_state.backfill_rate_limiter.clone(),
+            "backfill",
         ),
     );
 

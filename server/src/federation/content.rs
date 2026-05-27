@@ -525,9 +525,11 @@ async fn apply_one_object(
             .await?;
             // §10.1 on-receipt erasure: erase every post-rev payload
             // for the named post_id. Uses the text-uuid form because
-            // post_revisions / posts store post_id as text-uuid.
+            // post_revisions / posts store post_id as text-uuid. The
+            // retract is itself the erasure authority recorded against
+            // each NULLed row (§10.5.3 410-Gone forward-link).
             let post_id_text = Uuid::from_bytes(post_id).to_string();
-            erase_post_rev_payloads(&mut *tx, &post_id_text).await?;
+            erase_post_rev_payloads(&mut *tx, &post_id_text, Some(&canonical_hash)).await?;
             ContentStatus::Applied
         }
         ClassAction::Deactivate(user_key) => {
@@ -539,7 +541,7 @@ async fn apply_one_object(
                 &canonical_hash,
             )
             .await?;
-            erase_all_for_user_key(&mut tx, &user_key).await?;
+            erase_all_for_user_key(&mut tx, &user_key, &canonical_hash).await?;
             ContentStatus::Applied
         }
         ClassAction::PostRev(_) | ClassAction::Profile | ClassAction::ThreadCreate => {
@@ -744,8 +746,10 @@ async fn apply_admin_rm(
 
     // Erase the named post's revisions (§10.1 on-receipt erasure).
     // The post_revisions / posts tables use text-uuid for post_id.
+    // The admin-rm canonical hash is recorded as `erased_by` so the
+    // §10.5.3 410-Gone path can return it as the authority.
     let post_id_text = Uuid::from_bytes(post_id).to_string();
-    erase_post_rev_payloads(&mut **tx, &post_id_text).await?;
+    erase_post_rev_payloads(&mut **tx, &post_id_text, Some(canonical_hash)).await?;
 
     // §10.4 receive-time precedence projection. PK on `post_id`
     // enforces first-and-only semantics. The early signed_objects
@@ -793,6 +797,7 @@ async fn apply_admin_rm(
 async fn erase_all_for_user_key(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     user_key: &[u8; 32],
+    authority_hash: &[u8; 32],
 ) -> Result<(), sqlx::Error> {
     let key_slice: &[u8] = user_key.as_slice();
 
@@ -807,20 +812,28 @@ async fn erase_all_for_user_key(
             .await?;
 
     if let Some(uid) = user_id {
-        crate::signing::erase_user_trust_edge_payloads(&mut **tx, &uid).await?;
-        crate::signing::erase_user_profile_revision_payloads(&mut **tx, &uid).await?;
+        crate::signing::erase_user_trust_edge_payloads(&mut **tx, &uid, Some(authority_hash))
+            .await?;
+        crate::signing::erase_user_profile_revision_payloads(&mut **tx, &uid, Some(authority_hash))
+            .await?;
         // Erase every post-rev payload the user authored. Subquery
         // walks `posts WHERE author = uid` to find the post ids,
-        // then `post_revisions` to find the canonical hashes.
+        // then `post_revisions` to find the canonical hashes. The
+        // deactivate canonical_hash is recorded as `erased_by` so the
+        // §10.5.3 410-Gone path can return it as the authority.
+        let authority_slice: &[u8] = authority_hash.as_slice();
         sqlx::query!(
             "UPDATE signed_objects \
-             SET payload = NULL, erased_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+             SET payload = NULL, \
+                 erased_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), \
+                 erased_by = COALESCE(erased_by, ?) \
              WHERE payload IS NOT NULL \
                AND canonical_hash IN ( \
                    SELECT pr.canonical_hash FROM post_revisions pr \
                    JOIN posts p ON p.id = pr.post_id \
                    WHERE p.author = ? \
                )",
+            authority_slice,
             uid,
         )
         .execute(&mut **tx)
