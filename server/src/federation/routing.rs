@@ -131,8 +131,8 @@ pub const LOW_THRESHOLD: f64 = 0.60;
 ///    against `content_filter`.
 /// 2. What the routing *key* is for an object — for most classes the
 ///    key is the author's public key; for trust-edges it is the
-///    signer (== source) of the edge; for attests / user-status it is
-///    the subject; for admin-rm it is the target post's author. The
+///    signer (== source) of the edge; for user-status it is the
+///    subject; for admin-rm it is the target post's author. The
 ///    caller resolves the key from the object before calling
 ///    [`peers_interested_in`].
 ///
@@ -147,7 +147,7 @@ pub enum ForwardingClass {
     /// `edge_origin_filter` (§7.4); key is `signer(edge)`.
     TrustEdge,
     /// Every author-keyed class — post-rev, retract, profile,
-    /// thread-create, deactivate, attest (key = subject), admin-rm
+    /// thread-create, deactivate, admin-rm
     /// (key = target_author), thread-status (key = thread OP author).
     /// Routes against the receiver's `content_filter` (§7.4).
     Authored,

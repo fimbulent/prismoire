@@ -449,8 +449,7 @@ pub(crate) async fn apply_one_object(
         | SignedPayload::Move(_)
         | SignedPayload::UserStatus(_)
         | SignedPayload::ThreadStatus(_)
-        | SignedPayload::Report(_)
-        | SignedPayload::Attestation(_) => {
+        | SignedPayload::Report(_) => {
             return Ok(ContentResult {
                 canonical_hash,
                 status: ContentStatus::Rejected(ContentRejectReason::WrongClass),

@@ -8,7 +8,7 @@ verifier. See `docs/signed-payload-format.md` §8 for the spec.
 
 - One subdirectory per signed-object class (`post-rev/`, `retract/`,
   `trust-edge/`, `profile/`, `move/`, `admin-rm/`, `fed-envelope/`,
-  `attest/`, `registration-challenge/`, `prior-home-challenge/`,
+  `registration-challenge/`, `prior-home-challenge/`,
   `prior-home-response/`, `thread-create/`, `user-status/`,
   `deactivate/`, `thread-status/`, `report/`) — positive fixtures.
   Each named fixture (`<name>.{cbor,sig,key.pub,key.sec}`) holds:

@@ -66,9 +66,6 @@ pub const TAG_ADMIN_REMOVAL: &str = "admin-rm";
 /// signed, ephemeral. See `docs/signed-payload-format.md` §5.3 and
 /// `docs/federation-protocol.md` §6.
 pub const TAG_FED_ENVELOPE: &str = "fed-envelope";
-/// Verification attestation (`t = "attest"`). Instance-signed.
-/// See `docs/signed-payload-format.md` §5.4.
-pub const TAG_ATTESTATION: &str = "attest";
 /// Cross-instance registration challenge (`t = "registration-challenge"`).
 /// User-signed, ephemeral. See `docs/signed-payload-format.md` §5.5
 /// and `docs/federation-protocol.md` §13.
@@ -326,7 +323,6 @@ pub enum SignedPayload {
     Move(Move),
     AdminRemoval(AdminRemoval),
     FedEnvelope(FedEnvelope),
-    Attestation(Attestation),
     RegistrationChallenge(RegistrationChallenge),
     PriorHomeChallenge(PriorHomeChallenge),
     PriorHomeResponse(PriorHomeResponse),
@@ -538,27 +534,6 @@ pub struct FedEnvelope {
     /// 16 cryptographically-random bytes, single-use per
     /// (sender, receiver) pair.
     pub nonce: [u8; 16],
-}
-
-/// Verification-plugin attestation. Instance-signed.
-///
-/// See `docs/signed-payload-format.md` §5.4.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Attestation {
-    /// Ed25519 public key of the verified user.
-    pub subject: [u8; 32],
-    /// Plugin identifier (e.g. `"steam"`, `"reddit"`).
-    pub plugin_id: String,
-    /// Plugin-specific attestation tag (e.g. `"half_life"`,
-    /// `"account_age_4y"`).
-    pub attestation: String,
-    /// Issuance time, Unix milliseconds, UTC.
-    pub issued_at: u64,
-    /// Expiry time, Unix milliseconds, UTC. `None` means "no
-    /// expiry; revocable only by issuer."
-    pub expires_at: Option<u64>,
-    /// Issuing instance's bare canonical domain.
-    pub issuer: String,
 }
 
 /// Cross-instance registration challenge. User-signed, ephemeral.
@@ -984,7 +959,6 @@ impl SignedPayload {
             Self::Move(m) => move_to_cbor(m),
             Self::AdminRemoval(a) => admin_removal_to_cbor(a),
             Self::FedEnvelope(e) => fed_envelope_to_cbor(e),
-            Self::Attestation(a) => attestation_to_cbor(a),
             Self::RegistrationChallenge(c) => registration_challenge_to_cbor(c),
             Self::PriorHomeChallenge(c) => prior_home_challenge_to_cbor(c),
             Self::PriorHomeResponse(r) => prior_home_response_to_cbor(r),
@@ -1179,22 +1153,6 @@ fn fed_envelope_to_cbor(e: &FedEnvelope) -> Value {
     ];
     if let Some(body_hash) = e.body_hash {
         entries.push(("body_hash", bytes(&body_hash)));
-    }
-    build_map(entries)
-}
-
-fn attestation_to_cbor(a: &Attestation) -> Value {
-    let mut entries: Vec<(&'static str, Value)> = vec![
-        ("v", uint(V1)),
-        ("t", text(TAG_ATTESTATION)),
-        ("subject", bytes(&a.subject)),
-        ("plugin_id", text(&a.plugin_id)),
-        ("attestation", text(&a.attestation)),
-        ("issued_at", uint(a.issued_at)),
-        ("issuer", text(&a.issuer)),
-    ];
-    if let Some(exp) = a.expires_at {
-        entries.push(("expires_at", uint(exp)));
     }
     build_map(entries)
 }
@@ -1396,10 +1354,6 @@ impl SignedPayload {
             TAG_FED_ENVELOPE => {
                 require_version(TAG_FED_ENVELOPE, version)?;
                 parse_fed_envelope(&fields).map(SignedPayload::FedEnvelope)
-            }
-            TAG_ATTESTATION => {
-                require_version(TAG_ATTESTATION, version)?;
-                parse_attestation(&fields).map(SignedPayload::Attestation)
             }
             TAG_REGISTRATION_CHALLENGE => {
                 require_version(TAG_REGISTRATION_CHALLENGE, version)?;
@@ -1734,27 +1688,6 @@ fn parse_fed_envelope(fields: &BTreeMap<String, Value>) -> Result<FedEnvelope, P
     })
 }
 
-fn parse_attestation(fields: &BTreeMap<String, Value>) -> Result<Attestation, ParseError> {
-    let subject = field_bytes_fixed::<32>(fields, "subject")?;
-    let plugin_id = field_text(fields, "plugin_id")?;
-    let attestation = field_text(fields, "attestation")?;
-    let issued_at = field_uint(fields, "issued_at")?;
-    let issuer = field_text(fields, "issuer")?;
-    let expires_at = if fields.contains_key("expires_at") {
-        Some(field_uint(fields, "expires_at")?)
-    } else {
-        None
-    };
-    Ok(Attestation {
-        subject,
-        plugin_id,
-        attestation,
-        issued_at,
-        expires_at,
-        issuer,
-    })
-}
-
 fn parse_registration_challenge(
     fields: &BTreeMap<String, Value>,
 ) -> Result<RegistrationChallenge, ParseError> {
@@ -1959,7 +1892,7 @@ pub fn verify(
     // so a caller can't be tricked into verifying with the wrong key.
     // For instance-signed classes whose authority is named by *domain*
     // rather than by key inside the payload (`admin-rm`,
-    // `user-status`, `thread-status`, `attest`), the caller is
+    // `user-status`, `thread-status`), the caller is
     // responsible for resolving signing_instance → key via the peers
     // table and supplying it as `claimed_key`; no inner-field check
     // is meaningful here and the dispatch returns `None`.
@@ -2005,7 +1938,6 @@ fn identity_binding(payload: &SignedPayload) -> Option<&[u8; 32]> {
         SignedPayload::AdminRemoval(_) => None,
         SignedPayload::UserStatus(_) => None,
         SignedPayload::ThreadStatus(_) => None,
-        SignedPayload::Attestation(_) => None,
     }
 }
 
@@ -2070,13 +2002,10 @@ mod tests {
         "path",
         "body_hash",
         "nonce",
-        // attest fields.
+        // user-status `subject` (`status`/`signing_instance`/`created_at`
+        // overlap); `expires_at` also appears on prior-home-challenge.
         "subject",
-        "plugin_id",
-        "attestation",
-        "issued_at",
         "expires_at",
-        "issuer",
         // registration-challenge fields (`nonce`/`created_at` overlap).
         "user_key",
         "dest_instance_key",
@@ -3005,31 +2934,6 @@ mod tests {
         let sig = signing_key.sign(&bytes);
         let result = verify(&bytes, &sig.to_bytes(), &signing_key.verifying_key()).expect("verify");
         assert!(matches!(result, SignedPayload::FedEnvelope(_)));
-    }
-
-    fn sample_attestation(with_expiry: bool) -> Attestation {
-        Attestation {
-            subject: [0xd0; 32],
-            plugin_id: "steam".to_string(),
-            attestation: "half_life".to_string(),
-            issued_at: 1_700_000_400_000,
-            expires_at: if with_expiry {
-                Some(1_700_000_500_000)
-            } else {
-                None
-            },
-            issuer: "instance-a.example".to_string(),
-        }
-    }
-
-    #[test]
-    fn attestation_round_trip_with_and_without_expiry() {
-        for with_expiry in [false, true] {
-            let a = sample_attestation(with_expiry);
-            let bytes = SignedPayload::Attestation(a.clone()).encode();
-            let decoded = SignedPayload::parse(&bytes).unwrap();
-            assert_eq!(decoded, SignedPayload::Attestation(a));
-        }
     }
 
     fn sample_registration_challenge() -> RegistrationChallenge {

@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 
 use prismoire_server::signed::{
-    self, AdminRemoval, Attestation, Deactivation, FedEnvelope, Move, ParseError, PostRevision,
+    self, AdminRemoval, Deactivation, FedEnvelope, Move, ParseError, PostRevision,
     PriorHomeChallenge, PriorHomeResponse, ProfileRevision, RegistrationChallenge, Report,
     ReportReason, Retraction, SignedPayload, ThreadCreate, ThreadStatus, ThreadStatusKind,
     TrustEdge, TrustStance, UserStatus, UserStatusKind,
@@ -43,7 +43,7 @@ const KEY_ALICE_SEED: [u8; 32] = [0x11; 32];
 const KEY_BOB_SEED: [u8; 32] = [0x22; 32];
 const KEY_CAROL_SEED: [u8; 32] = [0x33; 32];
 // Pinned instance signing-key seeds. Used for instance-signed
-// classes (admin-rm, fed-envelope, attest, prior-home-challenge,
+// classes (admin-rm, fed-envelope, prior-home-challenge,
 // user-status, thread-status) so the (.key.pub, .key.sec) committed
 // alongside an instance-signed fixture is a stable, distinct key
 // not reused as a user identity.
@@ -284,7 +284,7 @@ fn positive_fixtures() -> Vec<PositiveFixture> {
         },
         // --- Federation-era classes (docs/signed-payload-format.md §5) ---
         //
-        // For instance-signed classes (admin-rm, fed-envelope, attest,
+        // For instance-signed classes (admin-rm, fed-envelope,
         // prior-home-challenge, user-status, thread-status) the committed
         // key.pub/key.sec is the instance signing key. The identity-binding
         // check in `verify()` returns `None` for these so the caller is
@@ -402,38 +402,6 @@ fn positive_fixtures() -> Vec<PositiveFixture> {
                     nonce: [0x22; 16],
                 };
                 (SignedPayload::FedEnvelope(e), key)
-            },
-        },
-        PositiveFixture {
-            stem: "attest/v1-no-expiry",
-            payload: || {
-                let key = signing_key(&KEY_INSTANCE_A_SEED);
-                let subject = signing_key(&KEY_BOB_SEED);
-                let a = Attestation {
-                    subject: *subject.verifying_key().as_bytes(),
-                    plugin_id: "steam".to_string(),
-                    attestation: "half_life".to_string(),
-                    issued_at: 1_700_000_050_000,
-                    expires_at: None,
-                    issuer: "attest.example".to_string(),
-                };
-                (SignedPayload::Attestation(a), key)
-            },
-        },
-        PositiveFixture {
-            stem: "attest/v1-with-expiry",
-            payload: || {
-                let key = signing_key(&KEY_INSTANCE_A_SEED);
-                let subject = signing_key(&KEY_CAROL_SEED);
-                let a = Attestation {
-                    subject: *subject.verifying_key().as_bytes(),
-                    plugin_id: "reddit".to_string(),
-                    attestation: "account_age_4y".to_string(),
-                    issued_at: 1_700_000_051_000,
-                    expires_at: Some(1_800_000_000_000),
-                    issuer: "attest.example".to_string(),
-                };
-                (SignedPayload::Attestation(a), key)
             },
         },
         PositiveFixture {

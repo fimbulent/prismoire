@@ -395,8 +395,7 @@ async fn apply_one_move(
         | SignedPayload::Deactivation(_)
         | SignedPayload::UserStatus(_)
         | SignedPayload::ThreadStatus(_)
-        | SignedPayload::Report(_)
-        | SignedPayload::Attestation(_) => {
+        | SignedPayload::Report(_) => {
             return Ok(MoveResult {
                 canonical_hash,
                 status: MoveStatus::Rejected(MoveRejectReason::WrongClass),
