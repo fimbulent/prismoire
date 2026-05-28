@@ -45,12 +45,14 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::AppState;
-use crate::federation::envelope::decode_signed_object;
+use crate::error::AppError;
+use crate::federation::envelope::{decode_signed_object, encode_signed_object};
 use crate::federation::errors::{bad_request, internal_error};
 use crate::federation::identity::CBOR_CONTENT_TYPE;
 use crate::federation::middleware::VerifiedBody;
 use crate::federation::push_rate_limit::push_too_many_requests;
-use crate::signed::{self, FedEnvelope, ParseError, SignedPayload};
+use crate::signed::{self, FedEnvelope, ParseError, ReportReason, SignedPayload};
+use crate::signing::{load_active_signing_key, sign_report_with_key};
 
 /// §18.5 `MAX_REPORT_BATCH`: per-push object-count cap (smaller than the
 /// other classes — reports are bursty per-incident but rarely batched).
@@ -239,6 +241,76 @@ pub async fn handle_reports_push(
     }
 
     cbor_ok(encode_results(&results))
+}
+
+// ---------------------------------------------------------------------------
+// Producer (§18.1 origination) — reporter's home → target's home
+// ---------------------------------------------------------------------------
+
+/// §18 producer: sign a local user's report and dispatch it to the
+/// target post author's home instance.
+///
+/// Reports are a **single-recipient, single-direction** channel (§18):
+/// no gossip, no forwarding, no backfill. When `target_author` is a
+/// remote user, we sign the report with the reporter's own credential
+/// key (reports are *user-signed*, not instance-signed) and enqueue a
+/// point-to-point push to the author's current home via the §7.3
+/// [`OutboundQueues`]; the drain worker wraps it in the §6 envelope and
+/// applies the usual backoff. This is **best-effort, fire-and-forget**.
+/// The reporter's home does *not* persist a copy of a report against a
+/// remote-authored post — the local `reports` table is the local
+/// moderation queue and holds only locally-authored posts; the target's
+/// home owns the remote post's queue. The §18.1 `wrong_recipient`
+/// move-redirect, the §18.2 `REPORT_RETRY_TTL` window, and surfacing
+/// undeliverable reports into the §20 admin queue are deferred
+/// follow-ups.
+///
+/// No-op (returns `Ok(())`) when the target post is **locally
+/// authored** — the local admin queue is already the authority — or
+/// when the target's home cannot be resolved.
+///
+/// [`OutboundQueues`]: crate::federation::outbound_queue::OutboundQueues
+pub async fn dispatch_local_report(
+    state: &Arc<AppState>,
+    reporter_user_id: &str,
+    post_id: &Uuid,
+    target_author: &[u8; 32],
+    reason: ReportReason,
+    detail: Option<&str>,
+) -> Result<(), AppError> {
+    // §18.1 single recipient = the target post author's current home.
+    // A locally-hosted author (or an unresolvable home) means there is
+    // nothing to federate.
+    let target_home = match resolve_current_home(state, target_author).await? {
+        Some(home) => home,
+        None => return Ok(()),
+    };
+    if target_home == *state.instance_key.public_bytes() {
+        return Ok(());
+    }
+
+    // Reports are user-signed: the signature must verify against the
+    // reporter's credential key on the receiver, so we sign with the
+    // reporter's active key rather than the instance key.
+    let signing_key = load_active_signing_key(&state.db, reporter_user_id).await?;
+    let created_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let signed = sign_report_with_key(
+        &signing_key,
+        post_id.as_bytes(),
+        target_author,
+        reason,
+        detail,
+        created_at_ms,
+    );
+    let wire = encode_signed_object(&signed.payload, &signed.signature);
+    state
+        .outbound_queues
+        .enqueue(target_home, "/federation/v1/reports", "objects", wire);
+    Ok(())
 }
 
 /// §18.1 per-object state machine for a single signed `report`.

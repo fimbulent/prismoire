@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::admin::require_admin;
 use crate::error::{AppError, ErrorCode};
 use crate::session::AuthUser;
+use crate::signed::ReportReason;
 use crate::state::AppState;
 
 const REPORTS_PAGE_SIZE: usize = 50;
@@ -81,8 +82,16 @@ pub struct DashboardResponse {
 
 /// Create a report against a post.
 ///
-/// Validates the reason against [`VALID_REASONS`], rejects reports on
-/// retracted posts, self-reports, and duplicate reports by the same user.
+/// Validates the reason against [`VALID_REASONS`] and bounds `detail` by
+/// [`MAX_REPORT_DETAIL_LEN`](crate::signed::MAX_REPORT_DETAIL_LEN);
+/// rejects reports on retracted posts and self-reports.
+///
+/// Persistence is split by where the post is hosted. A report against a
+/// **locally-authored** post is stored in the local `reports` table (the
+/// local moderation queue), and a duplicate by the same reporter is
+/// rejected. A report against a **remote-authored** post is *not* stored
+/// here — it is relayed to the author's home instance (§18), which owns
+/// that post's moderation queue.
 pub async fn create_report(
     State(state): State<Arc<AppState>>,
     Path(post_id): Path<String>,
@@ -100,8 +109,22 @@ pub async fn create_report(
         .map(|d| d.trim())
         .filter(|d| !d.is_empty());
 
+    // Bound `detail` before any persistence or signing — the §18
+    // receiver enforces this same ceiling in `parse_report`, so an
+    // oversized detail would only be rejected after we spent the
+    // Ed25519 sign + CBOR + queue bytes relaying it.
+    if let Some(d) = detail
+        && d.len() > crate::signed::MAX_REPORT_DETAIL_LEN
+    {
+        return Err(AppError::code(ErrorCode::ReportDetailTooLong));
+    }
+
     let post = sqlx::query!(
-        "SELECT id, author, retracted_at FROM posts WHERE id = ?",
+        r#"SELECT p.id, p.author, p.retracted_at,
+                  u.public_key AS "author_public_key!: Vec<u8>",
+                  u.home_instance AS "author_home_instance: Vec<u8>"
+           FROM posts p JOIN users u ON u.id = p.author
+           WHERE p.id = ?"#,
         post_id,
     )
     .fetch_optional(&state.db)
@@ -116,30 +139,73 @@ pub async fn create_report(
         return Err(AppError::code(ErrorCode::SelfReport));
     }
 
-    let already_reported = sqlx::query!(
-        "SELECT id FROM reports WHERE post_id = ? AND reporter = ?",
-        post.id,
-        user.user_id,
-    )
-    .fetch_optional(&state.db)
-    .await?
-    .is_some();
+    // The `reports` table is the *local* moderation queue: it stores
+    // only reports against locally-authored posts (`home_instance IS
+    // NULL`). A report against a remote-authored post is not persisted
+    // here — it is relayed to the author's home instance (§18), which
+    // owns that post's moderation queue.
+    if post.author_home_instance.is_none() {
+        let already_reported = sqlx::query!(
+            "SELECT id FROM reports WHERE post_id = ? AND reporter = ?",
+            post.id,
+            user.user_id,
+        )
+        .fetch_optional(&state.db)
+        .await?
+        .is_some();
 
-    if already_reported {
-        return Err(AppError::code(ErrorCode::AlreadyReported));
+        if already_reported {
+            return Err(AppError::code(ErrorCode::AlreadyReported));
+        }
+
+        let id = Uuid::new_v4().to_string();
+        sqlx::query!(
+            "INSERT INTO reports (id, post_id, reporter, reason, detail) VALUES (?, ?, ?, ?, ?)",
+            id,
+            post.id,
+            user.user_id,
+            reason,
+            detail,
+        )
+        .execute(&state.db)
+        .await?;
+
+        return Ok(axum::http::StatusCode::CREATED);
     }
 
-    let id = Uuid::new_v4().to_string();
-    sqlx::query!(
-        "INSERT INTO reports (id, post_id, reporter, reason, detail) VALUES (?, ?, ?, ?, ?)",
-        id,
-        post.id,
-        user.user_id,
-        reason,
+    // §18 federation: the reported post is hosted on another instance,
+    // so relay the report to that author's home (single-recipient,
+    // best-effort). Nothing is written to the local `reports` table. A
+    // dispatch failure must not fail the user's report, so we log and
+    // return success.
+    let (Ok(post_uuid), Ok(author_key), Some(report_reason)) = (
+        Uuid::parse_str(&post.id),
+        <[u8; 32]>::try_from(post.author_public_key.as_slice()),
+        ReportReason::parse(&reason),
+    ) else {
+        // All three are infallible given DB invariants (stored UUID,
+        // 32-byte key, reason pre-validated above). Reaching here means
+        // schema/validation drift has silently dropped the relay — loud
+        // enough to catch in logs rather than vanish behind a 201.
+        tracing::warn!(
+            post_id = %post.id,
+            "skipped federated report dispatch: post/author/reason failed to parse"
+        );
+        return Ok(axum::http::StatusCode::CREATED);
+    };
+
+    if let Err(e) = crate::federation::reports::dispatch_local_report(
+        &state,
+        &user.user_id,
+        &post_uuid,
+        &author_key,
+        report_reason,
         detail,
     )
-    .execute(&state.db)
-    .await?;
+    .await
+    {
+        tracing::error!(error = ?e, post_id = %post.id, "failed to dispatch federated report");
+    }
 
     Ok(axum::http::StatusCode::CREATED)
 }

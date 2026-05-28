@@ -30,15 +30,19 @@
 
 mod common;
 
+use std::time::Duration;
+
 use ciborium::value::Value;
 use ed25519_dalek::SigningKey;
 use http::{Method, StatusCode};
 use prismoire_server::federation::push_rate_limit::{
     REPORTS_RPM_PER_PEER, THREAD_STATUS_RPM_PER_PEER, USER_STATUS_RPM_PER_PEER,
 };
+use prismoire_server::federation::reports::dispatch_local_report;
 use prismoire_server::signed::{ReportReason, ThreadStatusKind, UserStatusKind};
 use prismoire_server::signing::{
     SigningOutput, sign_report_with_key, sign_thread_status_with_key, sign_user_status_with_key,
+    store_signing_key,
 };
 use rand::rngs::OsRng;
 use sqlx::SqlitePool;
@@ -635,6 +639,134 @@ async fn report_push_wrong_recipient_rejected() {
     let results = parse_results(&body);
     assert_eq!(results[0].1, "rejected");
     assert_eq!(results[0].2.as_deref(), Some("wrong_recipient"));
+}
+
+// ---------------------------------------------------------------------------
+// §18.1 producer (origination): reporter's home → target author's home
+// ---------------------------------------------------------------------------
+
+/// Producer happy path: a local reporter on A files a report against a
+/// post authored by a user homed at B. `dispatch_local_report` signs
+/// with the reporter's credential key and enqueues a point-to-point
+/// push to B; once A's outbound queue drains, B has applied the report
+/// (a `federated_reports` row keyed on `(post_id, reporter)` appears).
+#[tokio::test]
+async fn report_producer_dispatches_to_target_home() {
+    let harness = MultiInstanceHarness::new(2).await;
+    establish_active_peering(&harness, "a", "b").await;
+    let a = harness.instance("a");
+    let b = harness.instance("b");
+    let a_pub = *a.state.instance_key.public_bytes();
+    let b_pub = *b.state.instance_key.public_bytes();
+
+    // Reporter R — a local user on A with a stored signing key (reports
+    // are user-signed, so the producer must load this key).
+    let r_key = SigningKey::generate(&mut OsRng);
+    let r_pub: [u8; 32] = *r_key.verifying_key().as_bytes();
+    let reporter_id = insert_user(&a.state.db, "reporter", &r_pub, None).await;
+    let mut conn = a.state.db.acquire().await.expect("acquire conn");
+    store_signing_key(&mut conn, &reporter_id, &r_key)
+        .await
+        .expect("store reporter signing key");
+    drop(conn);
+
+    // Target author T — a federated user on A whose home is B.
+    let t_key = SigningKey::generate(&mut OsRng);
+    let t_pub: [u8; 32] = *t_key.verifying_key().as_bytes();
+    insert_user(&a.state.db, "target", &t_pub, Some(&b_pub)).await;
+
+    // On B: T is a local user (B is their home), and R is a federated
+    // user homed at A so the receiver's reporter-home check passes.
+    insert_user(&b.state.db, "target", &t_pub, None).await;
+    insert_user(&b.state.db, "reporter", &r_pub, Some(&a_pub)).await;
+
+    let post_id = Uuid::new_v4();
+    dispatch_local_report(
+        &a.state,
+        &reporter_id,
+        &post_id,
+        &t_pub,
+        ReportReason::Spam,
+        Some("repeated unsolicited links"),
+    )
+    .await
+    .expect("dispatch_local_report");
+
+    assert!(
+        a.state
+            .outbound_queues
+            .wait_idle(Duration::from_secs(2))
+            .await,
+        "A's outbound queue did not drain within 2s",
+    );
+
+    let post_id_db: Vec<u8> = post_id.as_bytes().to_vec();
+    let reporter_db: Vec<u8> = r_pub.to_vec();
+    let count = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM federated_reports WHERE post_id = ? AND reporter = ?",
+        post_id_db,
+        reporter_db,
+    )
+    .fetch_one(&b.state.db)
+    .await
+    .expect("count reports");
+    assert_eq!(count, 1, "B must have applied the dispatched report");
+}
+
+/// Producer no-op: when the reported post is authored by a *local*
+/// user, there is nothing to federate — the local admin queue is the
+/// authority. `dispatch_local_report` returns `Ok` without enqueuing,
+/// so the peer never receives anything.
+#[tokio::test]
+async fn report_producer_no_dispatch_for_local_author() {
+    let harness = MultiInstanceHarness::new(2).await;
+    establish_active_peering(&harness, "a", "b").await;
+    let a = harness.instance("a");
+    let b = harness.instance("b");
+
+    let r_key = SigningKey::generate(&mut OsRng);
+    let r_pub: [u8; 32] = *r_key.verifying_key().as_bytes();
+    let reporter_id = insert_user(&a.state.db, "reporter", &r_pub, None).await;
+    let mut conn = a.state.db.acquire().await.expect("acquire conn");
+    store_signing_key(&mut conn, &reporter_id, &r_key)
+        .await
+        .expect("store reporter signing key");
+    drop(conn);
+
+    // Target author T — a *local* user on A (home is A itself).
+    let t_key = SigningKey::generate(&mut OsRng);
+    let t_pub: [u8; 32] = *t_key.verifying_key().as_bytes();
+    insert_user(&a.state.db, "target", &t_pub, None).await;
+
+    let post_id = Uuid::new_v4();
+    dispatch_local_report(
+        &a.state,
+        &reporter_id,
+        &post_id,
+        &t_pub,
+        ReportReason::Spam,
+        None,
+    )
+    .await
+    .expect("dispatch_local_report");
+
+    assert!(
+        a.state
+            .outbound_queues
+            .wait_idle(Duration::from_secs(2))
+            .await,
+        "A's outbound queue did not drain within 2s",
+    );
+
+    let post_id_db: Vec<u8> = post_id.as_bytes().to_vec();
+    let count = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM federated_reports WHERE post_id = ?",
+        post_id_db,
+    )
+    .fetch_one(&b.state.db)
+    .await
+    .expect("count reports");
+    assert_eq!(count, 0, "a locally-authored post must not be federated");
 }
 
 // ---------------------------------------------------------------------------

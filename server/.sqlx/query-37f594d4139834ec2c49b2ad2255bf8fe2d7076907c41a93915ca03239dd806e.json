@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT p.id, p.author, p.retracted_at,\n                  u.public_key AS \"author_public_key!: Vec<u8>\",\n                  u.home_instance AS \"author_home_instance: Vec<u8>\"\n           FROM posts p JOIN users u ON u.id = p.author\n           WHERE p.id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "author",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "retracted_at",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "author_public_key!: Vec<u8>",
+        "ordinal": 3,
+        "type_info": "Blob"
+      },
+      {
+        "name": "author_home_instance: Vec<u8>",
+        "ordinal": 4,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "37f594d4139834ec2c49b2ad2255bf8fe2d7076907c41a93915ca03239dd806e"
+}

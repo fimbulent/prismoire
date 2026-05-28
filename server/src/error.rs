@@ -210,6 +210,8 @@ pub enum ErrorCode {
     // -- Reports -----------------------------------------------------
     /// Report reason is not one of the accepted enum values.
     ReportReasonInvalid,
+    /// Report `detail` exceeds [`MAX_REPORT_DETAIL_LEN`](crate::signed::MAX_REPORT_DETAIL_LEN).
+    ReportDetailTooLong,
     /// The user has already reported this post.
     AlreadyReported,
     /// No report row matched the provided id.
@@ -367,6 +369,7 @@ impl ErrorCode {
             | Self::ReasonRequired
             | Self::ReasonTooLong
             | Self::ReportReasonInvalid
+            | Self::ReportDetailTooLong
             | Self::SelfReport
             | Self::InvalidTheme
             | Self::InvalidFont
@@ -458,6 +461,7 @@ impl ErrorCode {
             Self::ConfirmationMismatch => "confirmation value did not match",
 
             Self::ReportReasonInvalid => "invalid report reason",
+            Self::ReportDetailTooLong => "report detail is too long",
             Self::AlreadyReported => "you have already reported this post",
             Self::ReportNotFound => "report not found",
             Self::SelfReport => "you cannot report your own post",
