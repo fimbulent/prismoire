@@ -640,6 +640,12 @@ pub async fn sweep_pending_projections(
             match try_project_trust_edge(tx, &edge, &canonical, &signature).await? {
                 TrustEdgeProjection::Projected => {
                     progressed = true;
+                    // Phase 9.8: a sweep projection may also unblock
+                    // pending_trust_edges orphans (e.g. the sweep
+                    // landed the predecessor that an autonomous
+                    // §9.3 backfill never recovered). Drain inside
+                    // the same tx so the cascade is atomic.
+                    drain_pending_orphans_after(tx, &canonical).await?;
                 }
                 TrustEdgeProjection::Deferred => {
                     still_deferred.push((edge, canonical, signature));
@@ -659,6 +665,279 @@ pub async fn sweep_pending_projections(
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 9.8 — pending_trust_edges buffer (durable orphan buffer)
+// ---------------------------------------------------------------------------
+
+/// Enqueue a trust-edge whose `prior_edge_hash` predecessor hasn't
+/// been received yet, per §9.1 `deferred` semantics.
+///
+/// `INSERT OR IGNORE` on the `(source_pubkey, prior_edge_hash)`
+/// primary key. Returns `true` iff a new row was actually inserted;
+/// `false` if a row was already buffered for the same `(source,
+/// prior)` gap. Callers use the boolean to dedup the autonomous §9.3
+/// backfill trigger — exactly one backfill per gap, regardless of
+/// how many siblings or re-pushes pile up.
+///
+/// The row stores the orphan's complete canonical payload +
+/// signature so [`drain_pending_orphans_after`] can replay the
+/// projection without going back through the wire-level decode path
+/// once the predecessor lands. `received_at` is the unix-epoch ms
+/// at enqueue time and is what the TTL sweep
+/// ([`evict_expired_pending_trust_edges`]) compares against.
+///
+/// Caller MUST be holding the same `BEGIN IMMEDIATE` transaction
+/// that established the `Deferred` outcome — otherwise two
+/// concurrent receives of the same orphan could both observe an
+/// empty buffer and both decide to fire the backfill.
+pub(crate) async fn enqueue_pending_trust_edge(
+    tx: &mut sqlx::SqliteConnection,
+    edge: &TrustEdge,
+    canonical_hash: &[u8; 32],
+    payload: &[u8],
+    signature: &[u8],
+    now_ms: i64,
+) -> Result<bool, sqlx::Error> {
+    // `prior_edge_hash` is required: an edge with NULL `prior` cannot
+    // produce `Deferred` (no predecessor to wait on), so callers
+    // should never reach here without one. Guard defensively rather
+    // than panic — a future regression in the caller would otherwise
+    // double-buffer the same `(source, NULL)` slot under SQLite's
+    // "NULLs distinct in PK" semantics and the dedup invariant would
+    // silently break.
+    let Some(prior) = edge.prior_edge_hash else {
+        tracing::error!(
+            canonical_hash = %crate::users::hex_lower(canonical_hash),
+            "enqueue_pending_trust_edge called for edge with NULL prior_edge_hash; refusing"
+        );
+        return Ok(false);
+    };
+
+    let source_slice: &[u8] = edge.from_key.as_slice();
+    let target_slice: &[u8] = edge.to_key.as_slice();
+    let prior_slice: &[u8] = prior.as_slice();
+    let canonical_slice: &[u8] = canonical_hash.as_slice();
+
+    let result = sqlx::query!(
+        "INSERT OR IGNORE INTO pending_trust_edges \
+            (source_pubkey, target_pubkey, prior_edge_hash, canonical_hash, \
+             payload, signature, received_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+        source_slice,
+        target_slice,
+        prior_slice,
+        canonical_slice,
+        payload,
+        signature,
+        now_ms,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    Ok(result.rows_affected() == 1)
+}
+
+/// Drain any pending orphans unblocked by a freshly-projected edge.
+///
+/// Called from both the §9.1 receive path
+/// (`edges.rs::apply_one_edge`) after `try_project_trust_edge`
+/// returns `Projected`, and from the Phase 9.6 sweep when a sweep-
+/// projected edge lands. The worklist walks forward through
+/// `pending_trust_edges`: each `Projected` outcome may itself be the
+/// predecessor of another buffered orphan, so a chain of N orphans
+/// (E2 waits on E1, E3 waits on E2, ...) drains in one call once
+/// the root lands.
+///
+/// On `Projected`, the pending row is DELETEd and the just-projected
+/// edge's `canonical_hash` is pushed onto the worklist. On any other
+/// outcome (`ChainFork`, `EndpointMissing`, `Deferred`) the pending
+/// row is left alone — the next §9.3 backfill or stub hydration
+/// will catch it. (In practice `Deferred` can't recur here because
+/// the predecessor we're chained off has just landed.)
+///
+/// Best-effort on parse failure: a `pending_trust_edges` row whose
+/// payload bytes no longer parse to a `TrustEdge` is corruption (the
+/// receive path verifies before enqueue); skip it with a warning
+/// and continue draining. Returns `Ok(())` after the worklist drains.
+///
+/// Caller MUST run inside the same transaction as the projection
+/// that originated `start_hash` so the cascade is atomic with its
+/// trigger.
+pub(crate) async fn drain_pending_orphans_after(
+    tx: &mut sqlx::SqliteConnection,
+    start_hash: &[u8; 32],
+) -> Result<(), sqlx::Error> {
+    // Worklist of just-projected canonical_hashes that might unblock
+    // pending rows. Bounded in practice by the depth of the deferred
+    // chain (typical case: 1). A pathological cycle is impossible:
+    // each iteration either DELETEs a pending row (monotonic
+    // decrease) or makes no progress (terminates).
+    let mut worklist: Vec<[u8; 32]> = vec![*start_hash];
+
+    while let Some(current) = worklist.pop() {
+        let current_slice: &[u8] = current.as_slice();
+        let rows = sqlx::query!(
+            "SELECT source_pubkey   AS \"source_pubkey!: Vec<u8>\", \
+                    target_pubkey   AS \"target_pubkey!: Vec<u8>\", \
+                    canonical_hash  AS \"canonical_hash!: Vec<u8>\", \
+                    prior_edge_hash AS \"prior_edge_hash!: Vec<u8>\", \
+                    payload         AS \"payload!: Vec<u8>\", \
+                    signature       AS \"signature!: Vec<u8>\" \
+               FROM pending_trust_edges \
+              WHERE prior_edge_hash = ?",
+            current_slice,
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+
+        for row in rows {
+            let Ok(parsed) = SignedPayload::parse(&row.payload) else {
+                tracing::warn!(
+                    canonical_hash = %crate::users::hex_lower(&row.canonical_hash),
+                    "pending_trust_edges payload no longer parses; dropping row",
+                );
+                delete_pending_orphan(&mut *tx, &row.source_pubkey, &row.prior_edge_hash).await?;
+                continue;
+            };
+            let SignedPayload::TrustEdge(edge) = parsed else {
+                tracing::warn!(
+                    canonical_hash = %crate::users::hex_lower(&row.canonical_hash),
+                    "pending_trust_edges payload class mismatched; dropping row",
+                );
+                delete_pending_orphan(&mut *tx, &row.source_pubkey, &row.prior_edge_hash).await?;
+                continue;
+            };
+            if row.canonical_hash.len() != 32 {
+                // Local corruption — schema/check constraints don't
+                // guard length here. Drop the row so future drains
+                // don't keep re-reading and re-erroring on it.
+                tracing::error!(
+                    "pending_trust_edges.canonical_hash has unexpected length; dropping row"
+                );
+                delete_pending_orphan(&mut *tx, &row.source_pubkey, &row.prior_edge_hash).await?;
+                continue;
+            }
+            let mut next_hash = [0u8; 32];
+            next_hash.copy_from_slice(&row.canonical_hash);
+
+            match try_project_trust_edge(&mut *tx, &edge, &next_hash, &row.signature).await? {
+                TrustEdgeProjection::Projected => {
+                    // Persist the canonical bytes on this successful
+                    // promotion. The receive path stored them only for
+                    // `Projected` / `EndpointMissing` / `ChainFork`;
+                    // `Deferred` skipped `signed_objects` because the
+                    // pending buffer was the durable layer. Now that
+                    // the orphan has projected, it's a normal applied
+                    // edge and needs to live in `signed_objects` for
+                    // dedup, relay, and audit just like any other.
+                    crate::signing::store_signed_object(
+                        &mut *tx,
+                        "trust-edge",
+                        &row.payload,
+                        &row.signature,
+                        &next_hash,
+                    )
+                    .await?;
+                    delete_pending_orphan(&mut *tx, &row.source_pubkey, &row.prior_edge_hash)
+                        .await?;
+                    worklist.push(next_hash);
+                }
+                // `ChainFork`: a sibling already applied between
+                // enqueue and drain. The pending bytes lose the race
+                // but should still be preserved as §9.4 evidence;
+                // store them in `signed_objects` and drop the pending
+                // row. Subsequent reads see both forks via the
+                // signed_objects archive.
+                TrustEdgeProjection::ChainFork => {
+                    crate::signing::store_signed_object(
+                        &mut *tx,
+                        "trust-edge",
+                        &row.payload,
+                        &row.signature,
+                        &next_hash,
+                    )
+                    .await?;
+                    delete_pending_orphan(&mut *tx, &row.source_pubkey, &row.prior_edge_hash)
+                        .await?;
+                }
+                // `EndpointMissing`: an endpoint stub vanished between
+                // enqueue and drain (rare — endpoints don't normally
+                // de-hydrate). Promote the bytes into `signed_objects`
+                // and drop the pending row so a future Phase 9.6
+                // sweep (keyed on whichever stub eventually re-hydrates)
+                // can project. If we left the row in the pending
+                // buffer, the sweep would never see it — sweep only
+                // walks `signed_objects` — and the row would strand
+                // until TTL evicts.
+                TrustEdgeProjection::EndpointMissing => {
+                    crate::signing::store_signed_object(
+                        &mut *tx,
+                        "trust-edge",
+                        &row.payload,
+                        &row.signature,
+                        &next_hash,
+                    )
+                    .await?;
+                    delete_pending_orphan(&mut *tx, &row.source_pubkey, &row.prior_edge_hash)
+                        .await?;
+                }
+                // `Deferred`: should not happen — we only consider
+                // rows whose `prior_edge_hash` equals `current`, and
+                // `current` was just projected. Treat as no-op rather
+                // than recurse.
+                TrustEdgeProjection::Deferred => {}
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Helper: DELETE one pending_trust_edges row by its primary key.
+async fn delete_pending_orphan(
+    tx: &mut sqlx::SqliteConnection,
+    source_pubkey: &[u8],
+    prior_edge_hash: &[u8],
+) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        "DELETE FROM pending_trust_edges \
+         WHERE source_pubkey = ? AND prior_edge_hash = ?",
+        source_pubkey,
+        prior_edge_hash,
+    )
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
+}
+
+/// TTL eviction: delete pending rows older than `DEFERRED_ORPHAN_TTL`.
+///
+/// Returns the number of rows evicted so callers (background tick,
+/// tests) can surface a tracing line. Compares `received_at`
+/// (unix-epoch ms at enqueue) against `now_ms - ttl_ms`. Rows that
+/// pass this cutoff are unrecoverable from the receiver's
+/// perspective per §9.1: recovery becomes the sender's problem once
+/// the buffer ages out.
+///
+/// The TTL window is supplied as a parameter rather than read from
+/// the spec constant directly so unit tests can use a short window
+/// (e.g. 0ms) without sleeping. Production callers pass
+/// `crate::federation::edges::DEFERRED_ORPHAN_TTL.as_millis() as i64`.
+pub async fn evict_expired_pending_trust_edges(
+    db: &sqlx::SqlitePool,
+    now_ms: i64,
+    ttl_ms: i64,
+) -> Result<u64, sqlx::Error> {
+    let cutoff = now_ms.saturating_sub(ttl_ms);
+    let result = sqlx::query!(
+        "DELETE FROM pending_trust_edges WHERE received_at < ?",
+        cutoff,
+    )
+    .execute(db)
+    .await?;
+    Ok(result.rows_affected())
 }
 
 /// Load and parse a `move` from `signed_objects`, returning

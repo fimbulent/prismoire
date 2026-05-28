@@ -269,6 +269,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         shared_state.metrics.clone(),
     ));
 
+    // Spawn the Phase 9.8 pending-orphan TTL sweep. Buffered
+    // `pending_trust_edges` rows whose `received_at` is older than
+    // `DEFERRED_ORPHAN_TTL` (1h per spec §9.6) are evicted: the
+    // receiver has given up on autonomous §9.3 recovery and the
+    // chain becomes the sender's problem on the next push. Cadence
+    // is 5 min so an orphan ages out within ~1h+5min worst case
+    // without paying a per-receive timer cost.
+    tokio::spawn(
+        prismoire_server::federation::edges::pending_orphan_ttl_loop(shared_state.db.clone()),
+    );
+
     let layers = rate_limit::build_layers(&config.rate_limit, config.server.trust_proxy_headers);
 
     let app = build_app(shared_state, allowed_origin, https_enabled, layers);

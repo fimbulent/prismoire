@@ -862,3 +862,17 @@ END;
 CREATE UNIQUE INDEX idx_trust_edges_canonical_hash_unique
     ON trust_edges(canonical_hash)
     WHERE canonical_hash IS NOT NULL;
+CREATE TABLE pending_trust_edges (
+    source_pubkey   BLOB NOT NULL,
+    target_pubkey   BLOB NOT NULL,
+    prior_edge_hash BLOB NOT NULL,
+    canonical_hash  BLOB NOT NULL,
+    payload         BLOB NOT NULL,
+    signature       BLOB NOT NULL,
+    received_at     INTEGER NOT NULL,
+    PRIMARY KEY (source_pubkey, prior_edge_hash)
+);
+CREATE INDEX idx_pending_trust_edges_prior
+    ON pending_trust_edges(prior_edge_hash);
+CREATE INDEX idx_pending_trust_edges_received_at
+    ON pending_trust_edges(received_at);

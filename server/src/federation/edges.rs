@@ -32,11 +32,23 @@
 //! 7. Map the projection result to the §9.1 status vocabulary,
 //!    commit the per-edge transaction:
 //!    - `Projected` → `applied`, with canonical bytes persisted to
-//!      `signed_objects` for dedup / relay / future audit.
+//!      `signed_objects` for dedup / relay / future audit. Phase 9.8:
+//!      also drains `pending_trust_edges` for any orphan whose
+//!      `prior_edge_hash` matches the just-projected `canonical_hash`,
+//!      cascading through chained orphans atomically with the
+//!      trigger.
 //!    - `ChainFork` → `rejected/chain_fork`, with bytes persisted as
 //!      §9.4 "both stored, neither active" evidence.
-//!    - `Deferred` → `deferred`; do NOT persist (a re-push or §9.3
-//!      backfill closes the gap and re-delivers).
+//!    - `Deferred` → `deferred`; Phase 9.8 enqueues the canonical
+//!      bytes into `pending_trust_edges` keyed on
+//!      `(source_pubkey, prior_edge_hash)`. If the row is freshly
+//!      inserted (first orphan for this gap), the handler spawns an
+//!      autonomous `GET /federation/v1/edges/backfill` (§9.3)
+//!      against the source-key's home instance after commit. The
+//!      orphan promotes to a real `signed_objects` row and a
+//!      `trust_edges` projection when the predecessor lands; the
+//!      pending row ages out under `DEFERRED_ORPHAN_TTL` (1h) if
+//!      recovery never completes.
 //!    - `EndpointMissing` → `applied`. The Phase 9.6 sweep
 //!      (`remote_users::sweep_pending_projections`) catches the
 //!      projection up when the missing endpoint's profile-rev
@@ -46,7 +58,7 @@
 //! handler issues a single `trust_graph_notify` — the rebuild loop
 //! coalesces, so per-edge notifications would be wasted work.
 //!
-//! Phase 9.6 status of historical punts:
+//! Phase 9.8 status of historical punts:
 //! - The pre-9.5 "no profile-sync yet, projection rebuilds when
 //!   stubs hydrate" comment is resolved: federated stubs exist as
 //!   real `users` rows from Phase 9.5 onwards, and the `EndpointMissing`
@@ -56,9 +68,10 @@
 //!   The rebuild loop picks the change up on its next pass; cached
 //!   per-viewer trust state lags by one rebuild cycle. Originated
 //!   edges keep the fast-path because the active viewer issued them.
-//! - Still punted: no durable pending-orphan buffer for `deferred`.
-//!   That status is a one-shot the sender sees; re-push or §9.3
-//!   backfill closes the gap.
+//! - Resolved (Phase 9.8): durable pending-orphan buffer
+//!   (`pending_trust_edges`) + autonomous §9.3 backfill. `Deferred`
+//!   is no longer a "one-shot the sender sees" — the receiver
+//!   persists the bytes and recovers the predecessor on its own.
 
 use std::sync::Arc;
 
@@ -75,7 +88,10 @@ use crate::federation::errors::{bad_request, internal_error};
 use crate::federation::forwarder::forward_signed_object;
 use crate::federation::identity::CBOR_CONTENT_TYPE;
 use crate::federation::middleware::VerifiedBody;
-use crate::federation::remote_users::{TrustEdgeProjection, try_project_trust_edge};
+use crate::federation::remote_users::{
+    TrustEdgeProjection, drain_pending_orphans_after, enqueue_pending_trust_edge,
+    try_project_trust_edge,
+};
 use crate::federation::routing::ForwardingClass;
 use crate::signed::{self, FedEnvelope, SignedPayload};
 use crate::signing::store_signed_object;
@@ -84,6 +100,13 @@ use crate::signing::store_signed_object;
 /// `len(body.edges)`. Overflow returns
 /// `400 { "error": "batch_too_large" }`.
 pub const MAX_EDGE_BATCH: usize = 256;
+
+/// §9.6 `DEFERRED_ORPHAN_TTL`: receiver-local lifetime for entries in
+/// the `pending_trust_edges` buffer. Default 1h per spec. After this
+/// window the orphan is unrecoverable from this receiver's
+/// perspective; recovery becomes the sender's problem on the next
+/// push.
+pub const DEFERRED_ORPHAN_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
 
 // ---------------------------------------------------------------------------
 // Per-edge result vocabulary (§9.1)
@@ -155,9 +178,9 @@ impl RejectReason {
 /// SHA-256 of the verbatim payload bytes; when the WireFormat itself
 /// fails to decode (no payload available), it falls back to SHA-256
 /// of the raw input bytes so the sender can still correlate.
-struct EdgeResult {
-    canonical_hash: [u8; 32],
-    status: EdgeStatus,
+pub(crate) struct EdgeResult {
+    pub(crate) canonical_hash: [u8; 32],
+    pub(crate) status: EdgeStatus,
 }
 
 // ---------------------------------------------------------------------------
@@ -328,11 +351,86 @@ pub async fn handle_edges_push(
 /// `arrived_from` is the envelope sender — passed to the §7.5
 /// forwarder so we don't push the relayed edge back to the peer it
 /// just arrived from.
-async fn apply_one_edge(
+///
+/// Live-push wrapper around [`apply_one_edge_inner`]. The inner helper
+/// is split out so the Phase 9.8 autonomous §9.3 backfill issuer
+/// (`crate::federation::edge_backfill`) can re-feed the chain-walk
+/// response through the same code path the live push uses — keeping
+/// `signed_objects` writes, `try_project_trust_edge` projection,
+/// pending-buffer drain, and §7.5 forwarder fan-out all on one path
+/// instead of forking the receive logic.
+///
+/// Why the split: `apply_one_edge_inner` may signal "spawn an autonomous
+/// §9.3 backfill". The spawn itself lives here in the outer wrapper, not
+/// inside the inner helper, because the live-push call site is the only
+/// path where firing autonomous backfill is in scope. The re-feed path
+/// inside `request_edge_predecessor` deliberately suppresses recursive
+/// backfill (§9.6 `MAX_BACKFILL_RATE`) by calling the inner directly
+/// and discarding the signal. Keeping the spawn out of `_inner` also
+/// breaks an otherwise-cyclic Send check (the spawned future calls
+/// `request_edge_predecessor`, which calls `apply_one_edge_inner` —
+/// putting the spawn inside the inner helper makes its own future's
+/// Send-ness depend on itself).
+pub(crate) async fn apply_one_edge(
     state: &Arc<AppState>,
     wire_bytes: &[u8],
     arrived_from: [u8; 32],
 ) -> Result<EdgeResult, sqlx::Error> {
+    let (result, backfill_target) = apply_one_edge_inner(state, wire_bytes, arrived_from).await?;
+    if let Some((source_key, target_key, prior)) = backfill_target {
+        // Phase 9.8: gate spawns behind a process-wide concurrency
+        // semaphore. A burst of fresh orphans (e.g. peer re-pushing a
+        // long chain from the tail) would otherwise launch one
+        // outbound `GET /edges/backfill` per orphan. When the cap is
+        // saturated we skip the spawn — the buffered orphan stays in
+        // `pending_trust_edges`, and either the next live push (which
+        // re-triggers via the `first_for_gap` flag) or the §9.6 sweep
+        // tick will eventually drive recovery.
+        match crate::federation::edge_backfill::try_acquire_outbound_permit() {
+            Some(permit) => {
+                let state_for_backfill = state.clone();
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    if let Err(e) = crate::federation::edge_backfill::request_edge_predecessor(
+                        state_for_backfill,
+                        source_key,
+                        target_key,
+                        prior,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            source = %crate::users::hex_lower(&source_key),
+                            target = %crate::users::hex_lower(&target_key),
+                            error = %e,
+                            "autonomous edge backfill failed; will rely on next push to retrigger",
+                        );
+                    }
+                });
+            }
+            None => {
+                tracing::debug!(
+                    source = %crate::users::hex_lower(&source_key),
+                    target = %crate::users::hex_lower(&target_key),
+                    "outbound backfill concurrency cap reached; skipping spawn (orphan retains buffered, will retrigger on next push or §9.6 sweep)",
+                );
+            }
+        }
+    }
+    Ok(result)
+}
+
+/// Core per-edge state machine. Returns `(EdgeResult, Option<(source,
+/// target, prior_edge_hash)>)` — the second element is `Some` iff the
+/// receive produced a fresh `Deferred` orphan that the outer wrapper
+/// should fire an autonomous §9.3 backfill for. `None` on every other
+/// outcome (and on Deferred-but-duplicate, where the gap already has
+/// a buffered orphan).
+pub(crate) async fn apply_one_edge_inner(
+    state: &Arc<AppState>,
+    wire_bytes: &[u8],
+    arrived_from: [u8; 32],
+) -> Result<(EdgeResult, Option<([u8; 32], [u8; 32], [u8; 32])>), sqlx::Error> {
     // Step 1: WireFormat decode. A failure here means we don't have a
     // canonical payload to hash for the result row's `canonical_hash`
     // field, so we fall back to hashing the raw input bytes — the
@@ -341,10 +439,13 @@ async fn apply_one_edge(
     let (payload_bytes, signature_bytes) = match decode_signed_object(wire_bytes) {
         Some(p) => p,
         None => {
-            return Ok(EdgeResult {
-                canonical_hash: sha256(wire_bytes),
-                status: EdgeStatus::Rejected(RejectReason::SchemaInvalid),
-            });
+            return Ok((
+                EdgeResult {
+                    canonical_hash: sha256(wire_bytes),
+                    status: EdgeStatus::Rejected(RejectReason::SchemaInvalid),
+                },
+                None,
+            ));
         }
     };
 
@@ -369,15 +470,21 @@ async fn apply_one_edge(
     .await?;
     if let Some(row) = existing {
         if row.erased_at.is_some() || row.payload_null != 0 {
-            return Ok(EdgeResult {
-                canonical_hash,
-                status: EdgeStatus::Rejected(RejectReason::Erased),
-            });
+            return Ok((
+                EdgeResult {
+                    canonical_hash,
+                    status: EdgeStatus::Rejected(RejectReason::Erased),
+                },
+                None,
+            ));
         }
-        return Ok(EdgeResult {
-            canonical_hash,
-            status: EdgeStatus::Duplicate,
-        });
+        return Ok((
+            EdgeResult {
+                canonical_hash,
+                status: EdgeStatus::Duplicate,
+            },
+            None,
+        ));
     }
 
     // Step 4: parse the inner payload and confirm it is a trust-edge.
@@ -387,19 +494,25 @@ async fn apply_one_edge(
     let payload = match SignedPayload::parse(&payload_bytes) {
         Ok(p) => p,
         Err(_) => {
-            return Ok(EdgeResult {
-                canonical_hash,
-                status: EdgeStatus::Rejected(RejectReason::SchemaInvalid),
-            });
+            return Ok((
+                EdgeResult {
+                    canonical_hash,
+                    status: EdgeStatus::Rejected(RejectReason::SchemaInvalid),
+                },
+                None,
+            ));
         }
     };
     let trust_edge = match payload {
         SignedPayload::TrustEdge(e) => e,
         _ => {
-            return Ok(EdgeResult {
-                canonical_hash,
-                status: EdgeStatus::Rejected(RejectReason::UnknownClass),
-            });
+            return Ok((
+                EdgeResult {
+                    canonical_hash,
+                    status: EdgeStatus::Rejected(RejectReason::UnknownClass),
+                },
+                None,
+            ));
         }
     };
 
@@ -410,17 +523,23 @@ async fn apply_one_edge(
     let verifying_key = match VerifyingKey::from_bytes(&trust_edge.from_key) {
         Ok(k) => k,
         Err(_) => {
-            return Ok(EdgeResult {
-                canonical_hash,
-                status: EdgeStatus::Rejected(RejectReason::InvalidSignature),
-            });
+            return Ok((
+                EdgeResult {
+                    canonical_hash,
+                    status: EdgeStatus::Rejected(RejectReason::InvalidSignature),
+                },
+                None,
+            ));
         }
     };
     if signed::verify(&payload_bytes, &signature_bytes, &verifying_key).is_err() {
-        return Ok(EdgeResult {
-            canonical_hash,
-            status: EdgeStatus::Rejected(RejectReason::InvalidSignature),
-        });
+        return Ok((
+            EdgeResult {
+                canonical_hash,
+                status: EdgeStatus::Rejected(RejectReason::InvalidSignature),
+            },
+            None,
+        ));
     }
 
     // Step 6: persist + project under BEGIN IMMEDIATE. Mirrors
@@ -438,6 +557,12 @@ async fn apply_one_edge(
     let projection =
         try_project_trust_edge(&mut tx, &trust_edge, &canonical_hash, &signature_bytes).await?;
 
+    // Phase 9.8 dispatch flag: set on `Deferred` *and* on the row
+    // being newly enqueued (not a duplicate). Carries the `prior`
+    // hash needed for the autonomous §9.3 backfill so the outer
+    // wrapper can spawn the request after the tx commits.
+    let mut backfill_prior: Option<[u8; 32]> = None;
+
     let status = match projection {
         TrustEdgeProjection::Projected => {
             store_signed_object(
@@ -448,6 +573,11 @@ async fn apply_one_edge(
                 &canonical_hash,
             )
             .await?;
+            // Phase 9.8: any orphans previously buffered waiting on
+            // *this* edge can now project. Drain them inside the same
+            // tx so the cascade is atomic with its trigger; a chain
+            // of N orphans collapses in one drain pass.
+            drain_pending_orphans_after(&mut tx, &canonical_hash).await?;
             EdgeStatus::Applied
         }
         TrustEdgeProjection::EndpointMissing => {
@@ -483,15 +613,69 @@ async fn apply_one_edge(
             EdgeStatus::Rejected(RejectReason::ChainFork)
         }
         TrustEdgeProjection::Deferred => {
-            // §9.1 deferred: orphan in the chain. We deliberately do
-            // NOT persist — a re-push or §9.3 backfill re-delivers
-            // the edge in a state where chain-continuity passes. A
-            // durable pending-orphan buffer is a future-phase item.
+            // `try_project_trust_edge` only returns `Deferred` from
+            // inside the `if let Some(prior)` branch, so by
+            // construction `prior_edge_hash` is `Some` here. Pull it
+            // out explicitly: a `None` means projection logic and the
+            // caller have desynchronised, and we must not lie
+            // "deferred" to the sender for an edge we can never
+            // recover (the pending row would be silently dropped by
+            // `enqueue_pending_trust_edge`'s defensive NULL guard).
+            let Some(prior) = trust_edge.prior_edge_hash else {
+                tracing::error!(
+                    canonical_hash = %crate::users::hex_lower(&canonical_hash),
+                    "try_project_trust_edge returned Deferred for an edge with NULL prior_edge_hash; rejecting as schema_invalid"
+                );
+                return Ok((
+                    EdgeResult {
+                        canonical_hash,
+                        status: EdgeStatus::Rejected(RejectReason::SchemaInvalid),
+                    },
+                    None,
+                ));
+            };
+
+            // Phase 9.8: durable buffer for orphan edges. `INSERT OR
+            // IGNORE` keyed on `(source_pubkey, prior_edge_hash)`
+            // returns `true` iff this is the first orphan for this
+            // gap — i.e. the one that should trigger the autonomous
+            // §9.3 backfill. Subsequent re-pushes / siblings for the
+            // same gap collapse into the existing buffered row and
+            // don't re-fire the request.
+            //
+            // We deliberately do NOT call `store_signed_object` here:
+            // the pending buffer is the sole durable layer for
+            // orphans, and double-storing would let the §9.1 dedup
+            // check observe the bytes and return `Duplicate` on
+            // re-push before the predecessor lands (which would
+            // confuse the sender about whether their chain has been
+            // accepted).
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let first_for_gap = enqueue_pending_trust_edge(
+                &mut tx,
+                &trust_edge,
+                &canonical_hash,
+                &payload_bytes,
+                &signature_bytes,
+                now_ms,
+            )
+            .await?;
+            if first_for_gap {
+                backfill_prior = Some(prior);
+            }
             EdgeStatus::Deferred
         }
     };
 
     tx.commit().await?;
+
+    // Phase 9.8: surface "backfill needed" to the outer wrapper. The
+    // wrapper is the one that spawns `request_edge_predecessor` — the
+    // spawn deliberately lives there to break the cycle between this
+    // function's Send check and the §9.3 issuer's (which calls back
+    // into this function via the re-feed path).
+    let backfill_target =
+        backfill_prior.map(|prior| (trust_edge.from_key, trust_edge.to_key, prior));
 
     // §7.5 fan the freshly-applied edge out to interested peers.
     // Originator-vs-relay is purely a matter of `arrived_from`: when
@@ -514,16 +698,52 @@ async fn apply_one_edge(
         .await;
     }
 
-    Ok(EdgeResult {
-        canonical_hash,
-        status,
-    })
+    Ok((
+        EdgeResult {
+            canonical_hash,
+            status,
+        },
+        backfill_target,
+    ))
 }
 
 fn sha256(bytes: &[u8]) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(bytes);
     h.finalize().into()
+}
+
+/// Cadence for the Phase 9.8 TTL sweep. Polls every 5 minutes —
+/// `DEFERRED_ORPHAN_TTL` is 1h, so a row ages out within at most
+/// `TTL + 5min ≈ 65 min` after enqueue. Fast enough that a stuck
+/// orphan doesn't pin a pubkey row indefinitely; slow enough that
+/// idle instances don't churn the DB.
+const PENDING_ORPHAN_TTL_TICK: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Background loop for Phase 9.8 `pending_trust_edges` TTL eviction.
+///
+/// Runs forever (spawned from `main`). On each tick, calls
+/// [`crate::federation::remote_users::evict_expired_pending_trust_edges`]
+/// with the current wall clock and the [`DEFERRED_ORPHAN_TTL`] window
+/// as `ttl_ms`. A non-zero eviction count is surfaced at `info!` so
+/// operators can spot a stuck-sender pattern (chronic eviction means
+/// somebody is pushing orphan chains whose root never arrives via
+/// any channel).
+pub async fn pending_orphan_ttl_loop(db: sqlx::SqlitePool) {
+    let ttl_ms = DEFERRED_ORPHAN_TTL.as_millis() as i64;
+    loop {
+        tokio::time::sleep(PENDING_ORPHAN_TTL_TICK).await;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        match crate::federation::remote_users::evict_expired_pending_trust_edges(
+            &db, now_ms, ttl_ms,
+        )
+        .await
+        {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(evicted = n, "pending_trust_edges TTL sweep"),
+            Err(e) => tracing::warn!(error = %e, "pending_trust_edges TTL sweep failed"),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

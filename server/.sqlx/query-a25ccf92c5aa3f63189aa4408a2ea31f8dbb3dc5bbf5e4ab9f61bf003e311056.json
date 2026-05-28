@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO pending_trust_edges (source_pubkey, target_pubkey, prior_edge_hash, canonical_hash, payload, signature, received_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "a25ccf92c5aa3f63189aa4408a2ea31f8dbb3dc5bbf5e4ab9f61bf003e311056"
+}

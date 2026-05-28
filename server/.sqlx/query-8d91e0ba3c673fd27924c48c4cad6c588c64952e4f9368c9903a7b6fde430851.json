@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM pending_trust_edges WHERE source_pubkey = ? AND prior_edge_hash = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "8d91e0ba3c673fd27924c48c4cad6c588c64952e4f9368c9903a7b6fde430851"
+}

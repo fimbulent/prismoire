@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT source_pubkey   AS \"source_pubkey!: Vec<u8>\", target_pubkey   AS \"target_pubkey!: Vec<u8>\", canonical_hash  AS \"canonical_hash!: Vec<u8>\", prior_edge_hash AS \"prior_edge_hash!: Vec<u8>\", payload         AS \"payload!: Vec<u8>\", signature       AS \"signature!: Vec<u8>\" FROM pending_trust_edges WHERE prior_edge_hash = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "source_pubkey!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "target_pubkey!: Vec<u8>",
+        "ordinal": 1,
+        "type_info": "Blob"
+      },
+      {
+        "name": "canonical_hash!: Vec<u8>",
+        "ordinal": 2,
+        "type_info": "Blob"
+      },
+      {
+        "name": "prior_edge_hash!: Vec<u8>",
+        "ordinal": 3,
+        "type_info": "Blob"
+      },
+      {
+        "name": "payload!: Vec<u8>",
+        "ordinal": 4,
+        "type_info": "Blob"
+      },
+      {
+        "name": "signature!: Vec<u8>",
+        "ordinal": 5,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "05c41b7facf8130ee1edaf67c04aafe9e61668b552eda2a47c99b351424228e3"
+}

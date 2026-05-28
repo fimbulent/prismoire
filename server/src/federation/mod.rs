@@ -37,6 +37,7 @@ pub mod bloom;
 pub mod content;
 pub mod content_rate_limit;
 pub mod domain;
+pub mod edge_backfill;
 pub mod edges;
 pub mod envelope;
 pub mod errors;
