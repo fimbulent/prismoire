@@ -300,6 +300,20 @@ pub async fn test_app_with_pool_transport_domain_and_outbound_config(
         prior_home_rate_limiter: Arc::new(
             prismoire_server::federation::prior_home_rate_limit::PriorHomeRateLimiter::default(),
         ),
+        // §14.3 challenge per-minute caps default to `u32::MAX` in
+        // the test harness so existing tests (e.g. the daily-budget
+        // overflow test that mints 21 challenges against the same K)
+        // are not silently throttled by the per-minute cap that would
+        // fire at the 11th mint under the production default. Tests
+        // that explicitly want to exercise the per-minute cap call
+        // `state.prior_home_challenge_rate_limiter.set_caps(...)` at
+        // test entry to tighten the cap to the spec default.
+        prior_home_challenge_rate_limiter: Arc::new(
+            prismoire_server::federation::prior_home_challenge_rate_limit::PriorHomeChallengeRateLimiter::new(
+                u32::MAX,
+                u32::MAX,
+            ),
+        ),
     });
 
     let layers = rate_limit::build_layers(&test_rate_limit_config(), false);

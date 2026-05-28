@@ -50,6 +50,7 @@ pub mod moves;
 pub mod outbound_queue;
 pub mod peering;
 pub mod prior_home;
+pub mod prior_home_challenge_rate_limit;
 pub mod prior_home_rate_limit;
 pub mod registration;
 pub mod remote_users;

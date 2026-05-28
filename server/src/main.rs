@@ -208,6 +208,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         prior_home_rate_limiter: Arc::new(
             prismoire_server::federation::prior_home_rate_limit::PriorHomeRateLimiter::default(),
         ),
+        prior_home_challenge_rate_limiter: Arc::new(
+            prismoire_server::federation::prior_home_challenge_rate_limit::PriorHomeChallengeRateLimiter::default(),
+        ),
     });
 
     // Spawn the debounced trust graph rebuild background task.
@@ -259,6 +262,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         prismoire_server::federation::prior_home_rate_limit::cleanup_loop(
             shared_state.prior_home_rate_limiter.clone(),
             "prior_home",
+        ),
+    );
+    tokio::spawn(
+        prismoire_server::federation::prior_home_challenge_rate_limit::cleanup_loop(
+            shared_state.prior_home_challenge_rate_limiter.clone(),
+            "prior_home_challenge",
         ),
     );
 

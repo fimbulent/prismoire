@@ -40,9 +40,10 @@
 //! serve step). The probe handler calls it, then folds in the §14.3
 //! rate-limit admit and the §14.2 has_activity computation.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::extract::{Extension, State};
+use axum::extract::{ConnectInfo, Extension, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use base64::Engine;
@@ -61,6 +62,7 @@ use crate::federation::envelope::{MAX_CLOCK_SKEW_MS, encode_signed_object};
 use crate::federation::errors::{bad_request, forbidden, internal_error};
 use crate::federation::identity::CBOR_CONTENT_TYPE;
 use crate::federation::middleware::VerifiedBody;
+use crate::federation::prior_home_challenge_rate_limit::prior_home_challenge_too_many_requests;
 use crate::federation::prior_home_rate_limit::prior_home_too_many_requests;
 use crate::signed::{self, PriorHomeChallenge, SignedPayload, TAG_DEACTIVATION};
 
@@ -245,17 +247,51 @@ fn now_ms() -> u64 {
 /// pubkey, so an in-process restart or load-balanced replica is
 /// transparent to the requester.
 ///
-/// **Known gap (Phase 10.1b).** Spec §14.3 mandates two additional
-/// limits at this endpoint: `PRIOR_HOME_CHALLENGE_RPM_PER_IP = 60`
-/// (cheap pre-verification rejection) and
-/// `PRIOR_HOME_CHALLENGE_RPM_PER_KEY = 10` (post-verification cap on
-/// issuance per K). Neither is implemented yet — a misbehaving but
-/// envelope-authenticated peer can currently drive Ed25519 signing
-/// at line rate. The redeem path is still gated by the §14.3 daily
-/// per-K probe budget, so this is bounded blast radius, but the
-/// limits should land before Phase 10 closes.
+/// ## §14.3 rate-limit ordering
+///
+/// Three checks run before the Ed25519 signing step, in the cheapest-
+/// first order called for by §14.3 ("Pre-verification cap" /
+/// "Post-verification cap"):
+///
+/// 1. Body decode + curve validation. A garbage K is rejected without
+///    burning any rate-limit budget.
+/// 2. Per-source-IP cap (`PRIOR_HOME_CHALLENGE_RPM_PER_IP = 60`).
+///    Belt-and-suspenders against a single network-layer origin
+///    saturating the signing CPU regardless of which K it submits.
+///    `Option<ConnectInfo>` because the in-process test transport
+///    does not populate it; production binds via
+///    `into_make_service_with_connect_info` so the extractor is
+///    always present on real traffic.
+///
+///    **Caveat — reverse-proxy collapse.** `main.rs` binds the
+///    server to `127.0.0.1` behind a Caddy / nginx reverse proxy
+///    (see project README). The `SocketAddr` axum sees is therefore
+///    the proxy's loopback peer, not the remote federation peer's
+///    public IP, and the per-IP bucket effectively becomes a global
+///    60 rpm cap across all peers under that deployment shape. The
+///    per-K cap below is the meaningful per-peer bound; the per-IP
+///    cap still adds useful coverage in topologies that terminate
+///    federation traffic directly on this process (single-tenant
+///    self-hosting, dev loops). Replacing the `ConnectInfo` source
+///    with the `X-Forwarded-For` extraction used by
+///    `rate_limit::ClientIpKeyExtractor::Smart` is tracked as a
+///    follow-up and gated on `server.trust_proxy_headers`.
+/// 3. Per-subject-key cap (`PRIOR_HOME_CHALLENGE_RPM_PER_KEY = 10`).
+///    Charged only after curve validation so garbage K values
+///    cannot deplete a real K's bucket.
+///
+/// Both 429s use `Retry-After: 60` per §14.3.
 pub async fn handle_challenge(
     State(state): State<Arc<AppState>>,
+    // `Option<Extension<ConnectInfo<…>>>` rather than
+    // `Option<ConnectInfo<…>>` because in axum 0.8 only `Extension<T>`
+    // implements `OptionalFromRequestParts`; `ConnectInfo` itself
+    // hard-rejects when absent. The `into_make_service_with_connect_info`
+    // path inserts `ConnectInfo<SocketAddr>` directly into request
+    // extensions, so reading it back through `Extension<...>` works
+    // identically in production and lets the test transport
+    // (`router.oneshot`, no ConnectInfo) degrade to `None`.
+    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
     Extension(VerifiedBody(body)): Extension<VerifiedBody>,
 ) -> Response {
     let req = match ChallengeReq::decode(&body) {
@@ -271,6 +307,31 @@ pub async fn handle_challenge(
     // seen K (the negative `has_activity: false` answer is by design).
     if VerifyingKey::from_bytes(&req.key).is_err() {
         return bad_request("invalid_key");
+    }
+
+    // §14.3 per-IP cap. Charged before signing as the cheap pre-
+    // verification rejection. The in-process test transport does
+    // not populate ConnectInfo (it dispatches via `router.oneshot`
+    // rather than a TcpListener), so absence is treated as "skip"
+    // rather than reject — the per-K cap still applies. Production
+    // traffic always carries a real ConnectInfo because `main.rs`
+    // serves via `into_make_service_with_connect_info::<SocketAddr>`.
+    if let Some(Extension(ConnectInfo(addr))) = connect_info
+        && !state
+            .prior_home_challenge_rate_limiter
+            .try_admit_ip(addr.ip())
+    {
+        return prior_home_challenge_too_many_requests();
+    }
+
+    // §14.3 per-K cap. Charged only after curve validation so a
+    // misbehaving sender spamming garbage K bytes cannot deplete a
+    // real K's per-minute budget.
+    if !state
+        .prior_home_challenge_rate_limiter
+        .try_admit_key(req.key)
+    {
+        return prior_home_challenge_too_many_requests();
     }
 
     let mut nonce = [0u8; PRIOR_HOME_NONCE_BYTES];
