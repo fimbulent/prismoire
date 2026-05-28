@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT te.canonical_hash AS \"canonical_hash!: Vec<u8>\", so.received_at AS \"received_at!: String\", so.payload AS \"payload?: Vec<u8>\", so.signature AS \"signature!: Vec<u8>\" FROM trust_edges te JOIN signed_objects so ON so.canonical_hash = te.canonical_hash WHERE te.target_user = ? AND so.payload IS NOT NULL AND ( ? IS NULL OR so.received_at > ? OR (so.received_at = ? AND te.canonical_hash > ?) ) ORDER BY so.received_at ASC, te.canonical_hash ASC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "canonical_hash!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "received_at!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "payload?: Vec<u8>",
+        "ordinal": 2,
+        "type_info": "Blob"
+      },
+      {
+        "name": "signature!: Vec<u8>",
+        "ordinal": 3,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "4c6570b6d8d8b92f87037516b69415a90acdb27603a0deb90cb4ac4be81dc7b7"
+}

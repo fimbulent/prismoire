@@ -11,9 +11,14 @@
 //! - `POST /federation/v1/prior-home/probe` — redeem the challenge
 //!   with a §5.7 `prior-home-response` signed by K; on success serve
 //!   the §14.2 1-bit `has_activity` + optional `earliest_seen`.
-//!
-//! Bulk-fetch surface (§14.5 / §14.6) lands in Phase 10.2 and reuses
-//! the same verification helper.
+//! - `POST /federation/v1/prior-home/content-by-key` (§14.5) — bulk
+//!   paginated transfer of signed objects authored by K (`post-rev`,
+//!   `retract`, `profile`, outbound `trust-edge`). Same auth surface
+//!   as the probe.
+//! - `POST /federation/v1/prior-home/inbound-edges-by-key` (§14.6) —
+//!   bulk paginated transfer of signed `trust-edge` objects where K
+//!   appears as the *target*. Fixed direction by spec — outbound
+//!   edges ride §14.5.
 //!
 //! ## Auth model recap (§14.1)
 //!
@@ -40,6 +45,7 @@ use std::sync::Arc;
 use axum::extract::{Extension, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use base64::Engine;
 use ciborium::value::Value;
 use ed25519_dalek::VerifyingKey;
 use rand::RngCore;
@@ -47,6 +53,10 @@ use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
 
 use crate::AppState;
+use crate::federation::backfill::{
+    MAX_BACKFILL_PAGE, PullChainRow, decode_cursor, encode_cursor, encode_pull_backfill_body,
+    ok_response,
+};
 use crate::federation::envelope::{MAX_CLOCK_SKEW_MS, encode_signed_object};
 use crate::federation::errors::{bad_request, forbidden, internal_error};
 use crate::federation::identity::CBOR_CONTENT_TYPE;
@@ -550,6 +560,497 @@ fn iso_to_unix_ms(iso: &str) -> u64 {
             0
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// §14.5 / §14.6 bulk-fetch request decoder
+// ---------------------------------------------------------------------------
+
+/// `POST /federation/v1/prior-home/content-by-key` and
+/// `POST /federation/v1/prior-home/inbound-edges-by-key` body shape
+/// (`docs/federation-protocol.md` §14.5 / §14.6):
+///
+/// ```text
+/// { "challenge": WireFormat,   // §5.6 echoed verbatim (may be reused
+///                              //   across pages within
+///                              //   PRIOR_HOME_CHALLENGE_TTL)
+///   "response":  WireFormat,   // §5.7 freshly signed per page
+///   "since":     bstr or absent,
+///   "limit":     uint or absent }
+/// ```
+///
+/// Same `challenge` + `response` pair as the §14.2 probe, plus optional
+/// keyset-pagination fields. The verbatim WireFormat bytes get fed
+/// through `verify_prior_home_request` after extracting `since`/`limit`
+/// here, so the two handlers share §14.1 verification semantics.
+pub(crate) struct BulkFetchReq {
+    pub(crate) challenge: Vec<u8>,
+    pub(crate) response: Vec<u8>,
+    pub(crate) since: Option<Vec<u8>>,
+    pub(crate) limit: Option<u32>,
+}
+
+impl BulkFetchReq {
+    pub(crate) fn decode(bytes: &[u8]) -> Option<Self> {
+        let value: Value = ciborium::de::from_reader(bytes).ok()?;
+        let entries = match value {
+            Value::Map(m) => m,
+            _ => return None,
+        };
+        let mut challenge_field: Option<Vec<u8>> = None;
+        let mut response_field: Option<Vec<u8>> = None;
+        let mut since_field: Option<Vec<u8>> = None;
+        let mut limit_field: Option<u32> = None;
+        for (k, v) in entries {
+            let key_name = match k {
+                Value::Text(s) => s,
+                _ => return None,
+            };
+            match key_name.as_str() {
+                "challenge" => {
+                    if challenge_field.is_some() {
+                        return None;
+                    }
+                    match v {
+                        Value::Bytes(b) => challenge_field = Some(b),
+                        _ => return None,
+                    }
+                }
+                "response" => {
+                    if response_field.is_some() {
+                        return None;
+                    }
+                    match v {
+                        Value::Bytes(b) => response_field = Some(b),
+                        _ => return None,
+                    }
+                }
+                "since" => {
+                    if since_field.is_some() {
+                        return None;
+                    }
+                    match v {
+                        Value::Bytes(b) => since_field = Some(b),
+                        _ => return None,
+                    }
+                }
+                "limit" => {
+                    if limit_field.is_some() {
+                        return None;
+                    }
+                    match v {
+                        Value::Integer(i) => {
+                            let n: i128 = i.into();
+                            if !(1..=u32::MAX as i128).contains(&n) {
+                                return None;
+                            }
+                            limit_field = Some(n as u32);
+                        }
+                        _ => return None,
+                    }
+                }
+                _ => return None,
+            }
+        }
+        Some(Self {
+            challenge: challenge_field?,
+            response: response_field?,
+            since: since_field,
+            limit: limit_field,
+        })
+    }
+}
+
+/// Common preamble for §14.5 / §14.6: decode the body, peel off
+/// `since` / `limit`, run §14.1 verification, return the authenticated
+/// subject_key plus the resolved cursor + page size.
+///
+/// `since` is the raw bytes from the request body (we treat the cursor
+/// as opaque on the wire). The §10.5.2 / §9.3 cursor decoder accepts
+/// base64url ASCII *or* raw bytes — but our §10.5.1 sibling routes
+/// emit raw bytes inside the response (`next_cursor`: bstr) and the
+/// §10.5.1 GET variants accept the base64url form on the URL. §14.5
+/// transports cursors as bstr both ways (request body + response), so
+/// we base64url-encode the raw bytes back to the string form
+/// `decode_cursor` expects.
+async fn verify_bulk_fetch_request(
+    state: &Arc<AppState>,
+    body: &[u8],
+) -> Result<([u8; 32], Option<crate::federation::backfill::Cursor>, u32), Response> {
+    let req = match BulkFetchReq::decode(body) {
+        Some(r) => r,
+        None => return Err(bad_request("malformed")),
+    };
+
+    let limit = match req.limit {
+        None => MAX_BACKFILL_PAGE,
+        Some(n) if (1..=MAX_BACKFILL_PAGE).contains(&n) => n,
+        _ => return Err(bad_request("limit_out_of_range")),
+    };
+
+    let cursor = match &req.since {
+        None => None,
+        // An empty `since` bstr is rejected rather than silently treated
+        // as "no cursor", matching `decode_cursor`'s strict
+        // CURSOR_LEN-or-reject contract. A caller that wants the first
+        // page should omit `since` entirely.
+        Some(b) if b.is_empty() => return Err(bad_request("invalid_cursor")),
+        Some(b) => {
+            // Cursors are emitted raw (bstr) by `encode_pull_backfill_body`,
+            // and §14.5 / §14.6 transport them as raw bstr both ways.
+            // `decode_cursor` operates on the base64url ASCII form (it
+            // is also used by the §10.5.1 GET routes whose `?since=` is
+            // base64url-encoded on the URL), so we round-trip raw → b64
+            // here to reuse one decoder.
+            let s = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+            match decode_cursor(&s) {
+                Some(c) => Some(c),
+                None => return Err(bad_request("invalid_cursor")),
+            }
+        }
+    };
+
+    // Repack into a `ProbeReq`-shaped body for the §14.1 verifier. The
+    // existing verifier consumes only `challenge` + `response`, so we
+    // re-encode just those two fields — the `since`/`limit` fields are
+    // page-control parameters and not part of the verifier's scope.
+    let probe_body = Value::Map(vec![
+        (Value::Text("challenge".into()), Value::Bytes(req.challenge)),
+        (Value::Text("response".into()), Value::Bytes(req.response)),
+    ]);
+    let mut probe_buf = Vec::new();
+    ciborium::ser::into_writer(&probe_body, &mut probe_buf).expect("ciborium ser is infallible");
+
+    let subject_key = match verify_prior_home_request(state, &probe_buf).await {
+        Ok(k) => k,
+        Err(resp) => return Err(resp),
+    };
+
+    Ok((subject_key, cursor, limit))
+}
+
+// ---------------------------------------------------------------------------
+// §14.5 — POST /federation/v1/prior-home/content-by-key
+// ---------------------------------------------------------------------------
+
+/// `POST /federation/v1/prior-home/content-by-key` (§14.5).
+///
+/// Returns signed objects authored by K — `post-rev`, `retract`,
+/// `profile`, and outbound `trust-edge` records — paginated under the
+/// §10.5.2 `{ objects, next_cursor?, complete }` envelope.
+///
+/// Object scope (per §14.5 prose):
+/// - `post-rev` authored by K (joined via `post_revisions` →
+///   `posts.author`).
+/// - `retract` authored by K (joined via `posts.retraction_signature
+///   = signed_objects.signature` and `posts.author`).
+/// - `profile` authored by K (joined via `profile_revisions.user_id`).
+/// - `trust-edge` with `source_user = K` (joined via
+///   `trust_edges.source_user`). Inbound edges ride §14.6.
+///
+/// Move declarations and prior-home challenge/response artifacts are
+/// excluded: moves propagate via §12 unconditional flood + §12.3 chain
+/// backfill, and challenges/responses are ephemeral per §5.6 / §5.7.
+///
+/// **Erasure carve-out.** The Phase 10.2 implementation skips erased
+/// rows (`payload IS NULL`) in the bulk page — same as the §10.5.1
+/// `/backfill/by-author` cut. The spec's "all-page-erased → 410 Gone"
+/// shape is not yet implemented; a sender that needs a specific
+/// erasure follows up reactively via §10.5.1 `/backfill/by-hash`.
+/// Documenting here so we land the 410 path with the other §10.5.2
+/// 410 work rather than dropping it into this phase.
+pub async fn handle_content_by_key(
+    State(state): State<Arc<AppState>>,
+    Extension(VerifiedBody(body)): Extension<VerifiedBody>,
+) -> Response {
+    let (subject_key, cursor, limit) = match verify_bulk_fetch_request(&state, &body).await {
+        Ok(t) => t,
+        Err(resp) => return resp,
+    };
+
+    // Resolve K to local users.id. §14.5 serves only what the
+    // responding peer has authored locally — so a key with no local
+    // `users` row produces `complete: true` with an empty page (same
+    // carve-out as §10.5.1 `/backfill/by-author`).
+    let key_slice: &[u8] = subject_key.as_slice();
+    let user_id_opt =
+        match sqlx::query_scalar!("SELECT id FROM users WHERE public_key = ?", key_slice,)
+            .fetch_optional(&state.db)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(error = %e, "db error resolving subject key in content-by-key");
+                return internal_error();
+            }
+        };
+    let Some(user_id) = user_id_opt else {
+        return ok_response(encode_pull_backfill_body(&[], None, true));
+    };
+
+    // Page-fetch: `limit + 1` rows for next-page detection. UNION ALL
+    // across the four §14.5 classes; each branch joins to the
+    // class-specific projection table. The outer keyset-pagination
+    // predicate runs against the union and orders by
+    // (so.received_at, so.canonical_hash) per §14.5 step 11.
+    //
+    // Note: SQLite cannot bind a parameter more than once across CTE
+    // boundaries cleanly via sqlx's `query!`, so each `?` is its own
+    // binding even when the value is identical. The repetition is
+    // intentional and not a bug.
+    let fetch_n = (limit as i64) + 1;
+    let cursor_iso: Option<String> = cursor.as_ref().map(|c| c.created_at.clone());
+    let cursor_hash: Option<Vec<u8>> = cursor.as_ref().map(|c| c.canonical_hash.to_vec());
+
+    // Note on the retract branch's `posts.retraction_signature = so.signature`
+    // join: `signature` is not UNIQUE in `signed_objects`, but Ed25519
+    // signatures are deterministic per (privkey, message) and collisions
+    // across distinct payloads are cryptographically infeasible, so in
+    // practice this join is 1:1. The cleaner long-term shape would be a
+    // `posts.retraction_canonical_hash` column joined against
+    // `so.canonical_hash` (the actual PRIMARY KEY); deferred as a schema
+    // migration.
+    let rows = match sqlx::query!(
+        "SELECT so.canonical_hash AS \"canonical_hash!: Vec<u8>\", \
+                so.received_at AS \"received_at!: String\", \
+                so.payload AS \"payload?: Vec<u8>\", \
+                so.signature AS \"signature!: Vec<u8>\" \
+         FROM ( \
+                SELECT so.canonical_hash, so.received_at, so.payload, so.signature \
+                FROM signed_objects so \
+                JOIN post_revisions pr ON pr.canonical_hash = so.canonical_hash \
+                JOIN posts p ON p.id = pr.post_id \
+                WHERE p.author = ? AND so.payload IS NOT NULL \
+                UNION ALL \
+                SELECT so.canonical_hash, so.received_at, so.payload, so.signature \
+                FROM signed_objects so \
+                JOIN posts p ON p.retraction_signature = so.signature \
+                WHERE so.inner_class = 'retract' \
+                  AND p.author = ? \
+                  AND so.payload IS NOT NULL \
+                UNION ALL \
+                SELECT so.canonical_hash, so.received_at, so.payload, so.signature \
+                FROM signed_objects so \
+                JOIN profile_revisions prv ON prv.canonical_hash = so.canonical_hash \
+                WHERE prv.user_id = ? AND so.payload IS NOT NULL \
+                UNION ALL \
+                SELECT so.canonical_hash, so.received_at, so.payload, so.signature \
+                FROM signed_objects so \
+                JOIN trust_edges te ON te.canonical_hash = so.canonical_hash \
+                WHERE te.source_user = ? AND so.payload IS NOT NULL \
+         ) so \
+         WHERE ( \
+                ? IS NULL \
+                OR so.received_at > ? \
+                OR (so.received_at = ? AND so.canonical_hash > ?) \
+         ) \
+         ORDER BY so.received_at ASC, so.canonical_hash ASC \
+         LIMIT ?",
+        user_id,
+        user_id,
+        user_id,
+        user_id,
+        cursor_iso,
+        cursor_iso,
+        cursor_iso,
+        cursor_hash,
+        fetch_n,
+    )
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = %e, "db error walking content-by-key page");
+            return internal_error();
+        }
+    };
+
+    let has_more = (rows.len() as i64) > limit as i64;
+    let mut page_rows: Vec<PullChainRow> = Vec::with_capacity(limit as usize);
+    for row in rows.into_iter().take(limit as usize) {
+        // Belt-and-suspenders against erased rows: the SQL `WHERE` clause
+        // already filters `payload IS NOT NULL` in each UNION ALL branch,
+        // but matching the `/backfill/by-author` posture means a `NULL`
+        // payload here is treated as "elide the row" rather than the
+        // unwrap blowing the request up.
+        let Some(payload) = row.payload else {
+            continue;
+        };
+        let canonical_hash: [u8; 32] = match row.canonical_hash.as_slice().try_into() {
+            Ok(h) => h,
+            Err(_) => {
+                tracing::error!(
+                    "content-by-key: signed_objects row has non-32-byte canonical_hash"
+                );
+                return internal_error();
+            }
+        };
+        page_rows.push(PullChainRow {
+            payload,
+            signature: row.signature,
+            received_at: row.received_at,
+            canonical_hash,
+        });
+    }
+
+    let next_cursor = if has_more && let Some(last) = page_rows.last() {
+        encode_cursor(&last.received_at, &last.canonical_hash)
+    } else {
+        None
+    };
+    let complete = !has_more;
+    if !complete && next_cursor.is_none() {
+        tracing::error!(
+            "content-by-key: tail row carries non-standard ISO timestamp; \
+             cannot mint a next_cursor without violating §10.5.2 invariant"
+        );
+        return internal_error();
+    }
+
+    ok_response(encode_pull_backfill_body(&page_rows, next_cursor, complete))
+}
+
+// ---------------------------------------------------------------------------
+// §14.6 — POST /federation/v1/prior-home/inbound-edges-by-key
+// ---------------------------------------------------------------------------
+
+/// `POST /federation/v1/prior-home/inbound-edges-by-key` (§14.6).
+///
+/// Returns signed `trust-edge` objects with `target_user = K` —
+/// "who has trusted K" — paginated under the §10.5.2 envelope.
+///
+/// **No `direction` parameter.** Per §14.6 prose, §14.6 is fixed to
+/// `target` only. Outbound edges (`source_user = K`) ride §14.5
+/// alongside K-authored content. The split keeps the recovery flow
+/// non-overlapping: §14.5 covers everything K signed, §14.6 covers
+/// everything signed *about* K. The §10.5.1 peer-authed
+/// `/backfill/edges-by-key?direction=...` route exposes both
+/// directions for normal-traffic backfill — that is a separate
+/// surface with different auth semantics.
+///
+/// Same erasure carve-out as §14.5: erased rows are elided from the
+/// bulk page; the 410-Gone shape lands with the broader §10.5.2 410
+/// work.
+///
+/// **Threat-model note.** The §14.1 challenge/response auth surface
+/// gates this endpoint on possession of K's private key — the same
+/// material that authorises signing as K. So anyone who can read this
+/// endpoint already controls K's signing capability. The marginal
+/// disclosure here is the full *inbound* trust set across federated
+/// instances (including signed distrust/block edges normally hidden by
+/// the aggregate trust-graph UI). This is intentional per §14.6: the
+/// whole purpose of §14 is data-recovery on key compromise / migration,
+/// which requires the migrating identity to enumerate trust pointing
+/// *at* it. Operators should treat key compromise as also yielding
+/// trust-graph enumeration, not just impersonation.
+pub async fn handle_inbound_edges_by_key(
+    State(state): State<Arc<AppState>>,
+    Extension(VerifiedBody(body)): Extension<VerifiedBody>,
+) -> Response {
+    let (subject_key, cursor, limit) = match verify_bulk_fetch_request(&state, &body).await {
+        Ok(t) => t,
+        Err(resp) => return resp,
+    };
+
+    // Resolve K to local users.id. Phase 5 only persists `trust_edges`
+    // rows for pairs whose target is a local user; a K with no local
+    // row has no inbound edges in our store, so `complete: true` with
+    // an empty page is the correct answer.
+    let key_slice: &[u8] = subject_key.as_slice();
+    let user_id_opt =
+        match sqlx::query_scalar!("SELECT id FROM users WHERE public_key = ?", key_slice,)
+            .fetch_optional(&state.db)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "db error resolving subject key in inbound-edges-by-key"
+                );
+                return internal_error();
+            }
+        };
+    let Some(user_id) = user_id_opt else {
+        return ok_response(encode_pull_backfill_body(&[], None, true));
+    };
+
+    let fetch_n = (limit as i64) + 1;
+    let cursor_iso: Option<String> = cursor.as_ref().map(|c| c.created_at.clone());
+    let cursor_hash: Option<Vec<u8>> = cursor.as_ref().map(|c| c.canonical_hash.to_vec());
+
+    let rows = match sqlx::query!(
+        "SELECT te.canonical_hash AS \"canonical_hash!: Vec<u8>\", \
+                so.received_at AS \"received_at!: String\", \
+                so.payload AS \"payload?: Vec<u8>\", \
+                so.signature AS \"signature!: Vec<u8>\" \
+         FROM trust_edges te \
+         JOIN signed_objects so ON so.canonical_hash = te.canonical_hash \
+         WHERE te.target_user = ? \
+           AND so.payload IS NOT NULL \
+           AND ( \
+                ? IS NULL \
+                OR so.received_at > ? \
+                OR (so.received_at = ? AND te.canonical_hash > ?) \
+         ) \
+         ORDER BY so.received_at ASC, te.canonical_hash ASC \
+         LIMIT ?",
+        user_id,
+        cursor_iso,
+        cursor_iso,
+        cursor_iso,
+        cursor_hash,
+        fetch_n,
+    )
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = %e, "db error walking inbound-edges-by-key page");
+            return internal_error();
+        }
+    };
+
+    let has_more = (rows.len() as i64) > limit as i64;
+    let mut page_rows: Vec<PullChainRow> = Vec::with_capacity(limit as usize);
+    for row in rows.into_iter().take(limit as usize) {
+        let Some(payload) = row.payload else {
+            continue;
+        };
+        let canonical_hash: [u8; 32] = match row.canonical_hash.as_slice().try_into() {
+            Ok(h) => h,
+            Err(_) => {
+                tracing::error!(
+                    "inbound-edges-by-key: trust_edges row has non-32-byte canonical_hash"
+                );
+                return internal_error();
+            }
+        };
+        page_rows.push(PullChainRow {
+            payload,
+            signature: row.signature,
+            received_at: row.received_at,
+            canonical_hash,
+        });
+    }
+
+    let next_cursor = if has_more && let Some(last) = page_rows.last() {
+        encode_cursor(&last.received_at, &last.canonical_hash)
+    } else {
+        None
+    };
+    let complete = !has_more;
+    if !complete && next_cursor.is_none() {
+        tracing::error!(
+            "inbound-edges-by-key: tail row carries non-standard ISO timestamp; \
+             cannot mint a next_cursor without violating §10.5.2 invariant"
+        );
+        return internal_error();
+    }
+
+    ok_response(encode_pull_backfill_body(&page_rows, next_cursor, complete))
 }
 
 #[cfg(test)]

@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT so.canonical_hash AS \"canonical_hash!: Vec<u8>\", so.received_at AS \"received_at!: String\", so.payload AS \"payload?: Vec<u8>\", so.signature AS \"signature!: Vec<u8>\" FROM ( SELECT so.canonical_hash, so.received_at, so.payload, so.signature FROM signed_objects so JOIN post_revisions pr ON pr.canonical_hash = so.canonical_hash JOIN posts p ON p.id = pr.post_id WHERE p.author = ? AND so.payload IS NOT NULL UNION ALL SELECT so.canonical_hash, so.received_at, so.payload, so.signature FROM signed_objects so JOIN posts p ON p.retraction_signature = so.signature WHERE so.inner_class = 'retract' AND p.author = ? AND so.payload IS NOT NULL UNION ALL SELECT so.canonical_hash, so.received_at, so.payload, so.signature FROM signed_objects so JOIN profile_revisions prv ON prv.canonical_hash = so.canonical_hash WHERE prv.user_id = ? AND so.payload IS NOT NULL UNION ALL SELECT so.canonical_hash, so.received_at, so.payload, so.signature FROM signed_objects so JOIN trust_edges te ON te.canonical_hash = so.canonical_hash WHERE te.source_user = ? AND so.payload IS NOT NULL ) so WHERE ( ? IS NULL OR so.received_at > ? OR (so.received_at = ? AND so.canonical_hash > ?) ) ORDER BY so.received_at ASC, so.canonical_hash ASC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "canonical_hash!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "received_at!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "payload?: Vec<u8>",
+        "ordinal": 2,
+        "type_info": "Blob"
+      },
+      {
+        "name": "signature!: Vec<u8>",
+        "ordinal": 3,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "63fb481221a66e94ef84334073f7ab028853e063f896804e9b610351ca6a027d"
+}

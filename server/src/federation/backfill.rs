@@ -115,12 +115,15 @@ pub struct EdgesBackfillQuery {
 /// canonical-hash tiebreaker means two rows with identical
 /// `created_at` (legal — `trust_edges.created_at` is per-second) still
 /// produce a strict total order on the chain walk.
-struct Cursor {
+///
+/// Visible at `pub(crate)` so the §14.5 / §14.6 bulk-fetch handlers
+/// in `prior_home.rs` reuse the same opaque-cursor layout.
+pub(crate) struct Cursor {
     /// Verbatim `trust_edges.created_at` (ISO 8601, `Z` suffix).
     /// Must be exactly [`ISO_TIMESTAMP_LEN`] bytes to encode.
-    created_at: String,
+    pub(crate) created_at: String,
     /// Last-emitted row's canonical hash (the strict-after tiebreak).
-    canonical_hash: [u8; 32],
+    pub(crate) canonical_hash: [u8; 32],
 }
 
 /// Decode a base64url `since` parameter into a [`Cursor`]. Returns
@@ -128,7 +131,7 @@ struct Cursor {
 /// non-ASCII timestamp) — the caller surfaces that as
 /// `400 invalid_cursor`, the spec's "client adopts response and retries
 /// without since" signal.
-fn decode_cursor(since: &str) -> Option<Cursor> {
+pub(crate) fn decode_cursor(since: &str) -> Option<Cursor> {
     let bytes = URL_SAFE_NO_PAD.decode(since.as_bytes()).ok()?;
     if bytes.len() != CURSOR_LEN {
         return None;
@@ -155,7 +158,7 @@ fn decode_cursor(since: &str) -> Option<Cursor> {
 /// [`ISO_TIMESTAMP_LEN`] bytes (it always is for rows minted by
 /// `apply_with_local_projection` / `set_trust_edge`, but defensive
 /// against any future migration that loosens the format).
-fn encode_cursor(created_at: &str, canonical_hash: &[u8; 32]) -> Option<Vec<u8>> {
+pub(crate) fn encode_cursor(created_at: &str, canonical_hash: &[u8; 32]) -> Option<Vec<u8>> {
     if created_at.len() != ISO_TIMESTAMP_LEN || !created_at.is_ascii() {
         return None;
     }
@@ -472,7 +475,7 @@ pub async fn handle_edges_backfill(
 }
 
 /// Build the `200 OK` `application/cbor` response for an encoded body.
-fn ok_response(body: Vec<u8>) -> Response {
+pub(crate) fn ok_response(body: Vec<u8>) -> Response {
     let mut r = (StatusCode::OK, body).into_response();
     r.headers_mut().insert(
         header::CONTENT_TYPE,
@@ -780,18 +783,22 @@ pub const MAX_BACKFILL_HASHES: usize = 50;
 // ---------------------------------------------------------------------------
 
 /// One row produced by a §10.5 by-author / edges-by-key page query.
-struct PullChainRow {
-    payload: Vec<u8>,
-    signature: Vec<u8>,
-    received_at: String,
-    canonical_hash: [u8; 32],
+///
+/// Reused by the §14.5 / §14.6 bulk-fetch handlers in `prior_home.rs`
+/// — same shape (verbatim payload + signature bytes, received_at
+/// cursor, canonical_hash tiebreak), same response envelope.
+pub(crate) struct PullChainRow {
+    pub(crate) payload: Vec<u8>,
+    pub(crate) signature: Vec<u8>,
+    pub(crate) received_at: String,
+    pub(crate) canonical_hash: [u8; 32],
 }
 
 /// Encode `{ "objects": [WireFormat...], ["next_cursor": bstr,]
 /// "complete": bool }` for §10.5 by-author / edges-by-key. Same wire
 /// shape as the §9.3 helper above but keyed on `PullChainRow` instead
 /// of `ChainRow` (the two cursor flows do not share a row type).
-fn encode_pull_backfill_body(
+pub(crate) fn encode_pull_backfill_body(
     objects: &[PullChainRow],
     next_cursor: Option<Vec<u8>>,
     complete: bool,

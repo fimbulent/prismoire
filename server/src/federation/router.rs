@@ -171,6 +171,21 @@ pub fn federation_router(state: Arc<AppState>) -> Router {
             "/federation/v1/prior-home/probe",
             post(prior_home::handle_probe),
         )
+        // §14.5 bulk-fetch content-by-key (Phase 10.2). Same
+        // challenge/response auth surface as the §14.2 probe (verified
+        // inside the handler via the shared §14.1 helper). Returns the
+        // §10.5.2 `{ objects, next_cursor?, complete }` envelope.
+        .route(
+            "/federation/v1/prior-home/content-by-key",
+            post(prior_home::handle_content_by_key),
+        )
+        // §14.6 bulk-fetch inbound-edges-by-key (Phase 10.2). Same
+        // auth surface as §14.5; fixed direction (`target_user == K`)
+        // by spec. Returns the §10.5.2 envelope.
+        .route(
+            "/federation/v1/prior-home/inbound-edges-by-key",
+            post(prior_home::handle_inbound_edges_by_key),
+        )
         .layer(from_fn_with_state(state.clone(), verify_known_peer));
 
     // Unauthenticated route(s) live outside both middleware layers.

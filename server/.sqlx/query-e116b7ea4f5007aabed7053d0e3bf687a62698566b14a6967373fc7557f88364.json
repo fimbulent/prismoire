@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO signed_objects (canonical_hash, inner_class, payload, signature, received_at) VALUES (?, 'trust-edge', ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "e116b7ea4f5007aabed7053d0e3bf687a62698566b14a6967373fc7557f88364"
+}

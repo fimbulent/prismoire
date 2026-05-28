@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO signed_objects (canonical_hash, inner_class, payload, signature) VALUES (?, 'profile', ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "2c405723ae46f17f3b03c8b39968fdb5b3afe2120be8782a4175c20c7f6488bc"
+}
