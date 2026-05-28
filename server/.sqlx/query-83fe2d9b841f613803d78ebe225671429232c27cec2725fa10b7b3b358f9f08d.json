@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT te.source_user, u.signup_method, u.home_instance AS \"home_instance: Vec<u8>\" FROM trust_edges te JOIN users u ON u.id = te.source_user WHERE te.id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "source_user",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "signup_method",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "home_instance: Vec<u8>",
+        "ordinal": 2,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "83fe2d9b841f613803d78ebe225671429232c27cec2725fa10b7b3b358f9f08d"
+}

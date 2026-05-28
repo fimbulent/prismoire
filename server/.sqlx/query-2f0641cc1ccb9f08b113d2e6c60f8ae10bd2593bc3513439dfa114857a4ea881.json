@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT signup_method, home_instance AS \"home_instance: Vec<u8>\" FROM users WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "signup_method",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "home_instance: Vec<u8>",
+        "ordinal": 1,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "2f0641cc1ccb9f08b113d2e6c60f8ae10bd2593bc3513439dfa114857a4ea881"
+}

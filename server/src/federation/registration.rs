@@ -420,16 +420,128 @@ pub async fn begin(
 }
 
 // ---------------------------------------------------------------------------
+// Federated-stub upgrade (Phase 9.7)
+// ---------------------------------------------------------------------------
+
+/// Promote a `signup_method = 'federated'` stub to a locally-homed
+/// user in place. Used by [`complete`] when an incoming §13
+/// `challenge.user_key` matches a stub that Phase 9.5 hydrated from
+/// an inbound profile-rev / edge / other signed payload.
+///
+/// The key promise is **id stability**: every projection row that
+/// already references the stub via `users.id` (post_revisions,
+/// profile_revisions, trust_edges as author or endpoint, …)
+/// continues to resolve under the upgraded identity. Without this
+/// path, a user moving their home to a peer that has already
+/// federated their content would be forced to abandon all locally
+/// projected history (the `user_key_taken` rejection §13 returned
+/// pre-9.7).
+///
+/// Mutations, applied inside the caller's transaction:
+///
+/// - `users.display_name` / `display_name_skeleton` are refreshed
+///   from `bootstrap` (the user can re-pick a name as part of the
+///   upgrade; uniqueness against other locally-homed rows is the
+///   caller's responsibility — see the dispatch in [`complete`]).
+/// - `users.signup_method` flips to `bootstrap.signup_method`
+///   (typically `'cross_instance_register'`).
+/// - `users.home_instance` is forced to NULL — the canonical
+///   "lives here" marker, matching how local signups leave the
+///   column and how [`apply_one_move`] flips it for an inbound
+///   move targeting this instance. Consistency between these two
+///   arrival paths is the whole point of the Phase 9.7 carve-out.
+/// - A new `credentials` row binds the freshly registered passkey
+///   to the existing id. Federated stubs never carry credential
+///   rows (federation does not transmit private credential
+///   material), so this is always an additive INSERT, not a re-bind.
+/// - A `signing_keys` row binds the user-supplied private key.
+///   [`signing::store_signing_key`] re-verifies that the key derives
+///   the existing `users.public_key` — redundant with the dispatch
+///   check in [`complete`] but pinned at the storage layer for
+///   defense in depth.
+///
+/// Caller responsibilities:
+///
+/// - Hold an open `BEGIN IMMEDIATE` so the SELECT-then-write that
+///   identified the stub and this UPDATE/INSERT pair observe a
+///   single snapshot — otherwise two concurrent §13 completes
+///   could both see the same stub and race to upgrade it twice.
+/// - Pass a `bootstrap.user_id` equal to the matched stub's
+///   `users.id`, **not** the pre-allocated UUID minted in
+///   [`begin`]. The whole point of in-place upgrade is to preserve
+///   the existing id.
+/// - Have already enforced display-name uniqueness exempting the
+///   stub being upgraded (see [`complete`] for the
+///   `id != ?`-style SELECT).
+///
+/// [`apply_one_move`]: crate::federation::moves
+pub async fn upgrade_federated_stub_in_place(
+    conn: &mut sqlx::SqliteConnection,
+    bootstrap: &LocalUserBootstrap<'_>,
+) -> Result<(), AppError> {
+    // Defense in depth: the dispatcher in [`complete`] resolves
+    // `bootstrap.user_id` by `SELECT … WHERE public_key = ?`, so the
+    // row at `user_id` is guaranteed to carry `bootstrap.public_key`
+    // *today*. Folding `AND public_key = ?` into the WHERE clause
+    // pins that invariant at the storage layer: if a future refactor
+    // of the dispatch SELECT ever drops the pubkey predicate, the
+    // UPDATE matches zero rows here and we fail closed rather than
+    // silently rewriting an unrelated user's row. `rows_affected` is
+    // checked below to surface the mismatch.
+    let updated = sqlx::query!(
+        "UPDATE users SET \
+            display_name = ?, \
+            display_name_skeleton = ?, \
+            signup_method = ?, \
+            home_instance = NULL \
+         WHERE id = ? AND public_key = ?",
+        bootstrap.display_name,
+        bootstrap.display_name_skeleton,
+        bootstrap.signup_method,
+        bootstrap.user_id,
+        bootstrap.public_key,
+    )
+    .execute(&mut *conn)
+    .await?;
+    if updated.rows_affected() != 1 {
+        tracing::error!(
+            user_id = %bootstrap.user_id,
+            "upgrade_federated_stub_in_place: stub row missing or public_key mismatch \
+             — caller must select the stub by both id and public_key"
+        );
+        return Err(AppError::code(ErrorCode::Internal));
+    }
+
+    sqlx::query!(
+        "INSERT INTO credentials (id, user_id, credential_id, public_key, sign_count) \
+         VALUES (?, ?, ?, ?, 0)",
+        bootstrap.credential_id,
+        bootstrap.user_id,
+        bootstrap.passkey_credential_id,
+        bootstrap.passkey_bytes,
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    signing::store_signing_key(conn, bootstrap.user_id, bootstrap.signing_key).await?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Complete handler
 // ---------------------------------------------------------------------------
 
 /// `POST /api/auth/cross-instance/complete` (§13.2 + §13 ceremony).
 ///
 /// Verifies the signed §5.5 challenge, finishes the WebAuthn
-/// passkey-registration ceremony, consumes the nonce, creates the
-/// `users` + `credentials` + `signing_keys` rows via
-/// [`bootstrap_local_user`], optionally authors and publishes a §12
-/// Move declaration, and returns a session cookie.
+/// passkey-registration ceremony, consumes the nonce, and either
+/// creates the `users` + `credentials` + `signing_keys` rows via
+/// [`bootstrap_local_user`] (the common case) or — if a
+/// `signup_method = 'federated'` stub for this `user_key` already
+/// exists from Phase 9.5 hydration — promotes the stub in place via
+/// [`upgrade_federated_stub_in_place`]. Optionally authors and
+/// publishes a §12 Move declaration, and returns a session cookie.
 pub async fn complete(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CompleteRequest>,
@@ -703,23 +815,45 @@ pub async fn complete(
     }
 
     // Re-check user_key uniqueness under the transaction snapshot.
-    let existing_key_tx = sqlx::query!("SELECT id FROM users WHERE public_key = ?", public_key,)
-        .fetch_optional(&mut *tx)
-        .await?;
-    if existing_key_tx.is_some() {
-        return Err(AppError::with_message(
-            ErrorCode::BadRequest,
-            "user_key_taken",
-        ));
-    }
+    // A pre-existing `signup_method = 'federated'` stub (hydrated in
+    // Phase 9.5 by an inbound profile-rev or trust-edge referencing
+    // this key) is the §13 upgrade case: we keep the stub's
+    // `users.id` so all projected content (post_revisions,
+    // profile_revisions, trust_edges authored by this key) continues
+    // to be served under the same identity, then flip
+    // `signup_method` and drop `home_instance` to NULL.
+    // Any other signup_method match is a real local collision and
+    // still rejects with `user_key_taken`.
+    let existing_key_tx = sqlx::query!(
+        "SELECT id, signup_method FROM users WHERE public_key = ?",
+        public_key,
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    let (user_id, is_stub_upgrade) = match existing_key_tx {
+        Some(row) if row.signup_method == "federated" => (row.id, true),
+        Some(_) => {
+            return Err(AppError::with_message(
+                ErrorCode::BadRequest,
+                "user_key_taken",
+            ));
+        }
+        None => (user_id, false),
+    };
 
     // Re-check display_name uniqueness under the transaction snapshot
     // so a racing signup can't sneak in between the pre-tx check in
-    // `begin` and here.
+    // `begin` and here. The `id != ?` exclusion is the upgrade case:
+    // a federated stub legitimately matches its own display_name /
+    // skeleton on this SELECT, so we exempt that single row. For a
+    // fresh signup, `user_id` is a newly minted UUID that no row
+    // carries, so the exclusion is a no-op.
     let existing_name_tx = sqlx::query!(
-        "SELECT id FROM users WHERE display_name = ? OR display_name_skeleton = ?",
+        "SELECT id FROM users \
+         WHERE (display_name = ? OR display_name_skeleton = ?) AND id != ?",
         display_name,
         skeleton,
+        user_id,
     )
     .fetch_optional(&mut *tx)
     .await?;
@@ -727,21 +861,22 @@ pub async fn complete(
         return Err(AppError::code(ErrorCode::DisplayNameTaken));
     }
 
-    bootstrap_local_user(
-        &mut tx,
-        &LocalUserBootstrap {
-            user_id: &user_id,
-            display_name: &display_name,
-            display_name_skeleton: &skeleton,
-            signup_method: "cross_instance_register",
-            public_key,
-            signing_key: &imported,
-            credential_id: &cred_id,
-            passkey_credential_id: cred_id_bytes,
-            passkey_bytes: &passkey_bytes,
-        },
-    )
-    .await?;
+    let bootstrap = LocalUserBootstrap {
+        user_id: &user_id,
+        display_name: &display_name,
+        display_name_skeleton: &skeleton,
+        signup_method: "cross_instance_register",
+        public_key,
+        signing_key: &imported,
+        credential_id: &cred_id,
+        passkey_credential_id: cred_id_bytes,
+        passkey_bytes: &passkey_bytes,
+    };
+    if is_stub_upgrade {
+        upgrade_federated_stub_in_place(&mut tx, &bootstrap).await?;
+    } else {
+        bootstrap_local_user(&mut tx, &bootstrap).await?;
+    }
 
     // §12 Move publication. Authored only when we resolved the source
     // peer above; in-tx so a rollback nukes the move alongside the
