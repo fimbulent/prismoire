@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT locked AS \"locked: bool\" FROM threads WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "locked: bool",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9a7a20f93dc53ecbe98215648ebb4156782e1b516069b20b89d361284599b1a7"
+}

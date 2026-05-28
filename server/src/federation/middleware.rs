@@ -115,6 +115,35 @@ pub const BACKFILL_BY_HASH_BODY_CAP: usize = 16 * 1024;
 /// hostile non-home moderator room to amplify advisory traffic.
 pub const ADMIN_RM_REPORT_BODY_CAP: usize = 8 * 1024;
 
+/// Body cap for `/federation/v1/user-status` (push) — Phase 11.
+///
+/// Matches the protocol's `MAX_USER_STATUS_BODY` default
+/// (`docs/federation-protocol.md` §16.5 — "Conservative; status
+/// objects are tiny"). A `user-status` payload is a subject key, a
+/// small enum, an optional `suspended_until`, an optional reason
+/// string and the §6 envelope; even a full `MAX_USER_STATUS_BATCH=256`
+/// batch of these stays well under 1 MiB. The handler enforces the
+/// per-batch object count independently inside this outer ceiling.
+pub const USER_STATUS_BODY_CAP: usize = 1024 * 1024;
+
+/// Body cap for `/federation/v1/thread-status` (push) — Phase 11.
+///
+/// Matches the protocol's `MAX_THREAD_STATUS_BODY` default
+/// (`docs/federation-protocol.md` §17.5). Same sizing rationale as
+/// [`USER_STATUS_BODY_CAP`]: a thread-status object is a thread id, a
+/// lock-state enum and an optional reason; a full
+/// `MAX_THREAD_STATUS_BATCH=256` batch fits comfortably under 1 MiB.
+pub const THREAD_STATUS_BODY_CAP: usize = 1024 * 1024;
+
+/// Body cap for `/federation/v1/reports` (push) — Phase 11.
+///
+/// Matches the protocol's `MAX_REPORT_BODY` default
+/// (`docs/federation-protocol.md` §18.5 — "Reports carry `detail`
+/// text; conservative cap"). Tighter than the status caps because the
+/// batch ceiling is smaller (`MAX_REPORT_BATCH=64`) and the only
+/// variable-length field is the free-text `detail`.
+pub const REPORT_BODY_CAP: usize = 256 * 1024;
+
 /// Resolve the body cap for a given federation path.
 ///
 /// Match is path-prefix-aware but anchored on a trailing slash (or
@@ -146,11 +175,38 @@ fn route_body_cap(path: &str) -> usize {
         || path.starts_with("/federation/v1/admin-rm-report/")
     {
         ADMIN_RM_REPORT_BODY_CAP
-    // §10.5.1 by-hash POST: bounded by MAX_BACKFILL_HASHES × 32 B
-    // plus framing. The sibling GET routes (by-author, edges-by-key)
-    // carry no body and fall through to the default cap below.
-    } else if path == "/federation/v1/backfill/by-hash" {
+    // by-hash POSTs all carry a bounded 32-byte hash list (up to 50)
+    // plus framing, so they share the same tight cap:
+    //   - §10.5.1 `/backfill/by-hash`        (MAX_BACKFILL_HASHES)
+    //   - §16.3   `/user-status/by-hash`     (MAX_USER_STATUS_HASHES)
+    //   - §17.3   `/thread-status/by-hash`   (MAX_THREAD_STATUS_HASHES)
+    // The §10.5.1 sibling GETs (by-author, edges-by-key) carry no body
+    // and fall through to the default cap below. The two status
+    // by-hash exact matches MUST precede the push-route prefixes below
+    // — `/user-status/by-hash` would otherwise be swallowed by the
+    // `/user-status/` prefix and charged the 1 MiB push ceiling
+    // instead of the 16 KiB hash-list one.
+    } else if path == "/federation/v1/backfill/by-hash"
+        || path == "/federation/v1/user-status/by-hash"
+        || path == "/federation/v1/thread-status/by-hash"
+    {
         BACKFILL_BY_HASH_BODY_CAP
+    // §16.1 user-status push: a batched push (up to
+    // MAX_USER_STATUS_BATCH signed objects); the handler enforces the
+    // per-batch count inside this outer ceiling.
+    } else if path == "/federation/v1/user-status"
+        || path.starts_with("/federation/v1/user-status/")
+    {
+        USER_STATUS_BODY_CAP
+    // §17.1 thread-status push, sized like user-status above.
+    } else if path == "/federation/v1/thread-status"
+        || path.starts_with("/federation/v1/thread-status/")
+    {
+        THREAD_STATUS_BODY_CAP
+    // §18.1 reports push. No by-hash sibling (reports do not chain or
+    // backfill), so a single exact match suffices.
+    } else if path == "/federation/v1/reports" {
+        REPORT_BODY_CAP
     } else {
         DEFAULT_FEDERATION_BODY_CAP
     }
@@ -332,6 +388,32 @@ mod tests {
         assert_eq!(
             route_body_cap("/federation/v1/backfill/edges-by-key"),
             DEFAULT_FEDERATION_BODY_CAP,
+        );
+    }
+
+    #[test]
+    fn route_body_cap_sizes_phase11_status_and_report_routes() {
+        // §16.1 / §17.1 push routes get the 1 MiB status cap.
+        assert_eq!(
+            route_body_cap("/federation/v1/user-status"),
+            USER_STATUS_BODY_CAP,
+        );
+        assert_eq!(
+            route_body_cap("/federation/v1/thread-status"),
+            THREAD_STATUS_BODY_CAP,
+        );
+        // §18.1 reports push gets the tighter 256 KiB cap.
+        assert_eq!(route_body_cap("/federation/v1/reports"), REPORT_BODY_CAP);
+        // §16.3 / §17.3 by-hash backfill carries only a bounded hash
+        // list — it MUST land on the tight 16 KiB cap, not be swallowed
+        // by the `/user-status/` (resp. `/thread-status/`) push prefix.
+        assert_eq!(
+            route_body_cap("/federation/v1/user-status/by-hash"),
+            BACKFILL_BY_HASH_BODY_CAP,
+        );
+        assert_eq!(
+            route_body_cap("/federation/v1/thread-status/by-hash"),
+            BACKFILL_BY_HASH_BODY_CAP,
         );
     }
 

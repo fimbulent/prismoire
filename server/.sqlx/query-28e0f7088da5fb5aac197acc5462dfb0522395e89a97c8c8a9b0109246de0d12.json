@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT current_created_at AS \"current_created_at!: i64\", current_status_hash AS \"current_status_hash!: Vec<u8>\" FROM user_statuses WHERE subject = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "current_created_at!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "current_status_hash!: Vec<u8>",
+        "ordinal": 1,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "28e0f7088da5fb5aac197acc5462dfb0522395e89a97c8c8a9b0109246de0d12"
+}

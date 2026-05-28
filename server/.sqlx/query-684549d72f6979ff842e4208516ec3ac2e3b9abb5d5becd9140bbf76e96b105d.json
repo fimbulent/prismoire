@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO federated_reports (id, post_id, target_author, reporter, reason, detail, canonical_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "684549d72f6979ff842e4208516ec3ac2e3b9abb5d5becd9140bbf76e96b105d"
+}

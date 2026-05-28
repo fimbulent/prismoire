@@ -315,6 +315,20 @@ pub async fn test_app_with_pool_transport_domain_and_outbound_config(
                 u32::MAX,
             ),
         ),
+        // Phase-11 push limiters default to the production spec
+        // ceilings (60/60/30 RPM per peer). Existing harness tests push
+        // at most a handful of times per peer, well under these, so the
+        // defaults don't silently throttle them; the dedicated
+        // rate-limit tests exercise the ceilings directly.
+        user_status_rate_limiter: Arc::new(
+            prismoire_server::federation::push_rate_limit::PushRateLimiter::for_user_status(),
+        ),
+        thread_status_rate_limiter: Arc::new(
+            prismoire_server::federation::push_rate_limit::PushRateLimiter::for_thread_status(),
+        ),
+        reports_rate_limiter: Arc::new(
+            prismoire_server::federation::push_rate_limit::PushRateLimiter::for_reports(),
+        ),
     });
 
     let layers = rate_limit::build_layers(&test_rate_limit_config(), false);

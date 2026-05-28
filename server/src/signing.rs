@@ -6,8 +6,9 @@ use uuid::Uuid;
 
 use crate::federation::instance_key::InstanceKey;
 use crate::signed::{
-    AdminRemoval, AttachmentRef, Deactivation, Move, PostRevision, ProfileRevision, Retraction,
-    SignedPayload, ThreadCreate, TrustEdge, TrustStance,
+    AdminRemoval, AttachmentRef, Deactivation, Move, PostRevision, ProfileRevision, Report,
+    ReportReason, Retraction, SignedPayload, ThreadCreate, ThreadStatus, ThreadStatusKind,
+    TrustEdge, TrustStance, UserStatus, UserStatusKind,
 };
 
 /// Output of signing a class-specific payload.
@@ -939,6 +940,125 @@ pub fn sign_deactivation_with_key(key: &SigningKey, created_at_ms: u64) -> Signi
     }
 }
 
+/// Sign a `user-status` canonical payload with the instance signing key.
+///
+/// See [signed-payload-format.md] §5.10 and [federation-protocol.md] §16.
+/// User-status objects are *instance-signed*: the authority is the
+/// subject's home instance, expressed via its long-lived signing key.
+/// Takes `&InstanceKey` so the instance-key boundary is not widened.
+///
+/// `signing_instance` MUST equal the bare canonical domain whose signing
+/// key signs this object — the §16.1 receiver re-derives it from
+/// `peers.instance_domain` and refuses on mismatch. `prior_status_hash`
+/// chains to `subject`'s previous status object; `None` for the first.
+#[allow(clippy::too_many_arguments)]
+pub fn sign_user_status_with_key(
+    key: &InstanceKey,
+    subject: &[u8; 32],
+    status: UserStatusKind,
+    suspended_until: Option<u64>,
+    signing_instance: &str,
+    reason: Option<&str>,
+    created_at_ms: u64,
+    prior_status_hash: Option<&[u8; 32]>,
+) -> SigningOutput {
+    let public_key = *key.public_bytes();
+    let payload = UserStatus {
+        subject: *subject,
+        status,
+        suspended_until,
+        signing_instance: signing_instance.to_string(),
+        reason: reason.map(str::to_string),
+        created_at: created_at_ms,
+        prior_status_hash: prior_status_hash.copied(),
+    };
+    let payload_bytes = SignedPayload::UserStatus(payload).encode();
+    let signature = key.sign(&payload_bytes).to_vec();
+    let canonical_hash: [u8; 32] = sha2::Sha256::digest(&payload_bytes).into();
+    SigningOutput {
+        payload: payload_bytes,
+        signature,
+        public_key,
+        canonical_hash,
+    }
+}
+
+/// Sign a `thread-status` canonical payload with the instance signing key.
+///
+/// See [signed-payload-format.md] §5.12 and [federation-protocol.md] §17.
+/// Thread-status objects are *instance-signed* by the thread's home
+/// instance. Takes `&InstanceKey` so the instance-key boundary is not
+/// widened.
+///
+/// `signing_instance` MUST equal the bare canonical domain whose signing
+/// key signs this object AND be the thread's home — the §17.1 receiver
+/// enforces both. `prior_status_hash` chains to `thread_id`'s previous
+/// status object; `None` for the first.
+pub fn sign_thread_status_with_key(
+    key: &InstanceKey,
+    thread_id: &[u8; 16],
+    status: ThreadStatusKind,
+    signing_instance: &str,
+    reason: Option<&str>,
+    created_at_ms: u64,
+    prior_status_hash: Option<&[u8; 32]>,
+) -> SigningOutput {
+    let public_key = *key.public_bytes();
+    let payload = ThreadStatus {
+        thread_id: *thread_id,
+        status,
+        signing_instance: signing_instance.to_string(),
+        reason: reason.map(str::to_string),
+        created_at: created_at_ms,
+        prior_status_hash: prior_status_hash.copied(),
+    };
+    let payload_bytes = SignedPayload::ThreadStatus(payload).encode();
+    let signature = key.sign(&payload_bytes).to_vec();
+    let canonical_hash: [u8; 32] = sha2::Sha256::digest(&payload_bytes).into();
+    SigningOutput {
+        payload: payload_bytes,
+        signature,
+        public_key,
+        canonical_hash,
+    }
+}
+
+/// Sign a `report` canonical payload with an already-loaded user key.
+///
+/// See [signed-payload-format.md] §5.13 and [federation-protocol.md] §18.
+/// Reports are *user-signed*: the authority is the reporting identity
+/// (`reporter` == the signer's public key). The §18.1 receiver verifies
+/// the signature against the report's `reporter` field, which this
+/// helper binds to the signer's verifying key.
+#[allow(clippy::too_many_arguments)]
+pub fn sign_report_with_key(
+    key: &SigningKey,
+    post_id: &[u8; 16],
+    target_author: &[u8; 32],
+    reason: ReportReason,
+    detail: Option<&str>,
+    created_at_ms: u64,
+) -> SigningOutput {
+    let public_key = *key.verifying_key().as_bytes();
+    let payload = Report {
+        post_id: *post_id,
+        target_author: *target_author,
+        reporter: public_key,
+        reason,
+        detail: detail.map(str::to_string),
+        created_at: created_at_ms,
+    };
+    let payload_bytes = SignedPayload::Report(payload).encode();
+    let signature = key.sign(&payload_bytes).to_bytes().to_vec();
+    let canonical_hash: [u8; 32] = sha2::Sha256::digest(&payload_bytes).into();
+    SigningOutput {
+        payload: payload_bytes,
+        signature,
+        public_key,
+        canonical_hash,
+    }
+}
+
 #[derive(Debug)]
 pub enum SignError {
     Db(sqlx::Error),
@@ -1184,5 +1304,143 @@ mod tests {
         };
         assert_eq!(d.user, *key.verifying_key().as_bytes());
         assert_eq!(d.created_at, created_at_ms);
+    }
+
+    #[test]
+    fn user_status_round_trips_under_instance_key() {
+        let signing = fixed_key_a();
+        let inst_pub = *signing.verifying_key().as_bytes();
+        let instance_key = InstanceKey::new(signing);
+
+        let subject = *fixed_key_b().verifying_key().as_bytes();
+        let signing_instance = "home.example.invalid";
+        let created_at_ms: u64 = 1_700_000_003_000;
+        let suspended_until = Some(1_700_000_900_000);
+        let reason = Some("temporary suspension");
+        let prior = [0x55; 32];
+
+        let out = sign_user_status_with_key(
+            &instance_key,
+            &subject,
+            UserStatusKind::Suspended,
+            suspended_until,
+            signing_instance,
+            reason,
+            created_at_ms,
+            Some(&prior),
+        );
+
+        // Instance-signed: reported pubkey is the instance key's public
+        // half, the value a §16.1 receiver looks up via the peers row.
+        assert_eq!(out.public_key, inst_pub);
+        verify_sig(&out.public_key, &out.payload, &out.signature);
+        let recomputed: [u8; 32] = sha2::Sha256::digest(&out.payload).into();
+        assert_eq!(out.canonical_hash, recomputed);
+
+        let parsed = SignedPayload::parse(&out.payload).expect("canonical parse");
+        let SignedPayload::UserStatus(s) = parsed else {
+            panic!("expected UserStatus variant");
+        };
+        assert_eq!(s.subject, subject);
+        assert_eq!(s.status, UserStatusKind::Suspended);
+        assert_eq!(s.suspended_until, suspended_until);
+        assert_eq!(s.signing_instance, signing_instance);
+        assert_eq!(s.reason.as_deref(), reason);
+        assert_eq!(s.created_at, created_at_ms);
+        assert_eq!(s.prior_status_hash, Some(prior));
+    }
+
+    #[test]
+    fn user_status_banned_omits_optionals() {
+        let instance_key = InstanceKey::new(fixed_key_a());
+        let out = sign_user_status_with_key(
+            &instance_key,
+            &[0u8; 32],
+            UserStatusKind::Banned,
+            None,
+            "x.invalid",
+            None,
+            0,
+            None,
+        );
+        let parsed = SignedPayload::parse(&out.payload).expect("canonical parse");
+        let SignedPayload::UserStatus(s) = parsed else {
+            panic!("expected UserStatus variant");
+        };
+        assert_eq!(s.status, UserStatusKind::Banned);
+        assert!(s.suspended_until.is_none());
+        assert!(s.reason.is_none());
+        assert!(s.prior_status_hash.is_none());
+    }
+
+    #[test]
+    fn thread_status_round_trips_under_instance_key() {
+        let signing = fixed_key_a();
+        let inst_pub = *signing.verifying_key().as_bytes();
+        let instance_key = InstanceKey::new(signing);
+
+        let thread_uuid = Uuid::from_u128(0x1111_2222_3333_4444_5555_6666_7777_8888);
+        let signing_instance = "home.example.invalid";
+        let created_at_ms: u64 = 1_700_000_004_000;
+        let reason = Some("locked for review");
+        let prior = [0x77; 32];
+
+        let out = sign_thread_status_with_key(
+            &instance_key,
+            thread_uuid.as_bytes(),
+            ThreadStatusKind::Locked,
+            signing_instance,
+            reason,
+            created_at_ms,
+            Some(&prior),
+        );
+
+        assert_eq!(out.public_key, inst_pub);
+        verify_sig(&out.public_key, &out.payload, &out.signature);
+
+        let parsed = SignedPayload::parse(&out.payload).expect("canonical parse");
+        let SignedPayload::ThreadStatus(s) = parsed else {
+            panic!("expected ThreadStatus variant");
+        };
+        assert_eq!(s.thread_id, *thread_uuid.as_bytes());
+        assert_eq!(s.status, ThreadStatusKind::Locked);
+        assert_eq!(s.signing_instance, signing_instance);
+        assert_eq!(s.reason.as_deref(), reason);
+        assert_eq!(s.created_at, created_at_ms);
+        assert_eq!(s.prior_status_hash, Some(prior));
+    }
+
+    #[test]
+    fn report_round_trips_and_binds_reporter_pubkey() {
+        let key = fixed_key_a();
+        let post_uuid = Uuid::from_u128(0x9999_aaaa_bbbb_cccc_dddd_eeee_ffff_0000);
+        let target_author = *fixed_key_b().verifying_key().as_bytes();
+        let created_at_ms: u64 = 1_700_000_005_000;
+        let detail = Some("see linked screenshot");
+
+        let out = sign_report_with_key(
+            &key,
+            post_uuid.as_bytes(),
+            &target_author,
+            ReportReason::RulesViolation,
+            detail,
+            created_at_ms,
+        );
+
+        // User-signed: `reporter` MUST be the signer's verifying key —
+        // the §18.1 receiver verifies the signature against it.
+        assert_eq!(out.public_key, *key.verifying_key().as_bytes());
+        verify_sig(&out.public_key, &out.payload, &out.signature);
+
+        let parsed = SignedPayload::parse(&out.payload).expect("canonical parse");
+        let SignedPayload::Report(r) = parsed else {
+            panic!("expected Report variant");
+        };
+        assert_eq!(r.post_id, *post_uuid.as_bytes());
+        assert_eq!(r.target_author, target_author);
+        assert_eq!(r.reporter, *key.verifying_key().as_bytes());
+        assert_eq!(r.reason, ReportReason::RulesViolation);
+        assert_eq!(r.detail.as_deref(), detail);
+        assert_eq!(r.created_at, created_at_ms);
     }
 }

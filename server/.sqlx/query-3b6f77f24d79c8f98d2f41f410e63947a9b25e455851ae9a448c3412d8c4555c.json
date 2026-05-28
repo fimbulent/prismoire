@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 1 AS \"present!: i64\" FROM signed_objects WHERE canonical_hash = ? AND inner_class = 'thread-status' AND payload IS NOT NULL LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "present!: i64",
+        "ordinal": 0,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "3b6f77f24d79c8f98d2f41f410e63947a9b25e455851ae9a448c3412d8c4555c"
+}

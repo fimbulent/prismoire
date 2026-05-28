@@ -72,6 +72,47 @@
 //! The row itself stays for FK integrity — rooms, threads, posts, reports,
 //! and admin_log all reference `users.id`. The `deleted_at` tombstone is
 //! what gates UI rendering ("[deleted]") and login attempts downstream.
+//!
+//! # Inbound federated moderation evidence is deliberately excluded
+//!
+//! Three tables can name a *local* user as the subject of moderation
+//! evidence that *another instance* authored and pushed to us:
+//!
+//! - `federated_reports.target_author` — a remote reporter's §18 report
+//!   against a post one of our users wrote.
+//! - `user_statuses.subject` — a remote home instance's §16 ban/suspend
+//!   of a user (only meaningful for users whose home is elsewhere, but
+//!   the column shape admits a local subject).
+//! - `admin_rm_reports` — the pre-existing local precedent: reports
+//!   filed *against* a user, as opposed to `reports` filed *by* them.
+//!
+//! None of these are emitted by `GET /api/me/export` or touched by
+//! `DELETE /api/me`, and that omission is intentional, not an oversight
+//! of the "keep `privacy.rs` in sync with the schema" rule:
+//!
+//! - **It is not the subject's personal data to access or erase.** A
+//!   report or status is a *signed assertion authored by another party*
+//!   (a remote reporter, a remote home instance) about the subject. The
+//!   author's right to make and retain that assertion — and the
+//!   recipient instance's legitimate interest in moderation and abuse
+//!   prevention (GDPR Art. 6(1)(f), Art. 17(3)) — outweighs the
+//!   subject's erasure interest in evidence held *against* them. Letting
+//!   a banned user erase the federated ban that targets them would
+//!   defeat the moderation surface entirely.
+//! - **We are not its controller in the relevant sense.** The canonical
+//!   record lives at the authoring instance; our copy is received
+//!   moderation state. An erasure request belongs at the home/authoring
+//!   instance, which is the §16/§18 source of truth.
+//! - **Consistency with the existing precedent.** `admin_rm_reports`
+//!   has never been exported or erased for exactly this reason; the
+//!   Phase-11 federated tables follow the same line so the local and
+//!   federated moderation surfaces are treated identically.
+//!
+//! Note the asymmetry with `reports` *filed by* the user, which **are**
+//! exported (they are the user's own authored assertions) — see the
+//! `reports_filed: Vec<ReportExport>` field below. The distinction is
+//! authorship: you can access/erase what you asserted, not what was
+//! asserted about you.
 
 use std::sync::Arc;
 

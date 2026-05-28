@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO user_statuses (subject, status, suspended_until, signing_instance, reason, current_created_at, current_status_hash) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(subject) DO UPDATE SET status = excluded.status, suspended_until = excluded.suspended_until, signing_instance = excluded.signing_instance, reason = excluded.reason, current_created_at = excluded.current_created_at, current_status_hash = excluded.current_status_hash, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "19a73d715a4b1bb762297eecaa491a8e23ae2dfeebe5135156ce44de4ac3d9dc"
+}

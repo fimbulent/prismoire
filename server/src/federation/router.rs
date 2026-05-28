@@ -40,7 +40,8 @@ use axum::routing::{delete, get, post};
 use crate::AppState;
 use crate::federation::middleware::{verify_bootstrap, verify_known_peer};
 use crate::federation::{
-    admin_rm, attachments, backfill, content, edges, frontier, identity, moves, peering, prior_home,
+    admin_rm, attachments, backfill, content, edges, frontier, identity, moves, peering,
+    prior_home, reports, thread_status, user_status,
 };
 
 /// Build the `/federation/v1/*` subrouter.
@@ -186,6 +187,34 @@ pub fn federation_router(state: Arc<AppState>) -> Router {
             "/federation/v1/prior-home/inbound-edges-by-key",
             post(prior_home::handle_inbound_edges_by_key),
         )
+        // §16.1 user-status push + §16.3 chain backfill (Phase 11).
+        // Instance-signed moderation evidence about a subject user;
+        // direct issuer → peer only (no gossip). Per-object results
+        // follow `{ canonical_hash, status, reason? }`.
+        .route(
+            "/federation/v1/user-status",
+            post(user_status::handle_user_status_push),
+        )
+        .route(
+            "/federation/v1/user-status/by-hash",
+            post(user_status::handle_user_status_by_hash),
+        )
+        // §17.1 thread-status push + §17.3 chain backfill (Phase 11).
+        // Instance-signed lock state by the thread's home; an applied
+        // lock mirrors into `threads.locked` (§17.4).
+        .route(
+            "/federation/v1/thread-status",
+            post(thread_status::handle_thread_status_push),
+        )
+        .route(
+            "/federation/v1/thread-status/by-hash",
+            post(thread_status::handle_thread_status_by_hash),
+        )
+        // §18.1 reports push (Phase 11). User-signed private channel
+        // from reporter's home to the target post's home; queued for
+        // operator review, never forwarded or exposed (§18.2/§18.3).
+        // No by-hash route — reports do not chain or backfill.
+        .route("/federation/v1/reports", post(reports::handle_reports_push))
         .layer(from_fn_with_state(state.clone(), verify_known_peer));
 
     // Unauthenticated route(s) live outside both middleware layers.

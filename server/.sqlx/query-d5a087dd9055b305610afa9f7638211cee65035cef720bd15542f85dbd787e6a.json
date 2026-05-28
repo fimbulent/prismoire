@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO thread_statuses (thread_id, status, signing_instance, reason, current_created_at, current_status_hash) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(thread_id) DO UPDATE SET status = excluded.status, signing_instance = excluded.signing_instance, reason = excluded.reason, current_created_at = excluded.current_created_at, current_status_hash = excluded.current_status_hash, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "d5a087dd9055b305610afa9f7638211cee65035cef720bd15542f85dbd787e6a"
+}

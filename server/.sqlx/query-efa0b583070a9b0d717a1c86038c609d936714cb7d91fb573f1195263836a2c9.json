@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT current_created_at AS \"current_created_at!: i64\", current_status_hash AS \"current_status_hash!: Vec<u8>\" FROM thread_statuses WHERE thread_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "current_created_at!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "current_status_hash!: Vec<u8>",
+        "ordinal": 1,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "efa0b583070a9b0d717a1c86038c609d936714cb7d91fb573f1195263836a2c9"
+}

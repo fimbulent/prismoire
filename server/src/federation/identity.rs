@@ -59,6 +59,7 @@ pub const CAPABILITIES: &[&str] = &[
     "user-status",
     "thread-status",
     "attachment-fetch",
+    "reports",
 ];
 
 /// Typed view of the identity card. Constructed from `AppState` at

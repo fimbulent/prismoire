@@ -876,3 +876,131 @@ CREATE INDEX idx_pending_trust_edges_prior
     ON pending_trust_edges(prior_edge_hash);
 CREATE INDEX idx_pending_trust_edges_received_at
     ON pending_trust_edges(received_at);
+CREATE TABLE user_statuses (
+    -- Ed25519 public key of the subject user (raw 32 bytes). Matches
+    -- the `subject` field of §5.10 `user-status` payloads and the
+    -- `users.public_key` column for local users.
+    subject BLOB PRIMARY KEY NOT NULL
+            CHECK (length(subject) = 32),
+
+    -- Resolved current status kind. CHECK mirrors `UserStatusKind`.
+    status TEXT NOT NULL
+            CHECK (status IN ('active', 'suspended', 'banned')),
+
+    -- Unix milliseconds UTC. Present iff `status = 'suspended'` AND
+    -- the suspension has a fixed end time; NULL otherwise. Copied
+    -- verbatim from the winning object's `suspended_until` field.
+    suspended_until INTEGER,
+
+    -- Bare canonical domain of the issuing instance (the subject's
+    -- home at the object's `created_at`). Copied verbatim from the
+    -- winning object's `signing_instance`.
+    signing_instance TEXT NOT NULL
+            CHECK (length(signing_instance) > 0),
+
+    -- Optional human-readable reason, copied verbatim from the
+    -- winning object. NULL when the issuer omitted it.
+    reason TEXT,
+
+    -- Wire timestamp of the winning object (Unix milliseconds UTC),
+    -- copied verbatim. The §16.3 latest-wins comparison reads this
+    -- column directly; receivers MUST NOT re-derive it from a local
+    -- clock.
+    current_created_at INTEGER NOT NULL,
+
+    -- SHA-256 (32 bytes) of the winning object's canonical payload
+    -- bytes. Joins back to `signed_objects.canonical_hash`.
+    current_status_hash BLOB NOT NULL
+            CHECK (length(current_status_hash) = 32),
+
+    -- ISO-8601 timestamp of the most recent UPSERT against this row.
+    -- Operator-visible only — distinct from `current_created_at`
+    -- (signer's wall clock).
+    updated_at TEXT NOT NULL
+            DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE TABLE thread_statuses (
+    -- Target thread UUID (raw 16 bytes). Matches the `thread_id`
+    -- field of §5.12 `thread-status` payloads.
+    thread_id BLOB PRIMARY KEY NOT NULL
+            CHECK (length(thread_id) = 16),
+
+    -- Resolved current lock state. CHECK mirrors `ThreadStatusKind`.
+    status TEXT NOT NULL
+            CHECK (status IN ('open', 'locked')),
+
+    -- Bare canonical domain of the thread's home instance (the
+    -- issuer). Copied verbatim from the winning object's
+    -- `signing_instance`.
+    signing_instance TEXT NOT NULL
+            CHECK (length(signing_instance) > 0),
+
+    -- Optional human-readable reason, copied verbatim. NULL when the
+    -- issuer omitted it.
+    reason TEXT,
+
+    -- Wire timestamp of the winning object (Unix milliseconds UTC),
+    -- copied verbatim. The §17.3 latest-wins comparison reads this
+    -- column directly.
+    current_created_at INTEGER NOT NULL,
+
+    -- SHA-256 (32 bytes) of the winning object's canonical payload
+    -- bytes. Joins back to `signed_objects.canonical_hash`.
+    current_status_hash BLOB NOT NULL
+            CHECK (length(current_status_hash) = 32),
+
+    -- ISO-8601 timestamp of the most recent UPSERT against this row.
+    updated_at TEXT NOT NULL
+            DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE TABLE federated_reports (
+    -- Stable row identity for log references and a future "dismiss
+    -- this report" admin action. Text UUID matches the convention
+    -- used by `admin_log.id` and `admin_rm_reports.id`.
+    id TEXT PRIMARY KEY NOT NULL,
+
+    -- Target post UUID (raw 16 bytes), from the signed report payload.
+    post_id BLOB NOT NULL
+            CHECK (length(post_id) = 16),
+
+    -- Ed25519 pubkey of the target post's author (raw 32 bytes). By
+    -- construction the local instance is this user's current home —
+    -- the §18.1 handler rejects `wrong_recipient` before inserting.
+    target_author BLOB NOT NULL
+            CHECK (length(target_author) = 32),
+
+    -- Ed25519 pubkey of the reporter (raw 32 bytes; the report
+    -- signer). Identified per §18.3 for sybil/spam defense. Part of
+    -- the §18.1 `(post_id, reporter)` dedup key.
+    reporter BLOB NOT NULL
+            CHECK (length(reporter) = 32),
+
+    -- Bounded reason enum, copied verbatim from the report payload.
+    -- CHECK mirrors `ReportReason`.
+    reason TEXT NOT NULL
+            CHECK (reason IN ('spam', 'rules_violation', 'illegal_content', 'other')),
+
+    -- Optional reporter-supplied free-form detail. Length-bounded at
+    -- sign time by `MAX_REPORT_DETAIL_LEN`; treated as untrusted input
+    -- on the admin UI per §18.3. NULL when omitted.
+    detail TEXT,
+
+    -- SHA-256 (32 bytes) of the report's canonical payload bytes. The
+    -- bytes themselves are not retained (no backfill); the hash lets
+    -- an operator join an action back to the originating signature if
+    -- the reporter's home re-supplies it.
+    canonical_hash BLOB NOT NULL
+            CHECK (length(canonical_hash) = 32),
+
+    -- Report time, Unix milliseconds UTC, copied verbatim from the
+    -- payload.
+    created_at INTEGER NOT NULL,
+
+    -- ISO-8601 timestamp of the row write. Drives admin queue display
+    -- order ("oldest pending first").
+    received_at TEXT NOT NULL
+            DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+
+    -- §18.1 idempotency: one stored report per (post_id, reporter).
+    UNIQUE (post_id, reporter)
+);

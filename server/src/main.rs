@@ -211,6 +211,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         prior_home_challenge_rate_limiter: Arc::new(
             prismoire_server::federation::prior_home_challenge_rate_limit::PriorHomeChallengeRateLimiter::default(),
         ),
+        user_status_rate_limiter: Arc::new(
+            prismoire_server::federation::push_rate_limit::PushRateLimiter::for_user_status(),
+        ),
+        thread_status_rate_limiter: Arc::new(
+            prismoire_server::federation::push_rate_limit::PushRateLimiter::for_thread_status(),
+        ),
+        reports_rate_limiter: Arc::new(
+            prismoire_server::federation::push_rate_limit::PushRateLimiter::for_reports(),
+        ),
     });
 
     // Spawn the debounced trust graph rebuild background task.
@@ -270,6 +279,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "prior_home_challenge",
         ),
     );
+    tokio::spawn(prismoire_server::federation::push_rate_limit::cleanup_loop(
+        shared_state.user_status_rate_limiter.clone(),
+        "user_status",
+    ));
+    tokio::spawn(prismoire_server::federation::push_rate_limit::cleanup_loop(
+        shared_state.thread_status_rate_limiter.clone(),
+        "thread_status",
+    ));
+    tokio::spawn(prismoire_server::federation::push_rate_limit::cleanup_loop(
+        shared_state.reports_rate_limiter.clone(),
+        "reports",
+    ));
 
     // Spawn the attachment staging-expiry + orphan-blob GC + §11.5
     // receiver-local cache-eviction sweep. Cadence is the server-static

@@ -16,6 +16,7 @@ use crate::federation::instance_key::InstanceKey;
 use crate::federation::outbound_queue::OutboundQueues;
 use crate::federation::prior_home_challenge_rate_limit::PriorHomeChallengeRateLimiter;
 use crate::federation::prior_home_rate_limit::PriorHomeRateLimiter;
+use crate::federation::push_rate_limit::PushRateLimiter;
 use crate::federation::transport::FederationTransport;
 use crate::instance_config::AttachmentBudget;
 use crate::metrics::Metrics;
@@ -161,6 +162,22 @@ pub struct AppState {
     /// budget at the redeem-time serve endpoints. Overflow returns
     /// `429` with `Retry-After: 60`. In-memory only; resets on restart.
     pub prior_home_challenge_rate_limiter: Arc<PriorHomeChallengeRateLimiter>,
+    /// §16.5 per-peer per-minute request budget gating
+    /// `POST /federation/v1/user-status` (`USER_STATUS_RPM_PER_PEER`).
+    /// Overflow returns `429` with `Retry-After: 60`. In-memory only;
+    /// resets on restart.
+    pub user_status_rate_limiter: Arc<PushRateLimiter>,
+    /// §17.5 per-peer per-minute request budget gating
+    /// `POST /federation/v1/thread-status` (`THREAD_STATUS_RPM_PER_PEER`).
+    /// Overflow returns `429` with `Retry-After: 60`. In-memory only;
+    /// resets on restart.
+    pub thread_status_rate_limiter: Arc<PushRateLimiter>,
+    /// §18.5 per-peer per-minute request budget gating
+    /// `POST /federation/v1/reports` (`REPORTS_RPM_PER_PEER`). Tighter
+    /// ceiling than the status routes because the sender can vary
+    /// `post_id` to flood the moderation queue. Overflow returns `429`
+    /// with `Retry-After: 60`. In-memory only; resets on restart.
+    pub reports_rate_limiter: Arc<PushRateLimiter>,
 }
 
 impl AppState {
