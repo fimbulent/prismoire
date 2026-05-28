@@ -297,6 +297,9 @@ pub async fn test_app_with_pool_transport_domain_and_outbound_config(
         backfill_rate_limiter: Arc::new(
             prismoire_server::federation::backfill_rate_limit::BackfillRateLimiter::default(),
         ),
+        prior_home_rate_limiter: Arc::new(
+            prismoire_server::federation::prior_home_rate_limit::PriorHomeRateLimiter::default(),
+        ),
     });
 
     let layers = rate_limit::build_layers(&test_rate_limit_config(), false);

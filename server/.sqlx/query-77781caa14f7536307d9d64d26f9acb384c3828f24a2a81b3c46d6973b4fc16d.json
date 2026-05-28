@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT created_at AS \"created_at!: String\" FROM users WHERE public_key = ? AND signup_method != 'federated' AND home_instance IS NULL AND deleted_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "created_at!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "77781caa14f7536307d9d64d26f9acb384c3828f24a2a81b3c46d6973b4fc16d"
+}

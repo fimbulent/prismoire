@@ -205,6 +205,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         backfill_rate_limiter: Arc::new(
             prismoire_server::federation::backfill_rate_limit::BackfillRateLimiter::default(),
         ),
+        prior_home_rate_limiter: Arc::new(
+            prismoire_server::federation::prior_home_rate_limit::PriorHomeRateLimiter::default(),
+        ),
     });
 
     // Spawn the debounced trust graph rebuild background task.
@@ -250,6 +253,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         prismoire_server::federation::backfill_rate_limit::cleanup_loop(
             shared_state.backfill_rate_limiter.clone(),
             "backfill",
+        ),
+    );
+    tokio::spawn(
+        prismoire_server::federation::prior_home_rate_limit::cleanup_loop(
+            shared_state.prior_home_rate_limiter.clone(),
+            "prior_home",
         ),
     );
 

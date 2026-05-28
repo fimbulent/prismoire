@@ -40,7 +40,7 @@ use axum::routing::{delete, get, post};
 use crate::AppState;
 use crate::federation::middleware::{verify_bootstrap, verify_known_peer};
 use crate::federation::{
-    admin_rm, attachments, backfill, content, edges, frontier, identity, moves, peering,
+    admin_rm, attachments, backfill, content, edges, frontier, identity, moves, peering, prior_home,
 };
 
 /// Build the `/federation/v1/*` subrouter.
@@ -153,6 +153,23 @@ pub fn federation_router(state: Arc<AppState>) -> Router {
         .route(
             "/federation/v1/attachments/{hash}",
             get(attachments::handle_attachment_fetch),
+        )
+        // §14 prior-home discovery (Phase 10). Two-step
+        // challenge/response auth layered *over* the KnownPeer
+        // envelope: an active peer envelope signs every request, and
+        // the body carries a signed challenge (this instance's key)
+        // paired with a signed response (the captured key K). The
+        // challenge endpoint mints a fresh 60s ticket; the probe
+        // endpoint answers whether K has live local activity here.
+        // The shared §14.3 per-subject-key per-day budget gates the
+        // probe + future content-by-key + inbound-edges-by-key serves.
+        .route(
+            "/federation/v1/prior-home/challenge",
+            post(prior_home::handle_challenge),
+        )
+        .route(
+            "/federation/v1/prior-home/probe",
+            post(prior_home::handle_probe),
         )
         .layer(from_fn_with_state(state.clone(), verify_known_peer));
 

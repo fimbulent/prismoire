@@ -14,6 +14,7 @@ use crate::federation::forwarder::ForwardingLru;
 use crate::federation::frontier::LocalFrontier;
 use crate::federation::instance_key::InstanceKey;
 use crate::federation::outbound_queue::OutboundQueues;
+use crate::federation::prior_home_rate_limit::PriorHomeRateLimiter;
 use crate::federation::transport::FederationTransport;
 use crate::instance_config::AttachmentBudget;
 use crate::metrics::Metrics;
@@ -142,6 +143,15 @@ pub struct AppState {
     /// `/backfill/edges-by-key`). Overflow returns `429` with
     /// `Retry-After: 60`. In-memory only; resets on restart.
     pub backfill_rate_limiter: Arc<BackfillRateLimiter>,
+    /// §14.3 receiver-side per-subject-key per-day budget gating the
+    /// three §14 prior-home routes (`/prior-home/probe`,
+    /// `/prior-home/content-by-key`, `/prior-home/inbound-edges-by-key`).
+    /// Shared counter across all three because the threat model is
+    /// captured-key enumeration — splitting the budget would let an
+    /// attacker alternate endpoints to near-double per-key request
+    /// volume. Overflow returns `429` with `Retry-After: 86400`. In-
+    /// memory only; resets on restart.
+    pub prior_home_rate_limiter: Arc<PriorHomeRateLimiter>,
 }
 
 impl AppState {
