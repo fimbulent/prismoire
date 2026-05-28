@@ -513,7 +513,7 @@ fn ok_response(body: Vec<u8>) -> Response {
 // NULL` defensively so a corrupted local row does not crash the
 // handler.
 
-/// §12.6 `MAX_MOVE_BACKFILL_PAGE`: receiver-enforced cap on `limit`
+/// §12.7 `MAX_MOVE_BACKFILL_PAGE`: receiver-enforced cap on `limit`
 /// (default 100). Same shape as `MAX_EDGE_BACKFILL_PAGE`; per §12.5
 /// move chains for any one K are short, so single-page responses are
 /// the common case.

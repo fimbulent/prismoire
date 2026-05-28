@@ -10,7 +10,7 @@
 //! - The §12.4 latest-wins-by-timestamp resolution surfaces a stale
 //!   replay as `superseded` — chain row written, but `user_homes`
 //!   reflects the newer move.
-//! - The §12.6 `MAX_CLOCK_SKEW` gate rejects a future-dated move with
+//! - The §12.7 `MAX_CLOCK_SKEW` gate rejects a future-dated move with
 //!   `skew_exceeded` and does not persist it.
 //! - §12.1 chain-grounding returns `deferred` (no persist, no forward)
 //!   for a move whose `prior_move_hash` predecessor is absent locally.
@@ -345,7 +345,7 @@ async fn move_push_applies_and_projects_into_user_homes_and_user_moves() {
 }
 
 // ---------------------------------------------------------------------------
-// §12.6 MAX_CLOCK_SKEW gate
+// §12.7 MAX_CLOCK_SKEW gate
 // ---------------------------------------------------------------------------
 
 /// Done-when (2): a future-dated move outside `MAX_CLOCK_SKEW_MS` is

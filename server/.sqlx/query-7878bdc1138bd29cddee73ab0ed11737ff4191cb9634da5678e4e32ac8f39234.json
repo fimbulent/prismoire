@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE users SET signup_method = 'federated' WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "7878bdc1138bd29cddee73ab0ed11737ff4191cb9634da5678e4e32ac8f39234"
+}

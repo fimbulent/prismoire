@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT private_key AS \"private_key!: Vec<u8>\" FROM signing_keys WHERE user_id = ? AND active = 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "private_key!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c9442fc4451bb8766416ca0c0d464e57ea9557d688f5626961a26ddd1cb21e8a"
+}

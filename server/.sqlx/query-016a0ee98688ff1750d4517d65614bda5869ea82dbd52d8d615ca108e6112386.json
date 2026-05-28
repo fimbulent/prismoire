@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT public_key AS \"public_key!: Vec<u8>\" FROM users WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "public_key!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "016a0ee98688ff1750d4517d65614bda5869ea82dbd52d8d615ca108e6112386"
+}

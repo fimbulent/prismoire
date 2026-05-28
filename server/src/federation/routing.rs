@@ -98,7 +98,7 @@ impl Mode {
 /// runtime `instance_config` value if operators need to override it.
 pub const REDUNDANCY_K: usize = 2;
 
-/// §12.2 / §12.6 forwarding fanout cap for move declarations. Replaces
+/// §12.2 / §12.7 forwarding fanout cap for move declarations. Replaces
 /// the ordinary [`REDUNDANCY_K`] when the object being forwarded is a
 /// §5.1 `move` — the unconditional-flood property of §12 widens the
 /// per-object fanout from the ordinary 2 to 5 distinct downstream
@@ -199,7 +199,7 @@ impl ForwardingClass {
 
     /// Per-class §7.5 fanout cap. Ordinary classes use
     /// [`REDUNDANCY_K`] (= 2); moves use [`REDUNDANCY_K_MOVE`] (= 5)
-    /// per §12.2 / §12.6.
+    /// per §12.2 / §12.7.
     pub fn redundancy_cap(self) -> usize {
         match self {
             ForwardingClass::Move => REDUNDANCY_K_MOVE,

@@ -81,11 +81,11 @@ use crate::signing::store_signed_object;
 /// proportionally.
 pub const MAX_MOVE_OBJECTS_PER_HOUR: u32 = 1_000;
 
-/// §12.6 `MAX_MOVE_BATCH`: receiver-enforced object-count cap.
+/// §12.7 `MAX_MOVE_BATCH`: receiver-enforced object-count cap.
 /// Overflow returns `400 { "error": "batch_too_large" }`.
 pub const MAX_MOVE_BATCH: usize = 64;
 
-/// §12.6 `MAX_CLOCK_SKEW`: tolerance for `move.created_at` vs.
+/// §12.7 `MAX_CLOCK_SKEW`: tolerance for `move.created_at` vs.
 /// receiver wall clock. Bounds the forge-replay window on a
 /// compromised key.
 pub const MAX_CLOCK_SKEW_MS: u64 = 300_000;
@@ -430,7 +430,7 @@ async fn apply_one_move(
         });
     }
 
-    // Step 5: §12.6 `MAX_CLOCK_SKEW` check. `now_ms` is captured once
+    // Step 5: §12.7 `MAX_CLOCK_SKEW` check. `now_ms` is captured once
     // per batch in the handler so a long batch can't drift across
     // entries; `|now - move.created_at| > MAX_CLOCK_SKEW` is terminal
     // (`skew_exceeded`; senders MUST NOT retry).
@@ -605,6 +605,26 @@ async fn apply_one_move(
         MoveStatus::Superseded
     };
 
+    // §12.6 source-instance key disposal. A move whose
+    // `from_instance_key == self` is the user's own signed attestation
+    // that we are no longer their home. Destroy any local
+    // private-signing-key material and revoke active sessions inside
+    // the same transaction as the home update so a crash mid-apply
+    // commits both or neither — there is no half-state where the user
+    // has been re-homed but the private key still lingers.
+    //
+    // Trigger applies on both `Applied` and `Superseded`: a
+    // `Superseded` outbound-from-self move still proves the user
+    // intended to leave us (the §12.4 winner just happens to determine
+    // *where* they ended up). The receiver-side authority disposal is
+    // independent of which branch wins on the wire.
+    let local_key: &[u8] = state.instance_key.public_bytes().as_slice();
+    let outbound_from_self =
+        mv.from_instance_key.as_slice() == local_key && mv.to_instance_key.as_slice() != local_key;
+    if outbound_from_self && matches!(status, MoveStatus::Applied | MoveStatus::Superseded) {
+        dispose_local_user_authority(&mut tx, &mv.key).await?;
+    }
+
     tx.commit().await?;
 
     // Step 8: §12.2 unconditional flood. Both `applied` and
@@ -626,6 +646,101 @@ async fn apply_one_move(
         canonical_hash,
         status,
     })
+}
+
+/// §12.6 source-instance key disposal. Called when a move with
+/// `from_instance_key == self` and `to_instance_key != self` is
+/// applied or superseded — the user has signed that we are no longer
+/// their home, so any local authority we retain to act as them is
+/// stale.
+///
+/// Scope:
+/// - **MUST** delete `signing_keys` row(s) for `K` (the protocol
+///   requirement: the private seed we held would otherwise let us
+///   mint a fresh "move back to me" with a later timestamp and
+///   re-claim the user under §12.4 latest-wins).
+/// - **MUST** delete `sessions` rows so any still-open browser tab
+///   on this instance loses its login.
+/// - **SHOULD** delete `credentials` rows so passkey login is no
+///   longer possible. The credential identifier is not secret
+///   material (it's a public WebAuthn handle), but its continued
+///   presence has no protocol meaning after the move.
+/// - **SHOULD** flip `users.signup_method` to `federated` so the
+///   row's classification matches how it would appear had it been
+///   hydrated as a stub rather than locally registered. The display
+///   name, public key, and authored content remain — the row is
+///   downgraded, not erased.
+///
+/// Authored content (post revisions, trust-edges, profile revisions)
+/// is **retained** per §10.5.3. Moves do not erase.
+///
+/// Idempotent: a no-op when no local `users` row matches `K`, when
+/// the row is already `signup_method = 'federated'`, or when a prior
+/// disposal already cleared the auth rows.
+async fn dispose_local_user_authority(
+    tx: &mut sqlx::SqliteConnection,
+    user_key: &[u8; 32],
+) -> Result<(), sqlx::Error> {
+    let key_slice: &[u8] = user_key.as_slice();
+
+    // Locate the local user row. A federated stub (signup_method =
+    // 'federated') has no local authority to dispose — it was never
+    // ours; the row is just a projection of the remote identity. A
+    // missing row means the move arrived before any local registration
+    // ever happened; also a no-op.
+    let row = sqlx::query!(
+        "SELECT id FROM users WHERE public_key = ? AND signup_method != 'federated'",
+        key_slice,
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let Some(row) = row else {
+        return Ok(());
+    };
+    let user_id = row.id;
+
+    // MUST: destroy private signing-key material. This is the
+    // load-bearing line for §12.6 — without it, a source instance
+    // retains the ability to forge a counter-move and re-home the
+    // user under §12.4 latest-wins.
+    sqlx::query!("DELETE FROM signing_keys WHERE user_id = ?", user_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // MUST: revoke active sessions. A user whose home moved should
+    // not continue to have logged-in tabs on the old home behaving
+    // as though nothing changed.
+    sqlx::query!("DELETE FROM sessions WHERE user_id = ?", user_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // SHOULD: drop credentials. Holds no secret material (only the
+    // public WebAuthn credential id + counter), but leaving them in
+    // place would let the user re-authenticate locally even though
+    // their authority has moved.
+    sqlx::query!("DELETE FROM credentials WHERE user_id = ?", user_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // SHOULD: flip classification. The row stays so authored content
+    // keeps resolving to a known identity, but its `signup_method`
+    // now matches how peers without prior local registration would
+    // represent the same identity.
+    sqlx::query!(
+        "UPDATE users SET signup_method = 'federated' WHERE id = ?",
+        user_id,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    tracing::info!(
+        user_id = %user_id,
+        user_key_prefix = ?&user_key[..4],
+        "§12.6 disposal: dropped local signing authority for moved-away user"
+    );
+
+    Ok(())
 }
 
 /// Best-effort routing-key extraction from already-stored canonical
@@ -785,7 +900,7 @@ mod tests {
 
     #[test]
     fn max_clock_skew_matches_spec() {
-        // Pin the §12.6 resolved default. Changes here go alongside
+        // Pin the §12.7 resolved default. Changes here go alongside
         // a protocol-spec amendment.
         assert_eq!(MAX_CLOCK_SKEW_MS, 300_000);
     }
