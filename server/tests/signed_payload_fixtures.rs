@@ -32,8 +32,8 @@ use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 
 use prismoire_server::signed::{
     self, AdminRemoval, Attestation, Deactivation, FedEnvelope, Move, ParseError, PostRevision,
-    ProfileRevision, RecoveryChallenge, RecoveryOperation, RecoveryResponse, RegistrationChallenge,
-    Report, ReportReason, Retraction, SignedPayload, ThreadCreate, ThreadStatus, ThreadStatusKind,
+    PriorHomeChallenge, PriorHomeResponse, ProfileRevision, RegistrationChallenge, Report,
+    ReportReason, Retraction, SignedPayload, ThreadCreate, ThreadStatus, ThreadStatusKind,
     TrustEdge, TrustStance, UserStatus, UserStatusKind,
 };
 
@@ -43,7 +43,7 @@ const KEY_ALICE_SEED: [u8; 32] = [0x11; 32];
 const KEY_BOB_SEED: [u8; 32] = [0x22; 32];
 const KEY_CAROL_SEED: [u8; 32] = [0x33; 32];
 // Pinned instance signing-key seeds. Used for instance-signed
-// classes (admin-rm, fed-envelope, attest, recovery-challenge,
+// classes (admin-rm, fed-envelope, attest, prior-home-challenge,
 // user-status, thread-status) so the (.key.pub, .key.sec) committed
 // alongside an instance-signed fixture is a stable, distinct key
 // not reused as a user identity.
@@ -285,7 +285,7 @@ fn positive_fixtures() -> Vec<PositiveFixture> {
         // --- Federation-era classes (docs/signed-payload-format.md §5) ---
         //
         // For instance-signed classes (admin-rm, fed-envelope, attest,
-        // recovery-challenge, user-status, thread-status) the committed
+        // prior-home-challenge, user-status, thread-status) the committed
         // key.pub/key.sec is the instance signing key. The identity-binding
         // check in `verify()` returns `None` for these so the caller is
         // responsible for resolving the claimed domain → key.
@@ -452,47 +452,30 @@ fn positive_fixtures() -> Vec<PositiveFixture> {
             },
         },
         PositiveFixture {
-            stem: "recovery-challenge/v1-content",
+            stem: "prior-home-challenge/v1",
             payload: || {
                 let key = signing_key(&KEY_INSTANCE_A_SEED);
                 let subject = signing_key(&KEY_BOB_SEED);
-                let c = RecoveryChallenge {
+                let c = PriorHomeChallenge {
                     responder_instance_key: *key.verifying_key().as_bytes(),
                     subject_key: *subject.verifying_key().as_bytes(),
-                    operation: RecoveryOperation::ContentByKey,
                     nonce: [0x88; 32],
                     created_at: 1_700_000_070_000,
                     expires_at: 1_700_000_070_300,
                 };
-                (SignedPayload::RecoveryChallenge(c), key)
+                (SignedPayload::PriorHomeChallenge(c), key)
             },
         },
         PositiveFixture {
-            stem: "recovery-challenge/v1-inbound-edges",
-            payload: || {
-                let key = signing_key(&KEY_INSTANCE_A_SEED);
-                let subject = signing_key(&KEY_BOB_SEED);
-                let c = RecoveryChallenge {
-                    responder_instance_key: *key.verifying_key().as_bytes(),
-                    subject_key: *subject.verifying_key().as_bytes(),
-                    operation: RecoveryOperation::InboundEdgesByKey,
-                    nonce: [0x99; 32],
-                    created_at: 1_700_000_071_000,
-                    expires_at: 1_700_000_071_300,
-                };
-                (SignedPayload::RecoveryChallenge(c), key)
-            },
-        },
-        PositiveFixture {
-            stem: "recovery-response/v1",
+            stem: "prior-home-response/v1",
             payload: || {
                 let key = signing_key(&KEY_BOB_SEED);
-                let r = RecoveryResponse {
+                let r = PriorHomeResponse {
                     subject_key: *key.verifying_key().as_bytes(),
                     challenge_hash: [0xc1; 32],
                     created_at: 1_700_000_072_000,
                 };
-                (SignedPayload::RecoveryResponse(r), key)
+                (SignedPayload::PriorHomeResponse(r), key)
             },
         },
         PositiveFixture {

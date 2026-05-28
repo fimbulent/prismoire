@@ -448,8 +448,8 @@ async fn apply_one_object(
         // Ephemeral classes have no business on a push route at all.
         SignedPayload::FedEnvelope(_)
         | SignedPayload::RegistrationChallenge(_)
-        | SignedPayload::RecoveryChallenge(_)
-        | SignedPayload::RecoveryResponse(_) => {
+        | SignedPayload::PriorHomeChallenge(_)
+        | SignedPayload::PriorHomeResponse(_) => {
             return Ok(ContentResult {
                 canonical_hash,
                 status: ContentStatus::Rejected(ContentRejectReason::UnknownClass),

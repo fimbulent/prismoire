@@ -63,9 +63,9 @@
 //! the user's browser directly; it's a local API, not a federation
 //! route."* We defer to the spec and mount under `/api/auth/...`. The
 //! module lives here because §13 wire-format (§5.5 challenge,
-//! §12 move publication, eventual §14 recovery probing for §13.3
-//! prior-home reconciliation) is conceptually federation mechanics,
-//! just exposed on the local surface.
+//! §12 move publication, eventual §14 prior-home probe for §13.3
+//! reconciliation) is conceptually federation mechanics, just exposed
+//! on the local surface.
 //!
 //! ## Optional §12 Move publication
 //!
@@ -82,16 +82,17 @@
 //! Ed25519 pubkey) into the canonical bytes; we can only look that
 //! up from our `peers` table, so move publication is silently skipped
 //! when the source domain isn't an active peer. §13.3 prior-home
-//! reconciliation (which would resolve the source pubkey via §14
-//! recovery probing) lands in Phase 9; until then, "user moved from
+//! reconciliation (which would resolve the source pubkey via the §14
+//! prior-home probe) lands in Phase 10; until then, "user moved from
 //! a non-peered source" is recorded only as the local users row with
 //! no associated Move chain.
 //!
 //! ## Out of Phase-7 scope (deferred)
 //!
-//! - **§13.3 prior-home reconciliation.** Depends on §14 recovery
-//!   endpoints (Phase 9). The current user-declared `move_from_domain`
-//!   is the pragmatic stand-in until §14 lets us probe peers.
+//! - **§13.3 prior-home reconciliation.** Depends on the §14
+//!   prior-home discovery probe (Phase 10). The current
+//!   user-declared `move_from_domain` is the pragmatic stand-in
+//!   until §14 lets us probe peers.
 //!
 //! ## Reject reason vocabulary (§13.2)
 //!

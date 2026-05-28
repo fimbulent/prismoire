@@ -73,12 +73,12 @@ pub const TAG_ATTESTATION: &str = "attest";
 /// User-signed, ephemeral. See `docs/signed-payload-format.md` §5.5
 /// and `docs/federation-protocol.md` §13.
 pub const TAG_REGISTRATION_CHALLENGE: &str = "registration-challenge";
-/// Recovery challenge (`t = "recovery-challenge"`). Instance-signed,
+/// Prior-home challenge (`t = "prior-home-challenge"`). Instance-signed,
 /// ephemeral. See `docs/signed-payload-format.md` §5.6.
-pub const TAG_RECOVERY_CHALLENGE: &str = "recovery-challenge";
-/// Recovery response (`t = "recovery-response"`). User-signed,
+pub const TAG_PRIOR_HOME_CHALLENGE: &str = "prior-home-challenge";
+/// Prior-home response (`t = "prior-home-response"`). User-signed,
 /// ephemeral. See `docs/signed-payload-format.md` §5.7.
-pub const TAG_RECOVERY_RESPONSE: &str = "recovery-response";
+pub const TAG_PRIOR_HOME_RESPONSE: &str = "prior-home-response";
 /// Thread creation (`t = "thread-create"`). User-signed.
 /// See `docs/signed-payload-format.md` §5.9.
 pub const TAG_THREAD_CREATE: &str = "thread-create";
@@ -328,8 +328,8 @@ pub enum SignedPayload {
     FedEnvelope(FedEnvelope),
     Attestation(Attestation),
     RegistrationChallenge(RegistrationChallenge),
-    RecoveryChallenge(RecoveryChallenge),
-    RecoveryResponse(RecoveryResponse),
+    PriorHomeChallenge(PriorHomeChallenge),
+    PriorHomeResponse(PriorHomeResponse),
     ThreadCreate(ThreadCreate),
     UserStatus(UserStatus),
     Deactivation(Deactivation),
@@ -579,49 +579,19 @@ pub struct RegistrationChallenge {
     pub created_at: u64,
 }
 
-/// Operation scope of a recovery challenge / response pair.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RecoveryOperation {
-    /// Recover content authored by the subject key.
-    ContentByKey,
-    /// Recover inbound trust edges to the subject key.
-    InboundEdgesByKey,
-}
-
-impl RecoveryOperation {
-    /// Canonical string form used in the CBOR payload.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::ContentByKey => "content-by-key",
-            Self::InboundEdgesByKey => "inbound-edges-by-key",
-        }
-    }
-
-    /// Parse the canonical string form. Returns `None` for any
-    /// other input.
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "content-by-key" => Some(Self::ContentByKey),
-            "inbound-edges-by-key" => Some(Self::InboundEdgesByKey),
-            _ => None,
-        }
-    }
-}
-
-/// Recovery challenge. Instance-signed, ephemeral.
+/// Prior-home challenge. Instance-signed, ephemeral.
 ///
 /// See `docs/signed-payload-format.md` §5.6 and
 /// `docs/federation-protocol.md` §14.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecoveryChallenge {
+pub struct PriorHomeChallenge {
     /// Issuing instance's signing pubkey (the signer). The
     /// challenge is bound to this instance — captures cannot
     /// redirect to a different peer.
     pub responder_instance_key: [u8; 32],
-    /// Ed25519 public key K whose recovery is being authenticated.
+    /// Ed25519 public key K whose prior-home probe is being
+    /// authenticated.
     pub subject_key: [u8; 32],
-    /// Scopes the response to a single recovery endpoint.
-    pub operation: RecoveryOperation,
     /// CSPRNG-generated, single-use 32-byte nonce.
     pub nonce: [u8; 32],
     /// Issuance time, Unix milliseconds, UTC.
@@ -630,11 +600,11 @@ pub struct RecoveryChallenge {
     pub expires_at: u64,
 }
 
-/// Recovery response. User-signed, ephemeral.
+/// Prior-home response. User-signed, ephemeral.
 ///
 /// See `docs/signed-payload-format.md` §5.7.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecoveryResponse {
+pub struct PriorHomeResponse {
     /// Ed25519 public key K (the signer). Must equal the
     /// `subject_key` of the referenced challenge.
     pub subject_key: [u8; 32],
@@ -897,9 +867,6 @@ pub enum ParseError {
     /// `status` text was not one of the spec-defined values for the
     /// containing class (`user-status` or `thread-status`).
     InvalidStatus(String),
-    /// `operation` text on a `recovery-challenge` was not one of the
-    /// spec-defined values.
-    InvalidOperation(String),
     /// `reason` text on a `report` was not one of the spec-defined
     /// values. (For free-text `reason` fields on `admin-rm` /
     /// `user-status` / `thread-status` this error is not produced.)
@@ -950,7 +917,6 @@ impl std::fmt::Display for ParseError {
                 write!(f, "attachment size {got} exceeds maximum {max}")
             }
             Self::InvalidStatus(s) => write!(f, "invalid status: {s}"),
-            Self::InvalidOperation(s) => write!(f, "invalid recovery operation: {s}"),
             Self::InvalidReportReason(s) => write!(f, "invalid report reason: {s}"),
             Self::IllegalSuspendedUntil => f.write_str(
                 "suspended_until present on user-status whose status is not 'suspended'",
@@ -1020,8 +986,8 @@ impl SignedPayload {
             Self::FedEnvelope(e) => fed_envelope_to_cbor(e),
             Self::Attestation(a) => attestation_to_cbor(a),
             Self::RegistrationChallenge(c) => registration_challenge_to_cbor(c),
-            Self::RecoveryChallenge(c) => recovery_challenge_to_cbor(c),
-            Self::RecoveryResponse(r) => recovery_response_to_cbor(r),
+            Self::PriorHomeChallenge(c) => prior_home_challenge_to_cbor(c),
+            Self::PriorHomeResponse(r) => prior_home_response_to_cbor(r),
             Self::ThreadCreate(t) => thread_create_to_cbor(t),
             Self::UserStatus(s) => user_status_to_cbor(s),
             Self::Deactivation(d) => deactivation_to_cbor(d),
@@ -1245,23 +1211,22 @@ fn registration_challenge_to_cbor(c: &RegistrationChallenge) -> Value {
     ])
 }
 
-fn recovery_challenge_to_cbor(c: &RecoveryChallenge) -> Value {
+fn prior_home_challenge_to_cbor(c: &PriorHomeChallenge) -> Value {
     build_map(vec![
         ("v", uint(V1)),
-        ("t", text(TAG_RECOVERY_CHALLENGE)),
+        ("t", text(TAG_PRIOR_HOME_CHALLENGE)),
         ("responder_instance_key", bytes(&c.responder_instance_key)),
         ("subject_key", bytes(&c.subject_key)),
-        ("operation", text(c.operation.as_str())),
         ("nonce", bytes(&c.nonce)),
         ("created_at", uint(c.created_at)),
         ("expires_at", uint(c.expires_at)),
     ])
 }
 
-fn recovery_response_to_cbor(r: &RecoveryResponse) -> Value {
+fn prior_home_response_to_cbor(r: &PriorHomeResponse) -> Value {
     build_map(vec![
         ("v", uint(V1)),
-        ("t", text(TAG_RECOVERY_RESPONSE)),
+        ("t", text(TAG_PRIOR_HOME_RESPONSE)),
         ("subject_key", bytes(&r.subject_key)),
         ("challenge_hash", bytes(&r.challenge_hash)),
         ("created_at", uint(r.created_at)),
@@ -1440,13 +1405,13 @@ impl SignedPayload {
                 require_version(TAG_REGISTRATION_CHALLENGE, version)?;
                 parse_registration_challenge(&fields).map(SignedPayload::RegistrationChallenge)
             }
-            TAG_RECOVERY_CHALLENGE => {
-                require_version(TAG_RECOVERY_CHALLENGE, version)?;
-                parse_recovery_challenge(&fields).map(SignedPayload::RecoveryChallenge)
+            TAG_PRIOR_HOME_CHALLENGE => {
+                require_version(TAG_PRIOR_HOME_CHALLENGE, version)?;
+                parse_prior_home_challenge(&fields).map(SignedPayload::PriorHomeChallenge)
             }
-            TAG_RECOVERY_RESPONSE => {
-                require_version(TAG_RECOVERY_RESPONSE, version)?;
-                parse_recovery_response(&fields).map(SignedPayload::RecoveryResponse)
+            TAG_PRIOR_HOME_RESPONSE => {
+                require_version(TAG_PRIOR_HOME_RESPONSE, version)?;
+                parse_prior_home_response(&fields).map(SignedPayload::PriorHomeResponse)
             }
             TAG_THREAD_CREATE => {
                 require_version(TAG_THREAD_CREATE, version)?;
@@ -1807,34 +1772,30 @@ fn parse_registration_challenge(
     })
 }
 
-fn parse_recovery_challenge(
+fn parse_prior_home_challenge(
     fields: &BTreeMap<String, Value>,
-) -> Result<RecoveryChallenge, ParseError> {
+) -> Result<PriorHomeChallenge, ParseError> {
     let responder_instance_key = field_bytes_fixed::<32>(fields, "responder_instance_key")?;
     let subject_key = field_bytes_fixed::<32>(fields, "subject_key")?;
-    let operation_str = field_text(fields, "operation")?;
-    let operation = RecoveryOperation::parse(&operation_str)
-        .ok_or(ParseError::InvalidOperation(operation_str))?;
     let nonce = field_bytes_fixed::<32>(fields, "nonce")?;
     let created_at = field_uint(fields, "created_at")?;
     let expires_at = field_uint(fields, "expires_at")?;
-    Ok(RecoveryChallenge {
+    Ok(PriorHomeChallenge {
         responder_instance_key,
         subject_key,
-        operation,
         nonce,
         created_at,
         expires_at,
     })
 }
 
-fn parse_recovery_response(
+fn parse_prior_home_response(
     fields: &BTreeMap<String, Value>,
-) -> Result<RecoveryResponse, ParseError> {
+) -> Result<PriorHomeResponse, ParseError> {
     let subject_key = field_bytes_fixed::<32>(fields, "subject_key")?;
     let challenge_hash = field_bytes_fixed::<32>(fields, "challenge_hash")?;
     let created_at = field_uint(fields, "created_at")?;
-    Ok(RecoveryResponse {
+    Ok(PriorHomeResponse {
         subject_key,
         challenge_hash,
         created_at,
@@ -2033,11 +1994,11 @@ fn identity_binding(payload: &SignedPayload) -> Option<&[u8; 32]> {
         SignedPayload::ThreadCreate(t) => Some(&t.author),
         SignedPayload::Report(r) => Some(&r.reporter),
         SignedPayload::RegistrationChallenge(c) => Some(&c.user_key),
-        SignedPayload::RecoveryResponse(r) => Some(&r.subject_key),
+        SignedPayload::PriorHomeResponse(r) => Some(&r.subject_key),
         // Instance-signed with the signing key as a payload field
         // (rather than only a domain name): bind to the key.
         SignedPayload::FedEnvelope(e) => Some(&e.sender),
-        SignedPayload::RecoveryChallenge(c) => Some(&c.responder_instance_key),
+        SignedPayload::PriorHomeChallenge(c) => Some(&c.responder_instance_key),
         // Instance-signed by domain: no inner-field binding. The
         // caller resolves `signing_instance` / `issuer` → key via the
         // peers table and passes the resolved key as `claimed_key`.
@@ -2120,12 +2081,12 @@ mod tests {
         "user_key",
         "dest_instance_key",
         "dest_domain",
-        // recovery-challenge fields (`nonce`/`subject_key`/`expires_at`
+        // prior-home-challenge fields (`nonce`/`subject_key`/`expires_at`
         // overlap).
         "responder_instance_key",
         "subject_key",
         "operation",
-        // recovery-response fields (`subject_key`/`created_at` overlap).
+        // prior-home-response fields (`subject_key`/`created_at` overlap).
         "challenge_hash",
         // thread-create fields (`thread_id`/`author`/`created_at` overlap).
         "room_slug",
@@ -3089,11 +3050,10 @@ mod tests {
         assert_eq!(decoded, SignedPayload::RegistrationChallenge(c));
     }
 
-    fn sample_recovery_challenge() -> RecoveryChallenge {
-        RecoveryChallenge {
+    fn sample_prior_home_challenge() -> PriorHomeChallenge {
+        PriorHomeChallenge {
             responder_instance_key: [0xf0; 32],
             subject_key: [0xf1; 32],
-            operation: RecoveryOperation::ContentByKey,
             nonce: [0xf2; 32],
             created_at: 1_700_000_700_000,
             expires_at: 1_700_000_760_000,
@@ -3101,41 +3061,15 @@ mod tests {
     }
 
     #[test]
-    fn recovery_challenge_round_trip_both_operations() {
-        for op in [
-            RecoveryOperation::ContentByKey,
-            RecoveryOperation::InboundEdgesByKey,
-        ] {
-            let mut c = sample_recovery_challenge();
-            c.operation = op;
-            let bytes = SignedPayload::RecoveryChallenge(c.clone()).encode();
-            let decoded = SignedPayload::parse(&bytes).unwrap();
-            assert_eq!(decoded, SignedPayload::RecoveryChallenge(c));
-        }
+    fn prior_home_challenge_round_trip() {
+        let c = sample_prior_home_challenge();
+        let bytes = SignedPayload::PriorHomeChallenge(c.clone()).encode();
+        let decoded = SignedPayload::parse(&bytes).unwrap();
+        assert_eq!(decoded, SignedPayload::PriorHomeChallenge(c));
     }
 
-    #[test]
-    fn recovery_challenge_rejects_unknown_operation() {
-        // Build a valid challenge, swap the operation string for an
-        // unknown one (matching byte length to leave the rest of the
-        // canonical form intact).
-        let c = sample_recovery_challenge();
-        let bytes_ok = SignedPayload::RecoveryChallenge(c).encode();
-        // "content-by-key" is 14 chars; replace with another 14-char
-        // string so the surrounding CBOR length prefix stays correct.
-        let mut bytes = bytes_ok.clone();
-        let needle = b"content-by-key";
-        let pos = bytes
-            .windows(needle.len())
-            .position(|w| w == needle)
-            .expect("operation value");
-        bytes[pos..pos + needle.len()].copy_from_slice(b"bogus-operatio");
-        let result = SignedPayload::parse(&bytes);
-        assert!(matches!(result, Err(ParseError::InvalidOperation(_))));
-    }
-
-    fn sample_recovery_response() -> RecoveryResponse {
-        RecoveryResponse {
+    fn sample_prior_home_response() -> PriorHomeResponse {
+        PriorHomeResponse {
             subject_key: [0xf1; 32],
             challenge_hash: [0xf3; 32],
             created_at: 1_700_000_710_000,
@@ -3143,11 +3077,11 @@ mod tests {
     }
 
     #[test]
-    fn recovery_response_round_trip() {
-        let r = sample_recovery_response();
-        let bytes = SignedPayload::RecoveryResponse(r.clone()).encode();
+    fn prior_home_response_round_trip() {
+        let r = sample_prior_home_response();
+        let bytes = SignedPayload::PriorHomeResponse(r.clone()).encode();
         let decoded = SignedPayload::parse(&bytes).unwrap();
-        assert_eq!(decoded, SignedPayload::RecoveryResponse(r));
+        assert_eq!(decoded, SignedPayload::PriorHomeResponse(r));
     }
 
     fn sample_thread_create(with_link: bool) -> ThreadCreate {

@@ -404,8 +404,8 @@ async fn apply_one_move(
         }
         SignedPayload::FedEnvelope(_)
         | SignedPayload::RegistrationChallenge(_)
-        | SignedPayload::RecoveryChallenge(_)
-        | SignedPayload::RecoveryResponse(_) => {
+        | SignedPayload::PriorHomeChallenge(_)
+        | SignedPayload::PriorHomeResponse(_) => {
             return Ok(MoveResult {
                 canonical_hash,
                 status: MoveStatus::Rejected(MoveRejectReason::UnknownClass),
