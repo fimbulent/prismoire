@@ -87,12 +87,39 @@
 //! a non-peered source" is recorded only as the local users row with
 //! no associated Move chain.
 //!
-//! ## Out of Phase-7 scope (deferred)
+//! ## §13.3 prior-home reconciliation (Phase 10.3a)
 //!
-//! - **§13.3 prior-home reconciliation.** Depends on the §14
-//!   prior-home discovery probe (Phase 10). The current
-//!   user-declared `move_from_domain` is the pragmatic stand-in
-//!   until §14 lets us probe peers.
+//! [`discover_prior_home`] runs the §13.3 step-1 probe fan-out
+//! before the §12 move-publication block. Three strategies in
+//! priority order; whether a strategy is terminal on miss depends
+//! on *how* it missed — see [`ProbeClass`] for the tri-state split
+//! and `discover_prior_home`'s body for the routing rationale.
+//!
+//! 1. **User-declared.** If the request carries
+//!    `move_from_domain`, probe only that one peer. An
+//!    [authoritative miss][`ProbeClass::AuthoritativeMiss`] is
+//!    terminal (the declared peer *answered* "I don't hold K", so
+//!    we refuse to silently surface a different peer as the
+//!    prior home). An [unreachable][`ProbeClass::Unreachable`]
+//!    declared peer (transport refusal, 5xx, decode failure, or
+//!    not even in our `peers` table) falls through to strategy
+//!    3 — we got no answer to override.
+//! 2. **Local lookup.** If `users.home_instance` is already set
+//!    for K (Phase 9.5 hydrated stub), probe just that peer.
+//!    Always falls through on any non-hit: `home_instance` is a
+//!    cached hint, not a user-declared intent, so there is no
+//!    "user said X" to preserve.
+//! 3. **Bounded fan-out.** Probe up to
+//!    [`PRIOR_HOME_PROBE_FANOUT_MAX`] active peers in parallel
+//!    batches of [`PRIOR_HOME_PROBE_BATCH_SIZE`], short-circuit
+//!    on first `has_activity = true`. Peer order is recently-
+//!    active first; trust-density ordering can come later if
+//!    needed.
+//!
+//! A `None` return from the whole discovery is *not* a registration
+//! failure: §13 always creates the local user; a missed prior-home
+//! just means no `user_moves` row is published. §13.3 step 4 (data
+//! recovery via §14.5/§14.6) lands in Phase 10.3b.
 //!
 //! ## Reject reason vocabulary (§13.2)
 //!
@@ -127,7 +154,9 @@ use crate::display_name::{display_name_skeleton, validate_display_name};
 use crate::error::{AppError, ErrorCode};
 use crate::federation::envelope::encode_signed_object;
 use crate::federation::forwarder::forward_signed_object;
+use crate::federation::prior_home_client::{ProbeError, ProbeOutcome, probe_peer_for_key};
 use crate::federation::routing::ForwardingClass;
+use crate::federation::transport::PeerId;
 use crate::session::{create_session, session_cookie};
 use crate::signed::{self, RegistrationChallenge, SignedPayload};
 use crate::signing;
@@ -140,6 +169,19 @@ pub const REGISTRATION_CHALLENGE_TTL_MS: u64 = 600_000;
 /// Pinned in the schema's `CHECK (length(nonce) = 32)` constraint;
 /// this constant just gives the issuance path the same number to read.
 pub const REGISTRATION_NONCE_BYTES: usize = 32;
+
+/// §13.3 step 1 fan-out concurrency. Probes run in parallel batches of
+/// this size; we wait for the whole batch to complete before checking
+/// for a hit, so the worst case for one round is one slow peer's
+/// timeout. Default matches the impl-plan figure.
+pub const PRIOR_HOME_PROBE_BATCH_SIZE: usize = 4;
+
+/// §13.3 step 1 fan-out cap. Once we've probed this many peers without
+/// a hit, we stop — registration finishes without a prior-home move.
+/// At 16 peers / 4 per batch = 4 rounds max, which bounds the worst-
+/// case registration latency to a small constant under hostile-peer
+/// scenarios.
+pub const PRIOR_HOME_PROBE_FANOUT_MAX: usize = 16;
 
 // ---------------------------------------------------------------------------
 // Request / response types
@@ -530,6 +572,331 @@ pub async fn upgrade_federated_stub_in_place(
 }
 
 // ---------------------------------------------------------------------------
+// §13.3 step 1 — prior-home discovery
+// ---------------------------------------------------------------------------
+
+/// Resolve a `(peer_pubkey, peer_domain)` pair to probe one candidate.
+/// Returns `None` if the domain isn't a known active peer or the
+/// `peers.instance_pubkey` is somehow not 32 bytes.
+async fn resolve_peer_by_domain(
+    state: &Arc<AppState>,
+    domain: &str,
+) -> Result<Option<([u8; 32], String)>, sqlx::Error> {
+    let row = sqlx::query!(
+        "SELECT instance_pubkey AS \"instance_pubkey!: Vec<u8>\" \
+         FROM peers WHERE instance_domain = ? AND status = 'active' LIMIT 1",
+        domain,
+    )
+    .fetch_optional(&state.db)
+    .await?;
+    Ok(row.and_then(|r| {
+        <[u8; 32]>::try_from(r.instance_pubkey.as_slice())
+            .ok()
+            .map(|k| (k, domain.to_string()))
+    }))
+}
+
+/// Resolve a `(peer_pubkey, peer_domain)` pair from a 32-byte instance
+/// pubkey already known locally (e.g. `users.home_instance`). Returns
+/// `None` if no `active` peer record exists for the key.
+async fn resolve_peer_by_pubkey(
+    state: &Arc<AppState>,
+    pubkey: &[u8; 32],
+) -> Result<Option<([u8; 32], String)>, sqlx::Error> {
+    let key_slice: &[u8] = pubkey.as_slice();
+    let row = sqlx::query!(
+        "SELECT instance_domain FROM peers \
+         WHERE instance_pubkey = ? AND status = 'active' LIMIT 1",
+        key_slice,
+    )
+    .fetch_optional(&state.db)
+    .await?;
+    Ok(row.map(|r| (*pubkey, r.instance_domain)))
+}
+
+/// Tri-state classification of one §13.3 probe outcome.
+///
+/// Collapses the raw `Result<ProbeOutcome, ProbeError>` into the
+/// three buckets the discovery routing actually cares about. The
+/// distinction matters only for the user-declared strategy in
+/// [`discover_prior_home`]: an [`AuthoritativeMiss`] there is
+/// terminal (peer said no, don't override), whereas
+/// [`Unreachable`] falls through to fan-out (no answer to override).
+/// For fan-out itself the two miss variants behave identically — we
+/// just move on to the next candidate.
+///
+/// `Status` codes are bucketed by what they tell us about peer
+/// authority:
+/// - `4xx` → `AuthoritativeMiss`: the peer received and processed
+///   our request, it just refused (`403 subject_deactivated`,
+///   `400 subject_mismatch`, `404`, `410 gone`, etc.). The peer
+///   *did* speak — its answer is authoritative for itself.
+/// - `5xx`, transport errors, decode failures → `Unreachable`: we
+///   never got a usable answer.
+///
+/// [`AuthoritativeMiss`]: ProbeClass::AuthoritativeMiss
+/// [`Unreachable`]: ProbeClass::Unreachable
+enum ProbeClass {
+    /// Peer confirmed `has_activity = true`.
+    Hit(([u8; 32], String)),
+    /// Peer reached and answered "no" (either `has_activity = false`
+    /// or a 4xx telling us K doesn't belong here).
+    AuthoritativeMiss,
+    /// No usable answer (transport refusal, 5xx, decode failure, or
+    /// peer not in our `peers` table).
+    Unreachable,
+}
+
+/// Probe `peer` once and classify the outcome via [`ProbeClass`].
+/// Errors are logged at `debug` since fan-out failure is the
+/// expected case for most peers and we don't want to spam `warn`
+/// per probe.
+async fn probe_once(
+    state: &Arc<AppState>,
+    user_key: &[u8; 32],
+    signing_key: &SigningKey,
+    peer: ([u8; 32], String),
+) -> ProbeClass {
+    let (peer_key, domain) = peer;
+    let peer_id = PeerId::from_bytes(peer_key);
+    match probe_peer_for_key(state, &peer_id, *user_key, signing_key).await {
+        Ok(ProbeOutcome {
+            has_activity: true, ..
+        }) => ProbeClass::Hit((peer_key, domain)),
+        Ok(ProbeOutcome {
+            has_activity: false,
+            ..
+        }) => {
+            tracing::debug!(
+                domain = %domain,
+                "§13.3 probe miss — peer holds no activity for K",
+            );
+            ProbeClass::AuthoritativeMiss
+        }
+        Err(ProbeError::Transport(e)) => {
+            tracing::debug!(
+                domain = %domain,
+                error = %e,
+                "§13.3 probe transport error — treating as unreachable",
+            );
+            ProbeClass::Unreachable
+        }
+        Err(ProbeError::Status(s)) => {
+            // 4xx ⇒ peer received + answered (authoritative);
+            // 5xx ⇒ peer broke mid-request (unreachable). Anything
+            // else (1xx/3xx) shouldn't reach a successful future,
+            // but lump it with unreachable to be safe.
+            if s.is_client_error() {
+                tracing::debug!(
+                    domain = %domain,
+                    status = %s,
+                    "§13.3 probe returned 4xx — treating as authoritative miss",
+                );
+                ProbeClass::AuthoritativeMiss
+            } else {
+                tracing::debug!(
+                    domain = %domain,
+                    status = %s,
+                    "§13.3 probe returned non-4xx error status — treating as unreachable",
+                );
+                ProbeClass::Unreachable
+            }
+        }
+        Err(ProbeError::Decode(why)) => {
+            // Peer ran an incompatible protocol revision (or sent
+            // garbage). We have no authoritative answer. Logged at
+            // `info` rather than `warn` so a single old peer can't
+            // emit up to 16 `warn` lines per registration (one per
+            // fan-out target) — version mismatches are routine on a
+            // mixed-version mesh.
+            tracing::info!(
+                domain = %domain,
+                error = why,
+                "§13.3 probe response failed to decode — treating as unreachable",
+            );
+            ProbeClass::Unreachable
+        }
+    }
+}
+
+/// §13.3 step 1 — locate the prior home for `user_key`.
+///
+/// Implements the three-strategy probe fan-out described in the module
+/// docstring. Returns the `(peer_pubkey, peer_domain)` of the first
+/// peer that confirms `has_activity = true`, or `None` if no candidate
+/// is found.
+///
+/// **Best-effort throughout.** A `None` return — whether from an
+/// authoritative-miss declaration, an unreachable peer set, or every
+/// fan-out probe coming up empty — silently falls through and the
+/// local user is created without a `user_moves` row. The user can
+/// always publish a corrective move later from the actual prior home.
+///
+/// `pub` rather than private so Phase 10.3a integration tests can
+/// drive the orchestrator end-to-end without needing to fake a full
+/// WebAuthn ceremony just to hit it through [`complete`].
+pub async fn discover_prior_home(
+    state: &Arc<AppState>,
+    user_key: &[u8; 32],
+    signing_key: &SigningKey,
+    move_from_domain: Option<&str>,
+) -> Option<([u8; 32], String)> {
+    // Strategy 1 — user-declared candidate. The fall-through rule
+    // is asymmetric:
+    //
+    //  * `Hit` → publish (the user's claim confirmed).
+    //  * `AuthoritativeMiss` → terminal None. The declared peer
+    //    received our probe and answered "I don't hold K"; silently
+    //    rewriting that to a different peer would override an
+    //    authoritative answer.
+    //  * `Unreachable` (incl. "not an active peer" — we can't even
+    //    ask) → fall through to fan-out. No answer was given, so
+    //    there is no user intent to preserve, and fan-out might
+    //    locate real K activity for §13.3 step-4 recovery.
+    if let Some(domain) = move_from_domain.filter(|d| !d.is_empty()) {
+        match resolve_peer_by_domain(state, domain).await {
+            Ok(Some(candidate)) => {
+                match probe_once(state, user_key, signing_key, candidate).await {
+                    ProbeClass::Hit(h) => return Some(h),
+                    ProbeClass::AuthoritativeMiss => {
+                        tracing::info!(
+                            domain = %domain,
+                            "cross-instance complete: declared prior home authoritatively denied K; skipping move publication",
+                        );
+                        return None;
+                    }
+                    ProbeClass::Unreachable => {
+                        tracing::info!(
+                            domain = %domain,
+                            "cross-instance complete: declared prior home unreachable; falling through to fan-out",
+                        );
+                    }
+                }
+            }
+            Ok(None) => {
+                tracing::info!(
+                    domain = %domain,
+                    "cross-instance complete: move_from_domain is not an active peer; falling through to fan-out",
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    domain = %domain,
+                    error = %e,
+                    "cross-instance complete: db error resolving declared prior home; falling through to fan-out",
+                );
+            }
+        }
+    }
+
+    // Strategy 2 — local lookup. Phase 9.5 hydrated a `signup_method
+    // = 'federated'` stub may carry `users.home_instance` set to the
+    // peer whose inbound payload first surfaced K. If so, probe just
+    // that peer. Always falls through on any non-hit — `home_instance`
+    // is a cached hint, not user-declared intent, so there is no
+    // authority to preserve.
+    let user_key_slice: &[u8] = user_key.as_slice();
+    let local_home: Option<Vec<u8>> = match sqlx::query_scalar!(
+        "SELECT home_instance AS \"home_instance: Vec<u8>\" \
+         FROM users WHERE public_key = ? AND home_instance IS NOT NULL LIMIT 1",
+        user_key_slice,
+    )
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(opt) => opt.flatten(),
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "cross-instance complete: db error reading users.home_instance for local lookup",
+            );
+            None
+        }
+    };
+    if let Some(home_bytes) = local_home
+        && let Ok(arr) = <[u8; 32]>::try_from(home_bytes.as_slice())
+    {
+        match resolve_peer_by_pubkey(state, &arr).await {
+            Ok(Some(candidate)) => {
+                let domain = candidate.1.clone();
+                match probe_once(state, user_key, signing_key, candidate).await {
+                    ProbeClass::Hit(h) => return Some(h),
+                    ProbeClass::AuthoritativeMiss | ProbeClass::Unreachable => {
+                        tracing::info!(
+                            domain = %domain,
+                            "cross-instance complete: locally-known prior home did not confirm activity; falling through to fan-out",
+                        );
+                    }
+                }
+            }
+            Ok(None) => {
+                tracing::debug!(
+                    "cross-instance complete: users.home_instance is not an active peer; falling through to fan-out",
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "cross-instance complete: db error resolving locally-known prior home",
+                );
+            }
+        }
+    }
+
+    // Strategy 3 — bounded fan-out. List active peers, recently-
+    // handshaken first, cap at PRIOR_HOME_PROBE_FANOUT_MAX, probe in
+    // parallel batches of PRIOR_HOME_PROBE_BATCH_SIZE, short-circuit
+    // on first hit. Recency proxy: `peers.last_handshake` if present
+    // (most recent successful handshake event), else `peers.first_seen`
+    // (row creation). NULL `last_handshake` sorts last under DESC.
+    let limit = PRIOR_HOME_PROBE_FANOUT_MAX as i64;
+    let candidates: Vec<([u8; 32], String)> = match sqlx::query!(
+        "SELECT instance_pubkey AS \"instance_pubkey!: Vec<u8>\", \
+                instance_domain AS \"instance_domain!: String\" \
+         FROM peers \
+         WHERE status = 'active' \
+         ORDER BY COALESCE(last_handshake, first_seen) DESC \
+         LIMIT ?",
+        limit,
+    )
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(rows) => rows
+            .into_iter()
+            .filter_map(|r| {
+                <[u8; 32]>::try_from(r.instance_pubkey.as_slice())
+                    .ok()
+                    .map(|k| (k, r.instance_domain))
+            })
+            .collect(),
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "cross-instance complete: db error listing fan-out candidates; skipping prior-home discovery",
+            );
+            return None;
+        }
+    };
+
+    for batch in candidates.chunks(PRIOR_HOME_PROBE_BATCH_SIZE) {
+        let futures: Vec<_> = batch
+            .iter()
+            .cloned()
+            .map(|cand| probe_once(state, user_key, signing_key, cand))
+            .collect();
+        let results: Vec<ProbeClass> = futures::future::join_all(futures).await;
+        for class in results {
+            if let ProbeClass::Hit(h) = class {
+                return Some(h);
+            }
+        }
+    }
+
+    None
+}
+
+// ---------------------------------------------------------------------------
 // Complete handler
 // ---------------------------------------------------------------------------
 
@@ -691,52 +1058,27 @@ pub async fn complete(
     let passkey_bytes = serde_json::to_vec(&passkey)?;
     let cred_id_bytes: &[u8] = passkey.cred_id().as_ref();
 
-    // If the user declared a source domain, look up its instance
-    // pubkey from our peers table. Only `active` peers are eligible —
-    // a pending peering can't reliably express "this is the trust
-    // anchor for X." A missing row is *not* an error: §13 explicitly
-    // allows registration without a Move; we just skip publication
-    // and the local users row exists with no associated move chain.
+    // §13.3 step 1 — discover the prior home. See module docstring for
+    // the three strategies. Probes hit `/federation/v1/prior-home/*` on
+    // candidate peers, and a hit returns the (peer pubkey, peer domain)
+    // pair the §12 publication block below feeds into the move payload.
     //
-    // The lookup is deliberately *outside* the BEGIN IMMEDIATE below.
-    // The race window — peer transitions from `active` to inactive
-    // between this SELECT and the tx commit — is benign: the resulting
+    // The discovery is deliberately *outside* the BEGIN IMMEDIATE below
+    // — probes do network I/O and we don't hold a write transaction
+    // open across that. The race window (peer transitions from `active`
+    // to inactive between probe and tx commit) is benign: the resulting
     // Move is signed by the user's own key (it's the user's
     // cryptographic identity that authenticates the move, not the
     // peer's current status); the `from_instance_key` / `from_instance`
     // fields are spec metadata and downstream peers don't validate
     // them against the source's *current* peer status on this instance.
-    let move_source: Option<([u8; 32], String)> = match req.move_from_domain.as_deref() {
-        Some(domain) if !domain.is_empty() => {
-            let row = sqlx::query!(
-                "SELECT instance_pubkey AS \"instance_pubkey!: Vec<u8>\" \
-                 FROM peers WHERE instance_domain = ? AND status = 'active' LIMIT 1",
-                domain,
-            )
-            .fetch_optional(&state.db)
-            .await?;
-            match row {
-                Some(r) => match <[u8; 32]>::try_from(r.instance_pubkey.as_slice()) {
-                    Ok(arr) => Some((arr, domain.to_string())),
-                    Err(_) => {
-                        tracing::warn!(
-                            domain = %domain,
-                            "cross-instance complete: peers.instance_pubkey wrong length; skipping move publication"
-                        );
-                        None
-                    }
-                },
-                None => {
-                    tracing::info!(
-                        domain = %domain,
-                        "cross-instance complete: move_from_domain is not an active peer; skipping move publication"
-                    );
-                    None
-                }
-            }
-        }
-        _ => None,
-    };
+    let move_source: Option<([u8; 32], String)> = discover_prior_home(
+        &state,
+        &challenge.user_key,
+        &imported,
+        req.move_from_domain.as_deref(),
+    )
+    .await;
 
     // BEGIN IMMEDIATE: nonce-consume + auth_challenges delete + user
     // creation + (optional) move publication run as one snapshot so a
@@ -879,6 +1221,13 @@ pub async fn complete(
         bootstrap_local_user(&mut tx, &bootstrap).await?;
     }
 
+    // Snapshot `move_source` for the post-commit §13.3 step-4
+    // recovery spawn before the move-publication block consumes it.
+    // A `None` here means we never confirmed a prior home, and
+    // [`drive_recovery`] will go straight to the peer-network
+    // fallback layer.
+    let recovery_confirmed_peer = move_source.clone();
+
     // §12 Move publication. Authored only when we resolved the source
     // peer above; in-tx so a rollback nukes the move alongside the
     // user. Forwarder is invoked AFTER commit so a fanout that
@@ -968,6 +1317,33 @@ pub async fn complete(
         )
         .await;
     }
+
+    // §13.3 step 4 — best-effort data recovery. Spawned post-commit
+    // so the user-facing response is not gated on §14.5 / §14.6
+    // pagination (a slow or offline prior home would otherwise stall
+    // registration). The recovery worker runs §14.5 + §14.6 against
+    // the confirmed prior home when one was found above, and falls
+    // back to peer-authed §10.5.1 against D's own active peers
+    // otherwise (or in addition, if the primary path didn't complete).
+    //
+    // `imported.clone()` is the right ownership move here:
+    // [`SigningKey`] holds the raw seed and is `Clone` precisely so
+    // that handoffs like this can pass an independent copy into a
+    // detached task. The local handle is still in scope for any
+    // remaining session bookkeeping below, and both copies drop /
+    // zero independently.
+    let recovery_signing_key = imported.clone();
+    let recovery_subject_key = challenge.user_key;
+    let recovery_state = state.clone();
+    tokio::spawn(async move {
+        crate::federation::prior_home_recovery::drive_recovery(
+            recovery_state,
+            recovery_subject_key,
+            recovery_signing_key,
+            recovery_confirmed_peer,
+        )
+        .await;
+    });
 
     let token = create_session(&state.db, &user_id).await?;
     let mut headers = HeaderMap::new();

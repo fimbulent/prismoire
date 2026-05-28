@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT instance_pubkey AS \"instance_pubkey!: Vec<u8>\", instance_domain AS \"instance_domain!: String\" FROM peers WHERE status = 'active' ORDER BY COALESCE(last_handshake, first_seen) DESC",
+  "describe": {
+    "columns": [
+      {
+        "name": "instance_pubkey!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "instance_domain!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "66f5e9cca2d95bcfe4e75cfae67048ee0aba01618a4a4d1070846d70e0b4a680"
+}

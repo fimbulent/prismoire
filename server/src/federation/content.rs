@@ -178,9 +178,13 @@ impl ContentRejectReason {
 }
 
 /// One row of the §10.1 `results` array.
-struct ContentResult {
-    canonical_hash: [u8; 32],
-    status: ContentStatus,
+///
+/// `pub(crate)` so callers re-feeding bytes through [`apply_one_object`]
+/// (e.g. the §13.3 step-4 data-recovery flow) can match on the per-row
+/// status.
+pub(crate) struct ContentResult {
+    pub(crate) canonical_hash: [u8; 32],
+    pub(crate) status: ContentStatus,
 }
 
 // ---------------------------------------------------------------------------
@@ -349,7 +353,14 @@ async fn peer_domain_for<'e, E: sqlx::SqliteExecutor<'e>>(
 }
 
 /// Apply a single signed WireFormat blob against local state.
-async fn apply_one_object(
+///
+/// `pub(crate)` so the §13.3 step-4 prior-home data-recovery flow in
+/// [`crate::federation::prior_home_recovery`] can feed §14.5 / §10.5.1
+/// page entries back through the same per-object pipeline that the
+/// live `/federation/v1/content` push uses. The receive contract here
+/// (signature verify, dedup, retention, chain check) is identical
+/// regardless of whether bytes arrive via push or pull.
+pub(crate) async fn apply_one_object(
     state: &Arc<AppState>,
     wire_bytes: &[u8],
     arrived_from: [u8; 32],

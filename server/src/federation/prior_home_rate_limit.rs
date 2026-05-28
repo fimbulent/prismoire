@@ -53,7 +53,22 @@ use axum::response::{IntoResponse, Response};
 /// "Successful" means "passed §14.1 verification steps 1–9 and
 /// reached the per-endpoint serve step." Verification failures
 /// (signature, expired challenge, deactivation) do not burn budget.
-pub const PRIOR_HOME_PROBES_PER_DAY_PER_KEY: u32 = 20;
+///
+/// **Sizing rationale.** The cap is generous (200/day) because §14.3
+/// is *not* the relevant defense surface against a captured-K
+/// attacker — see the matching §14.3 prose for the full argument.
+/// Briefly: K's private key trivially exfiltrates K's data via
+/// `/api/me/export` (no rate limit), via WebAuthn auth against the
+/// regular API, or by fanning out across N peers. The surface this
+/// limiter *does* meaningfully bound is a misbehaving destination D
+/// looping bulk-fetch against one peer, which is already covered by
+/// per-sender `BACKFILL_RPM_PER_PEER`. The ceiling is sized for the
+/// legitimate worst case (one full paginated migration: §14.2 probe
+/// plus §14.5 ~64 pages plus §14.6 ~64 pages plus retry headroom) rather than
+/// a residual security argument the larger architecture already
+/// makes redundantly. Smaller values silently degrade recovery to
+/// the §14.7 peer-network fallback for any non-trivial account.
+pub const PRIOR_HOME_PROBES_PER_DAY_PER_KEY: u32 = 200;
 
 /// Per-subject-key rolling-24h request counter for §14 endpoints.
 ///

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT instance_domain FROM peers WHERE instance_pubkey = ? AND status = 'active' LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "instance_domain",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3e45a9480ac9becc0e55147ca919915a861d0db397d9b549ad01a1b22dfef919"
+}

@@ -337,8 +337,13 @@ async fn resolve_source_home(
 /// "complete": bool }` shape that `handle_edges_backfill` returns.
 /// Returns `None` on any structural deviation — the caller logs and
 /// leaves the orphan in the pending buffer for the next retry.
+///
+/// `pub(crate)` so the §13.3 step-4 prior-home data-recovery flow in
+/// [`crate::federation::prior_home_recovery`] can reuse it for the
+/// §14.5 / §14.6 page responses, which carry the same §10.5.2
+/// envelope as `/edges/backfill`.
 #[allow(clippy::type_complexity)]
-fn decode_backfill_body(body: &[u8]) -> Option<(Vec<Vec<u8>>, Option<Vec<u8>>, bool)> {
+pub(crate) fn decode_backfill_body(body: &[u8]) -> Option<(Vec<Vec<u8>>, Option<Vec<u8>>, bool)> {
     let value: Value = ciborium::de::from_reader(body).ok()?;
     let Value::Map(entries) = value else {
         return None;

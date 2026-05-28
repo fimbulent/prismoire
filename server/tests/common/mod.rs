@@ -302,10 +302,11 @@ pub async fn test_app_with_pool_transport_domain_and_outbound_config(
         ),
         // §14.3 challenge per-minute caps default to `u32::MAX` in
         // the test harness so existing tests (e.g. the daily-budget
-        // overflow test that mints 21 challenges against the same K)
-        // are not silently throttled by the per-minute cap that would
-        // fire at the 11th mint under the production default. Tests
-        // that explicitly want to exercise the per-minute cap call
+        // overflow test that mints `PRIOR_HOME_PROBES_PER_DAY_PER_KEY
+        // + 1` challenges against the same K) are not silently
+        // throttled by the per-minute cap that would fire well before
+        // the daily cap under the production default. Tests that
+        // explicitly want to exercise the per-minute cap call
         // `state.prior_home_challenge_rate_limiter.set_caps(...)` at
         // test entry to tighten the cap to the spec default.
         prior_home_challenge_rate_limiter: Arc::new(

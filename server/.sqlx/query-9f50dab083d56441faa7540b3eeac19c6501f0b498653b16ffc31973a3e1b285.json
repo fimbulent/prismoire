@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT instance_pubkey AS \"instance_pubkey!: Vec<u8>\" FROM peers WHERE status = 'active' ORDER BY COALESCE(last_handshake, first_seen) DESC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "instance_pubkey!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9f50dab083d56441faa7540b3eeac19c6501f0b498653b16ffc31973a3e1b285"
+}

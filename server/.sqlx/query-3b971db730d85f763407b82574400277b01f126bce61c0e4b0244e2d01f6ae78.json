@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE peers SET last_handshake = '2000-01-01T00:00:00Z' WHERE instance_pubkey = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "3b971db730d85f763407b82574400277b01f126bce61c0e4b0244e2d01f6ae78"
+}
