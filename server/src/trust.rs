@@ -1996,6 +1996,12 @@ pub async fn rebuild_trust_graph(
 /// - At most `max_interval` of staleness when mutations are continuous.
 /// - No rebuild if the graph hasn't changed (dirty flag is false).
 ///
+/// After each successful rebuild it fires `frontier_dirty` to wake the
+/// §8.7 frontier-fanout worker ([`crate::federation::frontier::frontier_fanout_loop`]),
+/// which recomputes the local frontier and re-announces to peers if it
+/// changed. Decoupled via `Notify` because this loop owns only the
+/// graph, not the full `AppState` the fanout worker needs.
+///
 /// The schedule lives behind a [`std::sync::RwLock`] so admin edits via
 /// `/api/admin/config` are picked up on the *next* scheduling window
 /// without a server restart. We snapshot the schedule once per window
@@ -2013,6 +2019,7 @@ pub async fn rebuild_loop(
     schedule: Arc<std::sync::RwLock<RebuildSchedule>>,
     metrics: Arc<Metrics>,
     pending_deltas: Arc<PendingDeltas>,
+    frontier_dirty: Arc<Notify>,
 ) {
     use tokio::time::{Instant, sleep_until};
 
@@ -2049,6 +2056,9 @@ pub async fn rebuild_loop(
         tracing::error!(error = %e, "trust graph initial build failed");
     } else {
         pending_deltas.purge_below(initial_high_water);
+        // Wake the §8.7 frontier-fanout worker: the graph just changed,
+        // so the local frontier may have expanded.
+        frontier_dirty.notify_one();
     }
 
     let mut last_rebuild = Instant::now();
@@ -2091,6 +2101,8 @@ pub async fn rebuild_loop(
         match rebuild_trust_graph(&db, &graph, bytes, Some(metrics.clone())).await {
             Ok(()) => {
                 pending_deltas.purge_below(high_water);
+                // Wake the §8.7 frontier-fanout worker (see initial build).
+                frontier_dirty.notify_one();
             }
             Err(e) => {
                 tracing::error!(error = %e, "trust graph rebuild failed");

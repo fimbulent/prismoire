@@ -622,7 +622,9 @@ async fn recover_via_peer_network(
 /// Pull the `status='active'` peer set, recently-handshaken first.
 /// Same ordering as the §13.3 fan-out so the fallback sweep prefers
 /// the most-likely-to-respond peers.
-async fn list_active_peers(state: &Arc<AppState>) -> Result<Vec<([u8; 32], String)>, sqlx::Error> {
+pub(crate) async fn list_active_peers(
+    state: &Arc<AppState>,
+) -> Result<Vec<([u8; 32], String)>, sqlx::Error> {
     let rows = sqlx::query!(
         "SELECT instance_pubkey AS \"instance_pubkey!: Vec<u8>\", \
                 instance_domain AS \"instance_domain!: String\" \
@@ -640,6 +642,77 @@ async fn list_active_peers(state: &Arc<AppState>) -> Result<Vec<([u8; 32], Strin
                 .map(|k| (k, r.instance_domain))
         })
         .collect())
+}
+
+/// §7.6 / §10.5 proactive by-author pull-backfill for a single author
+/// `author_key` that newly entered our local content frontier.
+///
+/// Tries active peers (recently-handshaken first, clipped to
+/// `MAX_FALLBACK_PEERS`) until one completes the `/backfill/by-author`
+/// content surface, seeding the author's *existing* content. Frontier
+/// push only carries content authored *after* a peer learns our
+/// interest, so without this backfill a freshly-trusted author's
+/// history would never arrive. Best-effort and meant to be
+/// `tokio::spawn`ed off the trust-graph rebuild critical path: every
+/// failure is logged at debug and swallowed.
+///
+/// Edges are deliberately *not* fetched here (unlike
+/// [`recover_via_peer_network`]): this is steady-state frontier
+/// expansion, not account-move recovery. The author's edges arrive via
+/// the normal §7.5 push / §9.3 ancestor-miss paths.
+pub(crate) async fn proactive_author_backfill(state: &Arc<AppState>, author_key: [u8; 32]) {
+    let mut candidates = match list_active_peers(state).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                author = %hex_lower(&author_key),
+                error = %e,
+                "proactive by-author backfill: db error listing active peers",
+            );
+            return;
+        }
+    };
+    if candidates.is_empty() {
+        return;
+    }
+    candidates.truncate(MAX_FALLBACK_PEERS);
+
+    let key_hex = hex_lower(&author_key);
+    let content_path = format!("/federation/v1/backfill/by-author?key={key_hex}");
+
+    for (peer_key, peer_domain) in candidates {
+        let peer_id = PeerId::from_bytes(peer_key);
+        let res = paginate_peer_backfill(state, &peer_id, &content_path, |wire| {
+            let state = state.clone();
+            async move {
+                ingest_content_object(&state, &wire, peer_key).await;
+            }
+        })
+        .await;
+        match res {
+            Ok(stats) if stats.complete => {
+                tracing::debug!(
+                    author = %key_hex,
+                    peer = %peer_domain,
+                    objects = stats.objects_seen,
+                    "proactive by-author backfill complete",
+                );
+                return;
+            }
+            Ok(_) => {
+                // Incomplete from this peer (hit page cap or a
+                // !complete page) — move on to the next candidate.
+            }
+            Err(e) => {
+                tracing::debug!(
+                    author = %key_hex,
+                    peer = %peer_domain,
+                    error = %e,
+                    "proactive by-author backfill: peer surface failed",
+                );
+            }
+        }
+    }
 }
 
 /// Orchestrate the §13.3 step-4 recovery flow end-to-end. Tries the

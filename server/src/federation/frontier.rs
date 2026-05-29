@@ -642,6 +642,14 @@ pub struct LocalFrontier {
     /// chosen format: `version_be(8) || epoch_start_be(8)`. Total 16
     /// bytes, comfortably under the spec's 64-byte ceiling.
     pub cursor: Vec<u8>,
+    /// Raw 32-byte pubkeys of every author in the 3-hop content
+    /// closure — the *plaintext* set the `content_filter` bloom was
+    /// built from. Retained (not just the bloom) so the §7.6 / §10.5
+    /// proactive pull-backfill path can diff `new − old` across a
+    /// refresh and learn exactly which authors newly entered the
+    /// frontier, without false positives from bloom membership tests.
+    /// Never serialized — purely a local-side diff aid.
+    pub content_keys: HashSet<[u8; 32]>,
 }
 
 impl LocalFrontier {
@@ -664,6 +672,7 @@ impl LocalFrontier {
             content_filter,
             edge_origin_filter,
             cursor,
+            content_keys: HashSet::new(),
         }
     }
 }
@@ -759,6 +768,7 @@ pub async fn compute_local_frontier(
         content_filter,
         edge_origin_filter,
         cursor: encode_cursor(0, now),
+        content_keys: content_keys.into_iter().collect(),
     })
 }
 
@@ -787,6 +797,34 @@ async fn fetch_local_user_pubkeys(db: &SqlitePool) -> Result<Vec<[u8; 32]>, sqlx
         }
     }
     Ok(keys)
+}
+
+/// Keep only the keys belonging to *remote* users (`home_instance IS
+/// NOT NULL`). Proactive by-author backfill (§7.6) pulls an author's
+/// existing content *from a peer* — that only makes sense for authors
+/// whose home is another instance. Local authors' content already
+/// lives here, so backfilling them would fan out a burst of futile
+/// `/backfill/by-author` GETs to peers that have nothing to return.
+async fn filter_remote_authors(
+    db: &SqlitePool,
+    keys: &[[u8; 32]],
+) -> Result<Vec<[u8; 32]>, sqlx::Error> {
+    let mut remote = Vec::new();
+    for key in keys {
+        let key_slice = key.as_slice();
+        let is_remote = sqlx::query_scalar!(
+            "SELECT 1 AS \"found!: i64\" FROM users \
+             WHERE public_key = ? AND home_instance IS NOT NULL",
+            key_slice,
+        )
+        .fetch_optional(db)
+        .await?
+        .is_some();
+        if is_remote {
+            remote.push(*key);
+        }
+    }
+    Ok(remote)
 }
 
 /// Resolve a set of user UUIDs to their `public_key` BLOBs. Skips
@@ -842,6 +880,21 @@ fn build_bloom_from_keys(keys: &[[u8; 32]]) -> BloomFilter {
     filter
 }
 
+/// Outcome of a [`refresh_local_frontier_detailed`] call: the (new or
+/// unchanged) snapshot plus the change signal the fanout worker needs.
+#[derive(Debug)]
+pub struct FrontierRefresh {
+    /// The current snapshot after the refresh — a freshly-minted Arc
+    /// when `changed`, otherwise the previous (unchanged) Arc.
+    pub frontier: Arc<LocalFrontier>,
+    /// True when the filter bytes changed and the version was bumped.
+    pub changed: bool,
+    /// Authors that newly entered the 3-hop content closure this
+    /// refresh (`new − old`), as raw pubkeys. Empty when unchanged.
+    /// Drives the §7.6 / §10.5 proactive by-author pull-backfill.
+    pub added_content_keys: Vec<[u8; 32]>,
+}
+
 /// Recompute the local frontier and, if its contents changed, swap
 /// the cached snapshot under `state.local_frontier` and bump the
 /// version + cursor.
@@ -855,6 +908,17 @@ fn build_bloom_from_keys(keys: &[[u8; 32]]) -> BloomFilter {
 /// where re-running on every peer-bound announce would needlessly
 /// inflate the version counter.
 pub async fn refresh_local_frontier(state: &AppState) -> Result<Arc<LocalFrontier>, ComputeError> {
+    Ok(refresh_local_frontier_detailed(state).await?.frontier)
+}
+
+/// Like [`refresh_local_frontier`] but also reports whether the
+/// snapshot changed and which authors newly entered the content
+/// closure. The added-author diff is computed under the same write
+/// lock as the swap, so it can't race a concurrent refresh: the set
+/// returned is exactly `new − old` for the version this call produced.
+pub async fn refresh_local_frontier_detailed(
+    state: &AppState,
+) -> Result<FrontierRefresh, ComputeError> {
     let trust_graph = state
         .trust_graph
         .read()
@@ -871,6 +935,11 @@ pub async fn refresh_local_frontier(state: &AppState) -> Result<Arc<LocalFrontie
         || filter_bytes_differ(&prev.edge_origin_filter, &next.edge_origin_filter);
 
     if changed {
+        let added_content_keys: Vec<[u8; 32]> = next
+            .content_keys
+            .difference(&prev.content_keys)
+            .copied()
+            .collect();
         // Pure monotonic counter — `prev.version + 1` is strictly
         // greater than `prev` regardless of refresh cadence. Wall-clock
         // belongs in `epoch_start` / `cursor`, not in the version
@@ -881,9 +950,17 @@ pub async fn refresh_local_frontier(state: &AppState) -> Result<Arc<LocalFrontie
         next.cursor = encode_cursor(next.version, next.epoch_start);
         let new_arc = Arc::new(next);
         *guard = Arc::clone(&new_arc);
-        Ok(new_arc)
+        Ok(FrontierRefresh {
+            frontier: new_arc,
+            changed: true,
+            added_content_keys,
+        })
     } else {
-        Ok(prev)
+        Ok(FrontierRefresh {
+            frontier: prev,
+            changed: false,
+            added_content_keys: Vec::new(),
+        })
     }
 }
 
@@ -915,6 +992,15 @@ pub async fn handle_frontier_announce(
     // state change; the spec calls for them to be idempotent rather
     // than rejected, so we look up the existing row and short-circuit
     // a same-version replay as an OK with the current cursor.
+    //
+    // This read-then-write check is not atomic, so two announces from
+    // the same sender in flight at once (e.g. a §8.6 first-contact and
+    // a §8.7 change-fanout — both routine after Phase 11.9.4) could
+    // pass the check and then race the upsert, letting a stale lower
+    // version clobber a newer one. The `ON CONFLICT … WHERE
+    // excluded.applied_version > peer_frontiers.applied_version` guard
+    // on the upsert below closes that window atomically; this read
+    // check stays for the 400 / idempotent-200 response shaping.
     //
     // The `outbound_mode` column is read for §7.2 hysteresis on the
     // mode classification we re-run below: a pair already in `All`
@@ -1032,7 +1118,8 @@ pub async fn handle_frontier_announce(
              cursor = excluded.cursor, \
              inbound_mode = excluded.inbound_mode, \
              outbound_mode = excluded.outbound_mode, \
-             updated_at = excluded.updated_at",
+             updated_at = excluded.updated_at \
+         WHERE excluded.applied_version > peer_frontiers.applied_version",
         sender_slice,
         version_i,
         epoch_i,
@@ -1055,9 +1142,41 @@ pub async fn handle_frontier_announce(
     )
     .execute(&state.db)
     .await;
-    if let Err(e) = result {
-        tracing::error!(error = %e, "failed to persist peer_frontiers row");
-        return internal_error();
+    let result = match result {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to persist peer_frontiers row");
+            return internal_error();
+        }
+    };
+
+    // If the monotonic guard (`WHERE excluded.applied_version >
+    // peer_frontiers.applied_version`) blocked the write, the row we
+    // hold is *newer* than this announce. Don't claim we applied
+    // `parsed.version` — re-read the persisted row so the 200 reports
+    // the version/cursor the peer should actually sync against.
+    if result.rows_affected() == 0 {
+        match sqlx::query!(
+            "SELECT applied_version, cursor AS \"cursor!: Vec<u8>\" \
+             FROM peer_frontiers WHERE peer_pubkey = ?",
+            sender_slice,
+        )
+        .fetch_optional(&state.db)
+        .await
+        {
+            Ok(Some(row)) => {
+                return announce_response(row.applied_version as u64, &row.cursor);
+            }
+            Ok(None) => {
+                // No conflicting row existed, yet nothing was inserted —
+                // shouldn't happen, but fall through to the optimistic
+                // response rather than fabricate a state.
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to re-read peer_frontiers after guarded upsert");
+                return internal_error();
+            }
+        }
     }
 
     announce_response(parsed.version, &cursor)
@@ -1353,9 +1472,10 @@ impl From<ComputeError> for AnnounceError {
 /// announce reflects any trust-graph changes since the last fanout.
 ///
 /// Returns the applied version the peer ACKed in its 200 response
-/// (or surfaces the failure). Phase 5+ will call this from a
-/// background fanout worker; for Phase 4 the harness drives it
-/// directly.
+/// (or surfaces the failure). Called from the §8.7 background
+/// fanout worker ([`frontier_fanout_loop`]) on a frontier change,
+/// from [`spawn_first_contact_announce`] on §8.6 peer activation, and
+/// directly by the operator-forced re-announce path / test harness.
 pub async fn operator_announce_frontier(
     state: &AppState,
     instance_key: &InstanceKey,
@@ -1419,6 +1539,141 @@ pub async fn operator_announce_frontier(
         return Err(AnnounceError::UnexpectedStatus(response.status()));
     }
     Ok(frontier.version)
+}
+
+// ---------------------------------------------------------------------------
+// §8.7 change-fanout worker (Trigger 2 + Trigger 3)
+// ---------------------------------------------------------------------------
+
+/// Background worker that turns trust-graph rebuilds into frontier
+/// fanout. Driven by `frontier_dirty`, which `trust::rebuild_loop`
+/// fires once per successful graph swap — a natural epoch bucket,
+/// since the rebuild loop already debounces and coalesces edge bursts.
+///
+/// On each tick it recomputes the local frontier
+/// ([`refresh_local_frontier_detailed`]). When the snapshot actually
+/// changed (filter bytes differ → version bump) it:
+///
+/// 1. **§8.7 re-announce** — fans out a fresh `/frontier/announce` to
+///    every active peer. MVP ships full re-announce, not minimal
+///    deltas: §8.7 permits a full announce in place of a delta, and a
+///    redundant announce is a cheap no-op on the receiver thanks to its
+///    `last_applied_announce_version` guard. (Delta encoding is the
+///    Phase 11.9.6 optimization.)
+/// 2. **§7.6 / §10.5 proactive pull-backfill** — for every author that
+///    *newly* entered the content closure this refresh, schedules a
+///    by-author backfill so the author's existing content arrives
+///    (push only carries content authored after the announce).
+///
+/// All federation I/O is `tokio::spawn`ed so neither a slow peer nor a
+/// large backfill can stall the next rebuild's fanout.
+pub async fn frontier_fanout_loop(state: Arc<AppState>, frontier_dirty: Arc<tokio::sync::Notify>) {
+    loop {
+        frontier_dirty.notified().await;
+
+        let refresh = match refresh_local_frontier_detailed(&state).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = ?e, "frontier fanout: refresh failed");
+                continue;
+            }
+        };
+        if !refresh.changed {
+            continue;
+        }
+
+        // Trigger 2 — re-announce the new frontier to every active peer.
+        match crate::federation::prior_home_recovery::list_active_peers(&state).await {
+            Ok(peers) => {
+                for (peer_key, peer_domain) in peers {
+                    let state = Arc::clone(&state);
+                    tokio::spawn(async move {
+                        match operator_announce_frontier(
+                            &state,
+                            &state.instance_key,
+                            &state.federation_transport,
+                            peer_key,
+                        )
+                        .await
+                        {
+                            Ok(version) => tracing::debug!(
+                                peer = %peer_domain,
+                                version,
+                                "frontier fanout: re-announced",
+                            ),
+                            Err(e) => tracing::debug!(
+                                peer = %peer_domain,
+                                error = ?e,
+                                "frontier fanout: re-announce failed",
+                            ),
+                        }
+                    });
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "frontier fanout: db error listing active peers");
+            }
+        }
+
+        // Trigger 3 — proactive by-author backfill for newly-frontier'd
+        // authors so their existing content arrives, not just future
+        // pushes. Only *remote* authors are worth backfilling: a peer
+        // has nothing to serve for a local author, so spawning a pull
+        // for one would just burn a futile round-trip. `added_content_keys`
+        // is dominated by local authors (every local user expansion), so
+        // this filter is the difference between one targeted pull and a
+        // burst of dead requests.
+        let remote_authors = match filter_remote_authors(&state.db, &refresh.added_content_keys)
+            .await
+        {
+            Ok(keys) => keys,
+            Err(e) => {
+                tracing::warn!(error = %e, "frontier fanout: db error filtering remote authors");
+                continue;
+            }
+        };
+        for author_key in remote_authors {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move {
+                crate::federation::prior_home_recovery::proactive_author_backfill(
+                    &state, author_key,
+                )
+                .await;
+            });
+        }
+    }
+}
+
+/// §8.6 first-contact announce. Spawn-and-forget our current frontier
+/// to a peer that has just transitioned to `active`, so the peer's
+/// `peers_interested_in` routing leaves empty-filter mode and content
+/// starts flowing. Per §8.6 each side announces on activation; this is
+/// our half. Deliberately fire-and-forget: a slow or unreachable peer
+/// must not stall the handshake response, and a failed first announce
+/// is self-healing — the next §8.7 change-fanout or a §8.5 reconnect
+/// pull re-establishes the peer's view of our frontier.
+pub fn spawn_first_contact_announce(state: Arc<AppState>, peer_pubkey: [u8; 32]) {
+    tokio::spawn(async move {
+        match operator_announce_frontier(
+            &state,
+            &state.instance_key,
+            &state.federation_transport,
+            peer_pubkey,
+        )
+        .await
+        {
+            Ok(version) => tracing::debug!(
+                peer = %crate::users::hex_lower(&peer_pubkey),
+                version,
+                "§8.6 first-contact announce sent",
+            ),
+            Err(e) => tracing::debug!(
+                peer = %crate::users::hex_lower(&peer_pubkey),
+                error = ?e,
+                "§8.6 first-contact announce failed (repaired by next fanout/pull)",
+            ),
+        }
+    });
 }
 
 // Quiet unused-import warnings on builds that don't exercise certain

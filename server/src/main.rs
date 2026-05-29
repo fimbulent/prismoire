@@ -131,6 +131,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let trust_graph_notify = Arc::new(Notify::new());
+    // Fired by `rebuild_loop` after each successful graph swap; consumed
+    // by the §8.7 frontier-fanout worker spawned below.
+    let frontier_dirty = Arc::new(Notify::new());
     let trust_graph = Arc::new(RwLock::new(Arc::new(trust::TrustGraph::empty())));
     let app_metrics = Arc::new(metrics::Metrics::new());
     let pending_deltas = Arc::new(trust::PendingDeltas::new(Some(app_metrics.clone())));
@@ -280,7 +283,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         rebuild_schedule,
         app_metrics,
         pending_deltas,
+        frontier_dirty.clone(),
     ));
+
+    // Spawn the §8.7 frontier-fanout worker. Woken by `rebuild_loop`
+    // after each graph rebuild, it recomputes the local frontier and —
+    // on a real change — re-announces to active peers (Trigger 2) and
+    // schedules proactive by-author backfill for newly-frontier'd
+    // authors (Trigger 3). See `federation::frontier::frontier_fanout_loop`.
+    tokio::spawn(
+        prismoire_server::federation::frontier::frontier_fanout_loop(
+            shared_state.clone(),
+            frontier_dirty,
+        ),
+    );
 
     // Spawn the CSP report retention sweep. Runs once per hour and
     // deletes reports older than the retention window (see

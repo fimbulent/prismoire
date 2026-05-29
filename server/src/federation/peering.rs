@@ -994,6 +994,14 @@ pub async fn handle_peer_response(
                 tracing::error!(error = %e, "failed to flip peer to active on accept");
                 return internal_error();
             }
+            // §8.6 first-contact: our outbound request was accepted and
+            // the peer is now active on our side, so announce our
+            // frontier (the responder announces from its own accept
+            // path). Spawn-and-forget so we still return 200 promptly.
+            crate::federation::frontier::spawn_first_contact_announce(
+                state.clone(),
+                recorded_pubkey,
+            );
         }
         PeerDecision::Reject => {
             // Terminal `rejected` per §5.4 ("rejected (archive)"); the

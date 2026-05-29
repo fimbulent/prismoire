@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT applied_version, cursor AS \"cursor!: Vec<u8>\" FROM peer_frontiers WHERE peer_pubkey = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "applied_version",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "cursor!: Vec<u8>",
+        "ordinal": 1,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "c0742427e1f6d13ab4e7eef9afab717a40cfc70745e2b9e26ac35a16579a861a"
+}

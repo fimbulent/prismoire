@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 1 AS \"found!: i64\" FROM users WHERE public_key = ? AND home_instance IS NOT NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "found!: i64",
+        "ordinal": 0,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "ace5bb11e87c691fa2d0cdb374a07ac400b8f6d0fd7d50b8841d40de34053a1f"
+}
