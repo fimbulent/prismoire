@@ -294,6 +294,9 @@ pub async fn test_app_with_pool_transport_domain_and_outbound_config(
                 prismoire_server::federation::moves::MAX_MOVE_OBJECTS_PER_HOUR,
             ),
         ),
+        status_content_rate_limiter: Arc::new(
+            prismoire_server::federation::content_rate_limit::ContentRateLimiter::default(),
+        ),
         backfill_rate_limiter: Arc::new(
             prismoire_server::federation::backfill_rate_limit::BackfillRateLimiter::default(),
         ),

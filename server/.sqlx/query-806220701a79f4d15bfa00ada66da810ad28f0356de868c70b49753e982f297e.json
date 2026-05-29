@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT t.home_instance AS \"home_instance?: Vec<u8>\", u.public_key AS \"author_pubkey!: Vec<u8>\" FROM threads t JOIN users u ON u.id = t.author WHERE t.id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "home_instance?: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "author_pubkey!: Vec<u8>",
+        "ordinal": 1,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "806220701a79f4d15bfa00ada66da810ad28f0356de868c70b49753e982f297e"
+}

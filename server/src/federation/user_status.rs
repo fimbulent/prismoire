@@ -13,9 +13,13 @@
 //! subject's home instance asserts the subject is `active`,
 //! `suspended`, or `banned` as of `created_at`. Authority is
 //! home-scoped and follows the subject through moves (§16.1
-//! `unauthorized_signer`). These objects are **direct issuer → peer
-//! only** — never gossip-forwarded (§16.2), so unlike `/moves` this
-//! handler does not touch the forwarder.
+//! `unauthorized_signer`). They propagate by **selective multi-hop
+//! gossip** (§16.2) over the §7.5 machinery — the issuer's initial
+//! push reaches interested direct peers, then this handler tier-2
+//! forwards copies onward. Authority is therefore anchored to the
+//! object's **inner signature**, not the forwarding peer's envelope
+//! identity: every hop re-verifies the signature against `subject`'s
+//! home-at-`created_at` pubkey, which a forwarder cannot forge.
 //!
 //! ## Per-object state machine (§16.1)
 //!
@@ -24,21 +28,29 @@
 //! 3. `SignedPayload::parse` + class dispatch → `rejected/unknown_class`
 //!    (unrecognised `t`) or `rejected/schema_invalid` (recognised but
 //!    not `user-status`).
-//! 4. Ed25519 verify against the authenticated peer (`envelope.sender`)
-//!    → `rejected/invalid_signature`.
-//! 5. `signing_instance` must equal the sender's recorded domain →
-//!    `rejected/unauthorized_signer` (§16.2 forbids forwarding, so the
-//!    pusher must *be* the issuer).
-//! 6. Home-at-`created_at` authority: resolve `subject`'s home key at
-//!    the object's timestamp; it MUST equal `envelope.sender`. No local
-//!    knowledge of the subject → `rejected/unknown_subject_home`; a
-//!    different home → `rejected/unauthorized_signer`.
+//! 4. Home-at-`created_at` authority: resolve `subject`'s home key at
+//!    the object's timestamp. No local knowledge of the subject →
+//!    `rejected/unknown_subject_home`.
+//! 5. Ed25519 verify the inner signature against the **resolved home
+//!    pubkey** (NOT `envelope.sender` — under gossip the sender is an
+//!    arbitrary forwarding peer) → `rejected/invalid_signature`.
+//! 6. Advisory `signing_instance` cross-check: if the home's domain is
+//!    locally known (it is a peer, or it is us), the declared
+//!    `signing_instance` must match it → `rejected/unauthorized_signer`.
+//!    For a home reached only transitively via gossip (domain unknown)
+//!    the label is accepted as-is; the pubkey check above is the
+//!    load-bearing authority gate.
 //! 7. Chain-grounding: a `Some(prior_status_hash)` must reference a
 //!    stored `user-status` predecessor, else `deferred`.
 //! 8. §16.3 latest-wins-by-`created_at` (ties broken by canonical_hash
 //!    bytewise, smaller wins) against the `user_statuses` row. Winner
 //!    UPSERTs the projection (`applied`); loser is `superseded`. Both
 //!    persist canonical bytes for chain/audit.
+//! 9. Tier-2 gossip forward (§16.2): an `applied` or `superseded`
+//!    object is relayed onward via [`forward_signed_object`] (key =
+//!    `subject`, class [`ForwardingClass::UserStatus`], `arrived_from`
+//!    = envelope sender for split-horizon), subject to the
+//!    per-inner-signer amplification cap.
 
 use std::sync::Arc;
 
@@ -50,14 +62,17 @@ use ed25519_dalek::VerifyingKey;
 use sha2::{Digest, Sha256};
 
 use crate::AppState;
+use crate::error::AppError;
 use crate::federation::envelope::{decode_signed_object, encode_signed_object};
 use crate::federation::errors::{bad_request, internal_error};
+use crate::federation::forwarder::forward_signed_object;
 use crate::federation::identity::CBOR_CONTENT_TYPE;
 use crate::federation::middleware::VerifiedBody;
 use crate::federation::push_rate_limit::push_too_many_requests;
 use crate::federation::remote_users::resolve_home_at_t;
-use crate::signed::{self, FedEnvelope, ParseError, SignedPayload};
-use crate::signing::store_signed_object;
+use crate::federation::routing::ForwardingClass;
+use crate::signed::{self, FedEnvelope, ParseError, SignedPayload, UserStatusKind};
+use crate::signing::{sign_user_status_with_key, store_signed_object};
 
 /// §16.5 `MAX_USER_STATUS_BATCH`: per-push object-count cap. Overflow
 /// returns `400 { "error": "batch_too_large" }`.
@@ -242,41 +257,151 @@ pub async fn handle_user_status_push(
         return bad_request("batch_too_large");
     }
 
-    // Resolve the sender's recorded domain once per batch. The
-    // known_peer middleware already gated existence, so a missing row
-    // is local-state corruption.
-    let sender_domain = match resolve_sender_domain(&state, &envelope.sender).await {
-        Ok(Some(d)) => d,
-        Ok(None) => return internal_error(),
-        Err(e) => {
-            tracing::error!(error = %e, "db error resolving sender domain");
-            return internal_error();
-        }
-    };
-
     let mut results: Vec<UserStatusResult> = Vec::with_capacity(parsed.objects.len());
     for wire_bytes in &parsed.objects {
-        let result =
-            match apply_one_user_status(&state, wire_bytes, &envelope.sender, &sender_domain).await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::error!(error = %e, "db error applying federated user-status");
-                    return internal_error();
-                }
-            };
+        let result = match apply_one_user_status(&state, wire_bytes, &envelope.sender).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(error = %e, "db error applying federated user-status");
+                return internal_error();
+            }
+        };
         results.push(result);
     }
 
     cbor_ok(encode_results(&results))
 }
 
+// ---------------------------------------------------------------------------
+// Producer (§16 origination) — local home → gossip fabric
+// ---------------------------------------------------------------------------
+
+/// §16 producer: sign a `user-status` for a **local** subject (one this
+/// instance homes) and inject it into the §16.2 selective-gossip fabric.
+///
+/// Call only when this instance is `subject`'s home — the §16 authority
+/// rule forbids issuing a status for a user we do not home, and a
+/// receiver would reject it (`unauthorized_signer`). The admin handlers
+/// that wrap this (ban / suspend / unban) gate on the local-user
+/// invariant before calling.
+///
+/// Flow is "sign → store → advance head → forward":
+/// 1. Read the subject's current chain head (`user_statuses
+///    .current_status_hash`) to set `prior_status_hash` — `None` for the
+///    first status, chaining otherwise.
+/// 2. Sign with the **instance** key (status objects are instance-signed)
+///    and `signing_instance = state.instance_domain`.
+/// 3. Persist canonical bytes (`store_signed_object`) so the chain is
+///    grounded for the next issue and for §16.3 backfill.
+/// 4. UPSERT the local `user_statuses` projection so our own chain head
+///    advances (the next issue chains onto this one).
+/// 5. Hand to [`forward_signed_object`] as **originator** (`arrived_from
+///    = None`, key = `subject`, class [`ForwardingClass::UserStatus`]),
+///    which runs the §7.5 dedup-LRU accounting and caps direct push at
+///    `REDUNDANCY_K`; gossip carries it the rest of the way.
+///
+/// Best-effort fanout: a forwarder enqueue failure is logged inside
+/// [`forward_signed_object`], not surfaced here. The local DB writes are
+/// transactional and committed before the forward.
+pub async fn dispatch_local_user_status(
+    state: &Arc<AppState>,
+    subject: &[u8; 32],
+    status: UserStatusKind,
+    suspended_until: Option<u64>,
+    reason: Option<&str>,
+) -> Result<(), AppError> {
+    let created_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+
+    // Chain onto the subject's current status head, if one exists.
+    let subject_slice: &[u8] = subject.as_slice();
+    let prior_hash: Option<[u8; 32]> = sqlx::query!(
+        "SELECT current_status_hash AS \"current_status_hash!: Vec<u8>\" \
+         FROM user_statuses WHERE subject = ?",
+        subject_slice,
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    .and_then(|r| <[u8; 32]>::try_from(r.current_status_hash.as_slice()).ok());
+
+    let signed = sign_user_status_with_key(
+        &state.instance_key,
+        subject,
+        status,
+        suspended_until,
+        &state.instance_domain,
+        reason,
+        created_at_ms,
+        prior_hash.as_ref(),
+    );
+
+    store_signed_object(
+        &mut *tx,
+        "user-status",
+        &signed.payload,
+        &signed.signature,
+        &signed.canonical_hash,
+    )
+    .await?;
+
+    // Advance our own projection head so the next issue chains correctly.
+    let status_str = status.as_str();
+    let suspended_until_db = suspended_until.map(|v| v as i64);
+    let created_at_db = created_at_ms as i64;
+    let canonical_hash_db: Vec<u8> = signed.canonical_hash.to_vec();
+    let signing_instance_db: &str = &state.instance_domain;
+    sqlx::query!(
+        "INSERT INTO user_statuses \
+            (subject, status, suspended_until, signing_instance, reason, \
+             current_created_at, current_status_hash) \
+         VALUES (?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(subject) DO UPDATE SET \
+            status = excluded.status, \
+            suspended_until = excluded.suspended_until, \
+            signing_instance = excluded.signing_instance, \
+            reason = excluded.reason, \
+            current_created_at = excluded.current_created_at, \
+            current_status_hash = excluded.current_status_hash, \
+            updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+        subject_slice,
+        status_str,
+        suspended_until_db,
+        signing_instance_db,
+        reason,
+        created_at_db,
+        canonical_hash_db,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    forward_signed_object(
+        Arc::clone(state),
+        signed.canonical_hash,
+        ForwardingClass::UserStatus,
+        subject.to_vec(),
+        encode_signed_object(&signed.payload, &signed.signature),
+        None,
+    )
+    .await;
+    Ok(())
+}
+
 /// §16.1 per-object state machine for a single signed `user-status`.
+///
+/// `arrived_from` is the envelope sender (the transport peer that
+/// pushed this batch). It is *not* an authority input — authority is
+/// the inner signature against `subject`'s resolved home (§16.2) — but
+/// it is the split-horizon exclusion for the §16.2 tier-2 forward.
 async fn apply_one_user_status(
     state: &Arc<AppState>,
     wire_bytes: &[u8],
-    sender_key: &[u8; 32],
-    sender_domain: &str,
+    arrived_from: &[u8; 32],
 ) -> Result<UserStatusResult, sqlx::Error> {
     // Step 1: WireFormat decode.
     let (payload_bytes, signature_bytes) = match decode_signed_object(wire_bytes) {
@@ -334,10 +459,31 @@ async fn apply_one_user_status(
         }
     };
 
-    // Step 4: Ed25519 verify against the authenticated peer. §16.2
-    // forbids forwarding, so the pusher must be the issuer — the
-    // signature binds to `envelope.sender`.
-    let vk = match VerifyingKey::from_bytes(sender_key) {
+    // Step 4: home-at-T authority. Resolve `subject`'s home key as of
+    // the object's `created_at` — the authority anchor. Open a
+    // transaction now so the authority read, chain-grounding read, and
+    // the latest-wins UPSERT all observe one snapshot.
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+
+    let self_key = *state.instance_key.public_bytes();
+    let home =
+        match resolve_subject_home_at_t(&mut tx, &self_key, &status.subject, status.created_at)
+            .await?
+        {
+            None => {
+                return Ok(reject(
+                    canonical_hash,
+                    UserStatusRejectReason::UnknownSubjectHome,
+                ));
+            }
+            Some(h) => h,
+        };
+
+    // Step 5: Ed25519 verify the inner signature against the resolved
+    // home pubkey — NOT `envelope.sender`. Under §16.2 gossip the bytes
+    // arrive from an arbitrary forwarding peer; the home pubkey is the
+    // transport-independent authority. A forwarder cannot forge it.
+    let vk = match VerifyingKey::from_bytes(&home) {
         Ok(k) => k,
         Err(_) => {
             return Ok(reject(
@@ -353,40 +499,21 @@ async fn apply_one_user_status(
         ));
     }
 
-    // Step 5: the declared `signing_instance` must match the
-    // authenticated sender's domain. A mismatch means the bytes were
-    // signed by this peer but claim a different issuer — not a valid
-    // home authority on this direct channel.
-    if status.signing_instance != sender_domain {
+    // Step 6: advisory `signing_instance` cross-check. The pubkey check
+    // above is the load-bearing gate; the domain label is informational.
+    // When we can map the home pubkey to a domain locally (it is us, or
+    // a known peer), a mismatched label is a signing-side inconsistency
+    // → `unauthorized_signer`. A home reached only transitively via
+    // gossip has no local domain mapping, so we accept its self-declared
+    // label.
+    if let Some(home_domain) =
+        resolve_domain_for_key(&mut tx, &self_key, &state.instance_domain, &home).await?
+        && status.signing_instance != home_domain
+    {
         return Ok(reject(
             canonical_hash,
             UserStatusRejectReason::UnauthorizedSigner,
         ));
-    }
-
-    // Step 6: home-at-T authority. Resolve `subject`'s home key as of
-    // the object's `created_at`; it MUST equal the sender. Open a
-    // transaction now so the authority read, chain-grounding read, and
-    // the latest-wins UPSERT all observe one snapshot.
-    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
-
-    let self_key = *state.instance_key.public_bytes();
-    let home =
-        resolve_subject_home_at_t(&mut tx, &self_key, &status.subject, status.created_at).await?;
-    match home {
-        None => {
-            return Ok(reject(
-                canonical_hash,
-                UserStatusRejectReason::UnknownSubjectHome,
-            ));
-        }
-        Some(h) if &h != sender_key => {
-            return Ok(reject(
-                canonical_hash,
-                UserStatusRejectReason::UnauthorizedSigner,
-            ));
-        }
-        Some(_) => {}
     }
 
     // Step 7: chain-grounding. A non-first object must reference a
@@ -452,6 +579,10 @@ async fn apply_one_user_status(
         let canonical_hash_db: Vec<u8> = canonical_hash.to_vec();
         let created_at_db = status.created_at as i64;
         let reason: Option<&str> = status.reason.as_deref();
+        // Persist the issuer's own declared `signing_instance` (the
+        // home's self-label), not the transport peer's domain — under
+        // §16.2 gossip the pusher is rarely the issuer.
+        let signing_instance_db: &str = status.signing_instance.as_str();
         sqlx::query!(
             "INSERT INTO user_statuses \
                 (subject, status, suspended_until, signing_instance, reason, \
@@ -468,7 +599,7 @@ async fn apply_one_user_status(
             subject_slice,
             status_str,
             suspended_until_db,
-            sender_domain,
+            signing_instance_db,
             reason,
             created_at_db,
             canonical_hash_db,
@@ -481,6 +612,30 @@ async fn apply_one_user_status(
     };
 
     tx.commit().await?;
+
+    // Step 9: §16.2 tier-2 gossip forward. Relay verified, novel objects
+    // (`applied` / `superseded` — both stored as chain evidence) onward
+    // toward peers interested in `subject`. `duplicate` re-arrivals were
+    // already short-circuited at step 2; `deferred` returned earlier
+    // without storing. The per-inner-signer amplification cap (keyed on
+    // the home pubkey) bounds how much of one issuer's status stream we
+    // will propagate per hour — over-cap objects stay applied locally
+    // but are not forwarded.
+    if matches!(
+        result_kind,
+        UserStatusResultKind::Applied | UserStatusResultKind::Superseded
+    ) && state.status_content_rate_limiter.check_and_count(home, 1)
+    {
+        forward_signed_object(
+            Arc::clone(state),
+            canonical_hash,
+            ForwardingClass::UserStatus,
+            status.subject.to_vec(),
+            encode_signed_object(&payload_bytes, &signature_bytes),
+            Some(*arrived_from),
+        )
+        .await;
+    }
 
     Ok(UserStatusResult {
         canonical_hash,
@@ -555,16 +710,28 @@ async fn resolve_subject_home_at_t(
     }
 }
 
-async fn resolve_sender_domain(
-    state: &Arc<AppState>,
-    sender_key: &[u8; 32],
+/// Resolve the domain label locally known for an instance pubkey, for
+/// the §16.1 / §17.1 advisory `signing_instance` cross-check. Returns:
+/// - `Some(self_domain)` when `key` is this instance;
+/// - `Some(peer_domain)` when `key` is a known peer;
+/// - `None` when `key` is a home reached only transitively via gossip
+///   (no local domain mapping) — the caller then skips the cross-check
+///   and relies solely on the home-pubkey signature verification.
+pub(super) async fn resolve_domain_for_key(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    self_key: &[u8; 32],
+    self_domain: &str,
+    key: &[u8; 32],
 ) -> Result<Option<String>, sqlx::Error> {
-    let sender_slice: &[u8] = sender_key.as_slice();
+    if key == self_key {
+        return Ok(Some(self_domain.to_string()));
+    }
+    let key_slice: &[u8] = key.as_slice();
     let row = sqlx::query!(
         "SELECT instance_domain FROM peers WHERE instance_pubkey = ?",
-        sender_slice,
+        key_slice,
     )
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut **tx)
     .await?;
     Ok(row.map(|r| r.instance_domain))
 }

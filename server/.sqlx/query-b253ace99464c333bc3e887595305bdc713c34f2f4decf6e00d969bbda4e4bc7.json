@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, display_name, public_key, status, role FROM users WHERE id = ?",
+  "query": "SELECT id, display_name, public_key, status, role,\n                  home_instance AS \"home_instance?: Vec<u8>\"\n           FROM users WHERE id = ?",
   "describe": {
     "columns": [
       {
@@ -27,6 +27,11 @@
         "name": "role",
         "ordinal": 4,
         "type_info": "Text"
+      },
+      {
+        "name": "home_instance?: Vec<u8>",
+        "ordinal": 5,
+        "type_info": "Blob"
       }
     ],
     "parameters": {
@@ -37,8 +42,9 @@
       false,
       false,
       false,
-      false
+      false,
+      true
     ]
   },
-  "hash": "bfa2b46c876f65324104c9da940b25e1a9e4b7eda638c1e1080af391a5ecdb6b"
+  "hash": "b253ace99464c333bc3e887595305bdc713c34f2f4decf6e00d969bbda4e4bc7"
 }

@@ -194,6 +194,9 @@ pub enum ErrorCode {
     NotSuspended,
     /// Cannot ban or suspend an admin.
     CannotModerateAdmin,
+    /// Moderation target (user or thread) is homed on another instance;
+    /// only its home instance may issue authoritative moderation status.
+    RemoteModerationTarget,
     /// Invalid suspension duration.
     InvalidDuration,
     /// User's invite privileges are already in the requested state.
@@ -299,6 +302,7 @@ impl ErrorCode {
             | Self::NotPostAuthor
             | Self::AnnouncementsAdminOnly
             | Self::CannotModerateAdmin
+            | Self::RemoteModerationTarget
             | Self::InvitePrivilegeRevoked => StatusCode::FORBIDDEN,
 
             Self::UserNotFound
@@ -454,6 +458,7 @@ impl ErrorCode {
             Self::AlreadySuspended => "user is already suspended",
             Self::NotSuspended => "user is not suspended",
             Self::CannotModerateAdmin => "cannot ban or suspend an admin",
+            Self::RemoteModerationTarget => "target is homed on another instance",
             Self::InvalidDuration => "invalid suspension duration",
             Self::InvitePrivilegeUnchanged => "invite privileges already in requested state",
             Self::UserAlreadyDeleted => "user is already deleted",

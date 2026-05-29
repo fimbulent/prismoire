@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT current_status_hash AS \"current_status_hash!: Vec<u8>\" FROM user_statuses WHERE subject = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "current_status_hash!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "70021118e0082cf4ab4e46badebbb51c3215608122632e85f544ccdbfc731f49"
+}

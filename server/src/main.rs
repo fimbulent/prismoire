@@ -202,6 +202,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 prismoire_server::federation::moves::MAX_MOVE_OBJECTS_PER_HOUR,
             ),
         ),
+        status_content_rate_limiter: Arc::new(
+            prismoire_server::federation::content_rate_limit::ContentRateLimiter::default(),
+        ),
         backfill_rate_limiter: Arc::new(
             prismoire_server::federation::backfill_rate_limit::BackfillRateLimiter::default(),
         ),
@@ -259,6 +262,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         prismoire_server::federation::content_rate_limit::cleanup_loop(
             shared_state.move_rate_limiter.clone(),
             "move",
+        ),
+    );
+    tokio::spawn(
+        prismoire_server::federation::content_rate_limit::cleanup_loop(
+            shared_state.status_content_rate_limiter.clone(),
+            "status",
         ),
     );
     tokio::spawn(

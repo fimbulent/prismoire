@@ -8,7 +8,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::{AppError, ErrorCode};
+use crate::federation::thread_status::dispatch_local_thread_status;
+use crate::federation::user_status::dispatch_local_user_status;
 use crate::session::AuthUser;
+use crate::signed::{ThreadStatusKind, UserStatusKind};
 use crate::signing;
 use crate::state::AppState;
 use crate::threads::parse_cursor;
@@ -284,13 +287,18 @@ pub async fn lock_thread(
     }
 
     let thread = sqlx::query!(
-        r#"SELECT id, locked AS "locked: bool" FROM threads WHERE id = ?"#,
+        r#"SELECT id, locked AS "locked: bool",
+                  home_instance AS "home_instance?: Vec<u8>"
+           FROM threads WHERE id = ?"#,
         thread_id,
     )
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| AppError::code(ErrorCode::ThreadNotFound))?;
 
+    if thread.home_instance.is_some() {
+        return Err(AppError::code(ErrorCode::RemoteModerationTarget));
+    }
     if thread.locked {
         return Err(AppError::code(ErrorCode::ThreadAlreadyLocked));
     }
@@ -311,6 +319,10 @@ pub async fn lock_thread(
     )
     .await?;
 
+    // §17: federate a signed `locked` thread-status. Best-effort,
+    // post-write; the producer is a no-op for non-locally-homed threads.
+    emit_local_thread_status(&state, &thread.id, ThreadStatusKind::Locked, Some(&reason)).await;
+
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
@@ -326,13 +338,18 @@ pub async fn unlock_thread(
     require_admin(&user)?;
 
     let thread = sqlx::query!(
-        r#"SELECT id, locked AS "locked: bool" FROM threads WHERE id = ?"#,
+        r#"SELECT id, locked AS "locked: bool",
+                  home_instance AS "home_instance?: Vec<u8>"
+           FROM threads WHERE id = ?"#,
         thread_id,
     )
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| AppError::code(ErrorCode::ThreadNotFound))?;
 
+    if thread.home_instance.is_some() {
+        return Err(AppError::code(ErrorCode::RemoteModerationTarget));
+    }
     if !thread.locked {
         return Err(AppError::code(ErrorCode::ThreadNotLocked));
     }
@@ -352,6 +369,10 @@ pub async fn unlock_thread(
         None,
     )
     .await?;
+
+    // §17: federate a signed `open` thread-status. Best-effort,
+    // post-write; the producer is a no-op for non-locally-homed threads.
+    emit_local_thread_status(&state, &thread.id, ThreadStatusKind::Open, None).await;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -712,12 +733,19 @@ struct TargetUser {
     public_key: Vec<u8>,
     status: UserStatus,
     role: String,
+    /// `Some(pubkey)` when the user is homed on a remote instance;
+    /// `None` for a locally-homed user. Local moderation handlers reject
+    /// remote targets — only the home instance may issue authoritative
+    /// user-status (`docs/federation-protocol.md` §16).
+    home_instance: Option<Vec<u8>>,
 }
 
 /// Look up a user by ID. Returns `UserNotFound` if no row matches.
 async fn fetch_target_user(db: &sqlx::SqlitePool, user_id: &str) -> Result<TargetUser, AppError> {
     let row = sqlx::query!(
-        "SELECT id, display_name, public_key, status, role FROM users WHERE id = ?",
+        r#"SELECT id, display_name, public_key, status, role,
+                  home_instance AS "home_instance?: Vec<u8>"
+           FROM users WHERE id = ?"#,
         user_id,
     )
     .fetch_optional(db)
@@ -733,7 +761,52 @@ async fn fetch_target_user(db: &sqlx::SqlitePool, user_id: &str) -> Result<Targe
         public_key: row.public_key,
         status,
         role: row.role,
+        home_instance: row.home_instance,
     })
+}
+
+/// Emit a federated `user-status` object for a freshly-moderated
+/// **local** user (`docs/federation-protocol.md` §16). Best-effort:
+/// called after the moderation action has already committed, so a
+/// dispatch failure is logged but never fails the (durable) action.
+/// Skips silently if the stored pubkey is not the expected 32 bytes.
+async fn emit_local_user_status(
+    state: &Arc<AppState>,
+    pubkey: &[u8],
+    status: UserStatusKind,
+    suspended_until: Option<u64>,
+    reason: Option<&str>,
+) {
+    let Ok(subject) = <[u8; 32]>::try_from(pubkey) else {
+        tracing::error!("local user pubkey is not 32 bytes; skipping user-status dispatch");
+        return;
+    };
+    if let Err(e) =
+        dispatch_local_user_status(state, &subject, status, suspended_until, reason).await
+    {
+        tracing::error!(error = ?e, "failed to dispatch local user-status");
+    }
+}
+
+/// Emit a federated `thread-status` object for a freshly-moderated
+/// **locally-homed** thread (`docs/federation-protocol.md` §17).
+/// Best-effort: called after the lock/unlock write has committed, so a
+/// dispatch failure is logged but never fails the action. The producer
+/// itself is a no-op for non-locally-homed or unknown threads; this
+/// wrapper only adds the id-parse guard and error logging.
+async fn emit_local_thread_status(
+    state: &Arc<AppState>,
+    thread_id: &str,
+    status: ThreadStatusKind,
+    reason: Option<&str>,
+) {
+    let Ok(uuid) = Uuid::parse_str(thread_id) else {
+        tracing::error!(thread_id = %thread_id, "thread id is not a valid UUID; skipping thread-status dispatch");
+        return;
+    };
+    if let Err(e) = dispatch_local_thread_status(state, &uuid, status, reason).await {
+        tracing::error!(error = ?e, "failed to dispatch local thread-status");
+    }
 }
 
 /// Parse a duration string ("1d", "3d", "1w", "2w", "1m") into a chrono Duration.
@@ -777,19 +850,28 @@ pub async fn ban_user(
         public_key: target_public_key,
         status,
         role,
+        home_instance: target_home_instance,
     } = fetch_target_user(&state.db, &user_id).await?;
 
     if role == "admin" {
         return Err(AppError::code(ErrorCode::CannotModerateAdmin));
     }
+    if target_home_instance.is_some() {
+        return Err(AppError::code(ErrorCode::RemoteModerationTarget));
+    }
     if status == UserStatus::Banned {
         return Err(AppError::code(ErrorCode::AlreadyBanned));
     }
 
+    // `(id, display_name, public_key, home_instance)` — `home_instance`
+    // is carried through so we only federate a `user-status` for the
+    // locally-homed members of the ban set; the local status flip still
+    // applies to every member of the invite subtree.
     let mut users_to_ban = vec![(
         target_id.clone(),
         target_name.clone(),
         target_public_key.clone(),
+        target_home_instance,
     )];
 
     if req.ban_tree {
@@ -804,7 +886,8 @@ pub async fn ban_user(
                  JOIN invite_tree it ON i.created_by = it.user_id
                )
                SELECT u.id AS "id!", u.display_name AS "display_name!",
-                      u.public_key AS "public_key!", u.role AS "role!"
+                      u.public_key AS "public_key!", u.role AS "role!",
+                      u.home_instance AS "home_instance?: Vec<u8>"
                FROM users u
                JOIN invite_tree it ON u.id = it.user_id
                WHERE u.status != 'banned'"#,
@@ -815,7 +898,7 @@ pub async fn ban_user(
 
         for row in tree_users {
             if row.role != "admin" {
-                users_to_ban.push((row.id, row.display_name, row.public_key));
+                users_to_ban.push((row.id, row.display_name, row.public_key, row.home_instance));
             }
         }
     }
@@ -824,7 +907,7 @@ pub async fn ban_user(
     let mut total_snapshot_edges: i64 = 0;
     let mut banned_entries = Vec::new();
 
-    for (uid, name, pubkey) in &users_to_ban {
+    for (uid, name, pubkey, _home) in &users_to_ban {
         sqlx::query!("UPDATE users SET status = 'banned' WHERE id = ?", uid)
             .execute(&mut *tx)
             .await?;
@@ -847,6 +930,15 @@ pub async fn ban_user(
 
     tx.commit().await?;
     state.trust_graph_notify.notify_one();
+
+    // §16: federate a signed `banned` user-status for each locally-homed
+    // member of the ban set. Best-effort, post-commit.
+    for (_uid, _name, pubkey, home) in &users_to_ban {
+        if home.is_none() {
+            emit_local_user_status(&state, pubkey, UserStatusKind::Banned, None, Some(&reason))
+                .await;
+        }
+    }
 
     Ok(Json(BanResponse {
         banned_users: banned_entries,
@@ -874,10 +966,15 @@ pub async fn unban_user(
 
     let TargetUser {
         id: target_id,
+        public_key: target_public_key,
         status,
+        home_instance: target_home_instance,
         ..
     } = fetch_target_user(&state.db, &user_id).await?;
 
+    if target_home_instance.is_some() {
+        return Err(AppError::code(ErrorCode::RemoteModerationTarget));
+    }
     if status != UserStatus::Banned {
         return Err(AppError::code(ErrorCode::NotBanned));
     }
@@ -895,6 +992,16 @@ pub async fn unban_user(
     tx.commit().await?;
 
     state.trust_graph_notify.notify_one();
+
+    // §16: federate the restored `active` user-status. Best-effort.
+    emit_local_user_status(
+        &state,
+        &target_public_key,
+        UserStatusKind::Active,
+        None,
+        Some(&reason),
+    )
+    .await;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -923,13 +1030,18 @@ pub async fn suspend_user(
     let duration = parse_duration(&req.duration)?;
     let TargetUser {
         id: target_id,
+        public_key: target_public_key,
         status,
         role,
+        home_instance: target_home_instance,
         ..
     } = fetch_target_user(&state.db, &user_id).await?;
 
     if role == "admin" {
         return Err(AppError::code(ErrorCode::CannotModerateAdmin));
+    }
+    if target_home_instance.is_some() {
+        return Err(AppError::code(ErrorCode::RemoteModerationTarget));
     }
     if status == UserStatus::Suspended {
         return Err(AppError::code(ErrorCode::AlreadySuspended));
@@ -938,9 +1050,9 @@ pub async fn suspend_user(
         return Err(AppError::code(ErrorCode::AlreadyBanned));
     }
 
-    let suspended_until = (Utc::now() + duration)
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
+    let suspended_until_dt = Utc::now() + duration;
+    let suspended_until = suspended_until_dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let suspended_until_ms = suspended_until_dt.timestamp_millis().max(0) as u64;
 
     let mut tx = state.db.begin().await?;
 
@@ -963,6 +1075,17 @@ pub async fn suspend_user(
 
     tx.commit().await?;
 
+    // §16: federate the `suspended` user-status carrying the lift time.
+    // Best-effort, post-commit.
+    emit_local_user_status(
+        &state,
+        &target_public_key,
+        UserStatusKind::Suspended,
+        Some(suspended_until_ms),
+        Some(&reason),
+    )
+    .await;
+
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
@@ -980,10 +1103,15 @@ pub async fn unsuspend_user(
 
     let TargetUser {
         id: target_id,
+        public_key: target_public_key,
         status,
+        home_instance: target_home_instance,
         ..
     } = fetch_target_user(&state.db, &user_id).await?;
 
+    if target_home_instance.is_some() {
+        return Err(AppError::code(ErrorCode::RemoteModerationTarget));
+    }
     if status != UserStatus::Suspended {
         return Err(AppError::code(ErrorCode::NotSuspended));
     }
@@ -1009,6 +1137,16 @@ pub async fn unsuspend_user(
     .await?;
 
     tx.commit().await?;
+
+    // §16: federate the restored `active` user-status. Best-effort.
+    emit_local_user_status(
+        &state,
+        &target_public_key,
+        UserStatusKind::Active,
+        None,
+        Some("manual unsuspend"),
+    )
+    .await;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }

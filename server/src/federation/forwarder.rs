@@ -92,6 +92,14 @@ const CONTENT_PATH: &str = "/federation/v1/content";
 /// for the §12.1 move declarations.
 const MOVES_PATH: &str = "/federation/v1/moves";
 
+/// Path the forwarder pushes wire bytes to on each downstream peer
+/// for §16 user-status objects (gossip-forwarded per §16.2).
+const USER_STATUS_PATH: &str = "/federation/v1/user-status";
+
+/// Path the forwarder pushes wire bytes to on each downstream peer
+/// for §17 thread-status objects (gossip-forwarded per §17.2).
+const THREAD_STATUS_PATH: &str = "/federation/v1/thread-status";
+
 /// Per-class dispatch: which downstream route + which body-wrapper
 /// CBOR key to use. Trust-edges go to `/edges` and wrap each
 /// WireFormat blob as `{ "edges": [bstr] }`; every Authored class
@@ -104,6 +112,8 @@ fn route_and_body_key(class: ForwardingClass) -> (&'static str, &'static str) {
     match class {
         ForwardingClass::TrustEdge => (EDGES_PATH, "edges"),
         ForwardingClass::Authored => (CONTENT_PATH, "objects"),
+        ForwardingClass::UserStatus => (USER_STATUS_PATH, "objects"),
+        ForwardingClass::ThreadStatus => (THREAD_STATUS_PATH, "objects"),
         ForwardingClass::Move => (MOVES_PATH, "moves"),
     }
 }
@@ -432,5 +442,14 @@ mod tests {
         let (path, key) = route_and_body_key(ForwardingClass::Authored);
         assert_eq!(path, "/federation/v1/content");
         assert_eq!(key, "objects");
+        let (path, key) = route_and_body_key(ForwardingClass::UserStatus);
+        assert_eq!(path, "/federation/v1/user-status");
+        assert_eq!(key, "objects");
+        let (path, key) = route_and_body_key(ForwardingClass::ThreadStatus);
+        assert_eq!(path, "/federation/v1/thread-status");
+        assert_eq!(key, "objects");
+        let (path, key) = route_and_body_key(ForwardingClass::Move);
+        assert_eq!(path, "/federation/v1/moves");
+        assert_eq!(key, "moves");
     }
 }

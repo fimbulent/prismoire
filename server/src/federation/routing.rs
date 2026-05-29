@@ -127,30 +127,43 @@ pub const LOW_THRESHOLD: f64 = 0.60;
 /// The class determines two things:
 ///
 /// 1. Which of the receiver's two filters to consult — trust-edges
-///    look up against `edge_origin_filter`; everything else looks up
-///    against `content_filter`.
+///    look up against `edge_origin_filter`; user-status looks up
+///    against EITHER filter (a status about a user is relevant to a
+///    peer that hosts the subject's content OR traverses the
+///    subject's edges); everything else looks up against
+///    `content_filter`.
 /// 2. What the routing *key* is for an object — for most classes the
 ///    key is the author's public key; for trust-edges it is the
 ///    signer (== source) of the edge; for user-status it is the
-///    subject; for admin-rm it is the target post's author. The
-///    caller resolves the key from the object before calling
-///    [`peers_interested_in`].
+///    subject; for thread-status it is the thread's OP author; for
+///    admin-rm it is the target post's author. The caller resolves
+///    the key from the object before calling [`peers_interested_in`].
 ///
-/// The §7.4 table also lists `reports`, `user-status`, and
-/// `thread-status` as "do not gossip" — they reach peers via
-/// different paths (§16.2, §17.2, §18.2) and never feed this routing
-/// dispatch. Those classes are deliberately absent from this enum so
-/// a caller that adds them by accident gets a type error.
+/// `user-status` and `thread-status` now gossip via this dispatch
+/// (§16.2 / §17.2 selective forwarding). Only `reports` (§18) stay
+/// off the gossip path — they ride a private point-to-point channel
+/// (§18.2) and are deliberately absent from this enum so a caller
+/// that tries to route one through here gets a type error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForwardingClass {
     /// Trust-edge signature → routes against the receiver's
     /// `edge_origin_filter` (§7.4); key is `signer(edge)`.
     TrustEdge,
-    /// Every author-keyed class — post-rev, retract, profile,
-    /// thread-create, deactivate, admin-rm
-    /// (key = target_author), thread-status (key = thread OP author).
-    /// Routes against the receiver's `content_filter` (§7.4).
+    /// Every author-keyed content class — post-rev, retract, profile,
+    /// thread-create, deactivate, admin-rm (key = target_author).
+    /// Routes against the receiver's `content_filter` (§7.4) and is
+    /// pushed to the `/content` route.
     Authored,
+    /// §16 `user-status`. Key is `subject(obj)`; routed against
+    /// EITHER `content_filter` OR `edge_origin_filter` (§7.4 — the
+    /// only OR-filter class) and pushed to the `/user-status` route.
+    UserStatus,
+    /// §17 `thread-status`. Key is the thread's OP author pubkey;
+    /// routed against `content_filter` (the status rides with the
+    /// thread's content) but pushed to the `/thread-status` route
+    /// rather than `/content`, which is why it is a distinct class
+    /// from [`Self::Authored`] despite sharing the filter.
+    ThreadStatus,
     /// §5.1 `move` declaration. §12 propagation override: every
     /// active peer receives every move regardless of `mode(self → P)`
     /// or any interest-filter membership, and the per-object fanout
@@ -162,16 +175,22 @@ pub enum ForwardingClass {
 }
 
 impl ForwardingClass {
-    /// Pick the receiver-side filter to consult per the §7.4
-    /// dispatch table. `Move` bypasses every filter under the §12
-    /// unconditional-flood override; callers must check
-    /// [`Self::bypasses_filters`] before reaching this method, or
-    /// the bloom path below would erroneously gate move propagation
-    /// on the per-peer interest filters.
-    fn select_filter<'a>(&self, cf: &'a BloomFilter, ef: &'a BloomFilter) -> &'a BloomFilter {
+    /// Decide whether `key` is admitted for this class against the
+    /// peer's two filters, per the §7.4 dispatch table. Trust-edges
+    /// test `edge_origin_filter`; user-status tests EITHER filter (the
+    /// OR-filter class — a status is relevant to a peer hosting the
+    /// subject's content or traversing its edges); every other content
+    /// class (including thread-status) tests `content_filter`.
+    ///
+    /// `Move` bypasses every filter under the §12 unconditional-flood
+    /// override; callers must check [`Self::bypasses_filters`] before
+    /// reaching this method, or the bloom path below would erroneously
+    /// gate move propagation on the per-peer interest filters.
+    fn admits(&self, cf: &BloomFilter, ef: &BloomFilter, key: &[u8]) -> bool {
         match self {
-            ForwardingClass::TrustEdge => ef,
-            ForwardingClass::Authored => cf,
+            ForwardingClass::TrustEdge => ef.contains(key),
+            ForwardingClass::Authored | ForwardingClass::ThreadStatus => cf.contains(key),
+            ForwardingClass::UserStatus => cf.contains(key) || ef.contains(key),
             // `Move` is documented to bypass §7.4 filter dispatch via
             // [`Self::bypasses_filters`]; reaching this arm means a
             // caller went through the bloom-membership path for a
@@ -182,7 +201,7 @@ impl ForwardingClass {
             // plane class, so panic loudly.
             ForwardingClass::Move => {
                 unreachable!(
-                    "select_filter called on ForwardingClass::Move; \
+                    "admits called on ForwardingClass::Move; \
                      callers must short-circuit on `bypasses_filters` first"
                 )
             }
@@ -345,10 +364,7 @@ pub async fn peers_interested_in(
         // Filtered falls back to the per-class membership test.
         let admitted = match outbound_mode {
             Mode::All => true,
-            Mode::Filtered => {
-                let filter = class.select_filter(&cf, &ef);
-                filter.contains(key)
-            }
+            Mode::Filtered => class.admits(&cf, &ef, key),
         };
         if admitted {
             out.push(PeerRouting {
@@ -528,21 +544,19 @@ mod tests {
         // match.
         let cf = one_key_filter(&[b"alice"]);
         let ef = one_key_filter(&[b"bob"]);
-        assert!(
-            ForwardingClass::Authored
-                .select_filter(&cf, &ef)
-                .contains(b"alice")
-        );
-        assert!(
-            !ForwardingClass::TrustEdge
-                .select_filter(&cf, &ef)
-                .contains(b"alice")
-        );
-        assert!(
-            ForwardingClass::TrustEdge
-                .select_filter(&cf, &ef)
-                .contains(b"bob")
-        );
+        assert!(ForwardingClass::Authored.admits(&cf, &ef, b"alice"));
+        assert!(!ForwardingClass::TrustEdge.admits(&cf, &ef, b"alice"));
+        assert!(ForwardingClass::TrustEdge.admits(&cf, &ef, b"bob"));
+        // thread-status rides the content filter (like Authored).
+        assert!(ForwardingClass::ThreadStatus.admits(&cf, &ef, b"alice"));
+        assert!(!ForwardingClass::ThreadStatus.admits(&cf, &ef, b"bob"));
+        // user-status is the OR-filter class: matches if EITHER filter
+        // admits the subject key.
+        assert!(ForwardingClass::UserStatus.admits(&cf, &ef, b"alice"));
+        assert!(ForwardingClass::UserStatus.admits(&cf, &ef, b"bob"));
+        let cf_empty = one_key_filter(&[b"zzz"]);
+        let ef_empty = one_key_filter(&[b"zzz"]);
+        assert!(!ForwardingClass::UserStatus.admits(&cf_empty, &ef_empty, b"alice"));
     }
 
     #[test]

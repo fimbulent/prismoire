@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "WITH RECURSIVE invite_tree(user_id) AS (\n                 SELECT u.id FROM users u\n                 JOIN invites i ON i.id = u.invite_id\n                 WHERE i.created_by = ?\n               UNION ALL\n                 SELECT u.id FROM users u\n                 JOIN invites i ON i.id = u.invite_id\n                 JOIN invite_tree it ON i.created_by = it.user_id\n               )\n               SELECT u.id AS \"id!\", u.display_name AS \"display_name!\",\n                      u.public_key AS \"public_key!\", u.role AS \"role!\",\n                      u.home_instance AS \"home_instance?: Vec<u8>\"\n               FROM users u\n               JOIN invite_tree it ON u.id = it.user_id\n               WHERE u.status != 'banned'",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "display_name!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "public_key!",
+        "ordinal": 2,
+        "type_info": "Blob"
+      },
+      {
+        "name": "role!",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "home_instance?: Vec<u8>",
+        "ordinal": 4,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "8ae2b18edcf27fbdce348c1855a84ca19365000c67ada15698acdc517e7b6586"
+}

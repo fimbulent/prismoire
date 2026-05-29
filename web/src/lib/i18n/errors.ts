@@ -88,6 +88,7 @@ const ERROR_MESSAGES: Record<ErrorCode, string> = {
 	already_suspended: 'User is already suspended.',
 	not_suspended: 'User is not suspended.',
 	cannot_moderate_admin: 'Cannot ban or suspend an admin.',
+	remote_moderation_target: 'This user or thread is homed on another instance and cannot be moderated here.',
 	invalid_duration: 'Invalid suspension duration.',
 	invite_privilege_unchanged: 'Invite privileges are already in the requested state.',
 	user_already_deleted: 'This user has already been deleted.',

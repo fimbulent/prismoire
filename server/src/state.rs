@@ -139,6 +139,15 @@ pub struct AppState {
     /// makes abuse on this route disproportionately expensive
     /// downstream.
     pub move_rate_limiter: Arc<ContentRateLimiter>,
+    /// §16.2 / §17.2 per-**inner-signer** rolling-hour object ceiling
+    /// for gossip-forwarded `user-status` and `thread-status`. Keyed on
+    /// the status object's home instance pubkey (the inner signer), not
+    /// the transport peer — so a single issuer's status stream cannot be
+    /// amplified by re-arrival along many gossip paths. Shared across
+    /// both status classes (the threat model is per-issuer volume, not
+    /// per-route). Checked only on the tier-2 forward decision; never
+    /// gates local acceptance. In-memory only; resets on restart.
+    pub status_content_rate_limiter: Arc<ContentRateLimiter>,
     /// §10.5.5 receiver-side per-peer per-minute request + byte
     /// budgets gating the three Phase-8 pull-backfill routes
     /// (`/backfill/by-hash`, `/backfill/by-author`,

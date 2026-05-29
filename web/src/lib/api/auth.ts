@@ -96,6 +96,7 @@ export type ErrorCode =
 	| 'already_suspended'
 	| 'not_suspended'
 	| 'cannot_moderate_admin'
+	| 'remote_moderation_target'
 	| 'invalid_duration'
 	| 'invite_privilege_unchanged'
 	| 'user_already_deleted'

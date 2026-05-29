@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT current_status_hash AS \"current_status_hash!: Vec<u8>\" FROM thread_statuses WHERE thread_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "current_status_hash!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "45df830ccaa5bc517be36f62e4530dd539bf692f6bffc41064378a484ddcaffb"
+}

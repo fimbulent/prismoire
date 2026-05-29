@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, locked AS \"locked: bool\",\n                  home_instance AS \"home_instance?: Vec<u8>\"\n           FROM threads WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "locked: bool",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "home_instance?: Vec<u8>",
+        "ordinal": 2,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "582b7f813953b54bef6705cbfc0984657e759cd698d7350c11a0aa32f95fe6b3"
+}
