@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT instance_pubkey, instance_domain, status, direction, capabilities, agreed_capabilities, decision_message, termination_reason, first_seen, last_handshake FROM peers ORDER BY first_seen DESC",
+  "describe": {
+    "columns": [
+      {
+        "name": "instance_pubkey",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "instance_domain",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "status",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "direction",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "capabilities",
+        "ordinal": 4,
+        "type_info": "Blob"
+      },
+      {
+        "name": "agreed_capabilities",
+        "ordinal": 5,
+        "type_info": "Blob"
+      },
+      {
+        "name": "decision_message",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "termination_reason",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "first_seen",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_handshake",
+        "ordinal": 9,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "104b26724c641313974f16759ee8e584c7b08d3e932d08a9b74a4cedf8acd2bc"
+}

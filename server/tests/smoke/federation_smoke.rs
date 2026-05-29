@@ -150,8 +150,11 @@ async fn spawn_smoke_instance(client: reqwest::Client, tls: RustlsConfig) -> Smo
     // production binaries derive this bool from
     // `PRISMOIRE_FEDERATION_ALLOW_PRIVATE_TARGETS` in `main.rs`.
     let pool: SqlitePool = fresh_db().await;
+    // `insecure_http = false`: this suite stands up real loopback TLS,
+    // so the transport must dial `https://` (the `http://` override is
+    // a local-dev-only affordance).
     let transport: Arc<dyn FederationTransport> =
-        Arc::new(ReqwestTransport::new(pool.clone(), client, true));
+        Arc::new(ReqwestTransport::new(pool.clone(), client, true, false));
 
     // Step 3: assemble the full production router via the shared
     // helper. Skipping the helper would mean re-listing every

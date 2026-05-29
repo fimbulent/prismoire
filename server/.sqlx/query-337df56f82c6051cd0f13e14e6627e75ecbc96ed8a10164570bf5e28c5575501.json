@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT request_id FROM peers WHERE instance_pubkey = ? AND status = 'pending_inbound' LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "request_id",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "337df56f82c6051cd0f13e14e6627e75ecbc96ed8a10164570bf5e28c5575501"
+}

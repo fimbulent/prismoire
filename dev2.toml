@@ -1,0 +1,14 @@
+# Federation dev instance 2 — run with `just dev 2`.
+# See dev1.toml for the full rationale.
+
+[server]
+port = 3010
+database = "prismoire-dev2.db"
+setup_token_file = "setup-token"
+
+[webauthn]
+rp_id = "localhost"
+rp_origin = "https://localhost:5183"
+
+[federation]
+domain = "localhost:3010"

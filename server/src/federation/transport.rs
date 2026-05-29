@@ -166,6 +166,20 @@ pub trait FederationTransport: Send + Sync + 'static {
     /// the federation path; they do not know which peer host serves
     /// it).
     fn request<'a>(&'a self, target: &'a PeerId, request: Request<Bytes>) -> TransportFuture<'a>;
+
+    /// Fetch an instance's identity card (`GET /federation/v1/identity`)
+    /// by bare canonical domain.
+    ///
+    /// Distinct from [`request`](Self::request) because the operator
+    /// "preview a candidate peer" flow (§5.2) has to reach an instance
+    /// that is *not yet* in the `peers` table — so there is no `PeerId`
+    /// to route by and no DB row to resolve a domain from. The call is
+    /// unauthenticated (the identity route is the only un-enveloped
+    /// federation endpoint) and SSRF-checked against the supplied
+    /// domain directly.
+    ///
+    /// [`request`]: Self::request
+    fn fetch_identity<'a>(&'a self, domain: &'a str) -> TransportFuture<'a>;
 }
 
 /// Placeholder transport that rejects every outbound call as
@@ -181,6 +195,10 @@ impl FederationTransport for NullTransport {
     fn request<'a>(&'a self, target: &'a PeerId, _request: Request<Bytes>) -> TransportFuture<'a> {
         let target = *target;
         Box::pin(async move { Err(TransportError::UnknownPeer(target)) })
+    }
+
+    fn fetch_identity<'a>(&'a self, _domain: &'a str) -> TransportFuture<'a> {
+        Box::pin(async move { Err(TransportError::Dispatch("disabled")) })
     }
 }
 
@@ -219,18 +237,39 @@ pub struct ReqwestTransport {
     /// [`super::domain::allow_private_targets_from_env`]; tests pass `true`
     /// directly without touching process-wide env state.
     allow_private_targets: bool,
+    /// When `true`, dial peers over plain `http://` instead of
+    /// `https://`. Set only for local multi-instance development where
+    /// each instance's Axum is served over plain HTTP; production
+    /// binaries leave this `false`. Derived in `main.rs` from
+    /// `PRISMOIRE_FEDERATION_INSECURE_HTTP` via
+    /// [`super::domain::insecure_http_from_env`]; the Layer-2 smoke test
+    /// passes `false` because it stands up real loopback TLS.
+    insecure_http: bool,
 }
 
 impl ReqwestTransport {
     /// Construct a [`ReqwestTransport`] over the supplied client.
-    /// The SSRF policy is set explicitly by the caller — see the
-    /// `allow_private_targets` field for the rationale.
-    pub fn new(db: sqlx::SqlitePool, client: reqwest::Client, allow_private_targets: bool) -> Self {
+    /// The SSRF policy and the plain-HTTP dev override are set
+    /// explicitly by the caller — see the `allow_private_targets` and
+    /// `insecure_http` fields for the rationale.
+    pub fn new(
+        db: sqlx::SqlitePool,
+        client: reqwest::Client,
+        allow_private_targets: bool,
+        insecure_http: bool,
+    ) -> Self {
         Self {
             client,
             db,
             allow_private_targets,
+            insecure_http,
         }
+    }
+
+    /// Scheme to dial peers with: `https` in production, `http` only
+    /// when the dev override is enabled.
+    fn scheme(&self) -> &'static str {
+        if self.insecure_http { "http" } else { "https" }
     }
 
     /// Production-shaped `reqwest::Client`. Configured for the
@@ -353,7 +392,7 @@ impl FederationTransport for ReqwestTransport {
                 .path_and_query()
                 .map(|pq| pq.as_str())
                 .unwrap_or("/");
-            let raw_url = format!("https://{instance_domain}{path_and_query}");
+            let raw_url = format!("{}://{instance_domain}{path_and_query}", self.scheme());
             let url = match reqwest::Url::parse(&raw_url) {
                 Ok(u) => u,
                 Err(e) => {
@@ -398,6 +437,52 @@ impl FederationTransport for ReqwestTransport {
                 .body(body_bytes)
                 .map_err(|e| {
                     tracing::error!(peer = %target_id, error = %e, "response build failed");
+                    TransportError::Dispatch("build")
+                })?;
+            *http_response.headers_mut() = headers;
+            Ok(http_response)
+        })
+    }
+
+    fn fetch_identity<'a>(&'a self, domain: &'a str) -> TransportFuture<'a> {
+        Box::pin(async move {
+            // The operator typed this domain; it has not passed
+            // through the inbound peering boundary, so validate it
+            // here as the SSRF boundary for the preview probe.
+            let parsed = parse_instance_domain(domain).map_err(|e| {
+                tracing::warn!(domain = %domain, error = %e, "fetch_identity: invalid domain");
+                TransportError::Dispatch("build")
+            })?;
+            if !self.allow_private_targets && is_blocked_ip_literal(&parsed.host) {
+                tracing::warn!(
+                    domain = %domain,
+                    host = %parsed.host,
+                    "fetch_identity: rejecting blocked target IP range",
+                );
+                return Err(TransportError::Dispatch("blocked"));
+            }
+
+            let raw_url = format!("{}://{domain}/federation/v1/identity", self.scheme());
+            let url = reqwest::Url::parse(&raw_url).map_err(|e| {
+                tracing::warn!(domain = %domain, error = %e, "fetch_identity: URL parse failed");
+                TransportError::Dispatch("build")
+            })?;
+
+            let response = self.client.get(url).send().await.map_err(|e| {
+                let category = classify_reqwest_error(&e);
+                tracing::warn!(domain = %domain, error = %e, category, "fetch_identity: send failed");
+                TransportError::Dispatch(category)
+            })?;
+
+            let status = response.status();
+            let headers = response.headers().clone();
+            let body_bytes = response.bytes().await.map_err(|e| {
+                tracing::warn!(domain = %domain, error = %e, "fetch_identity: body read failed");
+                TransportError::Dispatch("body")
+            })?;
+            let mut http_response =
+                Response::builder().status(status).body(body_bytes).map_err(|e| {
+                    tracing::error!(domain = %domain, error = %e, "fetch_identity: response build failed");
                     TransportError::Dispatch("build")
                 })?;
             *http_response.headers_mut() = headers;

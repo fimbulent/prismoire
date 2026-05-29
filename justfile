@@ -1,9 +1,32 @@
 import? '.justfile.local'
 
-# Run frontend + backend in watch mode
-dev:
+# Detailed usage:
+#
+#   just dev        Single instance: dev.toml, Axum :3000, web :5173.
+#   just dev N      Federation instance N (1,2,3,…): devN.toml, Axum
+#                   :30(N-1)0, web :517(N-1)... with the plain-HTTP
+#                   transport override on so the instances can reach each
+#                   other's Axum directly (no TLS proxy / certs needed).
+#
+# Run each federation instance in its own terminal. They share the Cargo
+# target dir, so a code edit triggers each watcher to rebuild in turn
+# (cargo serialises via the build lock) — expected, not a bug.
+#
+# Run frontend + backend in watch mode (optional instance number for federation)
+dev n="":
     #!/usr/bin/env bash
-    export PRISMOIRE_CONFIG=dev.toml
+    set -euo pipefail
+    if [ -z "{{n}}" ]; then
+        export PRISMOIRE_CONFIG=dev.toml
+    else
+        api_port=$((3000 + ({{n}} - 1) * 10))
+        web_port=$((5173 + ({{n}} - 1) * 10))
+        export PRISMOIRE_CONFIG="dev{{n}}.toml"
+        export API_URL="http://localhost:${api_port}"
+        export WEB_PORT="${web_port}"
+        export PRISMOIRE_FEDERATION_INSECURE_HTTP=1
+        echo "instance {{n}}: Axum http://localhost:${api_port}  web https://localhost:${web_port}  federation domain localhost:${api_port}"
+    fi
     pnpm --dir web dev & VITE_PID=$!
     trap 'kill $VITE_PID 2>/dev/null; wait $VITE_PID 2>/dev/null' EXIT
     cargo watch -x 'run -p prismoire-server'

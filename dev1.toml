@@ -1,0 +1,23 @@
+# Federation dev instance 1 — run with `just dev 1`.
+#
+# `just dev N` derives the ports from N and sets
+# PRISMOIRE_FEDERATION_INSECURE_HTTP=1, so the transport dials peers over
+# plain http:// straight at their Axum port (no TLS proxy / certs needed).
+
+[server]
+port = 3000
+database = "prismoire-dev1.db"
+# Shared across instances: generate once with `just setup-token > setup-token`,
+# then each instance consumes it at /setup to create its own admin.
+setup_token_file = "setup-token"
+
+[webauthn]
+# rp_id stays "localhost" so passkeys work on every instance's port with the
+# existing mkcert localhost cert. Only the federation domain differs per instance.
+rp_id = "localhost"
+rp_origin = "https://localhost:5173"
+
+[federation]
+# Distinct, dialable identity so peers (and the admin dashboard) can tell
+# instances apart. Matches this instance's Axum port.
+domain = "localhost:3000"

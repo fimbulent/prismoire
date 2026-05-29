@@ -124,6 +124,14 @@ export type ErrorCode =
 	| 'attachment_inline_ref_duplicate'
 	| 'attachment_inline_ref_not_image'
 	| 'attachment_empty'
+	// Federation (operator peering)
+	| 'self_peering'
+	| 'peer_domain_conflict'
+	| 'invalid_peer_domain'
+	| 'peer_unreachable'
+	| 'peer_handshake_failed'
+	| 'peer_identity_invalid'
+	| 'peer_not_found'
 	// Catch-all
 	| 'bad_request'
 	| 'rate_limited'

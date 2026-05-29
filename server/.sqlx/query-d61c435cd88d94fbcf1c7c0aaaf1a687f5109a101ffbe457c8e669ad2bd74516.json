@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM peers WHERE instance_pubkey = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "d61c435cd88d94fbcf1c7c0aaaf1a687f5109a101ffbe457c8e669ad2bd74516"
+}

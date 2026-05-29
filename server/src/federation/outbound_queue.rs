@@ -914,6 +914,18 @@ mod tests {
                 Ok(resp)
             })
         }
+
+        fn fetch_identity<'a>(
+            &'a self,
+            _domain: &'a str,
+        ) -> crate::federation::transport::TransportFuture<'a> {
+            // The outbound-queue tests never probe identities.
+            Box::pin(async move {
+                Err(crate::federation::transport::TransportError::Dispatch(
+                    "other",
+                ))
+            })
+        }
     }
 
     fn test_instance_key() -> Arc<InstanceKey> {

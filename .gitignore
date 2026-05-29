@@ -28,6 +28,9 @@ build/
 *.db-wal
 *.db-shm
 
+# Local admin-bootstrap token (generated via `just setup-token > setup-token`)
+setup-token
+
 # OS
 .DS_Store
 Thumbs.db

@@ -118,6 +118,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let allowed_origin =
         AllowedOrigin::from_url(&rp_origin_url).expect("rp_origin must have a host");
     let https_enabled = HttpsEnabled(rp_origin_url.scheme() == "https");
+    // A loopback rp_origin marks a local dev instance; used to gate the
+    // `[federation].domain` override and `PRISMOIRE_FEDERATION_INSECURE_HTTP`
+    // warnings below. Matches the `localhost` hostname as well as loopback
+    // IP literals (`127.0.0.0/8`, `::1`) so a `127.0.0.1` dev origin doesn't
+    // trip a spurious "non-loopback" warning.
+    let is_dev = match rp_origin_url.host() {
+        Some(url::Host::Domain(h)) => h == "localhost",
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    };
 
     let trust_graph_notify = Arc::new(Notify::new());
     let trust_graph = Arc::new(RwLock::new(Arc::new(trust::TrustGraph::empty())));
@@ -145,13 +156,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let instance_key = instance_key::load_or_generate(&pool).await?;
     let federation_nonce_lru = Arc::new(NonceLru::default());
     // SSRF policy is read from `PRISMOIRE_FEDERATION_ALLOW_PRIVATE_TARGETS`
-    // once at boot and held as a `bool` on the transport — restart-required
-    // to flip. Tests construct their own transport with `true` directly,
-    // never via the env var, to keep process-wide state out of the harness.
+    // and the plain-HTTP dev override from `PRISMOIRE_FEDERATION_INSECURE_HTTP`,
+    // both once at boot and held as `bool`s on the transport —
+    // restart-required to flip. Tests construct their own transport with
+    // explicit flags, never via the env vars, to keep process-wide state
+    // out of the harness.
+    let insecure_http = prismoire_server::federation::domain::insecure_http_from_env();
+    if insecure_http && !is_dev {
+        tracing::warn!(
+            "PRISMOIRE_FEDERATION_INSECURE_HTTP is set on a non-loopback rp_origin; \
+             all outbound federation requests will be dialed over plaintext HTTP. \
+             This is a local-development escape hatch only — unset it in production",
+        );
+    }
     let federation_transport: Arc<dyn FederationTransport> = Arc::new(ReqwestTransport::new(
         pool.clone(),
         ReqwestTransport::default_client()?,
         allow_private_targets_from_env(),
+        insecure_http,
     ));
     // §7.3 per-peer outbound FIFO queues (Phase 6.4 / 6.4.1). One
     // process-wide collection of per-peer FIFOs + drain workers; the
@@ -164,12 +186,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         instance_key.clone(),
     );
     // §5.2 `instance_domain` is the bare canonical domain this
-    // instance serves on. The closest existing config we have is
-    // `webauthn.rp_id`, which is the *same* concept by design (both
-    // identify the host as a security principal). Reuse it rather
-    // than adding a parallel `[federation].domain` knob that
-    // operators would have to keep in sync.
-    let instance_domain = config.webauthn.rp_id.clone();
+    // instance serves on. By default it reuses `webauthn.rp_id` — the
+    // *same* security principal by design (both identify the host) —
+    // so operators configure one value. The optional
+    // `[federation].domain` override exists for local multi-instance
+    // development, where every instance keeps `rp_id = "localhost"`
+    // (browsers accept passkeys on any port) but needs a distinct,
+    // dialable federation domain like `localhost:3010`. A production
+    // instance should never need it, so warn if it's set while
+    // `rp_origin` is not loopback.
+    let instance_domain = match &config.federation.domain {
+        Some(domain) => {
+            if let Err(e) = prismoire_server::federation::domain::parse_instance_domain(domain) {
+                tracing::error!(domain = %domain, error = %e, "[federation].domain is malformed");
+                std::process::exit(1);
+            }
+            if !is_dev {
+                tracing::warn!(
+                    domain = %domain,
+                    "[federation].domain override is set on a non-loopback rp_origin; \
+                     production instances should derive the federation domain from \
+                     webauthn.rp_id instead",
+                );
+            }
+            domain.clone()
+        }
+        None => config.webauthn.rp_id.clone(),
+    };
 
     let shared_state = Arc::new(AppState {
         db: pool.clone(),

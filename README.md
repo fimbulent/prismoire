@@ -80,6 +80,18 @@ just dev         # serves over HTTPS
 
 `just dev` uses `dev.toml`, which sets the WebAuthn origin to the Vite HTTPS dev server (`https://localhost:5173`).
 
+### Local Multi-Instance Federation
+
+To exercise federation locally, run several instances side by side with `just dev N` (N = 1, 2, 3, …), each in its own terminal:
+
+```sh
+just dev 1   # Axum :3000, web https://localhost:5173, federation domain localhost:3000
+just dev 2   # Axum :3010, web https://localhost:5183, federation domain localhost:3010
+just dev 3   # Axum :3020, web https://localhost:5193, federation domain localhost:3020
+```
+
+`just dev N` derives the ports from N, points `PRISMOIRE_CONFIG` at the matching `devN.toml` (distinct database per instance), and sets `PRISMOIRE_FEDERATION_INSECURE_HTTP=1` so instances dial each other's Axum port directly over plain HTTP — no TLS proxy or certs needed between them. Each `devN.toml` keeps `rp_id = "localhost"` (so the one mkcert cert and passkeys work on every port) but sets a distinct `[federation].domain` like `localhost:3010` so peers and the admin dashboard can tell instances apart. Federate from one instance's admin federation page by previewing another's domain (e.g. `localhost:3010`). The instances share the Cargo target dir, so a code edit makes each watcher rebuild in turn — expected, not a bug.
+
 ### Configuration
 
 The server reads configuration from a TOML file. The config file is resolved in order:
@@ -129,6 +141,13 @@ request_body_overhead_bytes = 8192  # default: 8192 (8 KiB) — body-size slack 
                                     #                       attachment cap; covers multipart
                                     #                       boundaries and form fields.
 
+[federation]
+domain = "community.example.com"    # default: webauthn.rp_id — the canonical, dialable domain
+                                    #                       peers use to reach this instance over
+                                    #                       HTTPS. Leave unset in production so it
+                                    #                       tracks rp_id; override only for local
+                                    #                       multi-instance development (see below).
+
 [federation.outbound_queue]
 total_bytes         = 536870912     # default: 512 MiB    — process-wide byte budget across every
                                     #                       per-peer outbound queue. Caps total
@@ -162,6 +181,13 @@ The `[attachments]` knobs (docs/attachments.md §10.2) are federation-inert: the
 The `[federation.outbound_queue]` knobs (docs/federation-protocol.md §7.5) shape how the local origin holds undelivered gossip while peers are slow or unreachable. They're deployment-shaped (RAM budget, peer outage tolerance), restart-required, and not audit-logged — raise them on hosts with more memory, lower them on resource-constrained deployments. Lowering caps shifts load from push to pull-backfill (§10.5) without compromising correctness; raising `object_max_age_secs` above `T_propagate_max` is rejected at config load. **Values are not clamped against host RAM** — a stray extra zero on `total_bytes` will be accepted at startup and only surface as memory pressure under load; size these against your actual host budget.
 
 The `[federation.attachment_cache]` knob (docs/federation-protocol.md §11.5) sets the byte budget for blobs fetched on demand from peer instances. Larger caches reduce cross-instance refetches when users re-render the same federated attachments; smaller caches free disk at the cost of more `GET /federation/v1/attachments/{hash}` round-trips. The budget covers federation-fetched bytes only — attachments authored on this instance are retained as long as a current revision binds them (a §11 protocol obligation) and are not counted against `max_bytes`. The setting is sender-local and restart-required; peers neither observe nor depend on it. The sloppy-LRU eviction sweep runs on the existing `attachments.sweep_interval_seconds` cadence: each tick walks the oldest cache entries by `accessed_at` and nulls their bytes until the federation-fetched population is at or under the budget (origin-authored bytes are excluded from the eligibility predicate, so eviction never touches a protocol-obligated retention).
+
+`[federation].domain` is the bare canonical domain (`host` or `host:port`) this instance is reachable at, embedded in its §5.2 identity card and used by peers for outbound dialing. It defaults to `webauthn.rp_id` — the same security principal by design — so production operators configure a single value. The override exists for local multi-instance development, where every instance keeps `rp_id = "localhost"` (browsers accept passkeys on any port) but each needs a distinct, dialable identity like `localhost:3010`. Setting it while `rp_origin` is not loopback logs a startup warning.
+
+Two environment variables tune federation transport, both read once at boot (restart-required to flip) and intended for local development only:
+
+- `PRISMOIRE_FEDERATION_INSECURE_HTTP=1` — dial peers over plaintext `http://` instead of `https://`. This drops transport-layer encryption for *all* outbound federation requests; envelope signatures still authenticate payloads, but it must never be set in production. Logs a startup warning on a non-loopback `rp_origin`.
+- `PRISMOIRE_FEDERATION_ALLOW_PRIVATE_TARGETS=1` — permit outbound federation requests to private/loopback/link-local IP literals that the SSRF guard otherwise blocks. Required for the Layer-2 smoke tests (which dial a loopback cert) and the local multi-instance workflow.
 
 `trust_proxy_headers` controls where the per-IP rate limiter looks for the client IP:
 

@@ -167,6 +167,22 @@ impl Default for AttachmentsConfig {
 /// every nested struct picks up its `defaults()`.
 #[derive(Default, Deserialize)]
 pub struct FederationConfig {
+    /// Optional override for the canonical `instance_domain` this
+    /// instance advertises in its §5.2 identity card and that peers
+    /// dial for every federation call.
+    ///
+    /// When unset (the production default) the domain is derived from
+    /// `webauthn.rp_id` — the two are the *same* security principal by
+    /// design, so operators configure one value. Set this only when the
+    /// federation identity must differ from the WebAuthn relying-party
+    /// id; the canonical case is local multi-instance development, where
+    /// every instance keeps `rp_id = "localhost"` (so browsers accept
+    /// passkeys on any port) but needs a distinct, dialable federation
+    /// domain like `localhost:3010`. `main.rs` emits a startup warning
+    /// if this is set while `rp_origin` is not loopback, since a
+    /// production instance should not need the override.
+    #[serde(default)]
+    pub domain: Option<String>,
     #[serde(default)]
     pub outbound_queue: OutboundQueueConfig,
     #[serde(default)]

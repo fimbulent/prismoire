@@ -163,7 +163,9 @@ impl TerminationReason {
         }
     }
 
-    fn parse(s: &str) -> Option<Self> {
+    /// Parse a wire / operator-supplied reason token. Returns `None`
+    /// on any value outside the spec-restricted three.
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "operator_initiated" => Some(TerminationReason::OperatorInitiated),
             "compromise_response" => Some(TerminationReason::CompromiseResponse),
@@ -786,7 +788,7 @@ fn encode_text_array(items: &[String]) -> Vec<u8> {
 }
 
 /// Decode a CBOR array-of-tstr. Returns `None` on any deviation.
-fn decode_text_array(bytes: &[u8]) -> Option<Vec<String>> {
+pub(crate) fn decode_text_array(bytes: &[u8]) -> Option<Vec<String>> {
     let value: Value = ciborium::de::from_reader(bytes).ok()?;
     text_array(value)
 }

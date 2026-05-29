@@ -277,6 +277,28 @@ pub enum ErrorCode {
     /// Upload was zero bytes (no content to share).
     AttachmentEmpty,
 
+    // -- Federation (operator peering) -------------------------------
+    /// Operator tried to peer with this instance itself (the fetched
+    /// identity's pubkey matched our own signing key).
+    SelfPeering,
+    /// Another peer row already binds the target domain to a different
+    /// instance pubkey.
+    PeerDomainConflict,
+    /// The supplied / fetched instance domain failed structural
+    /// validation (SSRF boundary).
+    InvalidPeerDomain,
+    /// Could not reach the target instance to fetch its identity or
+    /// deliver a handshake message.
+    PeerUnreachable,
+    /// The target instance was reachable but rejected the handshake
+    /// (non-2xx peering response).
+    PeerHandshakeFailed,
+    /// The target instance returned a malformed or unparseable
+    /// identity card.
+    PeerIdentityInvalid,
+    /// No peer row matched the supplied instance pubkey.
+    PeerNotFound,
+
     // -- Catch-all ---------------------------------------------------
     /// Generic client error when no more specific code applies.
     BadRequest,
@@ -328,7 +350,14 @@ impl ErrorCode {
             | Self::UserAlreadyDeleted
             | Self::RoomAlreadyDeleted
             | Self::FavoriteSetMismatch
+            | Self::PeerDomainConflict
             | Self::FavoriteCapExceeded => StatusCode::CONFLICT,
+
+            Self::PeerNotFound => StatusCode::NOT_FOUND,
+
+            Self::PeerUnreachable | Self::PeerHandshakeFailed | Self::PeerIdentityInvalid => {
+                StatusCode::BAD_GATEWAY
+            }
 
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
 
@@ -387,6 +416,8 @@ impl ErrorCode {
             | Self::AttachmentInlineRefDuplicate
             | Self::AttachmentInlineRefNotImage
             | Self::AttachmentEmpty
+            | Self::SelfPeering
+            | Self::InvalidPeerDomain
             | Self::BadRequest => StatusCode::BAD_REQUEST,
         }
     }
@@ -494,6 +525,14 @@ impl ErrorCode {
                 "only image attachments can be inlined in the body"
             }
             Self::AttachmentEmpty => "attachment has zero bytes",
+
+            Self::SelfPeering => "cannot peer with this instance itself",
+            Self::PeerDomainConflict => "another peer already uses this domain",
+            Self::InvalidPeerDomain => "instance domain is invalid",
+            Self::PeerUnreachable => "could not reach the instance",
+            Self::PeerHandshakeFailed => "the instance rejected the peering request",
+            Self::PeerIdentityInvalid => "the instance returned an invalid identity",
+            Self::PeerNotFound => "peer not found",
 
             Self::BadRequest => "bad request",
             Self::RateLimited => "rate limited",

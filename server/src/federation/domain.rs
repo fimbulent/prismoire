@@ -262,6 +262,26 @@ pub fn allow_private_targets_from_env() -> bool {
     )
 }
 
+/// Read the `PRISMOIRE_FEDERATION_INSECURE_HTTP` env var.
+///
+/// When set, the production transport dials peers over plain `http://`
+/// instead of `https://`. This exists **only** for local multi-instance
+/// development, where `just dev` serves each instance's Axum over plain
+/// HTTP and standing up per-instance TLS (reverse proxy + certs) would
+/// be pure ceremony. Read once at transport-construction time and held
+/// as a `bool`, mirroring [`allow_private_targets_from_env`]: the policy
+/// cannot be flipped at runtime, which is the security posture we want
+/// for a kill-switch that downgrades transport security. Unset
+/// everywhere else — a production binary must never dial peers in clear.
+pub fn insecure_http_from_env() -> bool {
+    matches!(
+        std::env::var("PRISMOIRE_FEDERATION_INSECURE_HTTP")
+            .ok()
+            .as_deref(),
+        Some("1") | Some("true") | Some("TRUE")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

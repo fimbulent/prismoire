@@ -40,6 +40,13 @@ use super::test_app_with_pool_transport_domain_and_outbound_config;
 /// instance A's transport (no setup step beyond `harness.spawn`).
 type Registry = Arc<RwLock<HashMap<PeerId, Router>>>;
 
+/// Shared `instance_domain -> PeerId` map, populated at `spawn` time
+/// alongside the [`Registry`]. Lets [`InProcessTransport::fetch_identity`]
+/// resolve an operator-typed domain (the `preview` flow reaches a
+/// non-peer instance, so it can't go through the peers table) to the
+/// right peer router without a real DNS/HTTP round-trip.
+type DomainMap = Arc<RwLock<HashMap<String, PeerId>>>;
+
 /// In-process implementation of [`FederationTransport`].
 ///
 /// Looks the target peer up in the shared [`Registry`], converts the
@@ -55,12 +62,15 @@ type Registry = Arc<RwLock<HashMap<PeerId, Router>>>;
 /// special-casing.
 pub struct InProcessTransport {
     registry: Registry,
+    domains: DomainMap,
 }
 
 impl InProcessTransport {
-    /// Build a transport that resolves peers against `registry`.
-    pub fn new(registry: Registry) -> Self {
-        Self { registry }
+    /// Build a transport that resolves peers against `registry` (by
+    /// [`PeerId`]) and `domains` (by `instance_domain`, for the
+    /// unauthenticated identity probe).
+    pub fn new(registry: Registry, domains: DomainMap) -> Self {
+        Self { registry, domains }
     }
 }
 
@@ -81,6 +91,46 @@ impl FederationTransport for InProcessTransport {
             };
             let (parts, body) = request.into_parts();
             let req = Request::from_parts(parts, Body::from(body));
+            let response = router
+                .oneshot(req)
+                .await
+                .map_err(|_| TransportError::Dispatch("other"))?;
+            let (parts, body) = response.into_parts();
+            let bytes = body
+                .collect()
+                .await
+                .map_err(|_| TransportError::Dispatch("body"))?
+                .to_bytes();
+            Ok(Response::from_parts(parts, bytes))
+        })
+    }
+
+    fn fetch_identity<'a>(&'a self, domain: &'a str) -> TransportFuture<'a> {
+        let registry = self.registry.clone();
+        let domains = self.domains.clone();
+        let domain = domain.to_string();
+        Box::pin(async move {
+            // Resolve domain -> PeerId -> Router, then issue the same
+            // unauthenticated GET the production transport would.
+            let router = {
+                let peer_id = {
+                    let guard = domains.read().await;
+                    guard
+                        .get(&domain)
+                        .copied()
+                        .ok_or(TransportError::Dispatch("connect"))?
+                };
+                let guard = registry.read().await;
+                guard
+                    .get(&peer_id)
+                    .cloned()
+                    .ok_or(TransportError::Dispatch("connect"))?
+            };
+            let req = Request::builder()
+                .method(Method::GET)
+                .uri("/federation/v1/identity")
+                .body(Body::empty())
+                .expect("identity probe request build");
             let response = router
                 .oneshot(req)
                 .await
@@ -126,6 +176,7 @@ pub struct InstanceHandle {
 pub struct MultiInstanceHarness {
     instances: HashMap<String, InstanceHandle>,
     registry: Registry,
+    domains: DomainMap,
 }
 
 impl MultiInstanceHarness {
@@ -141,9 +192,11 @@ impl MultiInstanceHarness {
             "MultiInstanceHarness supports up to 26 labelled instances, got {n}"
         );
         let registry: Registry = Arc::new(RwLock::new(HashMap::new()));
+        let domains: DomainMap = Arc::new(RwLock::new(HashMap::new()));
         let mut harness = MultiInstanceHarness {
             instances: HashMap::new(),
             registry,
+            domains,
         };
         for i in 0..n {
             let label = char::from(b'a' + i as u8).to_string();
@@ -166,9 +219,11 @@ impl MultiInstanceHarness {
             "MultiInstanceHarness supports up to 26 labelled instances, got {n}"
         );
         let registry: Registry = Arc::new(RwLock::new(HashMap::new()));
+        let domains: DomainMap = Arc::new(RwLock::new(HashMap::new()));
         let mut harness = MultiInstanceHarness {
             instances: HashMap::new(),
             registry,
+            domains,
         };
         for i in 0..n {
             let label = char::from(b'a' + i as u8).to_string();
@@ -238,8 +293,10 @@ impl MultiInstanceHarness {
         // `Arc<InProcessTransport>` wrapper but they all point at the
         // single shared `Registry`, so registering instance B
         // immediately makes B reachable from A's transport.
-        let base_transport: Arc<dyn FederationTransport> =
-            Arc::new(InProcessTransport::new(self.registry.clone()));
+        let base_transport: Arc<dyn FederationTransport> = Arc::new(InProcessTransport::new(
+            self.registry.clone(),
+            self.domains.clone(),
+        ));
         let transport = wrap_transport(base_transport);
         // Per-label domain so harness scenarios with N ≥ 3 instances
         // don't collide on the `peers.instance_domain` UNIQUE constraint.
@@ -264,9 +321,13 @@ impl MultiInstanceHarness {
         // shared `Arc` so the `with_state` clone in `test_app_with_transport`
         // and the harness's own handle point at the same underlying
         // `InProcessTransport`.
-        let concrete_transport = Arc::new(InProcessTransport::new(self.registry.clone()));
+        let concrete_transport = Arc::new(InProcessTransport::new(
+            self.registry.clone(),
+            self.domains.clone(),
+        ));
 
         self.registry.write().await.insert(peer_id, router.clone());
+        self.domains.write().await.insert(domain.clone(), peer_id);
 
         let handle = InstanceHandle {
             peer_id,
@@ -408,6 +469,12 @@ impl FederationTransport for FlakeyTransport {
             });
         }
         self.inner.request(target, request)
+    }
+
+    fn fetch_identity<'a>(&'a self, domain: &'a str) -> TransportFuture<'a> {
+        // The script only models the retry path for envelope dispatch;
+        // identity probes proxy straight through to the inner transport.
+        self.inner.fetch_identity(domain)
     }
 }
 

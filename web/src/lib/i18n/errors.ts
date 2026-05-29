@@ -120,6 +120,15 @@ const ERROR_MESSAGES: Record<ErrorCode, string> = {
 	attachment_inline_ref_not_image: 'Only image attachments can be displayed inline in the body.',
 	attachment_empty: 'Cannot upload an empty file.',
 
+	// Federation (operator peering)
+	self_peering: 'An instance cannot federate with itself.',
+	peer_domain_conflict: 'Another peer is already registered under this domain.',
+	invalid_peer_domain: 'That is not a valid instance domain.',
+	peer_unreachable: 'Could not reach that instance. Check the domain and that it is online.',
+	peer_handshake_failed: 'The instance rejected the federation request.',
+	peer_identity_invalid: 'The instance returned an invalid identity.',
+	peer_not_found: 'No such peer.',
+
 	// Catch-all
 	bad_request: 'The request was invalid.',
 	rate_limited: 'You are doing that too often. Please slow down.',

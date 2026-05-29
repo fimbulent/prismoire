@@ -18,6 +18,7 @@ use axum::routing::{delete, get, post, put};
 
 pub mod admin;
 pub mod admin_config;
+pub mod admin_federation;
 pub mod admin_overview;
 pub mod admin_routes;
 pub mod admin_watchlists;
@@ -246,6 +247,22 @@ pub fn build_app(
         )
         .route("/api/admin/users/{id}", delete(admin::delete_user_by_admin))
         .route("/api/admin/rooms/{id}", delete(admin::delete_room))
+        .route(
+            "/api/admin/federation/peers",
+            get(admin_federation::list_peers).post(admin_federation::initiate_peer),
+        )
+        .route(
+            "/api/admin/federation/preview",
+            post(admin_federation::preview),
+        )
+        .route(
+            "/api/admin/federation/peers/{pubkey_hex}/accept",
+            post(admin_federation::accept_peer),
+        )
+        .route(
+            "/api/admin/federation/peers/{pubkey_hex}",
+            delete(admin_federation::defederate),
+        )
         .layer(axum::middleware::from_fn_with_state(
             shared_state.clone(),
             session::session_middleware,
