@@ -116,6 +116,14 @@
 		introduction = '';
 	}
 
+	// Prefill the federate form from a trust-code peering suggestion and
+	// immediately look the instance up, so the operator lands on the
+	// preview card ready to send a request.
+	function federateFromSuggestion(domain: string) {
+		domainInput = domain;
+		handlePreview();
+	}
+
 	const canFederate = $derived(
 		preview !== null && !preview.is_self && preview.existing_status === null
 	);
@@ -318,6 +326,41 @@
 			</div>
 		{/if}
 	</section>
+
+	<!-- Trust-code peering suggestions ----------------------------------- -->
+	{#if data.peeringSuggestions && data.peeringSuggestions.length > 0}
+		<section class="bg-bg-surface border border-border rounded-md p-5 mb-4">
+			<div class="text-sm font-semibold text-text-primary mb-1">Suggested Instances</div>
+			<div class="text-xs text-text-muted mb-3">
+				Your users have formed trust edges (via trust codes) toward users homed on these
+				instances, but you aren't federated with them yet. Federating would let content flow
+				directly instead of relying on manual bootstrapping.
+			</div>
+			<ul class="flex flex-col gap-2">
+				{#each data.peeringSuggestions as s (s.pubkey_hex)}
+					<li
+						class="flex flex-wrap items-center justify-between gap-3 p-3 bg-bg rounded-md border border-border-subtle"
+					>
+						<div class="min-w-0">
+							<div class="text-sm text-text-primary font-medium break-all">{s.domain}</div>
+							<div class="text-xs text-text-muted">
+								{s.edge_count}
+								{s.edge_count === 1 ? 'trust edge' : 'trust edges'} from your users
+							</div>
+						</div>
+						<button
+							type="button"
+							onclick={() => federateFromSuggestion(s.domain)}
+							disabled={previewing}
+							class="font-sans text-sm px-3 py-1.5 rounded-md cursor-pointer border border-border bg-bg-surface text-text-primary font-medium hover:border-accent-muted disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+						>
+							Look up
+						</button>
+					</li>
+				{/each}
+			</ul>
+		</section>
+	{/if}
 
 	<!-- Peer table ------------------------------------------------------- -->
 	<section class="bg-bg-surface border border-border rounded-md p-5">

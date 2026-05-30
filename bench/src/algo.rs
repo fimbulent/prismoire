@@ -1,9 +1,9 @@
 //! Trust propagation algorithm under test.
 //!
-//! Bottleneck-grouped probabilistic BFS with distrust propagation and hub
-//! dampening. Mirrors `server/src/trust.rs` — the bench treats this module
-//! as the reference implementation for the production algorithm, and the
-//! synthetic graph in `graph.rs` is what feeds into it.
+//! Bottleneck-grouped probabilistic BFS with distrust propagation. Mirrors
+//! `server/src/trust.rs` — the bench treats this module as the reference
+//! implementation for the production algorithm, and the synthetic graph in
+//! `graph.rs` is what feeds into it.
 //!
 //! Algorithm essentials:
 //! - **Forward BFS** (relevance): reader → authors. Groups paths by the
@@ -13,11 +13,6 @@
 //!   graph. Group key = predecessor in the reverse traversal.
 //! - **Distrust** is consumed per-viewer as a multiplicative reliability
 //!   factor at each hop; direct distrusts override to 0.
-//! - **Hub dampening** attenuates the per-hop decay when BFS traverses
-//!   *through* a node with forward in-degree above `HUB_DAMPEN_THRESHOLD`.
-//!   The `_with_threshold` variants accept the threshold as a parameter so
-//!   the bench can A/B dampening on/off; production code uses the default
-//!   `HUB_DAMPEN_THRESHOLD` const via the non-`_with_threshold` wrappers.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -33,12 +28,6 @@ pub const MAX_DEPTH: u32 = 3;
 
 /// Per-distrusted-target penalty for reliability computation.
 pub const DISTRUST_PENALTY: f64 = 0.25;
-
-/// In-degree above which transitive trust propagation *through* a node
-/// is attenuated. Mirrors `HUB_DAMPEN_THRESHOLD` in server/src/trust.rs.
-/// See `docs/federation-bfs-analysis.md` "Hub dampening for transitive
-/// propagation."
-pub const HUB_DAMPEN_THRESHOLD: u32 = 5000;
 
 /// Maps distruster's dense node ID → set of distrusted dense node IDs.
 pub type DistrustSets = HashMap<u32, HashSet<u32>>;
@@ -236,19 +225,6 @@ fn reliability(neighbors: &[u32], viewer_distrusts: &HashSet<u32>) -> f64 {
     (1.0 - DISTRUST_PENALTY).powi(count)
 }
 
-/// Hub-dampening multiplier applied to the per-hop decay when BFS traverses
-/// *through* a node with the given forward in-degree. Parameterized on the
-/// threshold so the bench can A/B by passing `u32::MAX` to disable dampening.
-#[inline]
-fn hub_dampening_factor(in_degree: u32, threshold: u32) -> f64 {
-    if threshold == u32::MAX || in_degree <= threshold {
-        1.0
-    } else {
-        let penalty = (in_degree as f64 / threshold as f64).ln();
-        DECAY.powf(penalty)
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Forward BFS: reader → authors (relevance)
 // ---------------------------------------------------------------------------
@@ -265,31 +241,10 @@ fn hub_dampening_factor(in_degree: u32, threshold: u32) -> f64 {
 /// After BFS, directly distrusted users are overridden to score 0.0.
 ///
 /// Returns a vec of (target_node, combined_score) for all reachable nodes.
-///
-/// Hub dampening: when BFS leaves a high-in-degree node to expand to its
-/// outgoing neighbours, the per-hop decay is attenuated (see
-/// [`hub_dampening_factor`]). `reverse` supplies forward in-degree via
-/// its outgoing-edge counts.
 pub fn forward_bfs<G: CsrAccess>(
     source: u32,
     graph: &G,
-    reverse: &G,
     distrust_sets: &DistrustSets,
-) -> Vec<(u32, f64)> {
-    forward_bfs_with_threshold(source, graph, reverse, distrust_sets, HUB_DAMPEN_THRESHOLD)
-}
-
-/// Same as [`forward_bfs`] but with a configurable hub-dampening threshold.
-///
-/// Pass `HUB_DAMPEN_THRESHOLD` for production-equivalent behaviour, or
-/// `u32::MAX` to disable dampening entirely (used by the bench's A/B
-/// measurement of dampening's frontier impact).
-pub fn forward_bfs_with_threshold<G: CsrAccess>(
-    source: u32,
-    graph: &G,
-    reverse: &G,
-    distrust_sets: &DistrustSets,
-    dampen_threshold: u32,
 ) -> Vec<(u32, f64)> {
     let empty = HashSet::new();
     let viewer_distrusts = distrust_sets.get(&source).unwrap_or(&empty);
@@ -324,13 +279,6 @@ pub fn forward_bfs_with_threshold<G: CsrAccess>(
             continue;
         }
 
-        // Hub dampening (mirrors trust.rs forward_bfs_inner): traversal
-        // *through* `current` attenuates by an extra factor based on
-        // `current`'s forward in-degree. First-hop seeding above is at
-        // full strength; dampening only applies when leaving `current`.
-        let dampening =
-            hub_dampening_factor(reverse.neighbors(current).len() as u32, dampen_threshold);
-
         for &next in graph.neighbors(current) {
             if next == source {
                 continue;
@@ -343,7 +291,7 @@ pub fn forward_bfs_with_threshold<G: CsrAccess>(
             visited.insert(next);
 
             let r = reliability(graph.neighbors(next), viewer_distrusts);
-            let next_score = path_score * DECAY * dampening * r;
+            let next_score = path_score * DECAY * r;
 
             target_groups
                 .entry(next)
@@ -400,15 +348,6 @@ pub fn forward_bfs_with_threshold<G: CsrAccess>(
 /// returned here are an approximation that ignores distrusts. For exact
 /// distrust-penalized trust(A, reader), use forward_bfs from A directly.
 pub fn reverse_bfs<G: CsrAccess>(reader: u32, reverse_graph: &G) -> Vec<(u32, f64)> {
-    reverse_bfs_with_threshold(reader, reverse_graph, HUB_DAMPEN_THRESHOLD)
-}
-
-/// Same as [`reverse_bfs`] but with a configurable hub-dampening threshold.
-pub fn reverse_bfs_with_threshold<G: CsrAccess>(
-    reader: u32,
-    reverse_graph: &G,
-    dampen_threshold: u32,
-) -> Vec<(u32, f64)> {
     // BFS state: (current_node, depth, path_score)
     // No first_hop tag — the group key is determined by expansion context.
     let mut queue: VecDeque<(u32, u32, f64)> = VecDeque::new();
@@ -439,15 +378,7 @@ pub fn reverse_bfs_with_threshold<G: CsrAccess>(
             continue;
         }
 
-        // Hub dampening (mirrors trust.rs reverse_bfs): traversal *through*
-        // `current` attenuates by an extra factor based on `current`'s
-        // forward in-degree, which equals its reverse out-degree — the
-        // neighbours we are about to iterate over.
-        let dampening = hub_dampening_factor(
-            reverse_graph.neighbors(current).len() as u32,
-            dampen_threshold,
-        );
-        let next_score = path_score * DECAY * dampening;
+        let next_score = path_score * DECAY;
 
         // In the reverse graph, an edge current → next means next → current
         // in the forward graph. So `current` is `next`'s direct forward
@@ -517,11 +448,9 @@ impl HashMapGraph {
 }
 
 /// Reference forward BFS on HashMap graph (mirrors server/src/trust.rs logic)
-/// with distrust propagation and hub dampening.
+/// with distrust propagation.
 ///
-/// Used as a correctness oracle against the CSR `forward_bfs`. For
-/// correctness this builds an inbound-degree map by iterating all
-/// adjacency lists once — O(V·E_avg), fine for the small test graphs.
+/// Used as a correctness oracle against the CSR `forward_bfs`.
 pub fn reference_forward_bfs(
     source: u32,
     graph: &HashMapGraph,
@@ -530,16 +459,6 @@ pub fn reference_forward_bfs(
     let empty_distrusts = HashSet::new();
     let viewer_distrusts = distrust_sets.get(&source).unwrap_or(&empty_distrusts);
     let empty_neighbors: Vec<u32> = Vec::new();
-
-    // Precompute forward in-degrees for hub dampening. The HashMap graph
-    // has no transpose primitive, so we tally inbound counts by scanning
-    // every outgoing edge once.
-    let mut in_degrees: HashMap<u32, u32> = HashMap::new();
-    for neighbors in graph.adj.values() {
-        for &tgt in neighbors {
-            *in_degrees.entry(tgt).or_insert(0) += 1;
-        }
-    }
 
     let mut queue: VecDeque<(u32, u32, u32, f64)> = VecDeque::new();
     let mut target_groups: HashMap<u32, PathGroupsU32> = HashMap::new();
@@ -570,13 +489,6 @@ pub fn reference_forward_bfs(
             continue;
         }
 
-        // Hub dampening: traversal *through* `current` attenuates by an
-        // extra factor based on its inbound count.
-        let dampening = hub_dampening_factor(
-            in_degrees.get(&current).copied().unwrap_or(0),
-            HUB_DAMPEN_THRESHOLD,
-        );
-
         if let Some(neighbors) = graph.adj.get(&current) {
             for &next in neighbors {
                 if next == source {
@@ -590,7 +502,7 @@ pub fn reference_forward_bfs(
 
                 let next_targets = graph.adj.get(&next).unwrap_or(&empty_neighbors);
                 let r = reliability(next_targets, viewer_distrusts);
-                let next_score = path_score * DECAY * dampening * r;
+                let next_score = path_score * DECAY * r;
                 target_groups
                     .entry(next)
                     .or_insert_with(PathGroupsU32::new)

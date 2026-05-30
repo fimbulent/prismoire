@@ -284,6 +284,62 @@ export async function deleteTrustEdge(
 }
 
 /**
+ * Fetch the caller's own cross-instance trust code (§11.9.5) — a
+ * copy-pasteable string they hand to a user on another instance so that
+ * user can bootstrap the first cross-instance trust edge by hand.
+ */
+export async function getMyTrustCode(opts: FetchOpts = {}): Promise<{ code: string }> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f('/api/me/trust-code');
+	if (!res.ok) await throwApiError(res);
+	return res.json();
+}
+
+/**
+ * Outcome of redeeming a trust code. `is_local` is true when the code
+ * named one of this instance's own users (the home hint is then moot);
+ * `created` is true when redeeming seeded a brand-new federated stub
+ * (under `dryRun`, it reports what *would* happen).
+ */
+export interface RedeemTrustCodeResult {
+	/** Lowercase-hex pubkey the code names. */
+	pubkey_hex: string;
+	/** Display name carried by the code (UX-only). */
+	display_name: string;
+	/** Home domain carried by the code. */
+	home_domain: string;
+	/** Lowercase-hex of the home instance pubkey carried by the code. */
+	home_instance_hex: string;
+	/** True when the named user is a local account. */
+	is_local: boolean;
+	/** True when redeeming seeded (or would seed) a new federated stub. */
+	created: boolean;
+	/** The stance that was (or would be) set. */
+	edge_type: 'trust' | 'distrust';
+}
+
+/**
+ * Redeem a pasted trust code: resolve the named user (seeding a federated
+ * stub when never seen) and set a trust/distrust edge toward them.
+ *
+ * Pass `dryRun: true` to parse + resolve only — the result reports who the
+ * code names and whether a stub would be seeded, without mutating anything.
+ */
+export async function redeemTrustCode(
+	args: { code: string; type?: 'trust' | 'distrust'; dryRun?: boolean },
+	opts: FetchOpts = {}
+): Promise<RedeemTrustCodeResult> {
+	const f = opts.fetch ?? globalThis.fetch;
+	const res = await f('/api/users/by-trust-code', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ code: args.code, type: args.type, dry_run: args.dryRun ?? false })
+	});
+	if (!res.ok) await throwApiError(res);
+	return res.json();
+}
+
+/**
  * Attach (or replace) the viewer's private tag for the user identified
  * by `pubkeyHex`. Tags are strictly viewer-scoped — only the caller sees
  * them, the tagged user is never told. Max 35 grapheme clusters

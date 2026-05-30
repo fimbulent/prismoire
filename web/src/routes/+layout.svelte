@@ -137,6 +137,12 @@
 							>
 								Invites
 							</button>
+							<button
+								onclick={() => navigateTo('/add-contact')}
+								class="w-full text-left px-3 py-2 text-sm text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-pointer"
+							>
+								Add contact
+							</button>
 						{/if}
 						<button
 							onclick={() => navigateTo('/settings')}

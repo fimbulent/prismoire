@@ -111,6 +111,8 @@ pub type ReportLayer =
     GovernorLayer<SessionKeyExtractor, NoOpMiddleware<QuantaInstant>, axum::body::Body>;
 pub type UploadLayer =
     GovernorLayer<SessionKeyExtractor, NoOpMiddleware<QuantaInstant>, axum::body::Body>;
+pub type RedeemLayer =
+    GovernorLayer<SessionKeyExtractor, NoOpMiddleware<QuantaInstant>, axum::body::Body>;
 pub type CspReportLayer =
     GovernorLayer<ClientIpKeyExtractor, NoOpMiddleware<QuantaInstant>, axum::body::Body>;
 
@@ -125,6 +127,7 @@ pub struct RateLimitLayers {
     pub user: UserLayer,
     pub report: ReportLayer,
     pub upload: UploadLayer,
+    pub redeem: RedeemLayer,
     pub csp_report: CspReportLayer,
 }
 
@@ -209,6 +212,29 @@ const UPLOAD_REPLENISH_SECONDS: u64 = 5;
 /// network hiccup, without dipping into rate-limit territory.
 const UPLOAD_BURST_SIZE: u32 = 6;
 
+/// Replenish interval for the `POST /api/users/by-trust-code` per-session
+/// bucket, in seconds.
+///
+/// Redeeming a trust code is an unbounded write primitive: each successful
+/// non-dry-run redeem can seed a brand-new federated stub user (`users` +
+/// `user_homes` rows), sign a trust edge, and enqueue federation fanout
+/// toward the code's named home instance. A single session sharing the
+/// general `user_limiter` bucket could therefore mint a large number of
+/// stub rows and fanout jobs at read-endpoint rates. Redeeming a code is a
+/// deliberate, rare act (bootstrapping a cross-instance contact), so a
+/// tight bucket — one token every fifteen seconds (~4/min sustained) —
+/// sheds abuse while comfortably covering a user adding a handful of
+/// contacts in one sitting.
+const REDEEM_REPLENISH_SECONDS: u64 = 15;
+
+/// Burst size for the `POST /api/users/by-trust-code` per-session bucket.
+///
+/// Five tokens absorb a user pasting several trust codes in quick
+/// succession (e.g. importing a small contact list) without dipping into
+/// rate-limit territory, while still bounding a single burst of stub
+/// creation.
+const REDEEM_BURST_SIZE: u32 = 5;
+
 /// Replenish interval for the `/api/csp-report` per-IP bucket, in seconds.
 ///
 /// CSP reports are browser-driven telemetry — a page that triggers one
@@ -227,12 +253,17 @@ const CSP_REPORT_BURST_SIZE: u32 = 5;
 
 /// Build rate limiting layers from configuration.
 ///
-/// Returns five governor layers:
+/// Returns the governor layers:
 /// - General IP rate limit (applied to all API routes)
 /// - Strict auth rate limit (applied to login/signup/setup endpoints)
 /// - Per-user rate limit (applied to authenticated endpoints)
 /// - Per-session report limit for `POST /api/posts/:id/report`, tighter
 ///   than the general user bucket since reports require admin attention
+/// - Per-session upload limit for `POST /api/attachments`, tighter than
+///   the general user bucket since image re-encoding is CPU-expensive
+/// - Per-session redeem limit for `POST /api/users/by-trust-code`, tighter
+///   than the general user bucket since redeeming is an unbounded write +
+///   federation-fanout primitive
 /// - Tight per-IP limit for the `/api/csp-report` endpoint, applied on
 ///   top of the general IP limit so a flood of reports cannot crowd out
 ///   the rest of the API.
@@ -299,6 +330,17 @@ pub fn build_layers(
             .expect("invalid upload rate limit config"),
     );
 
+    let redeem_config = Arc::new(
+        GovernorConfigBuilder::default()
+            .key_extractor(SessionKeyExtractor {
+                ip_fallback: ip_extractor,
+            })
+            .per_second(REDEEM_REPLENISH_SECONDS)
+            .burst_size(REDEEM_BURST_SIZE)
+            .finish()
+            .expect("invalid redeem rate limit config"),
+    );
+
     let csp_report_config = Arc::new(
         GovernorConfigBuilder::default()
             .key_extractor(ip_extractor)
@@ -314,6 +356,7 @@ pub fn build_layers(
         user: GovernorLayer::new(user_config).error_handler(govern_error_handler),
         report: GovernorLayer::new(report_config).error_handler(govern_error_handler),
         upload: GovernorLayer::new(upload_config).error_handler(govern_error_handler),
+        redeem: GovernorLayer::new(redeem_config).error_handler(govern_error_handler),
         csp_report: GovernorLayer::new(csp_report_config).error_handler(govern_error_handler),
     }
 }

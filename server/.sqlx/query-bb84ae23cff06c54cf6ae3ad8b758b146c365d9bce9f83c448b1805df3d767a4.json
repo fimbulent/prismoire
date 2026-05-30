@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO user_homes (user_key, current_home_key, current_home_domain, current_move_hash, current_created_at) VALUES (?, ?, ?, NULL, NULL) ON CONFLICT(user_key) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "bb84ae23cff06c54cf6ae3ad8b758b146c365d9bce9f83c448b1805df3d767a4"
+}

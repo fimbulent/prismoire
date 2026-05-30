@@ -82,6 +82,7 @@ export type ErrorCode =
 	| 'self_trust_edge'
 	| 'no_trust_edge'
 	| 'invalid_trust_direction'
+	| 'invalid_trust_code'
 	// Misc user
 	| 'bio_too_long'
 	| 'bio_already_empty'

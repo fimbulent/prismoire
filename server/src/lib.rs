@@ -72,6 +72,11 @@ use rate_limit::RateLimitLayers;
 ///   but skips the per-session user limiter (see comment inline).
 /// - `report_route` (`POST /api/posts/{id}/report`) carries the session
 ///   middleware plus the tighter per-session report limiter.
+/// - `upload_route` (`POST /api/attachments`) carries the session
+///   middleware plus the tighter per-session upload limiter.
+/// - `redeem_route` (`POST /api/users/by-trust-code`) carries the session
+///   middleware plus the tighter per-session redeem limiter (it is an
+///   unbounded write + federation-fanout primitive).
 /// - `authed` (everything else under `/api/*`) carries the session
 ///   middleware and the per-session user limiter.
 /// - The merged `api` router carries the global IP limiter and the
@@ -98,6 +103,7 @@ pub fn build_app(
         user: user_limiter,
         report: report_limiter,
         upload: upload_limiter,
+        redeem: redeem_limiter,
         csp_report: csp_report_limiter,
     } = layers;
 
@@ -132,6 +138,7 @@ pub fn build_app(
             "/api/me/favorites",
             get(favorites::list_favorites).put(favorites::reorder_favorites),
         )
+        .route("/api/me/trust-code", get(users::get_my_trust_code))
         .route(
             "/api/threads",
             get(threads::list_all_threads).post(threads::create_thread),
@@ -306,6 +313,23 @@ pub fn build_app(
         ))
         .layer(upload_limiter);
 
+    // Trust-code redemption gets the general session middleware plus a
+    // tighter per-session rate limit. `POST /api/users/by-trust-code` is
+    // an unbounded write primitive: each non-dry-run redeem can seed a
+    // new federated stub user (`users` + `user_homes` rows), sign a trust
+    // edge, and enqueue federation fanout toward the code's named home.
+    // The general `user_limiter` would let one session mint stub rows and
+    // fanout jobs at read-endpoint rates, so this carries the dedicated
+    // `redeem_limiter` bucket instead. The route still inherits the outer
+    // `ip_limiter` from the `api` router.
+    let redeem_route = Router::new()
+        .route("/api/users/by-trust-code", post(users::redeem_trust_code))
+        .layer(axum::middleware::from_fn_with_state(
+            shared_state.clone(),
+            session::session_middleware,
+        ))
+        .layer(redeem_limiter);
+
     // `/api/auth/session` is intentionally separated from the rest of
     // the authed routes so it does not carry the per-session
     // `user_limiter`. The endpoint is cheap, idempotent, and called by
@@ -376,6 +400,7 @@ pub fn build_app(
         .merge(session_route)
         .merge(report_route)
         .merge(upload_route)
+        .merge(redeem_route)
         .merge(authed);
 
     #[cfg(any(test, feature = "test-auth"))]

@@ -89,11 +89,26 @@ pub struct PeerView {
     pub last_handshake: Option<String>,
 }
 
+/// A home instance that local users have trust-coded (§11.9.5) toward but
+/// which this instance is not actively peered with — a hint that the
+/// operator may want to open a peering with them.
+#[derive(Serialize)]
+pub struct PeeringSuggestion {
+    pub pubkey_hex: String,
+    pub domain: String,
+    /// How many of this instance's users hold a live edge toward a user
+    /// homed on that instance.
+    pub edge_count: i64,
+}
+
 /// `GET /api/admin/federation/peers` response.
 #[derive(Serialize)]
 pub struct PeersListResponse {
     pub instance: InstanceIdentity,
     pub peers: Vec<PeerView>,
+    /// Instances surfaced by trust-code edges that aren't active peers
+    /// yet — see [`PeeringSuggestion`].
+    pub peering_suggestions: Vec<PeeringSuggestion>,
 }
 
 /// `POST /api/admin/federation/preview` request.
@@ -213,12 +228,47 @@ pub async fn list_peers(
         })
         .collect();
 
+    // §11.9.5 operator hint: home instances that local users have formed
+    // edges toward (typically via trust-code redemption) but which aren't
+    // active peers. Grouped by home instance; the domain is the §12.4
+    // resolved home (or the trust-code seed's hint when move-less).
+    let suggestion_rows = sqlx::query!(
+        r#"SELECT uh.current_home_key AS "home_key!: Vec<u8>",
+                  uh.current_home_domain AS "domain!: String",
+                  COUNT(*) AS "edge_count!: i64"
+             FROM current_trust_edges cte
+             JOIN users tu ON tu.id = cte.target_user
+             JOIN users su ON su.id = cte.source_user
+             JOIN user_homes uh ON uh.user_key = tu.public_key
+            WHERE su.home_instance IS NULL
+              AND tu.home_instance IS NOT NULL
+              AND NOT EXISTS (
+                    SELECT 1 FROM peers p
+                     WHERE p.instance_pubkey = uh.current_home_key
+                       AND p.status = 'active'
+                  )
+            GROUP BY uh.current_home_key, uh.current_home_domain
+            ORDER BY COUNT(*) DESC, uh.current_home_domain ASC"#,
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    let peering_suggestions = suggestion_rows
+        .into_iter()
+        .map(|r| PeeringSuggestion {
+            pubkey_hex: hex_lower(&r.home_key),
+            domain: r.domain,
+            edge_count: r.edge_count,
+        })
+        .collect();
+
     Ok(Json(PeersListResponse {
         instance: InstanceIdentity {
             domain: state.instance_domain.clone(),
             pubkey_hex: hex_lower(state.instance_key.public_bytes()),
         },
         peers,
+        peering_suggestions,
     }))
 }
 

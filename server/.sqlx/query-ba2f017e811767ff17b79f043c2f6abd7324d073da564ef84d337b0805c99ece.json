@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT home_instance, status, deleted_at FROM users WHERE public_key = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "home_instance",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "status",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "deleted_at",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "ba2f017e811767ff17b79f043c2f6abd7324d073da564ef84d337b0805c99ece"
+}

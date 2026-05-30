@@ -10,8 +10,8 @@
 //!
 //! - [`generate_power_law_graph`] / [`PowerLawConfig`] — heterogeneous: three
 //!   out-degree tiers (lurker/active/power) mixed with Pareto-weighted target
-//!   selection, producing a heavy-tailed in-degree distribution with hubs
-//!   large enough to exercise hub dampening. Models the single-instance
+//!   selection, producing a heavy-tailed in-degree distribution with
+//!   high-in-degree hubs. Models the single-instance
 //!   slice of the doc's power-law scenario
 //!   (`docs/federation-bfs-analysis.md` §"Power-law Extension").
 
@@ -193,8 +193,7 @@ pub fn generate_graph(config: &GraphConfig, rng: &mut ChaCha8Rng) -> SyntheticGr
 /// nodes to produce a heavy-tailed in-degree distribution.
 ///
 /// At [`PowerLawConfig::medium_instance`] scale (50K users, α=0.8) the top
-/// in-degree node lands around 8K–15K, comfortably above
-/// [`crate::algo::HUB_DAMPEN_THRESHOLD`] so dampening is actually exercised.
+/// in-degree node lands around 8K–15K, giving a pronounced heavy tail.
 pub struct PowerLawConfig {
     /// Total number of users in the instance.
     pub local_users: u32,
@@ -206,14 +205,13 @@ pub struct PowerLawConfig {
     pub lurker_out_degree: u32,
     /// Pareto exponent for in-degree attractiveness weight `1/(rank+1)^α`.
     /// Smaller α = heavier tail. 0.8 produces a top-1 in-degree share of
-    /// ~1–2% at N=50K (~5K–15K inbound edges), enough to cross
-    /// [`crate::algo::HUB_DAMPEN_THRESHOLD`].
+    /// ~1–2% at N=50K (~5K–15K inbound edges).
     pub in_degree_alpha: f64,
 }
 
 impl PowerLawConfig {
     /// Medium-small instance: 50K users with the doc's standard tier shape.
-    /// Sized so the top hubs cross the hub-dampening threshold.
+    /// Sized so the top hubs form a pronounced heavy tail.
     pub fn medium_instance() -> Self {
         Self {
             local_users: 50_000,
@@ -351,6 +349,20 @@ pub struct HomeInstanceConfig {
     /// target a remote user (instance-weighted, then rank-weighted within
     /// the chosen instance). 0.5 ≈ generalist instance; 0.7–0.9 ≈ niche.
     pub local_preference: f64,
+    /// Inbound cross-instance edges (remote → local) as a multiple of the
+    /// home instance's *outbound* cross-edge count. These model who *trusts*
+    /// local users — the axis the reverse/visibility frontier depends on,
+    /// and the one that is uncapped by design (a local "celebrity" can
+    /// accrue unbounded in-degree, unlike the 200-edge out-degree cap).
+    ///
+    /// - `0.0` disables inbound modelling entirely; the generator then draws
+    ///   an identical RNG sequence to the forward-only generators, so the
+    ///   established forward-frontier benchmarks stay bit-identical.
+    /// - `1.0` ≈ a balanced "average" instance that receives as many
+    ///   cross-vouches as it sends.
+    /// - `>1.0` ≈ a celebrity-hosting hub whose local accounts attract
+    ///   disproportionate remote trust.
+    pub inbound_factor: f64,
 }
 
 impl HomeInstanceConfig {
@@ -362,6 +374,11 @@ impl HomeInstanceConfig {
             local_users: 50_000,
             shape: PowerLawConfig::medium_instance(),
             local_preference: 0.5,
+            // Forward-only by default: `medium()` is the established fixture
+            // for the forward-frontier benchmarks (fed-power-law / sweep /
+            // mmap / sizing), which must not change. The reverse-frontier
+            // bench sets `inbound_factor` explicitly.
+            inbound_factor: 0.0,
         }
     }
 }
@@ -761,6 +778,118 @@ pub fn generate_federated_power_law_graph(
             edges.push((node, *t));
             if depth_remaining > 1 {
                 expansion_queue.push_back((*t, depth_remaining - 1));
+            }
+        }
+    }
+
+    // --- Step 4b: inbound cross-instance bridges (remote → local) ---
+    // The forward steps above model who *local users trust* (out-edges,
+    // hard-capped at 200/user). The reverse/visibility frontier instead
+    // depends on who *trusts local users* — inbound edges, which are
+    // uncapped by design, so a local "celebrity" can accrue an arbitrarily
+    // large in-degree. We model that here when `inbound_factor > 0`:
+    //
+    //   * Bridge count = `inbound_factor ×` the home instance's outbound
+    //     cross-edge count (see `HomeInstanceConfig::inbound_factor`).
+    //   * Each bridge picks a local target rank-weighted by the SAME
+    //     attractiveness distribution as local in-edges (`local_target_dist`),
+    //     so the locally-popular accounts are also the remotely-popular ones
+    //     — local celebrities emerge with very high in-degree.
+    //   * Each remote bridge source is then expanded 2 more levels *inbound*
+    //     (who trusts the source, then who trusts them) so a reverse BFS from
+    //     a local user can traverse the full 3-hop visibility neighbourhood.
+    //
+    // Guarded on `inbound_factor > 0.0` so the forward-only benchmarks draw
+    // an identical RNG sequence and produce bit-identical graphs.
+    if home.inbound_factor > 0.0 {
+        let mean_out = 0.01 * shape.power_out_degree as f64
+            + 0.09 * shape.active_out_degree as f64
+            + 0.90 * shape.lurker_out_degree as f64;
+        let outbound_cross = n_local as f64 * mean_out * (1.0 - local_pref);
+        let n_inbound = (outbound_cross * home.inbound_factor).round() as u64;
+
+        // Dedup all inbound-direction edges (bridges + inbound expansion)
+        // against each other so in-degree counts aren't inflated by repeats.
+        // The forward steps dedup per-source via a HashSet; the inbound steps
+        // draw edge-at-a-time so they need an explicit seen-set.
+        let mut inbound_seen: HashSet<(u32, u32)> = HashSet::new();
+        let mut inbound_queue: VecDeque<(u32, u8)> = VecDeque::new();
+        let mut inbound_expanded_to: std::collections::HashMap<u32, u8> =
+            std::collections::HashMap::new();
+
+        for _ in 0..n_inbound {
+            let local_target = local_target_dist.sample(rng) as u32;
+            let inst_id = instance_sampler.sample(rng) as u32;
+            let inst_size = instance_sizes[inst_id as usize];
+            let rank = sample_rank_pareto(inst_size, target_alpha, rng);
+            let key = (inst_id, rank);
+            let source_node = *remote_node_map.entry(key).or_insert_with(|| {
+                let id = next_node_id;
+                next_node_id += 1;
+                node_to_loc.insert(id, key);
+                id
+            });
+            if inbound_seen.insert((source_node, local_target)) {
+                edges.push((source_node, local_target));
+            }
+            // Queue the bridge source for 2 levels of inbound expansion (the
+            // hop-2 + hop-3 trusters a reverse BFS would traverse).
+            inbound_queue.push_back((source_node, 2));
+        }
+
+        // --- Step 4c: drain inbound expansion (who trusts the bridge sources) ---
+        // Mirror of Step 4 but with edges pointing *into* the queued node:
+        // each queued node draws an in-degree count by tier roll, samples that
+        // many truster ranks within the same instance, materialises them, and
+        // adds `truster → node` edges. Trusters are queued one level shallower.
+        while let Some((node, depth_remaining)) = inbound_queue.pop_front() {
+            let already_at = inbound_expanded_to.get(&node).copied().unwrap_or(0);
+            if already_at >= depth_remaining {
+                continue;
+            }
+            inbound_expanded_to.insert(node, depth_remaining);
+
+            let tier_roll: f64 = rng.gen_range(0.0..1.0);
+            let d_in = if tier_roll < 0.01 {
+                shape.power_out_degree
+            } else if tier_roll < 0.10 {
+                shape.active_out_degree
+            } else {
+                shape.lurker_out_degree
+            };
+
+            let (inst_id, this_rank) = node_to_loc[&node];
+            let inst_size = instance_sizes[inst_id as usize];
+            if inst_size <= 1 {
+                continue;
+            }
+
+            let mut count = 0u32;
+            let cap = (d_in as usize).saturating_mul(20).max(64);
+            let mut attempts = 0usize;
+            while count < d_in {
+                attempts += 1;
+                if attempts > cap {
+                    break;
+                }
+                let src_rank = sample_rank_pareto(inst_size, target_alpha, rng);
+                if src_rank == this_rank {
+                    continue;
+                }
+                let key = (inst_id, src_rank);
+                let src_node = *remote_node_map.entry(key).or_insert_with(|| {
+                    let id = next_node_id;
+                    next_node_id += 1;
+                    node_to_loc.insert(id, key);
+                    id
+                });
+                if inbound_seen.insert((src_node, node)) {
+                    edges.push((src_node, node));
+                    count += 1;
+                    if depth_remaining > 1 {
+                        inbound_queue.push_back((src_node, depth_remaining - 1));
+                    }
+                }
             }
         }
     }

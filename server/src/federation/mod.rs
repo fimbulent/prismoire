@@ -62,4 +62,5 @@ pub mod router;
 pub mod routing;
 pub mod thread_status;
 pub mod transport;
+pub mod trust_code;
 pub mod user_status;

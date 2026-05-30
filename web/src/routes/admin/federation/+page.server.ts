@@ -10,8 +10,8 @@ import { throwMappedLoadError } from '$lib/api/load-error';
 /// defederate all run client-side against `/api/admin/federation/*`.
 export const load: PageServerLoad = async ({ fetch }) => {
 	try {
-		const { instance, peers } = await listPeers({ fetch });
-		return { instance, peers };
+		const { instance, peers, peering_suggestions } = await listPeers({ fetch });
+		return { instance, peers, peeringSuggestions: peering_suggestions };
 	} catch (e) {
 		throwMappedLoadError(e, {
 			fallback: 'Failed to load federation peers',

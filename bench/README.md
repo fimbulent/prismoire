@@ -37,10 +37,10 @@ cargo test -p prismoire-bench                                       # cargo test
 
 ## Source layout
 
-- `src/algo.rs` — the BFS algorithm itself (CSR, dual CSR, forward/reverse BFS, distrust handling, hub dampening, the `HashMapGraph` reference oracle). The `*_with_threshold` BFS variants accept a configurable hub-dampening threshold so the harness can A/B with dampening on vs off without forking the algorithm. Defines the `CsrAccess` trait so BFS bodies work generically over heap-resident `CsrGraph` and mmap-backed `MmapCsrGraph`.
+- `src/algo.rs` — the BFS algorithm itself (CSR, dual CSR, forward/reverse BFS, distrust handling, the `HashMapGraph` reference oracle). Defines the `CsrAccess` trait so BFS bodies work generically over heap-resident `CsrGraph` and mmap-backed `MmapCsrGraph`.
 - `src/graph.rs` — synthetic graph generators: homogeneous (`generate_graph` / `GraphConfig`) and power-law (`generate_power_law_graph` / `PowerLawConfig`).
 - `src/mmap_csr.rs` — alternative CSR backed by an mmap'd tmpfs file (see the `mmap` bench mode below).
-- `src/main.rs` — CLI, timing harness, measurement helpers (degree distribution, variance multiplier κ, friendship-paradox branching, hub-dampening A/B), and the verbose correctness test suite.
+- `src/main.rs` — CLI, timing harness, measurement helpers (degree distribution, variance multiplier κ, friendship-paradox branching), and the verbose correctness test suite.
 
 Cross-compile for Raspberry Pi via the flake:
 
@@ -50,7 +50,7 @@ nix build .#packages.aarch64-linux.bench
 
 ## Synthetic Graph Topology
 
-Trust edges are binary (present or absent) and directional. The decay constant is 0.7 per hop, with a maximum traversal depth of 3 hops. Hub dampening kicks in for in-degrees above 5000 (`HUB_DAMPEN_THRESHOLD`).
+Trust edges are binary (present or absent) and directional. The decay constant is 0.7 per hop, with a maximum traversal depth of 3 hops.
 
 The single-instance and federation scenarios assume **each user trusts 10 other users** on average; the power-law scenario uses a three-tier out-degree distribution described below.
 
@@ -84,9 +84,7 @@ Instead of every user vouching for ~10 others, users fall into three out-degree 
 - **Active users** (next 9%): vouch for 50 others
 - **Lurkers** (remaining 90%): vouch for 5 others
 
-Target selection is **preferentially attached**: each user's targets are sampled with weight `1/(rank+1)^α` where `α=0.8`. The in-degree rank order is shuffled independently of the out-degree tier, so being a "power user" does not force you to also be a "top celebrity" — the two power-law axes are decoupled. At 50K users this produces a top in-degree around 8K–15K, comfortably above `HUB_DAMPEN_THRESHOLD` (5000), so the dampening logic is actually exercised. The mean out-degree is ≈11 (matching the homogeneous scenarios), but the variance multiplier κ = E[d²]/E[d]² is ≈5× — matching the doc's prediction.
-
-The power-law harness also emits a hub-dampening A/B (`with dampening` vs `threshold=u32::MAX`, holding everything else fixed) so you can see how many would-be-visible paths the dampening actually attenuates below the visibility threshold.
+Target selection is **preferentially attached**: each user's targets are sampled with weight `1/(rank+1)^α` where `α=0.8`. The in-degree rank order is shuffled independently of the out-degree tier, so being a "power user" does not force you to also be a "top celebrity" — the two power-law axes are decoupled. At 50K users this produces a top in-degree around 8K–15K. The mean out-degree is ≈11 (matching the homogeneous scenarios), but the variance multiplier κ = E[d²]/E[d]² is ≈5× — matching the doc's prediction.
 
 ### Federated power-law
 
@@ -104,7 +102,7 @@ The bench prints an **analytical pre-flight estimate** (cross-edges, unique remo
 
 **Sizing helper** (`bench size 4GB`) inverts the estimator analytically: binary-searches `local_users` for the largest value whose projected **rebuild-peak** memory (not just steady-state CSR) fits the budget. Rebuild peak is what governs OOM risk on a tight host; see `docs/rebuild_peak_memory.md`. Pure math, no generation — runs in milliseconds.
 
-> **Counter-intuitive finding:** at equal local-user count, the federated power-law has *less* hub concentration than the single-instance power-law. The 100M-user federation pool dilutes cross-vouches across many more potential targets than a 50K local pool concentrates intra-vouches. Single-instance power-law remains the more demanding stress test for `HUB_DAMPEN_THRESHOLD`.
+> **Counter-intuitive finding:** at equal local-user count, the federated power-law has *less* hub concentration than the single-instance power-law. The 100M-user federation pool dilutes cross-vouches across many more potential targets than a 50K local pool concentrates intra-vouches. Single-instance power-law remains the more demanding hub-concentration stress test.
 
 ### mmap bench mode
 
@@ -152,7 +150,6 @@ Degree distribution (power-law topology):
 in-degree:  max=5432  p99=12  p90=3  p50=1
 out-degree: max=200  p99=50  p90=5  p50=0
 top-10 in-degree share: 0.1% (25936 of 29570165 total inbound edges)
-nodes above HUB_DAMPEN_THRESHOLD (5000): 1
 
 Variance multiplier κ = E[d²]/E[d]² = 32.52× (E[d]=1.8, E[d²]=108)
 homogeneous baseline κ = 1.0; doc predicts ≈5× for the modelled distribution
@@ -170,12 +167,5 @@ avg reachable sources: 98
 
 Dual BFS (simulated page load) — 100 samples:
 p50: 0.348ms  p99: 17.259ms  mean: 1.084ms
-
-Hub-dampening A/B (visibility threshold = 0.45, 100 samples):
-frontier (reachable targets)  with dampening: median=559  max=14415
-frontier (reachable targets) without dampening: median=559  max=14415
-visible paths without dampening: 133668
-visible paths with    dampening: 133668
-attenuated below threshold:      0  (0.0% of would-be-visible)
 
 Peak RSS: 2.4 GB

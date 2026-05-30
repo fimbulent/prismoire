@@ -1856,6 +1856,212 @@ pub async fn delete_trust_edge(
 }
 
 // ---------------------------------------------------------------------------
+// GET /api/me/trust-code — Mint the caller's cross-instance trust code (§11.9.5)
+// ---------------------------------------------------------------------------
+
+/// `GET /api/me/trust-code` response — the caller's copy-pasteable code.
+#[derive(Serialize)]
+pub struct TrustCodeResponse {
+    pub code: String,
+}
+
+/// Mint the caller's own trust code so they can hand it to a user on
+/// another instance to bootstrap the first cross-instance trust edge.
+///
+/// The code embeds the caller's display name (UX-only), this instance's
+/// dialing domain, the caller's credential pubkey (the identity), and
+/// this instance's `instance_pubkey` (the §3 anchor). It is *not* signed
+/// — see `federation::trust_code` for the blast-radius rationale.
+pub async fn get_my_trust_code(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+) -> Result<impl IntoResponse, AppError> {
+    // `public_key_hex` is the canonical 64-char lowercase-hex form,
+    // populated from the session's stored key — always well-formed here.
+    let user_pubkey = crate::federation::trust_code::decode_hex32(&user.public_key_hex)
+        .ok_or_else(|| {
+            tracing::error!(
+                user_id = %user.user_id,
+                "session public_key_hex is not 64-char hex",
+            );
+            AppError::code(ErrorCode::Internal)
+        })?;
+
+    let code = crate::federation::trust_code::mint(
+        &user.display_name,
+        &state.instance_domain,
+        &user_pubkey,
+        state.instance_key.public_bytes(),
+    );
+
+    Ok(Json(TrustCodeResponse { code }))
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/users/by-trust-code — Redeem a pasted trust code (§11.9.5)
+// ---------------------------------------------------------------------------
+
+/// `POST /api/users/by-trust-code` request.
+#[derive(Deserialize)]
+pub struct RedeemTrustCodeRequest {
+    /// The pasted `:trust:...` code.
+    pub code: String,
+    /// Stance to set toward the resolved user. Defaults to `trust`.
+    #[serde(rename = "type")]
+    pub edge_type: Option<TrustEdgeType>,
+    /// When true, parse + resolve only — report what *would* happen
+    /// (who the code names, whether a stub would be created) without
+    /// seeding a row or writing an edge. Used by the frontend preview.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// `POST /api/users/by-trust-code` response.
+#[derive(Serialize)]
+pub struct RedeemTrustCodeResponse {
+    /// Lowercase-hex of the user the code names (the lookup key).
+    pub pubkey_hex: String,
+    /// The display name carried by the code (UX-only; sanitised on seed).
+    pub display_name: String,
+    /// The home domain carried by the code.
+    pub home_domain: String,
+    /// Lowercase-hex of the home instance pubkey carried by the code.
+    pub home_instance_hex: String,
+    /// True when the named user resolves to a *local* account (the code's
+    /// home instance hint is then moot — the edge is an ordinary one).
+    pub is_local: bool,
+    /// True when redeeming seeded a new federated stub (`dry_run` reports
+    /// what would happen). False when an existing row was reused.
+    pub created: bool,
+    /// The stance that was set (or would be set, under `dry_run`).
+    pub edge_type: String,
+}
+
+/// Redeem a pasted trust code: resolve the named user, seeding a
+/// federated stub when we've never seen them, then set a trust/distrust
+/// edge toward them. This is the §11.9.5 manual bootstrap that breaks the
+/// "no edge → no content → no local row → no edge" deadlock.
+///
+/// Decision tree (pivots on whether a local `users` row already exists
+/// for the code's pubkey, *not* on peering status):
+///
+/// 1. **Local row exists** — the named pubkey is one of our own users.
+///    The home-instance hint is irrelevant; just set an ordinary edge.
+/// 2. **Federated stub exists** — we already know this remote user. Set
+///    the edge; do *not* touch `user_homes` (first-seed-wins: an earlier
+///    seed or an observed move already established the home).
+/// 3. **No row** — seed a federated stub via `hydrate_stub_user` and a
+///    move-less `user_homes` row (NULL move columns), then set the edge.
+pub async fn redeem_trust_code(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Json(req): Json<RedeemTrustCodeRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let tc = crate::federation::trust_code::parse(&req.code)
+        .map_err(|e| AppError::with_message(ErrorCode::InvalidTrustCode, e.to_string()))?;
+    let edge_type = req.edge_type.unwrap_or(TrustEdgeType::Trust);
+    let edge_type_str = match edge_type {
+        TrustEdgeType::Trust => "trust",
+        TrustEdgeType::Distrust => "distrust",
+    };
+
+    let pubkey_hex = hex_lower(&tc.user_pubkey);
+    let home_instance_hex = hex_lower(&tc.instance_pubkey);
+
+    // A user cannot trust-code themselves into their own graph.
+    if pubkey_hex == user.public_key_hex {
+        return Err(AppError::code(ErrorCode::SelfTrustEdge));
+    }
+
+    // Decision-tree pivot: is there already a local row for this pubkey?
+    let pubkey_slice: &[u8] = tc.user_pubkey.as_slice();
+    let existing = sqlx::query!(
+        r#"SELECT home_instance, status, deleted_at FROM users WHERE public_key = ?"#,
+        pubkey_slice,
+    )
+    .fetch_optional(&state.db)
+    .await?;
+
+    let (is_local, created) = match &existing {
+        Some(row) => {
+            // Mirror `set_trust_edge`: never form an edge toward a
+            // tombstoned identity, and don't leak its prior existence.
+            let raw_status = UserStatus::try_from(row.status.as_str()).map_err(|e| {
+                tracing::error!(error = %e, "unrecognised users.status in trust-code redeem");
+                AppError::code(ErrorCode::Internal)
+            })?;
+            if UserStatus::effective(raw_status, row.deleted_at.as_deref()) == UserStatus::Deleted {
+                return Err(AppError::code(ErrorCode::UserNotFound));
+            }
+            (row.home_instance.is_none(), false)
+        }
+        None => (false, true),
+    };
+
+    // Dry-run: report the resolution outcome without mutating anything.
+    if req.dry_run {
+        return Ok(Json(RedeemTrustCodeResponse {
+            pubkey_hex,
+            display_name: tc.display_name,
+            home_domain: tc.home_domain,
+            home_instance_hex,
+            is_local,
+            created,
+            edge_type: edge_type_str.to_string(),
+        }));
+    }
+
+    // Branch 3: seed a federated stub + a move-less home row so the
+    // subsequent `set_trust_edge` can resolve a target row. First-seed-
+    // wins: the `user_homes` insert is a no-op if a row already exists.
+    if created {
+        let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+        crate::federation::remote_users::hydrate_stub_user(
+            &mut tx,
+            &tc.user_pubkey,
+            &tc.display_name,
+            &tc.instance_pubkey,
+        )
+        .await?;
+        let user_key_slice: &[u8] = tc.user_pubkey.as_slice();
+        let home_key_slice: &[u8] = tc.instance_pubkey.as_slice();
+        sqlx::query!(
+            "INSERT INTO user_homes (user_key, current_home_key, current_home_domain, \
+                                     current_move_hash, current_created_at) \
+             VALUES (?, ?, ?, NULL, NULL) \
+             ON CONFLICT(user_key) DO NOTHING",
+            user_key_slice,
+            home_key_slice,
+            tc.home_domain,
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+    }
+
+    // Branches 1/2/3 converge here: set the edge via the canonical
+    // signed-edge path. `set_trust_edge` re-resolves the now-present row,
+    // signs, persists, updates the cached graph, and fans out to peers.
+    set_trust_edge(
+        State(state.clone()),
+        user,
+        Path(pubkey_hex.clone()),
+        Json(SetTrustEdgeRequest { edge_type }),
+    )
+    .await?;
+
+    Ok(Json(RedeemTrustCodeResponse {
+        pubkey_hex,
+        display_name: tc.display_name,
+        home_domain: tc.home_domain,
+        home_instance_hex,
+        is_local,
+        created,
+        edge_type: edge_type_str.to_string(),
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // PUT /api/users/:pubkey_hex/tag — Set viewer-private tag for another user
 // ---------------------------------------------------------------------------
 

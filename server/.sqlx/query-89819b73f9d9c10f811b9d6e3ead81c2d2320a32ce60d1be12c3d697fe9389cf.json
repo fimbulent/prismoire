@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT current_move_hash AS \"current_move_hash?: Vec<u8>\"\n             FROM user_homes WHERE user_key = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "current_move_hash?: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "89819b73f9d9c10f811b9d6e3ead81c2d2320a32ce60d1be12c3d697fe9389cf"
+}

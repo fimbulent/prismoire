@@ -740,15 +740,15 @@ pub async fn compute_local_frontier(
         .collect();
 
     // 2. Forward closures via the trust graph. `forward_visible_closure`
-    //    shares the scoring kernel with `forward_scores` (hub
-    //    dampening, decay, distrust handling) and prunes paths whose
-    //    combined score falls below `MINIMUM_TRUST_THRESHOLD` — the
-    //    same visibility cutoff the rest of the app uses. Without this
-    //    pruning the bloom would carry users that hub dampening makes
-    //    structurally invisible to every local reader, wasting frontier
-    //    bytes and inflating peers' fetch traffic. Sources are
-    //    included unconditionally (a local user is trivially visible
-    //    to themselves and must be advertised for author-keyed routing).
+    //    shares the scoring kernel with `forward_scores` (decay, distrust
+    //    handling) and prunes paths whose combined score falls below
+    //    `MINIMUM_TRUST_THRESHOLD` — the same visibility cutoff the rest
+    //    of the app uses. Without this pruning the bloom would carry
+    //    users that are structurally invisible to every local reader,
+    //    wasting frontier bytes and inflating peers' fetch traffic.
+    //    Sources are included unconditionally (a local user is trivially
+    //    visible to themselves and must be advertised for author-keyed
+    //    routing).
     let three_hop = trust_graph.forward_visible_closure(&local_users, 3);
     let two_hop = trust_graph.forward_visible_closure(&local_users, 2);
 

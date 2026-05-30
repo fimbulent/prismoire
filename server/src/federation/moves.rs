@@ -473,8 +473,8 @@ async fn apply_one_move(
 
     let key_slice: &[u8] = mv.key.as_slice();
     let existing_home = sqlx::query!(
-        "SELECT current_created_at AS \"current_created_at!: i64\", \
-                current_move_hash AS \"current_move_hash!: Vec<u8>\" \
+        "SELECT current_created_at AS \"current_created_at?: i64\", \
+                current_move_hash AS \"current_move_hash?: Vec<u8>\" \
          FROM user_homes WHERE user_key = ?",
         key_slice,
     )
@@ -489,24 +489,32 @@ async fn apply_one_move(
     let new_wins = match &existing_home {
         None => true,
         Some(row) => {
-            // `current_created_at` is INTEGER NOT NULL in `user_homes`; the
-            // schema doesn't enforce non-negative, but every write path
-            // here populates it from `mv.created_at: u64`. A negative
-            // value would mean our row was corrupted (or a future
-            // migration changed semantics); treat it as if the prior
-            // move was at the epoch so any inbound move with a sensible
-            // timestamp supersedes — losing-direction is the safer
-            // failure mode than letting a corrupted row pin the home.
-            let prior_ts = u64::try_from(row.current_created_at).unwrap_or(0);
+            // `current_created_at` is normally populated from
+            // `mv.created_at: u64`, but is NULL for a trust-code-seeded
+            // row (Phase 11.9.5: home pointer known, no move object). A
+            // NULL — or a negative value, which would mean a corrupted
+            // row — is treated as the epoch so any inbound move with a
+            // sensible timestamp supersedes; losing-direction is the
+            // safer failure mode than letting a seeded/corrupted row pin
+            // the home.
+            let prior_ts = row
+                .current_created_at
+                .map(|v| u64::try_from(v).unwrap_or(0))
+                .unwrap_or(0);
             let new_ts = mv.created_at;
             if new_ts > prior_ts {
                 true
             } else if new_ts < prior_ts {
                 false
             } else {
-                // Tie on timestamp: smaller canonical_hash wins.
-                let prior_hash = row.current_move_hash.as_slice();
-                canonical_hash.as_slice() < prior_hash
+                // Tie on timestamp: smaller canonical_hash wins. A
+                // seeded row has no move hash (NULL), so a real move —
+                // which can only tie at ts 0 against the epoch sentinel,
+                // never in practice — wins outright.
+                match &row.current_move_hash {
+                    Some(prior_hash) => canonical_hash.as_slice() < prior_hash.as_slice(),
+                    None => true,
+                }
             }
         }
     };

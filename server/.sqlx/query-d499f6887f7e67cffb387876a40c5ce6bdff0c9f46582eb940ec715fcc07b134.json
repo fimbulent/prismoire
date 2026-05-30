@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT uh.current_home_key AS \"home_key!: Vec<u8>\",\n                  uh.current_home_domain AS \"domain!: String\",\n                  COUNT(*) AS \"edge_count!: i64\"\n             FROM current_trust_edges cte\n             JOIN users tu ON tu.id = cte.target_user\n             JOIN users su ON su.id = cte.source_user\n             JOIN user_homes uh ON uh.user_key = tu.public_key\n            WHERE su.home_instance IS NULL\n              AND tu.home_instance IS NOT NULL\n              AND NOT EXISTS (\n                    SELECT 1 FROM peers p\n                     WHERE p.instance_pubkey = uh.current_home_key\n                       AND p.status = 'active'\n                  )\n            GROUP BY uh.current_home_key, uh.current_home_domain\n            ORDER BY COUNT(*) DESC, uh.current_home_domain ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "home_key!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "domain!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "edge_count!: i64",
+        "ordinal": 2,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "d499f6887f7e67cffb387876a40c5ce6bdff0c9f46582eb940ec715fcc07b134"
+}

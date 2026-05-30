@@ -71,6 +71,7 @@ const ERROR_MESSAGES: Record<ErrorCode, string> = {
 	self_trust_edge: 'You cannot set a trust edge on yourself.',
 	no_trust_edge: 'No trust edge to remove.',
 	invalid_trust_direction: 'Invalid trust direction.',
+	invalid_trust_code: 'That trust code is malformed or invalid.',
 
 	// Misc user
 	bio_too_long: 'Bio is too long.',

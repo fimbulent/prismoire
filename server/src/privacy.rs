@@ -897,13 +897,16 @@ pub async fn export_my_data(
     .fetch_all(db)
     .await?;
     let current_move_hash_row = sqlx::query!(
-        r#"SELECT current_move_hash AS "current_move_hash!: Vec<u8>"
+        r#"SELECT current_move_hash AS "current_move_hash?: Vec<u8>"
              FROM user_homes WHERE user_key = ?"#,
         public_key_bytes,
     )
     .fetch_optional(db)
     .await?;
-    let current_hash = current_move_hash_row.map(|r| r.current_move_hash);
+    // Flatten "no user_homes row" and "row with NULL move_hash"
+    // (trust-code seed, no move object) into the same None — neither
+    // flags a current move in the export.
+    let current_hash = current_move_hash_row.and_then(|r| r.current_move_hash);
     let home_history: Vec<UserMoveExport> = move_rows
         .into_iter()
         .map(|r| {

@@ -166,6 +166,8 @@ pub enum ErrorCode {
     NoTrustEdge,
     /// Trust-list direction parameter was neither "trusts" nor "trusted_by".
     InvalidTrustDirection,
+    /// A pasted trust code (§11.9.5) was malformed or failed validation.
+    InvalidTrustCode,
 
     // -- User tags ---------------------------------------------------
     /// Cannot tag yourself.
@@ -396,6 +398,7 @@ impl ErrorCode {
             | Self::ParentRetracted
             | Self::SelfTrustEdge
             | Self::InvalidTrustDirection
+            | Self::InvalidTrustCode
             | Self::SelfTag
             | Self::TagTooLong
             | Self::BioTooLong
@@ -475,6 +478,7 @@ impl ErrorCode {
             Self::SelfTrustEdge => "cannot set trust edge on yourself",
             Self::NoTrustEdge => "no trust edge to remove",
             Self::InvalidTrustDirection => "direction must be 'trusts' or 'trusted_by'",
+            Self::InvalidTrustCode => "trust code is malformed or invalid",
 
             Self::SelfTag => "cannot tag yourself",
             Self::TagTooLong => "tag is too long",

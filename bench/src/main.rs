@@ -4,7 +4,7 @@
 //! generators live in [`graph`]. This file owns the benchmark harness, the
 //! verbose test runner, the cargo-test module, and the CLI dispatcher.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
 use rand::Rng;
@@ -17,9 +17,8 @@ mod graph;
 mod mmap_csr;
 
 use algo::{
-    DECAY, DistrustSets, DualCsrGraph, HUB_DAMPEN_THRESHOLD, HashMapGraph, MAX_DEPTH,
-    build_distrust_sets, forward_bfs, forward_bfs_with_threshold, reference_forward_bfs,
-    reverse_bfs,
+    CsrAccess, DECAY, DistrustSets, DualCsrGraph, HashMapGraph, MAX_DEPTH, build_distrust_sets,
+    forward_bfs, reference_forward_bfs, reverse_bfs,
 };
 use graph::{
     FederationEnvironment, GraphConfig, HomeInstanceConfig, PowerLawConfig, SyntheticGraph,
@@ -295,12 +294,7 @@ fn run_bfs_timings(synth: &SyntheticGraph, dual: &DualCsrGraph, distrust_sets: &
     let num_samples = sample_sources.len();
 
     // Warm up (one run to populate caches).
-    let _ = forward_bfs(
-        sample_sources[0],
-        &dual.forward,
-        &dual.reverse,
-        distrust_sets,
-    );
+    let _ = forward_bfs(sample_sources[0], &dual.forward, distrust_sets);
     let _ = reverse_bfs(sample_sources[0], &dual.reverse);
 
     // --- Forward BFS ---
@@ -308,7 +302,7 @@ fn run_bfs_timings(synth: &SyntheticGraph, dual: &DualCsrGraph, distrust_sets: &
     let mut forward_result_counts = Vec::with_capacity(num_samples);
     for &src in &sample_sources {
         let t = Instant::now();
-        let results = forward_bfs(src, &dual.forward, &dual.reverse, distrust_sets);
+        let results = forward_bfs(src, &dual.forward, distrust_sets);
         forward_times.push(t.elapsed().as_secs_f64() * 1000.0);
         forward_result_counts.push(results.len());
     }
@@ -347,7 +341,7 @@ fn run_bfs_timings(synth: &SyntheticGraph, dual: &DualCsrGraph, distrust_sets: &
     let mut dual_times = Vec::with_capacity(num_samples);
     for &src in &sample_sources {
         let t = Instant::now();
-        let _fwd = forward_bfs(src, &dual.forward, &dual.reverse, distrust_sets);
+        let _fwd = forward_bfs(src, &dual.forward, distrust_sets);
         let _rev = reverse_bfs(src, &dual.reverse);
         dual_times.push(t.elapsed().as_secs_f64() * 1000.0);
     }
@@ -362,7 +356,7 @@ fn run_bfs_timings(synth: &SyntheticGraph, dual: &DualCsrGraph, distrust_sets: &
 // Power-law benchmark runner
 // ---------------------------------------------------------------------------
 
-/// Same as [`run_benchmark`] for setup/timing, plus four power-law-specific
+/// Same as [`run_benchmark`] for setup/timing, plus three power-law-specific
 /// measurements after CSR build:
 ///
 /// 1. **Degree distribution.** Top-N + percentile dump of in/out degree.
@@ -372,11 +366,6 @@ fn run_bfs_timings(synth: &SyntheticGraph, dual: &DualCsrGraph, distrust_sets: &
 /// 3. **Friendship-paradox effective branching.** `Σ d_in·d_out / Σ d_in`,
 ///    which is the expected out-degree of a node reached by a random hop.
 ///    Doc predicts ~59 vs ~11 for the modelled distribution.
-/// 4. **Hub-dampening A/B.** Runs forward BFS on each sample source with
-///    dampening on (threshold=`HUB_DAMPEN_THRESHOLD`) and off
-///    (threshold=`u32::MAX`); reports how many target-paths that would be
-///    visible without dampening fall below the 0.45 visibility threshold
-///    when dampening is on.
 fn run_power_law_benchmark(name: &str, config: &PowerLawConfig) {
     println!("\n{}", "=".repeat(60));
     println!("  Benchmark: {name}");
@@ -414,9 +403,6 @@ fn run_power_law_benchmark(name: &str, config: &PowerLawConfig) {
     report_effective_branching(&dual);
 
     run_bfs_timings(&synth, &dual, &distrust_sets);
-
-    let sample_sources = pick_sample_sources(&synth.local_range, 100);
-    report_hub_dampening_impact(&dual, &sample_sources);
 
     if let Some(peak) = peak_rss_kb() {
         println!("\nPeak RSS: {}", fmt_memory(peak));
@@ -465,15 +451,6 @@ fn report_degree_distribution(dual: &DualCsrGraph) {
         top_sum,
         total_in_edges,
     );
-
-    let above_threshold = in_degrees
-        .iter()
-        .take_while(|&&d| d > HUB_DAMPEN_THRESHOLD)
-        .count();
-    println!(
-        "  nodes above HUB_DAMPEN_THRESHOLD ({}): {}",
-        HUB_DAMPEN_THRESHOLD, above_threshold,
-    );
 }
 
 /// Measurement 2: out-degree variance multiplier κ = E[d²] / E[d]².
@@ -516,88 +493,6 @@ fn report_effective_branching(dual: &DualCsrGraph) {
     let mean_out = sum_in as f64 / n as f64; // Σ d_in = Σ d_out
     println!(
         "Friendship-paradox branching at hop 2/3: {eff_branching:.1} (mean out-degree = {mean_out:.1})"
-    );
-}
-
-/// Measurement 4: hub-dampening A/B vs visibility threshold.
-///
-/// For each sample source, runs forward BFS with dampening on
-/// (threshold=`HUB_DAMPEN_THRESHOLD`) and off (threshold=`u32::MAX`). Counts
-/// targets whose path crosses the 0.45 visibility threshold in each
-/// configuration. The "attenuated" bucket is exactly the set of paths that
-/// dampening cut off from the visible feed — its size answers the question
-/// "how much frontier does dampening actually save on a realistic graph?".
-fn report_hub_dampening_impact(dual: &DualCsrGraph, sample_sources: &[u32]) {
-    const VISIBILITY_THRESHOLD: f64 = 0.45;
-    let no_distrusts: DistrustSets = HashMap::new();
-
-    let mut visible_with_damp = 0usize;
-    let mut visible_without_damp = 0usize;
-    let mut attenuated = 0usize;
-    // Median/max per-source forward result counts under each config, to
-    // give a frontier-size sense not just a yes/no on visibility.
-    let mut frontier_with: Vec<usize> = Vec::with_capacity(sample_sources.len());
-    let mut frontier_without: Vec<usize> = Vec::with_capacity(sample_sources.len());
-
-    for &src in sample_sources {
-        let with_damp: HashMap<u32, f64> = forward_bfs_with_threshold(
-            src,
-            &dual.forward,
-            &dual.reverse,
-            &no_distrusts,
-            HUB_DAMPEN_THRESHOLD,
-        )
-        .into_iter()
-        .collect();
-        let no_damp: HashMap<u32, f64> =
-            forward_bfs_with_threshold(src, &dual.forward, &dual.reverse, &no_distrusts, u32::MAX)
-                .into_iter()
-                .collect();
-
-        frontier_with.push(with_damp.len());
-        frontier_without.push(no_damp.len());
-
-        for (target, &score_no) in &no_damp {
-            if score_no >= VISIBILITY_THRESHOLD {
-                visible_without_damp += 1;
-                let score_with = with_damp.get(target).copied().unwrap_or(0.0);
-                if score_with >= VISIBILITY_THRESHOLD {
-                    visible_with_damp += 1;
-                } else {
-                    attenuated += 1;
-                }
-            }
-        }
-    }
-
-    frontier_with.sort_unstable();
-    frontier_without.sort_unstable();
-    let median = |v: &[usize]| v[v.len() / 2];
-
-    let attenuation_rate = if visible_without_damp == 0 {
-        0.0
-    } else {
-        100.0 * attenuated as f64 / visible_without_damp as f64
-    };
-
-    println!(
-        "\nHub-dampening A/B (visibility threshold = {VISIBILITY_THRESHOLD}, {} samples):",
-        sample_sources.len()
-    );
-    println!(
-        "  frontier (reachable targets)  with dampening: median={}  max={}",
-        median(&frontier_with),
-        frontier_with.last().copied().unwrap_or(0),
-    );
-    println!(
-        "  frontier (reachable targets) without dampening: median={}  max={}",
-        median(&frontier_without),
-        frontier_without.last().copied().unwrap_or(0),
-    );
-    println!("  visible paths without dampening: {visible_without_damp}");
-    println!("  visible paths with    dampening: {visible_with_damp}");
-    println!(
-        "  attenuated below threshold:      {attenuated}  ({attenuation_rate:.1}% of would-be-visible)"
     );
 }
 
@@ -792,9 +687,6 @@ fn run_federated_power_law_benchmark(
 
     run_bfs_timings(&synth, &dual, &distrust_sets);
 
-    let sample_sources = pick_sample_sources(&synth.local_range, 100);
-    report_hub_dampening_impact(&dual, &sample_sources);
-
     if let Some(peak) = peak_rss_kb() {
         println!("\nPeak RSS: {}", fmt_memory(peak));
     }
@@ -846,6 +738,7 @@ fn run_federated_power_law_sweep(env: &FederationEnvironment, sizes: &[u32]) {
             local_users: n,
             shape: PowerLawConfig::medium_instance(),
             local_preference: 0.5,
+            inbound_factor: 0.0,
         };
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let synth = generate_federated_power_law_graph(&home, env, &mut rng);
@@ -853,22 +746,17 @@ fn run_federated_power_law_sweep(env: &FederationEnvironment, sizes: &[u32]) {
         let distrust_sets = build_distrust_sets(&synth.distrust_edges);
 
         let sample_sources = pick_sample_sources(&synth.local_range, 50);
-        let _ = forward_bfs(
-            sample_sources[0],
-            &dual.forward,
-            &dual.reverse,
-            &distrust_sets,
-        );
+        let _ = forward_bfs(sample_sources[0], &dual.forward, &distrust_sets);
 
         let mut fwd_times: Vec<f64> = Vec::with_capacity(sample_sources.len());
         let mut dual_times: Vec<f64> = Vec::with_capacity(sample_sources.len());
         for &src in &sample_sources {
             let t = Instant::now();
-            let _ = forward_bfs(src, &dual.forward, &dual.reverse, &distrust_sets);
+            let _ = forward_bfs(src, &dual.forward, &distrust_sets);
             fwd_times.push(t.elapsed().as_secs_f64() * 1000.0);
 
             let t = Instant::now();
-            let _ = forward_bfs(src, &dual.forward, &dual.reverse, &distrust_sets);
+            let _ = forward_bfs(src, &dual.forward, &distrust_sets);
             let _ = reverse_bfs(src, &dual.reverse);
             dual_times.push(t.elapsed().as_secs_f64() * 1000.0);
         }
@@ -1022,18 +910,8 @@ fn run_mmap_bench(
     // --- Correctness check: heap and mmap must produce identical BFS results
     // on the same source. Catches any silent corruption in the serialise →
     // mmap → slice path (wrong endianness, off-by-one, misaligned cast).
-    let heap_sample = forward_bfs(
-        sample_sources[0],
-        &dual.forward,
-        &dual.reverse,
-        &distrust_sets,
-    );
-    let mmap_sample = forward_bfs(
-        sample_sources[0],
-        &mmap_forward,
-        &mmap_reverse,
-        &distrust_sets,
-    );
+    let heap_sample = forward_bfs(sample_sources[0], &dual.forward, &distrust_sets);
+    let mmap_sample = forward_bfs(sample_sources[0], &mmap_forward, &distrust_sets);
     {
         let mut h: Vec<(u32, f64)> = heap_sample.clone();
         let mut m: Vec<(u32, f64)> = mmap_sample.clone();
@@ -1062,28 +940,18 @@ fn run_mmap_bench(
     // warm-up iteration on each to fault any not-yet-touched pages
     // (heap was just built, mmap was just serialized — both should
     // already be hot, but the warm-up makes the comparison fair).
-    let _ = forward_bfs(
-        sample_sources[0],
-        &dual.forward,
-        &dual.reverse,
-        &distrust_sets,
-    );
-    let _ = forward_bfs(
-        sample_sources[0],
-        &mmap_forward,
-        &mmap_reverse,
-        &distrust_sets,
-    );
+    let _ = forward_bfs(sample_sources[0], &dual.forward, &distrust_sets);
+    let _ = forward_bfs(sample_sources[0], &mmap_forward, &distrust_sets);
 
     let mut heap_times: Vec<f64> = Vec::with_capacity(sample_sources.len());
     let mut mmap_warm_times: Vec<f64> = Vec::with_capacity(sample_sources.len());
     for &src in &sample_sources {
         let t = Instant::now();
-        let _ = forward_bfs(src, &dual.forward, &dual.reverse, &distrust_sets);
+        let _ = forward_bfs(src, &dual.forward, &distrust_sets);
         heap_times.push(t.elapsed().as_secs_f64() * 1000.0);
 
         let t = Instant::now();
-        let _ = forward_bfs(src, &mmap_forward, &mmap_reverse, &distrust_sets);
+        let _ = forward_bfs(src, &mmap_forward, &distrust_sets);
         mmap_warm_times.push(t.elapsed().as_secs_f64() * 1000.0);
     }
     heap_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -1141,7 +1009,7 @@ fn run_mmap_bench(
     let mut mmap_unmapped_times: Vec<f64> = Vec::with_capacity(sample_sources.len());
     for &src in &sample_sources {
         let t = Instant::now();
-        let _ = forward_bfs(src, &mmap_forward, &mmap_reverse, &distrust_sets);
+        let _ = forward_bfs(src, &mmap_forward, &distrust_sets);
         mmap_unmapped_times.push(t.elapsed().as_secs_f64() * 1000.0);
     }
     mmap_unmapped_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -1201,6 +1069,7 @@ fn run_sizing_helper(max_memory_bytes: u64, env: &FederationEnvironment) {
             local_users: n,
             shape: PowerLawConfig::medium_instance(),
             local_preference: 0.5,
+            inbound_factor: 0.0,
         };
         let est = estimate_frontier(&home, env);
         est.peak_rebuild_bytes
@@ -1228,6 +1097,7 @@ fn run_sizing_helper(max_memory_bytes: u64, env: &FederationEnvironment) {
             local_users: lo,
             shape: PowerLawConfig::medium_instance(),
             local_preference: 0.5,
+            inbound_factor: 0.0,
         },
         env,
     );
@@ -1259,15 +1129,638 @@ fn run_sizing_helper(max_memory_bytes: u64, env: &FederationEnvironment) {
 }
 
 // ---------------------------------------------------------------------------
+// Reverse-frontier (inbound visibility) measurement
+// ---------------------------------------------------------------------------
+
+/// Visibility threshold — a post by author A is visible to reader R iff
+/// trust(A, R) ≥ this (matches `MINIMUM_TRUST_THRESHOLD` in server/src/trust.rs).
+const VISIBILITY_THRESHOLD: f64 = 0.45;
+
+/// Visibility cap (proposed model): a reader's visible set is the authors who
+/// trust them (reverse frontier ≥ threshold), capped at this many, ranked by
+/// how much the reader trusts each author (forward score) descending, with
+/// oldest-account-first (lower node id) as the tiebreak for the long tail that
+/// shares forward score 0.0. For "normal" users the reverse set is far below
+/// the cap so it is a no-op; it only bites the celebrities (high inbound),
+/// bounding their visible set — and the per-author downstream work (fetch,
+/// rank, render) — to a predictable N.
+///
+/// Under the root-advertisement model (docs/federation-root-advertisement.md
+/// §6.2) the cap is not just an output filter but a **frontier-admission /
+/// retention rule**: the home instance stores at most N inbound trusters per
+/// local reader, evicting by the ranking. So the cap also bounds the *stored*
+/// reverse frontier — the CSR + stub footprint the reverse BFS works over.
+/// `measure_capped_union` / `induced_footprint` below model that stored
+/// footprint (capped-induced subgraph) against the uncapped baseline.
+const VISIBILITY_CAP: usize = 100_000;
+
+/// Estimated bytes per retained remote frontier user ("stub"). Models the
+/// lean `frontier_users` row of docs/federation-root-advertisement.md §8.1 /
+/// §11.1: a 32-byte content public key + 32-byte home-instance key + a dense
+/// u32 id and small per-row overhead ≈ 80 bytes. A full `users` row would be
+/// several times larger — which is exactly why §11.1 flags a lighter stub
+/// table as an open question. Stub bytes are reported separately from CSR
+/// bytes so the two footprint drivers stay legible.
+const STUB_ROW_BYTES: u64 = 80;
+
+/// Stored BFS working-set footprint: the dual CSR (forward + reverse edge
+/// arrays the reverse BFS traverses) plus the per-node stub rows. This is the
+/// "memory taken by BFS in practice" the sizing question asks about.
+struct StoredFootprint {
+    /// Materialised graph nodes (local users + retained remote stubs).
+    nodes: u64,
+    /// Trust edges retained in the store (both endpoints materialised).
+    edges: u64,
+    /// Dual CSR bytes (forward + reverse offsets/targets arrays).
+    csr_bytes: u64,
+    /// Estimated stub-row bytes = `nodes × STUB_ROW_BYTES`.
+    stub_bytes: u64,
+}
+
+impl StoredFootprint {
+    fn total_bytes(&self) -> u64 {
+        self.csr_bytes + self.stub_bytes
+    }
+}
+
+/// Build the stored footprint of the cap-retained subgraph: the node-induced
+/// subgraph on `retained` (a per-node keep bitset), compacted to dense ids and
+/// rebuilt as a dual CSR. Models what the home instance actually keeps after
+/// cap-at-N admission (§6.2) — every edge whose *both* endpoints survived
+/// admission. Compacting to dense ids matters: a sparse offsets array over the
+/// full node space would over-count, so the retained nodes are renumbered
+/// `0..kept` before the CSR is built.
+fn induced_footprint(edges: &[(u32, u32)], retained: &[bool]) -> StoredFootprint {
+    // Dense remap: retained original id → compact id.
+    let mut remap = vec![u32::MAX; retained.len()];
+    let mut kept = 0u32;
+    for (id, &keep) in retained.iter().enumerate() {
+        if keep {
+            remap[id] = kept;
+            kept += 1;
+        }
+    }
+    // Induced edge list: keep edges with both endpoints retained.
+    let mut induced: Vec<(u32, u32)> = Vec::new();
+    for &(s, t) in edges {
+        let (rs, rt) = (remap[s as usize], remap[t as usize]);
+        if rs != u32::MAX && rt != u32::MAX {
+            induced.push((rs, rt));
+        }
+    }
+    let dual = DualCsrGraph::from_edges(kept, &induced);
+    StoredFootprint {
+        nodes: kept as u64,
+        edges: induced.len() as u64,
+        csr_bytes: dual.memory_bytes() as u64,
+        stub_bytes: kept as u64 * STUB_ROW_BYTES,
+    }
+}
+
+/// Count remote nodes reachable within `max_depth` hops from the entire
+/// local set over `graph`, ignoring scores. This is the *structural*
+/// frontier — the routing/fetch upper bound the doc's frontier tables use.
+///
+/// Run over the forward graph it measures the forward frontier (authors a
+/// local user could rank as relevant, the current federation `content_filter`
+/// basis); run over the reverse graph it measures the reverse frontier
+/// (authors whose posts are *visible* to local users — the inbound-trust
+/// basis the visibility model actually gates on). "Remote" = node index
+/// ≥ `local_end`; seed (local) nodes are not counted.
+fn structural_frontier_remote<G: CsrAccess>(graph: &G, local_end: u32, max_depth: u32) -> u64 {
+    let n = graph.num_nodes() as usize;
+    let mut visited = vec![false; n];
+    let mut queue: VecDeque<(u32, u32)> = VecDeque::new();
+    for s in 0..local_end {
+        visited[s as usize] = true;
+        queue.push_back((s, 0));
+    }
+    let mut remote = 0u64;
+    while let Some((node, depth)) = queue.pop_front() {
+        if depth >= max_depth {
+            continue;
+        }
+        for &next in graph.neighbors(node) {
+            if !visited[next as usize] {
+                visited[next as usize] = true;
+                if next >= local_end {
+                    remote += 1;
+                }
+                queue.push_back((next, depth + 1));
+            }
+        }
+    }
+    remote
+}
+
+/// The top-`k` local nodes by in-degree (forward in-degree = reverse
+/// out-degree). These are the "celebrities" — local users with the largest
+/// inbound trust, the worst case for a reverse-frontier traversal. Evenly-
+/// spaced sampling misses them (in-degree rank is shuffled vs node id), so
+/// the reverse-frontier sample unions them in explicitly.
+fn top_local_in_degree(dual: &DualCsrGraph, local_end: u32, k: usize) -> Vec<u32> {
+    let mut v: Vec<(u32, u32)> = (0..local_end)
+        .map(|node| (node, dual.reverse.neighbors(node).len() as u32))
+        .collect();
+    v.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+    v.into_iter().take(k).map(|(node, _)| node).collect()
+}
+
+/// Per-source reverse-frontier statistics at the visibility threshold.
+struct ReverseFrontierStats {
+    /// Structural forward frontier (remote nodes reachable in ≤3 forward hops
+    /// from the local set). The current `content_filter` basis.
+    fwd_remote: u64,
+    /// Structural reverse frontier (remote nodes reachable in ≤3 reverse hops
+    /// from the local set). The inbound-trust / visibility basis.
+    rev_remote: u64,
+    /// Largest local in-degree (the biggest celebrity).
+    top_local_indeg: u32,
+    /// Per-source reverse-reachable remote authors at ≥ threshold.
+    reach_median: usize,
+    reach_p99: usize,
+    reach_max: usize,
+    /// Worst-case reach after applying the visibility cap = min(cap, reach_max).
+    /// This is the per-reader visible-set bound the proposed model guarantees.
+    reach_capped_max: usize,
+    /// How many sampled readers exceed the cap (the celebrities the cap bites).
+    sample_over_cap: usize,
+    /// Largest hop-1 *remote* in-degree across the sample (direct remote
+    /// trusters of a single local user — the full-strength part of the frontier).
+    direct_remote_max: usize,
+    /// reverse_bfs latency over the sample.
+    rev_p50_ms: f64,
+    rev_p99_ms: f64,
+    rev_max_ms: f64,
+}
+
+/// Measure the reverse frontier: structural size both directions, plus a
+/// per-source reverse-BFS sweep (latency, direct-inbound) over
+/// `sample_sources`. Counts only *remote* reachable authors ≥ threshold,
+/// since those are the cross-instance content a reverse frontier would fetch.
+fn measure_reverse_frontier(
+    dual: &DualCsrGraph,
+    local_end: u32,
+    sample_sources: &[u32],
+    cap: usize,
+) -> ReverseFrontierStats {
+    let fwd_remote = structural_frontier_remote(&dual.forward, local_end, MAX_DEPTH);
+    let rev_remote = structural_frontier_remote(&dual.reverse, local_end, MAX_DEPTH);
+    let top_local_indeg = (0..local_end)
+        .map(|node| dual.reverse.neighbors(node).len() as u32)
+        .max()
+        .unwrap_or(0);
+
+    let count_remote_visible = |v: &[(u32, f64)]| -> usize {
+        v.iter()
+            .filter(|&&(node, score)| score >= VISIBILITY_THRESHOLD && node >= local_end)
+            .count()
+    };
+
+    let mut reach: Vec<usize> = Vec::with_capacity(sample_sources.len());
+    let mut direct_remote: Vec<usize> = Vec::with_capacity(sample_sources.len());
+    let mut times: Vec<f64> = Vec::with_capacity(sample_sources.len());
+
+    // Warm-up to fault caches before timing.
+    let _ = reverse_bfs(sample_sources[0], &dual.reverse);
+
+    for &src in sample_sources {
+        let t = Instant::now();
+        let visible = reverse_bfs(src, &dual.reverse);
+        times.push(t.elapsed().as_secs_f64() * 1000.0);
+
+        reach.push(count_remote_visible(&visible));
+        direct_remote.push(
+            dual.reverse
+                .neighbors(src)
+                .iter()
+                .filter(|&&x| x >= local_end)
+                .count(),
+        );
+    }
+
+    reach.sort_unstable();
+    direct_remote.sort_unstable();
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    let n = reach.len();
+    let p = |v: &[f64], q: f64| v[((v.len() as f64 - 1.0) * q) as usize];
+
+    let reach_max = *reach.last().unwrap();
+    let sample_over_cap = reach.iter().filter(|&&r| r > cap).count();
+
+    ReverseFrontierStats {
+        fwd_remote,
+        rev_remote,
+        top_local_indeg,
+        reach_median: reach[n / 2],
+        reach_p99: reach[(n as f64 * 0.99) as usize % n],
+        reach_max,
+        reach_capped_max: reach_max.min(cap),
+        sample_over_cap,
+        direct_remote_max: *direct_remote.last().unwrap(),
+        rev_p50_ms: p(&times, 0.50),
+        rev_p99_ms: p(&times, 0.99),
+        rev_max_ms: *times.last().unwrap(),
+    }
+}
+
+/// Build the reverse-frontier sample: evenly-spaced local sources unioned
+/// with the top-`top_k` celebrities so the worst case is always covered.
+fn reverse_frontier_sample(
+    dual: &DualCsrGraph,
+    local_end: u32,
+    spaced: usize,
+    top_k: usize,
+) -> Vec<u32> {
+    let mut set: HashSet<u32> = pick_sample_sources(&(0..local_end), spaced)
+        .into_iter()
+        .collect();
+    for n in top_local_in_degree(dual, local_end, top_k) {
+        set.insert(n);
+    }
+    set.into_iter().collect()
+}
+
+/// Detailed single-config reverse-frontier benchmark. Generates a graph with
+/// inbound bridges, then contrasts the forward (relevance / current
+/// `content_filter`) frontier with the reverse (visibility) frontier the
+/// system actually gates reads on.
+fn run_reverse_frontier_bench(
+    home: &HomeInstanceConfig,
+    env: &FederationEnvironment,
+    cap: usize,
+    run_union: bool,
+) {
+    println!("\n{}", "=".repeat(60));
+    println!("  Reverse-Frontier (inbound visibility) Bench");
+    println!("{}", "=".repeat(60));
+    println!(
+        "  home: {} local users, local_preference={}, inbound_factor={}",
+        fmt_count(home.local_users as u64),
+        home.local_preference,
+        home.inbound_factor,
+    );
+    println!("  visibility cap N = {}", fmt_count(cap as u64));
+    println!(
+        "  federation: {} instances × {} mean users ≈ {} conceptual users",
+        env.num_remote_instances,
+        env.mean_remote_instance_size,
+        fmt_count(env.num_remote_instances as u64 * env.mean_remote_instance_size as u64),
+    );
+
+    let mut rng = ChaCha8Rng::seed_from_u64(42);
+    let t0 = Instant::now();
+    let synth = generate_federated_power_law_graph(home, env, &mut rng);
+    println!(
+        "\nGraph generation: {:.1}s  nodes={}  edges={}",
+        t0.elapsed().as_secs_f64(),
+        fmt_count(synth.num_nodes as u64),
+        fmt_count(synth.edges.len() as u64),
+    );
+
+    let dual = DualCsrGraph::from_edges(synth.num_nodes, &synth.edges);
+    let local_end = synth.local_range.end;
+
+    report_degree_distribution(&dual);
+
+    let sample = reverse_frontier_sample(&dual, local_end, 100, 25);
+    let stats = measure_reverse_frontier(&dual, local_end, &sample, cap);
+
+    println!("\nStructural frontier (remote nodes within 3 hops of the local set):");
+    println!(
+        "  forward (relevance / current content_filter): {}",
+        fmt_count(stats.fwd_remote)
+    );
+    println!(
+        "  reverse (visibility / inbound-trust frontier): {}  ({:.2}× forward)",
+        fmt_count(stats.rev_remote),
+        stats.rev_remote as f64 / stats.fwd_remote.max(1) as f64,
+    );
+    println!(
+        "  largest local in-degree (celebrity): {}",
+        fmt_count(stats.top_local_indeg as u64)
+    );
+
+    println!(
+        "\nPer-source reverse BFS at visibility threshold {VISIBILITY_THRESHOLD} ({} sampled local readers, incl. top-25 celebrities):",
+        sample.len()
+    );
+    println!(
+        "  remote authors visible:  median={}  p99={}  max={}",
+        fmt_count(stats.reach_median as u64),
+        fmt_count(stats.reach_p99 as u64),
+        fmt_count(stats.reach_max as u64),
+    );
+    println!(
+        "  visible set CAPPED at N={}: worst-case max={}  ({} of {} sampled readers clamped)",
+        fmt_count(cap as u64),
+        fmt_count(stats.reach_capped_max as u64),
+        stats.sample_over_cap,
+        sample.len(),
+    );
+    println!(
+        "  largest hop-1 direct remote in-degree:  {} (direct trust is always full strength)",
+        fmt_count(stats.direct_remote_max as u64),
+    );
+    println!(
+        "  reverse BFS latency: p50={:.3}ms  p99={:.3}ms  max={:.3}ms",
+        stats.rev_p50_ms, stats.rev_p99_ms, stats.rev_max_ms,
+    );
+
+    println!(
+        "\n  Read: the reverse frontier is the set the visibility model actually\n  gates on (author-trusts-reader). Direct inbound trust (hop 1) is\n  full-strength by design — so a local celebrity's direct remote trusters\n  set a floor the frontier cannot fall below, while deeper transitive\n  trust decays multiplicatively with each hop."
+    );
+
+    if run_union {
+        let distrust_sets = build_distrust_sets(&synth.distrust_edges);
+        println!(
+            "\nFederation union frontier (distinct remote authors visible across ALL {} local readers):",
+            fmt_count(local_end as u64)
+        );
+        println!("  (full per-reader pass — this is O(local × BFS), give it a moment)");
+        let t = Instant::now();
+        let u = measure_capped_union(&dual, &synth.edges, local_end, &distrust_sets, cap);
+        println!(
+            "  uncapped union: {}   capped union (N={}): {}   ({:.1}% smaller)",
+            fmt_count(u.uncapped_union_remote),
+            fmt_count(cap as u64),
+            fmt_count(u.capped_union_remote),
+            100.0
+                * (u.uncapped_union_remote
+                    .saturating_sub(u.capped_union_remote)) as f64
+                / u.uncapped_union_remote.max(1) as f64,
+        );
+        println!(
+            "  readers over cap: {} of {}   (the cap only bites these celebrities)",
+            fmt_count(u.readers_over_cap),
+            fmt_count(local_end as u64),
+        );
+        println!("  union pass: {:.1}s", t.elapsed().as_secs_f64());
+
+        let uf = &u.uncapped_footprint;
+        let cf = &u.capped_footprint;
+        let pct = |num: u64, den: u64| 100.0 * num as f64 / den.max(1) as f64;
+        println!(
+            "\n  Stored BFS working-set footprint (what the home instance keeps + traverses):"
+        );
+        println!(
+            "    uncapped (full frontier):  nodes={}  edges={}  CSR={}  stubs@{}B={}  total={}",
+            fmt_count(uf.nodes),
+            fmt_count(uf.edges),
+            fmt_bytes(uf.csr_bytes),
+            STUB_ROW_BYTES,
+            fmt_bytes(uf.stub_bytes),
+            fmt_bytes(uf.total_bytes()),
+        );
+        println!(
+            "    capped (cap-at-N admit):   nodes={}  edges={}  CSR={}  stubs@{}B={}  total={}",
+            fmt_count(cf.nodes),
+            fmt_count(cf.edges),
+            fmt_bytes(cf.csr_bytes),
+            STUB_ROW_BYTES,
+            fmt_bytes(cf.stub_bytes),
+            fmt_bytes(cf.total_bytes()),
+        );
+        println!(
+            "    cap retains {:.1}% of nodes, {:.1}% of edges, {:.1}% of total bytes",
+            pct(cf.nodes, uf.nodes),
+            pct(cf.edges, uf.edges),
+            pct(cf.total_bytes(), uf.total_bytes()),
+        );
+        println!(
+            "\n  Read: capping bounds each *reader's* visible set, but it barely\n  shrinks the federation's distinct-content set — popular remote authors\n  are visible to many readers, not only celebrities, so trimming a\n  celebrity's long tail rarely removes an author no one else can see. The\n  cap's win is per-reader predictability (bounded fetch/rank/render); the\n  stored-footprint rows above show how little it reclaims here, because\n  the surviving stubs are shared across readers. Stub bytes (not CSR)\n  dominate the store — matching §8.1 / §11.1's lighter-stub-table point."
+        );
+    }
+}
+
+/// Per-reader visible-set cap applied across the whole local population, to see
+/// whether bounding each celebrity's view also shrinks the federation's
+/// *distinct* remote-author set (the global fetch/storage frontier).
+struct CappedUnionStats {
+    /// Distinct remote authors visible to at least one local reader (≥ threshold),
+    /// with no cap applied.
+    uncapped_union_remote: u64,
+    /// Same, but readers over the cap contribute only their top-N authors
+    /// (ranked by forward trust desc, oldest-account-first tiebreak).
+    capped_union_remote: u64,
+    /// Local readers whose uncapped visible set exceeds the cap.
+    readers_over_cap: u64,
+    /// Stored footprint with NO admission cap: the full materialised reverse
+    /// frontier (every node/edge A received).
+    uncapped_footprint: StoredFootprint,
+    /// Stored footprint after cap-at-N admission: the node-induced subgraph on
+    /// (local users ∪ each reader's capped visible set).
+    capped_footprint: StoredFootprint,
+}
+
+/// Walk every local reader's reverse frontier once, accumulating two bitsets
+/// of remote authors: the uncapped union and the capped union. Under-cap
+/// readers contribute their whole visible set to both; over-cap readers
+/// contribute their whole set to the uncapped union but only their top-`cap`
+/// (ranked by forward trust, oldest-account-first tiebreak) to the capped one.
+/// Forward scores are only computed for the (rare) over-cap readers.
+fn measure_capped_union(
+    dual: &DualCsrGraph,
+    edges: &[(u32, u32)],
+    local_end: u32,
+    distrust_sets: &DistrustSets,
+    cap: usize,
+) -> CappedUnionStats {
+    let n = dual.forward.num_nodes() as usize;
+    let mut uncapped = vec![false; n];
+    let mut capped = vec![false; n];
+    let mut readers_over_cap = 0u64;
+
+    for r in 0..local_end {
+        let mut visible: Vec<(u32, f64)> = reverse_bfs(r, &dual.reverse)
+            .into_iter()
+            .filter(|&(node, score)| score >= VISIBILITY_THRESHOLD && node >= local_end)
+            .collect();
+
+        for &(node, _) in &visible {
+            uncapped[node as usize] = true;
+        }
+
+        if visible.len() > cap {
+            readers_over_cap += 1;
+            // Rank by how much the reader trusts each author (forward score),
+            // descending; oldest-account-first (lower node id) breaks ties —
+            // including the long tail that all share forward score 0.0.
+            let fwd: HashMap<u32, f64> = forward_bfs(r, &dual.forward, distrust_sets)
+                .into_iter()
+                .collect();
+            visible.sort_unstable_by(|a, b| {
+                let sa = fwd.get(&a.0).copied().unwrap_or(0.0);
+                let sb = fwd.get(&b.0).copied().unwrap_or(0.0);
+                sb.partial_cmp(&sa).unwrap().then(a.0.cmp(&b.0))
+            });
+            for &(node, _) in visible.iter().take(cap) {
+                capped[node as usize] = true;
+            }
+        } else {
+            for &(node, _) in &visible {
+                capped[node as usize] = true;
+            }
+        }
+    }
+
+    // Local users are always materialised; mark them retained in both stores
+    // so the induced subgraphs keep the local edges and the hop-1 bridges.
+    for b in uncapped.iter_mut().take(local_end as usize) {
+        *b = true;
+    }
+    for b in capped.iter_mut().take(local_end as usize) {
+        *b = true;
+    }
+
+    CappedUnionStats {
+        uncapped_union_remote: uncapped[local_end as usize..]
+            .iter()
+            .filter(|&&b| b)
+            .count() as u64,
+        capped_union_remote: capped[local_end as usize..].iter().filter(|&&b| b).count() as u64,
+        readers_over_cap,
+        uncapped_footprint: induced_footprint(edges, &uncapped),
+        capped_footprint: induced_footprint(edges, &capped),
+    }
+}
+
+/// Reverse-frontier scaling sweep: one row per `local_users`, contrasting the
+/// forward and reverse structural frontiers and the per-reader reverse cost.
+/// This is the table that feeds `docs/federation-bfs-analysis.md`.
+fn run_reverse_frontier_sweep(
+    env: &FederationEnvironment,
+    sizes: &[u32],
+    inbound_factor: f64,
+    mem_capped: bool,
+    cap: usize,
+) {
+    println!("\n{}", "=".repeat(60));
+    println!("  Reverse-Frontier Scaling Sweep");
+    println!("{}", "=".repeat(60));
+    println!(
+        "  federation: {} instances × {} mean users ≈ {} conceptual users",
+        env.num_remote_instances,
+        env.mean_remote_instance_size,
+        fmt_count(env.num_remote_instances as u64 * env.mean_remote_instance_size as u64),
+    );
+    println!(
+        "  shape: PowerLawConfig::medium_instance(), local_preference=0.5, inbound_factor={inbound_factor}"
+    );
+    println!(
+        "\n  fwd_front  = structural forward frontier (relevance, current content_filter)\n  rev_front  = structural reverse frontier (visibility, inbound-trust)\n  reach_max  = worst-case per-reader remote authors visible (≥{VISIBILITY_THRESHOLD}), UNCAPPED\n  reach_cap  = worst-case after the N={cap} visibility cap = min(N, reach_max)\n  celeb      = largest local in-degree",
+    );
+    println!();
+    println!(
+        "  {:>11}  {:>11}  {:>11}  {:>6}  {:>9}  {:>11}  {:>11}  {:>9}",
+        "local", "fwd_front", "rev_front", "r/f", "celeb", "reach_max", "reach_cap", "rev_p99",
+    );
+    println!("  {}", "─".repeat(92));
+
+    // Buffer per-size stored-footprint rows; print the memory table after the
+    // frontier table so the two concerns stay legible.
+    let mut mem_rows: Vec<(u32, StoredFootprint, Option<StoredFootprint>)> = Vec::new();
+
+    for &n in sizes {
+        let home = HomeInstanceConfig {
+            local_users: n,
+            shape: PowerLawConfig::medium_instance(),
+            local_preference: 0.5,
+            inbound_factor,
+        };
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let synth = generate_federated_power_law_graph(&home, env, &mut rng);
+        let dual = DualCsrGraph::from_edges(synth.num_nodes, &synth.edges);
+        let local_end = synth.local_range.end;
+        let sample = reverse_frontier_sample(&dual, local_end, 50, 20);
+        let s = measure_reverse_frontier(&dual, local_end, &sample, cap);
+        println!(
+            "  {:>11}  {:>11}  {:>11}  {:>5.2}×  {:>9}  {:>11}  {:>11}  {:>7.2}ms",
+            fmt_count(n as u64),
+            fmt_count(s.fwd_remote),
+            fmt_count(s.rev_remote),
+            s.rev_remote as f64 / s.fwd_remote.max(1) as f64,
+            fmt_count(s.top_local_indeg as u64),
+            fmt_count(s.reach_max as u64),
+            fmt_count(s.reach_capped_max as u64),
+            s.rev_p99_ms,
+        );
+
+        // Uncapped stored footprint is free (the full graph is already built).
+        let uncapped = StoredFootprint {
+            nodes: synth.num_nodes as u64,
+            edges: synth.edges.len() as u64,
+            csr_bytes: dual.memory_bytes() as u64,
+            stub_bytes: synth.num_nodes as u64 * STUB_ROW_BYTES,
+        };
+        // Capped footprint needs the O(local × BFS) admission pass — opt-in.
+        let capped = if mem_capped {
+            let distrust_sets = build_distrust_sets(&synth.distrust_edges);
+            Some(
+                measure_capped_union(&dual, &synth.edges, local_end, &distrust_sets, cap)
+                    .capped_footprint,
+            )
+        } else {
+            None
+        };
+        mem_rows.push((n, uncapped, capped));
+    }
+    println!(
+        "\n  Note: rev_front follows INBOUND edges (uncapped in-degree), fwd_front\n  follows OUTBOUND edges (capped at 200/user). reach_cap flattens the\n  worst-case visible set to N; once reach_max clears N, every celebrity\n  pins to the same bound regardless of how much bigger the network grows."
+    );
+
+    // Stored BFS working-set memory across userbase sizes.
+    println!("\n  Stored BFS working-set memory (dual CSR + stub rows @ {STUB_ROW_BYTES}B/node):");
+    if mem_capped {
+        println!(
+            "  {:>11}  {:>11}  {:>9}  {:>10}  {:>10}  {:>11}  {:>10}",
+            "local", "nodes", "CSR", "stubs", "uncapped", "capped", "cap/uncap",
+        );
+    } else {
+        println!(
+            "  {:>11}  {:>11}  {:>11}  {:>9}  {:>10}  {:>10}",
+            "local", "nodes", "edges", "CSR", "stubs", "total",
+        );
+    }
+    println!("  {}", "─".repeat(if mem_capped { 80 } else { 70 }));
+    for (n, uf, cf) in &mem_rows {
+        if let Some(cf) = cf {
+            println!(
+                "  {:>11}  {:>11}  {:>9}  {:>10}  {:>10}  {:>11}  {:>9.1}%",
+                fmt_count(*n as u64),
+                fmt_count(uf.nodes),
+                fmt_bytes(uf.csr_bytes),
+                fmt_bytes(uf.stub_bytes),
+                fmt_bytes(uf.total_bytes()),
+                fmt_bytes(cf.total_bytes()),
+                100.0 * cf.total_bytes() as f64 / uf.total_bytes().max(1) as f64,
+            );
+        } else {
+            println!(
+                "  {:>11}  {:>11}  {:>11}  {:>9}  {:>10}  {:>10}",
+                fmt_count(*n as u64),
+                fmt_count(uf.nodes),
+                fmt_count(uf.edges),
+                fmt_bytes(uf.csr_bytes),
+                fmt_bytes(uf.stub_bytes),
+                fmt_bytes(uf.total_bytes()),
+            );
+        }
+    }
+    println!(
+        "\n  Read: 'uncapped' = every node in the generated graph, no admission.\n  'capped' = cap-at-N admission (§6.2): store only the union of each\n  reader's reverse-reachable visible top-N. The reduction (capped ≈ 55–62%\n  of uncapped here) is mostly the REVERSE-REACHABILITY restriction — only\n  nodes within a local reader's 3-hop reverse cone are kept; the ≥threshold\n  test prunes little, since a single 3-hop path already scores 1·0.7·0.7 =\n  0.49 ≥ 0.45, so MAX_DEPTH=3 is the real horizon. The top-N cap itself\n  also trims little, since few readers exceed N. Stub rows, not CSR edges,\n  dominate the footprint ~3–4×, so the lighter frontier_users table\n  (§11.1) is a bigger memory lever than the cap (pass --capped to quantify)."
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 fn main() {
     println!("Prismoire Trust Graph Benchmark");
     println!("===============================");
-    println!(
-        "Algorithm: Bottleneck-Grouped Probabilistic (DECAY={DECAY}, MAX_DEPTH={MAX_DEPTH}, HUB_DAMPEN_THRESHOLD={HUB_DAMPEN_THRESHOLD})"
-    );
+    println!("Algorithm: Bottleneck-Grouped Probabilistic (DECAY={DECAY}, MAX_DEPTH={MAX_DEPTH})");
 
     let args: Vec<String> = std::env::args().collect();
     let mode = args.get(1).map(|s| s.as_str()).unwrap_or("all");
@@ -1308,6 +1801,77 @@ fn main() {
                 home.local_users / 1000
             );
             run_federated_power_law_benchmark(&name, &home, &env, rebuild_peak_probe);
+        }
+        "inbound" | "reverse-frontier" => {
+            // Reverse/visibility frontier study. Models inbound cross-instance
+            // trust (remote → local) so local celebrities emerge; contrasts
+            // the forward (relevance) frontier with the reverse (visibility)
+            // one. `--local-users N` and `--inbound-factor F` overrides.
+            let mut home = HomeInstanceConfig::medium();
+            home.inbound_factor = 1.0;
+            if let Some(pos) = args.iter().position(|a| a == "--local-users")
+                && let Some(n) = args.get(pos + 1).and_then(|s| s.parse::<u32>().ok())
+            {
+                home.local_users = n;
+            }
+            if let Some(pos) = args.iter().position(|a| a == "--inbound-factor")
+                && let Some(f) = args.get(pos + 1).and_then(|s| s.parse::<f64>().ok())
+            {
+                home.inbound_factor = f;
+            }
+            let mut cap = VISIBILITY_CAP;
+            if let Some(pos) = args.iter().position(|a| a == "--cap")
+                && let Some(c) = args.get(pos + 1).and_then(|s| s.parse::<usize>().ok())
+            {
+                cap = c;
+            }
+            let run_union = args.iter().any(|a| a == "--union");
+            let env = FederationEnvironment::realistic_10k();
+            run_reverse_frontier_bench(&home, &env, cap, run_union);
+        }
+        "inbound-sweep" | "rev-sweep" => {
+            let default_sizes: &[u32] = &[10_000, 50_000, 100_000, 250_000, 500_000];
+            let mut inbound_factor = 1.0f64;
+            if let Some(pos) = args.iter().position(|a| a == "--inbound-factor")
+                && let Some(f) = args.get(pos + 1).and_then(|s| s.parse::<f64>().ok())
+            {
+                inbound_factor = f;
+            }
+            // Positional sizes, skipping any token that is the value of a
+            // `--flag value` pair (e.g. `--cap 5000`) so it isn't mistaken
+            // for a userbase size.
+            let value_flags = ["--cap", "--inbound-factor"];
+            let mut sizes: Vec<u32> = Vec::new();
+            let mut skip_next = false;
+            for a in args.iter().skip(2) {
+                if skip_next {
+                    skip_next = false;
+                    continue;
+                }
+                if value_flags.contains(&a.as_str()) {
+                    skip_next = true;
+                    continue;
+                }
+                if let Ok(n) = a.parse::<u32>() {
+                    sizes.push(n);
+                }
+            }
+            let sizes = if sizes.is_empty() {
+                default_sizes.to_vec()
+            } else {
+                sizes
+            };
+            // `--capped` adds the (expensive) per-size cap-at-N admission pass
+            // so the memory table can contrast capped vs uncapped stored bytes.
+            let mem_capped = args.iter().any(|a| a == "--capped");
+            let mut cap = VISIBILITY_CAP;
+            if let Some(pos) = args.iter().position(|a| a == "--cap")
+                && let Some(c) = args.get(pos + 1).and_then(|s| s.parse::<usize>().ok())
+            {
+                cap = c;
+            }
+            let env = FederationEnvironment::realistic_10k();
+            run_reverse_frontier_sweep(&env, &sizes, inbound_factor, mem_capped, cap);
         }
         "sweep" | "fed-sweep" => {
             // Default sweep grid; covers the SLO-relevant range. Override
@@ -1430,10 +1994,9 @@ fn run_tests() {
     {
         let edges = vec![(0, 1), (1, 2), (2, 3)]; // A=0, B=1, C=2, D=3
         let csr = CsrGraph::from_edges(4, &edges);
-        let csr_rev = csr.transpose();
         let href = HashMapGraph::from_edges(&edges);
 
-        let csr_scores = to_map(forward_bfs(0, &csr, &csr_rev, &no_distrusts));
+        let csr_scores = to_map(forward_bfs(0, &csr, &no_distrusts));
         let ref_scores = to_map(reference_forward_bfs(0, &href, &no_distrusts));
 
         assert_near!(csr_scores[&1], 1.0, 0.001, "linear chain: B=1.0 (CSR)");
@@ -1463,10 +2026,9 @@ fn run_tests() {
     {
         let edges = vec![(0, 1), (0, 2), (1, 3), (2, 3)]; // A=0,B=1,C=2,D=3
         let csr = CsrGraph::from_edges(4, &edges);
-        let csr_rev = csr.transpose();
         let href = HashMapGraph::from_edges(&edges);
 
-        let csr_scores = to_map(forward_bfs(0, &csr, &csr_rev, &no_distrusts));
+        let csr_scores = to_map(forward_bfs(0, &csr, &no_distrusts));
         let ref_scores = to_map(reference_forward_bfs(0, &href, &no_distrusts));
 
         // 1-(1-0.7)(1-0.7) = 0.91
@@ -1485,8 +2047,7 @@ fn run_tests() {
         // A=0, H=1, M=2, S1=3, S2=4
         let edges = vec![(0, 1), (1, 2), (1, 3), (1, 4), (3, 2), (4, 2)];
         let csr = CsrGraph::from_edges(5, &edges);
-        let csr_rev = csr.transpose();
-        let csr_scores = to_map(forward_bfs(0, &csr, &csr_rev, &no_distrusts));
+        let csr_scores = to_map(forward_bfs(0, &csr, &no_distrusts));
 
         // All paths through H — max in group H is A→H→M = 0.7
         assert_near!(csr_scores[&2], 0.7, 0.001, "sybil: M=0.7 (collapsed)");
@@ -1497,8 +2058,7 @@ fn run_tests() {
         // A→B→C→D→E (4 hops, E unreachable)
         let edges = vec![(0, 1), (1, 2), (2, 3), (3, 4)];
         let csr = CsrGraph::from_edges(5, &edges);
-        let csr_rev = csr.transpose();
-        let csr_scores = to_map(forward_bfs(0, &csr, &csr_rev, &no_distrusts));
+        let csr_scores = to_map(forward_bfs(0, &csr, &no_distrusts));
 
         assert_true!(csr_scores.contains_key(&3), "depth limit: D reachable");
         assert_true!(!csr_scores.contains_key(&4), "depth limit: E unreachable");
@@ -1509,8 +2069,7 @@ fn run_tests() {
         // A→B→A
         let edges = vec![(0, 1), (1, 0)];
         let csr = CsrGraph::from_edges(2, &edges);
-        let csr_rev = csr.transpose();
-        let csr_scores = to_map(forward_bfs(0, &csr, &csr_rev, &no_distrusts));
+        let csr_scores = to_map(forward_bfs(0, &csr, &no_distrusts));
 
         assert_true!(
             !csr_scores.contains_key(&0),
@@ -1547,7 +2106,7 @@ fn run_tests() {
         let edges = vec![(0, 1), (0, 2), (1, 3), (2, 3)];
         let dual = DualCsrGraph::from_edges(4, &edges);
 
-        let fwd_scores = to_map(forward_bfs(0, &dual.forward, &dual.reverse, &no_distrusts));
+        let fwd_scores = to_map(forward_bfs(0, &dual.forward, &no_distrusts));
         let rev_scores = to_map(reverse_bfs(3, &dual.reverse));
 
         assert_near!(
@@ -1565,7 +2124,7 @@ fn run_tests() {
         let edges = vec![(0, 1), (1, 2), (1, 3), (1, 4), (3, 2), (4, 2)];
         let dual = DualCsrGraph::from_edges(5, &edges);
 
-        let fwd_scores = to_map(forward_bfs(0, &dual.forward, &dual.reverse, &no_distrusts));
+        let fwd_scores = to_map(forward_bfs(0, &dual.forward, &no_distrusts));
         let rev_scores = to_map(reverse_bfs(2, &dual.reverse));
 
         // Forward trust(A, R) = group H only, max = A→H→R = 0.7
@@ -1582,7 +2141,7 @@ fn run_tests() {
         let edges = vec![(0, 1), (0, 2), (1, 3), (2, 1)];
         let dual = DualCsrGraph::from_edges(4, &edges);
 
-        let fwd_scores = to_map(forward_bfs(0, &dual.forward, &dual.reverse, &no_distrusts));
+        let fwd_scores = to_map(forward_bfs(0, &dual.forward, &no_distrusts));
         let rev_scores = to_map(reverse_bfs(3, &dual.reverse));
 
         // Forward: group X = 0.7 (A→X→R), group Y = 0.49 (A→Y→X→R)
@@ -1631,12 +2190,7 @@ fn run_tests() {
         let mut mismatches = 0;
         let mut comparisons = 0;
         for src in 0..10u32 {
-            let fwd = to_map(forward_bfs(
-                src,
-                &dual.forward,
-                &dual.reverse,
-                &no_distrusts,
-            ));
+            let fwd = to_map(forward_bfs(src, &dual.forward, &no_distrusts));
             for tgt in 0..n {
                 if tgt == src {
                     continue;
@@ -1683,13 +2237,12 @@ fn run_tests() {
         }
 
         let csr = CsrGraph::from_edges(n, &edges);
-        let csr_rev = csr.transpose();
         let href = HashMapGraph::from_edges(&edges);
 
         let mut mismatches = 0;
         let mut comparisons = 0;
         for src in 0..n {
-            let csr_scores = to_map(forward_bfs(src, &csr, &csr_rev, &no_distrusts));
+            let csr_scores = to_map(forward_bfs(src, &csr, &no_distrusts));
             let ref_scores = to_map(reference_forward_bfs(src, &href, &no_distrusts));
 
             // Every target in either map should match.
@@ -1765,8 +2318,7 @@ fn run_tests() {
         let edges = vec![(0, 1), (1, 2), (1, 3)];
         let blocks = HashMap::from([(0u32, HashSet::from([3u32]))]);
         let csr = CsrGraph::from_edges(4, &edges);
-        let csr_rev = csr.transpose();
-        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &blocks));
+        let scores = to_map(forward_bfs(0, &csr, &blocks));
 
         // A trusts E (distrusted) → reliability = 0.75
         assert_near!(scores[&1], 0.75, 0.001, "distrust single: A=0.75");
@@ -1788,8 +2340,7 @@ fn run_tests() {
         let edges = vec![(0, 1), (1, 2), (1, 3)];
         let blocks = HashMap::from([(0u32, HashSet::from([2u32, 3u32]))]);
         let csr = CsrGraph::from_edges(4, &edges);
-        let csr_rev = csr.transpose();
-        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &blocks));
+        let scores = to_map(forward_bfs(0, &csr, &blocks));
 
         // A trusts 2 distrusted → reliability = 0.75^2 = 0.5625
         assert_near!(scores[&1], 0.5625, 0.001, "distrust multi: A=0.5625");
@@ -1802,8 +2353,7 @@ fn run_tests() {
         let edges = vec![(0, 1), (1, 2), (0, 3)];
         let blocks = HashMap::from([(0u32, HashSet::from([3u32]))]);
         let csr = CsrGraph::from_edges(4, &edges);
-        let csr_rev = csr.transpose();
-        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &blocks));
+        let scores = to_map(forward_bfs(0, &csr, &blocks));
 
         // A doesn't trust E → no penalty
         assert_near!(scores[&1], 1.0, 0.001, "distrust clean: A=1.0");
@@ -1817,8 +2367,7 @@ fn run_tests() {
         let edges = vec![(0, 1), (0, 2), (1, 3), (2, 3), (1, 4)];
         let blocks = HashMap::from([(0u32, HashSet::from([4u32]))]);
         let csr = CsrGraph::from_edges(5, &edges);
-        let csr_rev = csr.transpose();
-        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &blocks));
+        let scores = to_map(forward_bfs(0, &csr, &blocks));
 
         // Group A: A reliability=0.75, T via A = 0.75 * 0.7 = 0.525
         // Group C: C reliability=1.0, T via C = 1.0 * 0.7 = 0.7
@@ -1833,8 +2382,7 @@ fn run_tests() {
         let edges = vec![(0, 1), (1, 2), (2, 3), (1, 4), (2, 5)];
         let blocks = HashMap::from([(0u32, HashSet::from([4u32, 5u32]))]);
         let csr = CsrGraph::from_edges(6, &edges);
-        let csr_rev = csr.transpose();
-        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &blocks));
+        let scores = to_map(forward_bfs(0, &csr, &blocks));
 
         // A: reliability = 0.75 (trusts E1) → 0.75
         assert_near!(scores[&1], 0.75, 0.001, "distrust compound: A=0.75");
@@ -1851,8 +2399,7 @@ fn run_tests() {
         let edges = vec![(0, 1), (1, 2), (1, 3), (1, 4), (3, 2), (4, 2), (1, 5)];
         let blocks = HashMap::from([(0u32, HashSet::from([5u32]))]);
         let csr = CsrGraph::from_edges(6, &edges);
-        let csr_rev = csr.transpose();
-        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &blocks));
+        let scores = to_map(forward_bfs(0, &csr, &blocks));
 
         // All paths through first-hop H. H reliability = 0.75 (trusts E).
         // H score = 0.75. Best path to M in group H: H→M = 0.75 * 0.7 * r(M)
@@ -1872,10 +2419,9 @@ fn run_tests() {
         let edges = vec![(0, 1), (1, 2), (1, 3), (2, 4), (0, 5), (5, 4)];
         let blocks = HashMap::from([(0u32, HashSet::from([3u32]))]);
         let csr = CsrGraph::from_edges(6, &edges);
-        let csr_rev = csr.transpose();
         let href = HashMapGraph::from_edges(&edges);
 
-        let csr_scores = to_map(forward_bfs(0, &csr, &csr_rev, &blocks));
+        let csr_scores = to_map(forward_bfs(0, &csr, &blocks));
         let ref_scores = to_map(reference_forward_bfs(0, &href, &blocks));
 
         for &tgt in csr_scores
@@ -1916,8 +2462,7 @@ mod tests {
     fn test_csr_linear_chain() {
         let edges = vec![(0, 1), (1, 2), (2, 3)];
         let csr = CsrGraph::from_edges(4, &edges);
-        let csr_rev = csr.transpose();
-        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &empty_distrusts()));
+        let scores = to_map(forward_bfs(0, &csr, &empty_distrusts()));
 
         assert!((scores[&1] - 1.0).abs() < 0.001);
         assert!((scores[&2] - 0.7).abs() < 0.001);
@@ -1928,8 +2473,7 @@ mod tests {
     fn test_csr_two_independent_paths() {
         let edges = vec![(0, 1), (0, 2), (1, 3), (2, 3)];
         let csr = CsrGraph::from_edges(4, &edges);
-        let csr_rev = csr.transpose();
-        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &empty_distrusts()));
+        let scores = to_map(forward_bfs(0, &csr, &empty_distrusts()));
 
         assert!((scores[&3] - 0.91).abs() < 0.001);
     }
@@ -1938,8 +2482,7 @@ mod tests {
     fn test_csr_sybil_resistance() {
         let edges = vec![(0, 1), (1, 2), (1, 3), (1, 4), (3, 2), (4, 2)];
         let csr = CsrGraph::from_edges(5, &edges);
-        let csr_rev = csr.transpose();
-        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &empty_distrusts()));
+        let scores = to_map(forward_bfs(0, &csr, &empty_distrusts()));
 
         assert!((scores[&2] - 0.7).abs() < 0.001);
     }
@@ -1948,8 +2491,7 @@ mod tests {
     fn test_csr_depth_limit() {
         let edges = vec![(0, 1), (1, 2), (2, 3), (3, 4)];
         let csr = CsrGraph::from_edges(5, &edges);
-        let csr_rev = csr.transpose();
-        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &empty_distrusts()));
+        let scores = to_map(forward_bfs(0, &csr, &empty_distrusts()));
 
         assert!(scores.contains_key(&3));
         assert!(!scores.contains_key(&4));
@@ -1959,8 +2501,7 @@ mod tests {
     fn test_csr_no_self_loop() {
         let edges = vec![(0, 1), (1, 0)];
         let csr = CsrGraph::from_edges(2, &edges);
-        let csr_rev = csr.transpose();
-        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &empty_distrusts()));
+        let scores = to_map(forward_bfs(0, &csr, &empty_distrusts()));
 
         assert!(!scores.contains_key(&0));
         assert!(scores.contains_key(&1));
@@ -1982,12 +2523,7 @@ mod tests {
         let edges = vec![(0, 1), (0, 2), (1, 3), (2, 3)];
         let dual = DualCsrGraph::from_edges(4, &edges);
 
-        let fwd = to_map(forward_bfs(
-            0,
-            &dual.forward,
-            &dual.reverse,
-            &empty_distrusts(),
-        ));
+        let fwd = to_map(forward_bfs(0, &dual.forward, &empty_distrusts()));
         let rev = to_map(reverse_bfs(3, &dual.reverse));
 
         assert!((fwd[&3] - rev[&0]).abs() < 0.001);
@@ -1998,12 +2534,7 @@ mod tests {
         let edges = vec![(0, 1), (1, 2), (1, 3), (1, 4), (3, 2), (4, 2)];
         let dual = DualCsrGraph::from_edges(5, &edges);
 
-        let fwd = to_map(forward_bfs(
-            0,
-            &dual.forward,
-            &dual.reverse,
-            &empty_distrusts(),
-        ));
+        let fwd = to_map(forward_bfs(0, &dual.forward, &empty_distrusts()));
         let rev = to_map(reverse_bfs(2, &dual.reverse));
 
         assert!((fwd[&2] - 0.7).abs() < 0.001);
@@ -2016,12 +2547,7 @@ mod tests {
         let edges = vec![(0, 1), (0, 2), (1, 3), (2, 1)];
         let dual = DualCsrGraph::from_edges(4, &edges);
 
-        let fwd = to_map(forward_bfs(
-            0,
-            &dual.forward,
-            &dual.reverse,
-            &empty_distrusts(),
-        ));
+        let fwd = to_map(forward_bfs(0, &dual.forward, &empty_distrusts()));
         let rev = to_map(reverse_bfs(3, &dual.reverse));
 
         assert!((fwd[&3] - 0.847).abs() < 0.001);
@@ -2076,12 +2602,7 @@ mod tests {
         let dual = DualCsrGraph::from_edges(n, &edges);
 
         for src in 0..n {
-            let fwd = to_map(forward_bfs(
-                src,
-                &dual.forward,
-                &dual.reverse,
-                &empty_distrusts(),
-            ));
+            let fwd = to_map(forward_bfs(src, &dual.forward, &empty_distrusts()));
             for tgt in 0..n {
                 if tgt == src {
                     continue;
@@ -2120,11 +2641,10 @@ mod tests {
         }
 
         let csr = CsrGraph::from_edges(n, &edges);
-        let csr_rev = csr.transpose();
         let href = HashMapGraph::from_edges(&edges);
 
         for src in 0..n {
-            let csr_scores = to_map(forward_bfs(src, &csr, &csr_rev, &empty_distrusts()));
+            let csr_scores = to_map(forward_bfs(src, &csr, &empty_distrusts()));
             let ref_scores = to_map(reference_forward_bfs(src, &href, &empty_distrusts()));
 
             let all_targets: HashSet<u32> = csr_scores
@@ -2151,8 +2671,7 @@ mod tests {
         let edges = vec![(0, 1), (1, 2), (1, 3)];
         let blocks = HashMap::from([(0u32, HashSet::from([3u32]))]);
         let csr = CsrGraph::from_edges(4, &edges);
-        let csr_rev = csr.transpose();
-        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &blocks));
+        let scores = to_map(forward_bfs(0, &csr, &blocks));
 
         assert!((scores[&1] - 0.75).abs() < 0.001);
         assert!((scores[&2] - 0.525).abs() < 0.001);
@@ -2165,8 +2684,7 @@ mod tests {
         let edges = vec![(0, 1), (1, 2), (1, 3)];
         let blocks = HashMap::from([(0u32, HashSet::from([2u32, 3u32]))]);
         let csr = CsrGraph::from_edges(4, &edges);
-        let csr_rev = csr.transpose();
-        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &blocks));
+        let scores = to_map(forward_bfs(0, &csr, &blocks));
 
         assert!((scores[&1] - 0.5625).abs() < 0.001);
     }
@@ -2177,8 +2695,7 @@ mod tests {
         let edges = vec![(0, 1), (1, 2), (0, 3)];
         let blocks = HashMap::from([(0u32, HashSet::from([3u32]))]);
         let csr = CsrGraph::from_edges(4, &edges);
-        let csr_rev = csr.transpose();
-        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &blocks));
+        let scores = to_map(forward_bfs(0, &csr, &blocks));
 
         assert!((scores[&1] - 1.0).abs() < 0.001);
         assert!((scores[&2] - 0.7).abs() < 0.001);
@@ -2190,8 +2707,7 @@ mod tests {
         let edges = vec![(0, 1), (0, 2), (1, 3), (2, 3), (1, 4)];
         let blocks = HashMap::from([(0u32, HashSet::from([4u32]))]);
         let csr = CsrGraph::from_edges(5, &edges);
-        let csr_rev = csr.transpose();
-        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &blocks));
+        let scores = to_map(forward_bfs(0, &csr, &blocks));
 
         // Group A: 0.75*0.7=0.525, Group C: 1.0*0.7=0.7
         // Combined: 1-(0.475)(0.3)=0.8575
@@ -2205,8 +2721,7 @@ mod tests {
         let edges = vec![(0, 1), (1, 2), (2, 3), (1, 4), (2, 5)];
         let blocks = HashMap::from([(0u32, HashSet::from([4u32, 5u32]))]);
         let csr = CsrGraph::from_edges(6, &edges);
-        let csr_rev = csr.transpose();
-        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &blocks));
+        let scores = to_map(forward_bfs(0, &csr, &blocks));
 
         assert!((scores[&1] - 0.75).abs() < 0.001);
         assert!((scores[&2] - 0.39375).abs() < 0.001);
@@ -2220,8 +2735,7 @@ mod tests {
         let edges = vec![(0, 1), (1, 2), (1, 3), (1, 4), (3, 2), (4, 2), (1, 5)];
         let blocks = HashMap::from([(0u32, HashSet::from([5u32]))]);
         let csr = CsrGraph::from_edges(6, &edges);
-        let csr_rev = csr.transpose();
-        let scores = to_map(forward_bfs(0, &csr, &csr_rev, &blocks));
+        let scores = to_map(forward_bfs(0, &csr, &blocks));
 
         // All via first-hop H. H reliability=0.75.
         // Best in group: H→M = 0.75*0.7 = 0.525
@@ -2233,10 +2747,9 @@ mod tests {
         let edges = vec![(0, 1), (1, 2), (1, 3), (2, 4), (0, 5), (5, 4)];
         let blocks = HashMap::from([(0u32, HashSet::from([3u32]))]);
         let csr = CsrGraph::from_edges(6, &edges);
-        let csr_rev = csr.transpose();
         let href = HashMapGraph::from_edges(&edges);
 
-        let csr_scores = to_map(forward_bfs(0, &csr, &csr_rev, &blocks));
+        let csr_scores = to_map(forward_bfs(0, &csr, &blocks));
         let ref_scores = to_map(reference_forward_bfs(0, &href, &blocks));
 
         let all_targets: HashSet<u32> = csr_scores
@@ -2255,25 +2768,6 @@ mod tests {
     }
 
     // -- Power-law generator sanity --
-
-    /// The power-law generator should produce a graph with at least one node
-    /// whose in-degree exceeds HUB_DAMPEN_THRESHOLD (otherwise the dampening
-    /// A/B in run_power_law_benchmark measures nothing).
-    #[test]
-    fn test_power_law_produces_hub_above_threshold() {
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let synth = generate_power_law_graph(&PowerLawConfig::medium_instance(), &mut rng);
-        let dual = DualCsrGraph::from_edges(synth.num_nodes, &synth.edges);
-        let max_in_degree = (0..synth.num_nodes)
-            .map(|n| dual.reverse.neighbors(n).len() as u32)
-            .max()
-            .unwrap_or(0);
-        assert!(
-            max_in_degree > HUB_DAMPEN_THRESHOLD,
-            "max in-degree {max_in_degree} did not exceed HUB_DAMPEN_THRESHOLD {HUB_DAMPEN_THRESHOLD} \
-             — generator parameters may need adjustment"
-        );
-    }
 
     /// Variance multiplier κ on the power-law graph should be materially
     /// above 1.0 — otherwise the topology isn't actually heavy-tailed.

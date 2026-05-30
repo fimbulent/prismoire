@@ -311,50 +311,6 @@ CREATE TABLE admin_rm_reports (
 );
 CREATE INDEX idx_admin_rm_reports_source_received
     ON admin_rm_reports(signing_instance, received_at);
-CREATE TABLE user_homes (
-    -- Ed25519 public key of the moving identity (raw 32 bytes).
-    -- Matches the `key` field of §5.1 `Move` payloads and the
-    -- `users.public_key` column for local users.
-    user_key BLOB PRIMARY KEY NOT NULL
-            CHECK (length(user_key) = 32),
-
-    -- Ed25519 `instance_pubkey` (raw 32 bytes) of the user's
-    -- currently-resolved home instance. Copied verbatim from the
-    -- winning move's `to_instance_key` field
-    -- (signed-payload-format.md §5.1 + protocol §12). Per §3 of
-    -- the protocol this is the *trust anchor* for "is the sender
-    -- authoritative for K?" comparisons; `current_home_domain`
-    -- below is mutable metadata kept alongside.
-    current_home_key BLOB NOT NULL
-            CHECK (length(current_home_key) = 32),
-
-    -- Bare canonical domain of the user's currently-resolved home
-    -- instance. Copied verbatim from the winning move's
-    -- `to_instance` field; never empty.
-    current_home_domain TEXT NOT NULL
-            CHECK (length(current_home_domain) > 0),
-
-    -- SHA-256 (32 bytes) of the canonical payload bytes of the
-    -- winning `move` object. Joins back to
-    -- `signed_objects.canonical_hash`; used by §12.3 backfill to
-    -- serve the resolution chain without scanning every stored
-    -- move.
-    current_move_hash BLOB NOT NULL
-            CHECK (length(current_move_hash) = 32),
-
-    -- Wire timestamp of the winning move (Unix milliseconds UTC),
-    -- copied verbatim from the move payload. The §12.4 latest-wins
-    -- comparison reads this column directly; receivers MUST NOT
-    -- re-derive it from a local clock.
-    current_created_at INTEGER NOT NULL,
-
-    -- ISO-8601 timestamp of the most recent UPSERT against this
-    -- row. Operator-visible only — distinct from
-    -- `current_created_at` (signer's wall clock) because we want
-    -- to know when *we* learned of the latest resolution.
-    updated_at TEXT NOT NULL
-            DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-);
 CREATE TABLE registration_challenges (
     -- Server-issued CSPRNG nonce, 32 bytes raw. PRIMARY KEY because
     -- §13.2 enforces global single-use semantics: a given nonce
@@ -1003,4 +959,39 @@ CREATE TABLE federated_reports (
 
     -- §18.1 idempotency: one stored report per (post_id, reporter).
     UNIQUE (post_id, reporter)
+);
+CREATE TABLE IF NOT EXISTS "user_homes" (
+    -- Ed25519 public key of the moving identity (raw 32 bytes).
+    user_key BLOB PRIMARY KEY NOT NULL
+            CHECK (length(user_key) = 32),
+
+    -- Ed25519 instance_pubkey (raw 32 bytes) of the user's
+    -- currently-resolved home instance. The §3 trust anchor. Always set:
+    -- a move copies it from the winning move's to_instance_key; a
+    -- trust-code seed copies it from the code's instance pubkey.
+    current_home_key BLOB NOT NULL
+            CHECK (length(current_home_key) = 32),
+
+    -- Bare canonical domain of the user's currently-resolved home
+    -- instance. From the winning move's to_instance, or the trust
+    -- code's home_domain. Never empty.
+    current_home_domain TEXT NOT NULL
+            CHECK (length(current_home_domain) > 0),
+
+    -- SHA-256 (32 bytes) of the winning move's canonical payload bytes,
+    -- joining back to signed_objects.canonical_hash for §12.3 backfill.
+    -- NULL when the row was seeded by a trust code (no move object).
+    current_move_hash BLOB
+            CHECK (current_move_hash IS NULL OR length(current_move_hash) = 32),
+
+    -- Wire timestamp of the winning move (Unix milliseconds UTC),
+    -- copied verbatim; the §12.4 latest-wins comparison reads it
+    -- directly. NULL when seeded by a trust code (treated as the epoch,
+    -- so any real move supersedes).
+    current_created_at INTEGER,
+
+    -- ISO-8601 timestamp of the most recent UPSERT against this row.
+    -- Operator-visible only.
+    updated_at TEXT NOT NULL
+            DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );

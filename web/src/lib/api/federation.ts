@@ -34,9 +34,21 @@ export interface PeerView {
 	last_handshake: string | null;
 }
 
+/** A home instance that local users have trust-coded toward but which is
+ * not an active peer yet — an operator hint to consider peering. */
+export interface PeeringSuggestion {
+	/** Lowercase-hex Ed25519 instance pubkey of the suggested home. */
+	pubkey_hex: string;
+	domain: string;
+	/** How many local users hold a live edge toward a user homed there. */
+	edge_count: number;
+}
+
 export interface PeersListResponse {
 	instance: InstanceIdentity;
 	peers: PeerView[];
+	/** Instances surfaced by trust-code edges that aren't active peers. */
+	peering_suggestions: PeeringSuggestion[];
 }
 
 /** Remote instance's self-reported identity card, plus two

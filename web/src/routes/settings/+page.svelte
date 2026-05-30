@@ -2,12 +2,47 @@
 	import { goto, invalidateAll } from '$app/navigation';
 	import { updateSettings } from '$lib/api/settings';
 	import { exportMyData, exportMyAttachments, deleteMyAccount } from '$lib/api/privacy';
+	import { getMyTrustCode } from '$lib/api/users';
 	import { errorMessage } from '$lib/i18n/errors';
 	import { toast } from '$lib/components/ui/toast.svelte';
 	import { theme } from '$lib/stores/theme.svelte';
 	import { themes, type ThemeId } from '$lib/themes';
 	import { font } from '$lib/stores/font.svelte';
 	import { fonts, type FontId } from '$lib/fonts';
+
+	let trustCode = $state<string | null>(null);
+	let loadingTrustCode = $state(false);
+	let trustCodeCopied = $state(false);
+
+	async function revealTrustCode() {
+		if (trustCode !== null) return;
+		loadingTrustCode = true;
+		try {
+			const { code } = await getMyTrustCode();
+			trustCode = code;
+		} catch (e) {
+			toast.error(errorMessage(e, 'Failed to fetch your trust code'));
+		} finally {
+			loadingTrustCode = false;
+		}
+	}
+
+	async function copyTrustCode() {
+		if (trustCode === null) {
+			await revealTrustCode();
+			if (trustCode === null) return;
+		}
+		try {
+			await navigator.clipboard.writeText(trustCode);
+			trustCodeCopied = true;
+			toast.info('Trust code copied.');
+			setTimeout(() => {
+				trustCodeCopied = false;
+			}, 2000);
+		} catch {
+			toast.error('Could not copy to clipboard.');
+		}
+	}
 
 	let exporting = $state(false);
 	let exportError = $state<string | null>(null);
@@ -173,6 +208,42 @@
 					</div>
 				</button>
 			{/each}
+		</div>
+	</section>
+
+	<section class="mt-10">
+		<h2 class="text-sm font-semibold text-text-secondary mb-1">Cross-instance trust code</h2>
+		<p class="text-xs text-text-muted mb-3">
+			Share this code with someone on another instance so they can trust you directly. It encodes
+			your name, your home instance, and your public keys — it isn't a secret, but anyone you give
+			it to can form a one-way trust edge toward you.
+		</p>
+		<div class="bg-bg-surface border border-border rounded-md p-4">
+			{#if trustCode === null}
+				<button
+					onclick={revealTrustCode}
+					disabled={loadingTrustCode}
+					class="text-xs px-3 py-1.5 rounded-md border border-border text-text-primary bg-bg-surface-raised hover:bg-bg-hover cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+				>
+					{loadingTrustCode ? 'Loading…' : 'Show my trust code'}
+				</button>
+			{:else}
+				<div class="flex flex-wrap items-center gap-2">
+					<input
+						type="text"
+						readonly
+						value={trustCode}
+						onfocus={(e) => e.currentTarget.select()}
+						class="flex-1 min-w-60 text-xs font-mono px-2 py-1.5 rounded border border-border bg-bg text-text-secondary focus:outline-none focus:border-accent break-all"
+					/>
+					<button
+						onclick={copyTrustCode}
+						class="text-xs px-3 py-1.5 rounded-md border border-border text-text-primary bg-bg-surface-raised hover:bg-bg-hover cursor-pointer transition-colors"
+					>
+						{trustCodeCopied ? 'Copied!' : 'Copy'}
+					</button>
+				</div>
+			{/if}
 		</div>
 	</section>
 
