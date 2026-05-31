@@ -25,9 +25,11 @@
 //! stance per pair, `neutral` tombstones dropped) is derived at read
 //! time — this is the log, not the resolved graph.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::cmp::{Ordering, Reverse};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
 use sqlx::SqlitePool;
+use uuid::Uuid;
 
 use crate::signed::{TrustEdge, TrustStance};
 
@@ -240,21 +242,54 @@ pub async fn mark_frontier_edge_live(
 // Multi-source reverse BFS (§8.9) + frontier_users materialization (§8.11)
 // ---------------------------------------------------------------------------
 
-/// Outcome of the multi-source reverse BFS over the edge store: the
-/// structural reverse frontier (§8.9) plus the bookkeeping the §8.12
-/// mark phase and the §8.11 materialization produced.
+/// A local reader (BFS root) paired with its forward trust scores — the
+/// per-reader input to the §8.9 cap-at-`N` admission.
 ///
-/// This is the **uncapped** structural frontier — every author reachable
-/// within `max_depth` reverse *trust* hops of any root. The cap-at-`N`
-/// admission and forward-score ranking that prune this down to each
-/// reader's visible set are a later sub-slice (D3); they do not change
-/// which edges the mark phase keeps alive.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// `forward_scores` is the reader's *own* outbound trust toward every
+/// author it can reach (author UUID → combined score ∈ [0, 1]), computed
+/// from the in-memory `TrustGraph` (`forward_scores`). It is local and
+/// private — forward trust never crosses the wire — so the caller (the
+/// rebuild loop) materialises it here and hands it in. A frontier node
+/// absent from this map scores `0.0`: it lands in the age-ranked tail
+/// (§8.10), admitted only if old enough to beat the cap's worst.
+pub struct FrontierReader {
+    /// The reader's Ed25519 key — a reverse-BFS root.
+    pub key: [u8; 32],
+    /// Reader → author-UUID → forward trust score. Authors not present
+    /// score `0.0`.
+    pub forward_scores: HashMap<Uuid, f64>,
+}
+
+/// One reader's cap-at-`N` outcome from the pass — the bounded set of
+/// inbound trusters it admitted (§8.9), keyed back to the reader. Slice E
+/// reads [`AdmissionCap::worst_admitted`] here to derive the reader's
+/// advertised age ceiling (§8.10/§8.3) and walks the admitted set to
+/// cleave forward-reachable trusters from the age-ranked tail.
+#[derive(Debug)]
+pub struct ReaderCapOutcome {
+    /// The local reader this cap belongs to.
+    pub key: [u8; 32],
+    /// The reader's bounded top-`N` admitted inbound trusters.
+    pub cap: AdmissionCap,
+}
+
+/// Outcome of the multi-source reverse BFS over the edge store: the
+/// **capped** reverse frontier (§8.9) plus the bookkeeping the §8.12
+/// mark phase, the §8.11 materialization, and the cap-at-`N` admission
+/// produced.
+///
+/// `reachable` is the *expanded* frontier — the nodes that won admission
+/// to at least one reader's cap and were therefore traversed deeper.
+/// Nodes that were structurally reached but shed by every reader's cap
+/// are counted in `nodes_pruned` and not expanded (online §8.9 expansion
+/// pruning); their inbound edges are still marked live so GC keeps the
+/// evidence for the next rebuild, where admission may differ.
+#[derive(Debug, Default)]
 pub struct ReverseFrontier {
-    /// Every non-root key reached via an active-trust path — the
-    /// structural reverse frontier. Includes both remote keys (which get
-    /// a `frontier_users` stub when home resolves) and any local key that
-    /// happens to sit on a frontier path (which does not).
+    /// Every admitted-and-expanded non-root key. Includes remote keys
+    /// (which get a `frontier_users` stub when home resolves) and any
+    /// local key that won admission on a frontier path (which does not
+    /// get a stub).
     pub reachable: HashSet<[u8; 32]>,
     /// Remote frontier nodes for which a `frontier_users` stub was
     /// upserted because home (key + domain) resolved (§8.11).
@@ -270,11 +305,18 @@ pub struct ReverseFrontier {
     /// Active edges generation-marked live during this pass — the §8.12
     /// mark step.
     pub edges_marked: usize,
+    /// Structurally-reached nodes shed by every reader's cap and so not
+    /// expanded — the §8.9 online expansion-pruning count.
+    pub nodes_pruned: usize,
+    /// Per-reader cap-at-`N` outcomes, parallel to the `readers` passed
+    /// in. Slice E consumes these to derive age ceilings.
+    pub caps: Vec<ReaderCapOutcome>,
 }
 
 /// Run the multi-source reverse BFS that grows this instance's reverse
 /// frontier (§8.9) over the `frontier_edges` store, starting from the
-/// union of `roots` (the local readers' keys).
+/// union of `readers` (the local readers' keys), bounded per reader by
+/// the cap-at-`N` admission.
 ///
 /// At each node it reads the inbound edges ("who trusts this node"),
 /// resolves the active stance per `(source, target)` pair (latest by
@@ -286,8 +328,22 @@ pub struct ReverseFrontier {
 /// - **advances the frontier only along `trust`** (§8.9 "authors who
 ///   trust them"); `distrust` / `neutral` tombstones are marked but not
 ///   traversed;
-/// - **materializes a `frontier_users` stub** for each newly reached
-///   remote key whose home resolves (§8.11), deferring otherwise.
+/// - **offers each newly reached source to every reader's cap** (§8.9),
+///   ranked `(forward_score desc, genesis_at asc)`. A source admitted to
+///   at least one reader's cap is **expanded** (materialized + traversed
+///   deeper); a source shed by *every* reader's cap is **pruned** — not
+///   expanded, not stubbed, counted in `nodes_pruned`. This is the online
+///   §8.9 expansion pruning: BFS visits in distance order, which roughly
+///   tracks forward-score rank, so a node that cannot beat any reader's
+///   worst-admitted at the moment it is reached is unlikely to ever, and
+///   its subtree is not worth traversing.
+///
+/// Each source's `forward_score` for a reader is that reader's local
+/// forward trust toward the source (`FrontierReader::forward_scores`,
+/// `0.0` if absent — the age-ranked tail, §8.10); its `genesis_at` is the
+/// instance-attested account age from `user_genesis` (`None` if no
+/// attestation, the tail-spam floor). `cap_n` is the per-instance cap
+/// (default [`DEFAULT_FRONTIER_CAP`]); it is never carried on the wire.
 ///
 /// `generation` is the §8.12 GC tag stamped on every edge/stub this pass
 /// touches; the caller (the rebuild loop, wired in D4) supplies the
@@ -300,7 +356,8 @@ pub struct ReverseFrontier {
 /// long write lock across a large BFS would cost more than it buys.
 pub async fn reverse_frontier_bfs(
     db: &SqlitePool,
-    roots: &[[u8; 32]],
+    readers: &[FrontierReader],
+    cap_n: usize,
     generation: i64,
     max_depth: u32,
 ) -> Result<ReverseFrontier, sqlx::Error> {
@@ -308,12 +365,16 @@ pub async fn reverse_frontier_bfs(
     let mut visited: HashSet<[u8; 32]> = HashSet::new();
     let mut queue: VecDeque<([u8; 32], u32)> = VecDeque::new();
 
+    // One cap per reader, positionally parallel to `readers`.
+    let mut caps: Vec<AdmissionCap> = readers.iter().map(|_| AdmissionCap::new(cap_n)).collect();
+
     // Seed with the roots at depth 0. Roots are local readers — never
-    // frontier nodes themselves and never stubbed — but they are the
-    // targets whose inbound trusters the first hop expands.
-    for root in roots {
-        if visited.insert(*root) {
-            queue.push_back((*root, 0));
+    // frontier nodes themselves, never stubbed, never offered to a cap —
+    // but they are the targets whose inbound trusters the first hop
+    // expands.
+    for reader in readers {
+        if visited.insert(reader.key) {
+            queue.push_back((reader.key, 0));
         }
     }
 
@@ -323,7 +384,8 @@ pub async fn reverse_frontier_bfs(
         }
         let inbound = frontier_edges_by_target(db, &node).await?;
         for edge in active_edges_by_source(inbound) {
-            // §8.12 mark: the active edge for a reachable pair is live.
+            // §8.12 mark: the active edge for a reachable pair is live,
+            // regardless of whether its source survives the cap below.
             mark_frontier_edge_live(db, &edge.canonical_hash, generation).await?;
             frontier.edges_marked += 1;
 
@@ -335,6 +397,37 @@ pub async fn reverse_frontier_bfs(
             if !visited.insert(source) {
                 continue;
             }
+
+            // §8.9 cap-at-N admission. Resolve the source's UUID once (to
+            // index each reader's forward-score map) and its attested age,
+            // then offer it to every reader's cap. The source is expanded
+            // iff at least one reader admitted it.
+            let source_uuid = resolve_user_uuid(db, &source).await?;
+            let genesis_at = load_genesis_at(db, &source).await?;
+            let mut admitted_any = false;
+            for (reader, cap) in readers.iter().zip(caps.iter_mut()) {
+                let forward_score = source_uuid
+                    .and_then(|u| reader.forward_scores.get(&u))
+                    .copied()
+                    .unwrap_or(0.0);
+                let admission = Admission {
+                    truster: source,
+                    forward_score,
+                    genesis_at,
+                };
+                if cap.admit(admission) {
+                    admitted_any = true;
+                }
+            }
+
+            if !admitted_any {
+                // Shed by every reader's cap: prune the subtree (§8.9).
+                // The inbound edge stays marked live above, so GC retains
+                // the evidence for the next rebuild.
+                frontier.nodes_pruned += 1;
+                continue;
+            }
+
             match materialize_frontier_node(db, &source, generation).await? {
                 NodeMaterialization::Local => frontier.locals_skipped += 1,
                 NodeMaterialization::Stub => frontier.stubs_materialized += 1,
@@ -344,6 +437,15 @@ pub async fn reverse_frontier_bfs(
             queue.push_back((source, depth + 1));
         }
     }
+
+    frontier.caps = readers
+        .iter()
+        .zip(caps)
+        .map(|(reader, cap)| ReaderCapOutcome {
+            key: reader.key,
+            cap,
+        })
+        .collect();
     Ok(frontier)
 }
 
@@ -351,7 +453,14 @@ pub async fn reverse_frontier_bfs(
 /// latest by `(created_at, canonical_hash)`. The `canonical_hash`
 /// tiebreak makes the choice deterministic when two rows for the same
 /// pair share a `created_at` (e.g. a rapid trust→neutral flip clamped to
-/// the same millisecond), so the BFS is reproducible.
+/// the same millisecond).
+///
+/// The returned vector is sorted by `source_pubkey` so the BFS offers
+/// sources to the caps in a stable order. Under the §8.9 *online*
+/// expansion pruning the cap admission is order-sensitive (a node
+/// admitted then evicted by a later better candidate may already have
+/// been expanded), so a deterministic offer order is what makes a rebuild
+/// reproducible.
 fn active_edges_by_source(edges: Vec<FrontierEdgeRef>) -> Vec<FrontierEdgeRef> {
     let mut by_source: HashMap<[u8; 32], FrontierEdgeRef> = HashMap::new();
     for edge in edges {
@@ -364,7 +473,184 @@ fn active_edges_by_source(edges: Vec<FrontierEdgeRef>) -> Vec<FrontierEdgeRef> {
             }
         }
     }
-    by_source.into_values().collect()
+    let mut active: Vec<FrontierEdgeRef> = by_source.into_values().collect();
+    active.sort_by_key(|edge| edge.source_pubkey);
+    active
+}
+
+// ---------------------------------------------------------------------------
+// Cap-at-N admission (§8.9) — the per-reader bounded inbound-truster set
+// ---------------------------------------------------------------------------
+
+/// Default per-reader cap on admitted inbound trusters (§8.9 cap-at-`N`).
+///
+/// A reader keeps at most this many inbound trusters in their visible
+/// frontier; the rest are shed (§8.10). This is a per-instance operator
+/// knob — it is **never** carried on the wire (peers learn only the
+/// resulting age ceiling, §8.3, derived in Slice E), so two instances may
+/// run different caps without protocol divergence.
+pub const DEFAULT_FRONTIER_CAP: usize = 100_000;
+
+/// One inbound truster competing for a reader's bounded admission set
+/// (§8.9). Ordered "better is greater": higher `forward_score` wins, then
+/// older account (smaller `genesis_at`) wins, with an unknown/unattested
+/// genesis ranking worst of all (the tail-spam floor — a freshly minted
+/// key with no instance-vouched age cannot outrank an attested old one).
+///
+/// `forward_score` is the reader's *own* forward trust toward this truster
+/// (local, private — computed from the in-memory `TrustGraph`); a truster
+/// the reader does not forward-trust scores `0.0` and lands in the
+/// age-ranked tail (§8.10). `genesis_at` is the instance-attested account
+/// birth (`user_genesis.genesis_at`, Slice B), `None` when no attestation
+/// is on file.
+#[derive(Debug, Clone, Copy)]
+pub struct Admission {
+    /// The inbound truster's Ed25519 key — the frontier node competing
+    /// for admission.
+    pub truster: [u8; 32],
+    /// Reader's forward trust toward `truster` ∈ [0, 1]; `0.0` for the
+    /// no-forward-trust age-ranked tail (§8.10).
+    pub forward_score: f64,
+    /// Instance-attested account birth (unix ms), `None` when unattested.
+    /// Older (smaller) ranks higher; `None` ranks worst.
+    pub genesis_at: Option<i64>,
+}
+
+impl Admission {
+    /// Compare by admission desirability — "greater is more admittable",
+    /// so the worst candidate is the `min`, which the cap's min-heap keeps
+    /// at its root for O(1) eviction. `forward_score` dominates; ties
+    /// break to the older account (`Reverse(genesis_at)`, with `None`
+    /// sorting below every `Some` as the tail-spam floor); the final
+    /// `truster` tiebreak makes the total order deterministic so equal
+    /// candidates are distinguishable (required for a consistent `Eq`).
+    fn desirability(&self, other: &Self) -> Ordering {
+        self.forward_score
+            .total_cmp(&other.forward_score)
+            .then_with(|| {
+                self.genesis_at
+                    .map(Reverse)
+                    .cmp(&other.genesis_at.map(Reverse))
+            })
+            .then_with(|| self.truster.cmp(&other.truster))
+    }
+}
+
+impl Ord for Admission {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.desirability(other)
+    }
+}
+
+impl PartialOrd for Admission {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for Admission {
+    fn eq(&self, other: &Self) -> bool {
+        self.desirability(other) == Ordering::Equal
+    }
+}
+
+impl Eq for Admission {}
+
+/// A reader's bounded top-`N` set of admitted inbound trusters (§8.9
+/// cap-at-`N`). Backed by a min-heap keyed by [`Admission`] desirability
+/// so the worst-admitted sits at the root: offering a better candidate
+/// once the set is full evicts that worst in O(log N), and the surviving
+/// root is exactly the cleave point §8.10/Slice E reads to derive this
+/// reader's age ceiling.
+///
+/// **Caller contract:** offer each distinct truster at most once per
+/// reader. The cap does not dedup by key — it is fed from a single
+/// reverse-BFS pass whose global visited set already guarantees one offer
+/// per frontier node, so an internal dedup set would be dead weight.
+#[derive(Debug)]
+pub struct AdmissionCap {
+    cap: usize,
+    heap: BinaryHeap<Reverse<Admission>>,
+}
+
+impl AdmissionCap {
+    /// Create an empty cap admitting at most `cap` trusters. `cap == 0`
+    /// is a valid degenerate setting that admits nothing.
+    pub fn new(cap: usize) -> Self {
+        Self {
+            cap,
+            heap: BinaryHeap::new(),
+        }
+    }
+
+    /// Would `adm` be admitted if offered now — i.e. is there spare
+    /// capacity, or does `adm` strictly outrank the current worst? This is
+    /// the §8.9 **expansion-pruning** predicate: a frontier node worth
+    /// admitting for at least one reader is worth expanding ("who trusts
+    /// it") to grow the frontier deeper. Pure (no mutation), so the BFS
+    /// can test a node against every reader before committing to expand.
+    pub fn would_admit(&self, adm: &Admission) -> bool {
+        if self.cap == 0 {
+            return false;
+        }
+        if self.heap.len() < self.cap {
+            return true;
+        }
+        // Full: admit only if strictly better than the worst-admitted.
+        match self.heap.peek() {
+            Some(Reverse(worst)) => adm > worst,
+            None => true,
+        }
+    }
+
+    /// Offer `adm` to the cap, evicting the previous worst if the set is
+    /// full and `adm` outranks it. Returns whether `adm` ended up
+    /// admitted.
+    pub fn admit(&mut self, adm: Admission) -> bool {
+        if self.cap == 0 {
+            return false;
+        }
+        if self.heap.len() < self.cap {
+            self.heap.push(Reverse(adm));
+            return true;
+        }
+        match self.heap.peek() {
+            Some(Reverse(worst)) if adm > *worst => {
+                self.heap.pop();
+                self.heap.push(Reverse(adm));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The worst currently-admitted candidate — the §8.10/Slice E cleave
+    /// point whose `genesis_at` becomes this reader's advertised age
+    /// ceiling. `None` until something is admitted.
+    pub fn worst_admitted(&self) -> Option<&Admission> {
+        self.heap.peek().map(|Reverse(adm)| adm)
+    }
+
+    /// Number of admitted trusters.
+    pub fn len(&self) -> usize {
+        self.heap.len()
+    }
+
+    /// True when nothing is admitted yet.
+    pub fn is_empty(&self) -> bool {
+        self.heap.is_empty()
+    }
+
+    /// True once the set has reached its cap — past this point admission
+    /// requires displacing the worst.
+    pub fn is_full(&self) -> bool {
+        self.cap != 0 && self.heap.len() >= self.cap
+    }
+
+    /// Drain the admitted set (unordered).
+    pub fn into_admitted(self) -> Vec<Admission> {
+        self.heap.into_iter().map(|Reverse(adm)| adm).collect()
+    }
 }
 
 /// How a reached frontier node was materialized.
@@ -409,6 +695,38 @@ async fn is_local_user(db: &SqlitePool, key: &[u8; 32]) -> Result<bool, sqlx::Er
     .fetch_optional(db)
     .await?;
     Ok(row.is_some())
+}
+
+/// Resolve a frontier key to its local `users.id` (UUID), or `None` when
+/// no `users` row exists for it. The UUID indexes a reader's
+/// forward-score map (§8.9 admission): a key with a `users` row — a local
+/// account or a hydrated remote stub a local user explicitly trusts —
+/// participates in the in-memory `TrustGraph` and so may carry a non-zero
+/// forward score. A frontier-only key (a `frontier_users` stub with no
+/// `users` row) returns `None` and scores `0.0` for every reader (the
+/// age-ranked tail, §8.10).
+async fn resolve_user_uuid(db: &SqlitePool, key: &[u8; 32]) -> Result<Option<Uuid>, sqlx::Error> {
+    let key_slice: &[u8] = key.as_slice();
+    let row = sqlx::query!("SELECT id FROM users WHERE public_key = ?", key_slice)
+        .fetch_optional(db)
+        .await?;
+    Ok(row.and_then(|r| Uuid::parse_str(&r.id).ok()))
+}
+
+/// Read a key's instance-attested account-birth anchor
+/// (`user_genesis.genesis_at`, unix ms; Slice B), or `None` when no
+/// genesis attestation is on file. The §8.9 cap age-ranks by this value;
+/// `None` is the tail-spam floor (ranks worst), so a freshly minted key
+/// with no instance-vouched age cannot forge seniority to beat the cap.
+async fn load_genesis_at(db: &SqlitePool, key: &[u8; 32]) -> Result<Option<i64>, sqlx::Error> {
+    let key_slice: &[u8] = key.as_slice();
+    let row = sqlx::query!(
+        "SELECT genesis_at AS \"genesis_at!: i64\" FROM user_genesis WHERE user_key = ?",
+        key_slice,
+    )
+    .fetch_optional(db)
+    .await?;
+    Ok(row.map(|r| r.genesis_at))
 }
 
 /// Resolve a remote frontier key's home as `(home_instance_key,
@@ -770,7 +1088,7 @@ mod tests {
         .await;
         seed_user_home(&pool, 1, 5, "x.example").await;
 
-        let f = reverse_frontier_bfs(&pool, &[[9u8; 32]], 7, FRONTIER_MAX_DEPTH)
+        let f = reverse_frontier_bfs(&pool, &readers(&[9]), BIG_CAP, 7, FRONTIER_MAX_DEPTH)
             .await
             .unwrap();
 
@@ -818,7 +1136,7 @@ mod tests {
             seed_user_home(&pool, k, 5, "h.example").await;
         }
 
-        let f = reverse_frontier_bfs(&pool, &[[9u8; 32]], 0, 2)
+        let f = reverse_frontier_bfs(&pool, &readers(&[9]), BIG_CAP, 0, 2)
             .await
             .unwrap();
         // Depth 1 = X, depth 2 = Y reached; Z at depth 3 is beyond the cap.
@@ -841,7 +1159,7 @@ mod tests {
         .await;
         seed_user_home(&pool, 1, 5, "x.example").await;
 
-        let f = reverse_frontier_bfs(&pool, &[[9u8; 32]], 4, FRONTIER_MAX_DEPTH)
+        let f = reverse_frontier_bfs(&pool, &readers(&[9]), BIG_CAP, 4, FRONTIER_MAX_DEPTH)
             .await
             .unwrap();
         assert!(f.reachable.is_empty(), "a neutral edge is not a trust path");
@@ -866,7 +1184,7 @@ mod tests {
         put_edge(&pool, &revoke, 0xBB, 0).await;
         seed_user_home(&pool, 1, 5, "x.example").await;
 
-        let f = reverse_frontier_bfs(&pool, &[[9u8; 32]], 1, FRONTIER_MAX_DEPTH)
+        let f = reverse_frontier_bfs(&pool, &readers(&[9]), BIG_CAP, 1, FRONTIER_MAX_DEPTH)
             .await
             .unwrap();
         assert!(f.reachable.is_empty(), "newest stance (neutral) wins");
@@ -891,7 +1209,7 @@ mod tests {
         .await;
         seed_local_user(&pool, 1, "alice").await; // X is one of our own users
 
-        let f = reverse_frontier_bfs(&pool, &[[9u8; 32]], 2, FRONTIER_MAX_DEPTH)
+        let f = reverse_frontier_bfs(&pool, &readers(&[9]), BIG_CAP, 2, FRONTIER_MAX_DEPTH)
             .await
             .unwrap();
         assert!(f.reachable.contains(&[1u8; 32]));
@@ -914,7 +1232,7 @@ mod tests {
         )
         .await;
 
-        let f = reverse_frontier_bfs(&pool, &[[9u8; 32]], 3, FRONTIER_MAX_DEPTH)
+        let f = reverse_frontier_bfs(&pool, &readers(&[9]), BIG_CAP, 3, FRONTIER_MAX_DEPTH)
             .await
             .unwrap();
         assert!(f.reachable.contains(&[1u8; 32]));
@@ -939,7 +1257,7 @@ mod tests {
         seed_remote_stub(&pool, 1, "x-remote", 5).await;
         seed_peer(&pool, 5, "peer5.example").await;
 
-        let f = reverse_frontier_bfs(&pool, &[[9u8; 32]], 6, FRONTIER_MAX_DEPTH)
+        let f = reverse_frontier_bfs(&pool, &readers(&[9]), BIG_CAP, 6, FRONTIER_MAX_DEPTH)
             .await
             .unwrap();
         assert_eq!(f.stubs_materialized, 1);
@@ -969,11 +1287,313 @@ mod tests {
         .await;
         seed_user_home(&pool, 1, 5, "x.example").await;
 
-        let f = reverse_frontier_bfs(&pool, &[[9u8; 32], [8u8; 32]], 1, FRONTIER_MAX_DEPTH)
+        let f = reverse_frontier_bfs(&pool, &readers(&[9, 8]), BIG_CAP, 1, FRONTIER_MAX_DEPTH)
             .await
             .unwrap();
         assert_eq!(f.reachable.len(), 1, "one shared stub for X");
         assert_eq!(f.stubs_materialized, 1);
         assert_eq!(f.edges_marked, 2, "both inbound edges marked live");
+    }
+
+    // --- D3: cap-at-N admission -----------------------------------------
+
+    fn adm(truster: u8, forward_score: f64, genesis_at: Option<i64>) -> Admission {
+        Admission {
+            truster: [truster; 32],
+            forward_score,
+            genesis_at,
+        }
+    }
+
+    #[test]
+    fn cap_admits_up_to_capacity_then_evicts_worst() {
+        let mut cap = AdmissionCap::new(2);
+        assert!(cap.admit(adm(1, 0.9, Some(100))));
+        assert!(cap.admit(adm(2, 0.5, Some(100))));
+        assert!(cap.is_full());
+        // A better candidate than the worst (truster 2, score 0.5) is
+        // admitted, evicting truster 2.
+        assert!(cap.admit(adm(3, 0.7, Some(100))));
+        assert_eq!(cap.len(), 2);
+        let trusters: HashSet<[u8; 32]> =
+            cap.into_admitted().into_iter().map(|a| a.truster).collect();
+        assert!(trusters.contains(&[1u8; 32]));
+        assert!(trusters.contains(&[3u8; 32]));
+        assert!(!trusters.contains(&[2u8; 32]), "the worst was evicted");
+    }
+
+    #[test]
+    fn cap_rejects_candidate_no_better_than_worst() {
+        let mut cap = AdmissionCap::new(2);
+        cap.admit(adm(1, 0.9, Some(100)));
+        cap.admit(adm(2, 0.5, Some(100)));
+        // Strictly worse than the current worst (0.4 < 0.5) — rejected.
+        assert!(!cap.would_admit(&adm(3, 0.4, Some(100))));
+        assert!(!cap.admit(adm(3, 0.4, Some(100))));
+        assert_eq!(cap.len(), 2);
+    }
+
+    #[test]
+    fn forward_score_dominates_genesis() {
+        let mut cap = AdmissionCap::new(1);
+        // Younger but higher forward score beats older with lower score.
+        cap.admit(adm(1, 0.2, Some(1))); // ancient account, weak trust
+        assert!(cap.admit(adm(2, 0.8, Some(9_999)))); // newer, strong trust
+        assert_eq!(cap.worst_admitted().unwrap().truster, [2u8; 32]);
+    }
+
+    #[test]
+    fn older_account_breaks_forward_score_tie() {
+        let mut cap = AdmissionCap::new(1);
+        cap.admit(adm(1, 0.5, Some(500))); // younger
+        // Same score, older (smaller genesis_at) wins.
+        assert!(cap.admit(adm(2, 0.5, Some(100))));
+        assert_eq!(cap.worst_admitted().unwrap().truster, [2u8; 32]);
+    }
+
+    #[test]
+    fn unknown_genesis_ranks_worst_on_a_tie() {
+        let mut cap = AdmissionCap::new(1);
+        cap.admit(adm(1, 0.5, None)); // unattested age — tail-spam floor
+        // Any attested age at the same score outranks the unknown one.
+        assert!(cap.admit(adm(2, 0.5, Some(i64::MAX))));
+        assert_eq!(cap.worst_admitted().unwrap().truster, [2u8; 32]);
+        // And an unknown-genesis candidate cannot displace an attested one.
+        assert!(!cap.would_admit(&adm(3, 0.5, None)));
+    }
+
+    #[test]
+    fn worst_admitted_is_the_cleave_point() {
+        let mut cap = AdmissionCap::new(3);
+        cap.admit(adm(1, 0.9, Some(100)));
+        cap.admit(adm(2, 0.3, Some(200)));
+        cap.admit(adm(3, 0.6, Some(150)));
+        // The least desirable admitted candidate sits at the cleave point;
+        // Slice E reads its genesis_at as the advertised age ceiling.
+        let worst = cap.worst_admitted().unwrap();
+        assert_eq!(worst.truster, [2u8; 32]);
+        assert_eq!(worst.forward_score, 0.3);
+        assert_eq!(worst.genesis_at, Some(200));
+    }
+
+    #[test]
+    fn cap_zero_admits_nothing() {
+        let mut cap = AdmissionCap::new(0);
+        assert!(!cap.would_admit(&adm(1, 1.0, Some(1))));
+        assert!(!cap.admit(adm(1, 1.0, Some(1))));
+        assert!(cap.is_empty());
+        assert!(cap.worst_admitted().is_none());
+    }
+
+    #[test]
+    fn would_admit_matches_admit_when_full() {
+        let mut cap = AdmissionCap::new(2);
+        cap.admit(adm(1, 0.9, Some(100)));
+        cap.admit(adm(2, 0.5, Some(100)));
+        // would_admit is the pure mirror of admit's decision.
+        let candidate = adm(3, 0.7, Some(100));
+        assert_eq!(cap.would_admit(&candidate), cap.admit(candidate));
+    }
+
+    // --- D3: cap-at-N woven into the reverse BFS -------------------------
+
+    /// A cap large enough that the D2 structural tests above admit every
+    /// reached node, so the cap never alters their traversal.
+    const BIG_CAP: usize = 1_000;
+
+    /// Build readers with no forward trust (every frontier node scores
+    /// 0.0 — the pure age-ranked tail). The D2 structural tests use this.
+    fn readers(keys: &[u8]) -> Vec<FrontierReader> {
+        keys.iter()
+            .map(|&k| FrontierReader {
+                key: [k; 32],
+                forward_scores: HashMap::new(),
+            })
+            .collect()
+    }
+
+    /// Build one reader with an explicit forward-score map (author UUID →
+    /// score), for the §8.9 admission-ranking tests.
+    fn reader_scored(key: u8, scores: &[(Uuid, f64)]) -> FrontierReader {
+        FrontierReader {
+            key: [key; 32],
+            forward_scores: scores.iter().copied().collect(),
+        }
+    }
+
+    async fn seed_user_with_id(pool: &SqlitePool, key: u8, id: Uuid) {
+        sqlx::query(
+            "INSERT INTO users (id, display_name, signup_method, public_key) \
+             VALUES (?, ?, 'admin', ?)",
+        )
+        .bind(id.to_string())
+        .bind(format!("u{key}"))
+        .bind([key; 32].as_slice())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn seed_genesis(pool: &SqlitePool, key: u8, genesis_at: i64) {
+        sqlx::query(
+            "INSERT INTO user_genesis \
+                (user_key, genesis_at, birth_instance_key, attestation_sig) \
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind([key; 32].as_slice())
+        .bind(genesis_at)
+        .bind([0xEEu8; 32].as_slice())
+        .bind(vec![0u8; 64])
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    fn cap_for(f: &ReverseFrontier, key: u8) -> &AdmissionCap {
+        &f.caps.iter().find(|c| c.key == [key; 32]).unwrap().cap
+    }
+
+    #[tokio::test]
+    async fn cap_sheds_younger_truster_and_prunes_its_subtree() {
+        let pool = fresh_pool().await;
+        // Both A(1) and B(2) trust root R(9); A is the older account.
+        // C(3) trusts A, D(4) trusts B — the next hop behind each.
+        put_edge(
+            &pool,
+            &edge_at(1, 9, TrustStance::Trust, 100, None),
+            0x01,
+            0,
+        )
+        .await;
+        put_edge(
+            &pool,
+            &edge_at(2, 9, TrustStance::Trust, 100, None),
+            0x02,
+            0,
+        )
+        .await;
+        put_edge(
+            &pool,
+            &edge_at(3, 1, TrustStance::Trust, 100, None),
+            0x03,
+            0,
+        )
+        .await;
+        put_edge(
+            &pool,
+            &edge_at(4, 2, TrustStance::Trust, 100, None),
+            0x04,
+            0,
+        )
+        .await;
+        seed_genesis(&pool, 1, 100).await; // A older
+        seed_genesis(&pool, 2, 200).await; // B younger
+
+        // Cap of 1, no forward trust: pure age ranking. A (older) wins the
+        // single slot; B is shed, so D (only reachable via B) is never seen.
+        let f = reverse_frontier_bfs(&pool, &readers(&[9]), 1, 5, FRONTIER_MAX_DEPTH)
+            .await
+            .unwrap();
+
+        assert_eq!(f.reachable, HashSet::from([[1u8; 32]]), "only A expanded");
+        assert!(!f.reachable.contains(&[2u8; 32]), "B shed by the cap");
+        assert!(!f.reachable.contains(&[4u8; 32]), "D unreachable behind B");
+        // B (younger direct truster) and C (behind A, but A's slot is the
+        // worst and C cannot beat it) are both reached-but-shed.
+        assert_eq!(f.nodes_pruned, 2);
+        assert_eq!(f.edges_marked, 3, "A→R, B→R, C→A marked; D→B never read");
+
+        let cap = cap_for(&f, 9);
+        assert_eq!(cap.len(), 1);
+        assert_eq!(cap.worst_admitted().unwrap().truster, [1u8; 32]);
+    }
+
+    #[tokio::test]
+    async fn forward_trust_admits_over_an_older_tail() {
+        let pool = fresh_pool().await;
+        // A(1) and B(2) both trust R(9). R forward-trusts A strongly; B is
+        // an older account R does not trust back.
+        let a_id = Uuid::new_v4();
+        put_edge(
+            &pool,
+            &edge_at(1, 9, TrustStance::Trust, 100, None),
+            0x01,
+            0,
+        )
+        .await;
+        put_edge(
+            &pool,
+            &edge_at(2, 9, TrustStance::Trust, 100, None),
+            0x02,
+            0,
+        )
+        .await;
+        seed_user_with_id(&pool, 1, a_id).await; // A is a known local user
+        seed_genesis(&pool, 2, 100).await; // B is ancient, but untrusted
+
+        let reader = reader_scored(9, &[(a_id, 0.9)]);
+        let f = reverse_frontier_bfs(
+            &pool,
+            std::slice::from_ref(&reader),
+            1,
+            5,
+            FRONTIER_MAX_DEPTH,
+        )
+        .await
+        .unwrap();
+
+        // Forward score 0.9 beats B's attested age at score 0.
+        assert!(f.reachable.contains(&[1u8; 32]));
+        assert!(!f.reachable.contains(&[2u8; 32]), "older tail shed");
+        assert_eq!(f.nodes_pruned, 1);
+        assert_eq!(f.locals_skipped, 1, "A is local — admitted but not stubbed");
+        let worst = cap_for(&f, 9).worst_admitted().unwrap();
+        assert_eq!(worst.truster, [1u8; 32]);
+        assert_eq!(worst.forward_score, 0.9);
+    }
+
+    #[tokio::test]
+    async fn caps_are_independent_per_reader() {
+        let pool = fresh_pool().await;
+        // X(1) trusts both roots R1(9) and R2(8); Y(2) trusts only R1.
+        // R1 forward-trusts X; R2 trusts no one. Y is an older account.
+        let x_id = Uuid::new_v4();
+        put_edge(
+            &pool,
+            &edge_at(1, 9, TrustStance::Trust, 100, None),
+            0x01,
+            0,
+        )
+        .await;
+        put_edge(
+            &pool,
+            &edge_at(1, 8, TrustStance::Trust, 100, None),
+            0x02,
+            0,
+        )
+        .await;
+        put_edge(
+            &pool,
+            &edge_at(2, 9, TrustStance::Trust, 100, None),
+            0x03,
+            0,
+        )
+        .await;
+        seed_user_with_id(&pool, 1, x_id).await;
+        seed_genesis(&pool, 2, 100).await; // Y older
+
+        let r1 = reader_scored(9, &[(x_id, 0.9)]);
+        let r2 = reader_scored(8, &[]);
+        let f = reverse_frontier_bfs(&pool, &[r1, r2], 1, 5, FRONTIER_MAX_DEPTH)
+            .await
+            .unwrap();
+
+        // R1 keeps X on forward trust; R2 (no forward trust) ranks by age,
+        // so Y's attested age displaces X from R2's single slot.
+        assert_eq!(cap_for(&f, 9).worst_admitted().unwrap().truster, [1u8; 32]);
+        assert_eq!(cap_for(&f, 8).worst_admitted().unwrap().truster, [2u8; 32]);
+        // Both X and Y were admitted by at least one reader, so both expand.
+        assert!(f.reachable.contains(&[1u8; 32]));
+        assert!(f.reachable.contains(&[2u8; 32]));
     }
 }
