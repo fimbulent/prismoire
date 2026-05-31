@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM frontier_users WHERE generation < ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "ed3af921c86236dd34e8e01e5361feea52a8aad27284cad1d596b962d63abe71"
+}

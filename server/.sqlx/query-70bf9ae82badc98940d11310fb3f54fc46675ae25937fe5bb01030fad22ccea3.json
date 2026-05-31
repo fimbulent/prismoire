@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM frontier_edges WHERE generation < ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "70bf9ae82badc98940d11310fb3f54fc46675ae25937fe5bb01030fad22ccea3"
+}

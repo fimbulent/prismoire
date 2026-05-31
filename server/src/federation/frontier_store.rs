@@ -239,6 +239,96 @@ pub async fn mark_frontier_edge_live(
 }
 
 // ---------------------------------------------------------------------------
+// Generational counter + sweep (§8.12) — the GC window machinery
+// ---------------------------------------------------------------------------
+
+/// Generation window for the §8.12 mark-sweep: how many rebuilds a row may
+/// go untouched before it is swept. A `frontier_edges` / `frontier_users`
+/// row stamped at generation `g` survives until the current generation
+/// reaches `g + K + 1` (the sweep deletes `generation < current - K`).
+///
+/// `K = 3` means a row missed by three consecutive rebuilds — three passes
+/// in which no local reader's cap reached it — is reaped on the fourth.
+/// The slack absorbs transient unreachability (a single rebuild racing an
+/// in-flight backfill, or a reader briefly offline) without thrashing the
+/// store: evidence is kept a few generations past its last sighting so a
+/// re-appearing path does not have to re-fetch it.
+pub const FRONTIER_GC_K: i64 = 3;
+
+/// Read the current rebuild generation (§8.12) from the singleton
+/// `frontier_generation` row. The row is seeded at migration time, so this
+/// always finds it; a missing row is a corrupted DB and surfaces as the
+/// `RowNotFound` error rather than being papered over with a default.
+pub async fn current_generation(db: &SqlitePool) -> Result<i64, sqlx::Error> {
+    let row = sqlx::query!("SELECT generation FROM frontier_generation WHERE id = 1")
+        .fetch_one(db)
+        .await?;
+    Ok(row.generation)
+}
+
+/// Advance the rebuild generation by one (§8.12) and return the new value.
+/// Called once at the start of each reverse-frontier rebuild, immediately
+/// before the mark phase, so every edge/stub the rebuild touches is stamped
+/// with this fresh generation and the sweep's `current - K` watermark moves
+/// forward in lockstep. Monotonic and durable (see the migration): it never
+/// resets across restarts.
+pub async fn advance_generation(db: &SqlitePool) -> Result<i64, sqlx::Error> {
+    let row = sqlx::query!(
+        "UPDATE frontier_generation \
+         SET generation = generation + 1, \
+             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+         WHERE id = 1 \
+         RETURNING generation"
+    )
+    .fetch_one(db)
+    .await?;
+    Ok(row.generation)
+}
+
+/// Tally of rows reaped by one §8.12 sweep, split by store so operators can
+/// see whether edges or stubs dominate the eviction.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SweepOutcome {
+    /// `frontier_edges` rows deleted (stamp fell more than `K` behind).
+    pub edges_swept: u64,
+    /// `frontier_users` stub rows deleted (same window).
+    pub stubs_swept: u64,
+}
+
+/// Sweep the reverse frontier (§8.12): delete every `frontier_edges` and
+/// `frontier_users` row whose `generation` has fallen more than `K` behind
+/// `current` — i.e. rows untouched by the last `K` rebuilds, presumed no
+/// longer reachable from any local reader's cap.
+///
+/// `current` is the generation the just-finished rebuild stamped (the value
+/// [`advance_generation`] returned); pass [`FRONTIER_GC_K`] for `k` unless a
+/// caller overrides the window. The watermark is `current - k`: a row at
+/// exactly `current - k` is *kept* (it survived the K-th rebuild), one
+/// below is reaped. The two deletes are independent — an edge and the stub
+/// of the node it points at age on their own stamps — so a node can lose
+/// its stub while a still-fresh edge keeps it, or vice versa; the next
+/// rebuild reconciles.
+pub async fn sweep_frontier(
+    db: &SqlitePool,
+    current: i64,
+    k: i64,
+) -> Result<SweepOutcome, sqlx::Error> {
+    let watermark = current - k;
+    let edges = sqlx::query!("DELETE FROM frontier_edges WHERE generation < ?", watermark)
+        .execute(db)
+        .await?
+        .rows_affected();
+    let stubs = sqlx::query!("DELETE FROM frontier_users WHERE generation < ?", watermark)
+        .execute(db)
+        .await?
+        .rows_affected();
+    Ok(SweepOutcome {
+        edges_swept: edges,
+        stubs_swept: stubs,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Multi-source reverse BFS (§8.9) + frontier_users materialization (§8.11)
 // ---------------------------------------------------------------------------
 
@@ -447,6 +537,59 @@ pub async fn reverse_frontier_bfs(
         })
         .collect();
     Ok(frontier)
+}
+
+/// One full §8.12 mark-sweep rebuild: the generation that drove it, the
+/// BFS outcome (mark phase + cap admissions), and the sweep tally.
+#[derive(Debug)]
+pub struct RebuildOutcome {
+    /// The generation [`rebuild_reverse_frontier`] advanced to and stamped
+    /// on everything the mark phase touched.
+    pub generation: i64,
+    /// The §8.9 reverse-BFS result — reachable set, materialization counts,
+    /// per-reader caps (Slice E reads these for age ceilings).
+    pub frontier: ReverseFrontier,
+    /// Rows reaped after the mark phase (§8.12 sweep).
+    pub sweep: SweepOutcome,
+}
+
+/// Drive one complete generational mark-sweep rebuild of the reverse
+/// frontier (§8.12) — the cadence entry point the rebuild loop calls.
+///
+/// Three steps, strictly ordered:
+///
+/// 1. **Advance** the durable generation counter ([`advance_generation`]).
+/// 2. **Mark** by running the multi-source reverse BFS
+///    ([`reverse_frontier_bfs`]) under that generation — every edge/stub it
+///    touches is restamped fresh.
+/// 3. **Sweep** ([`sweep_frontier`]) every row left more than `K`
+///    generations behind.
+///
+/// Order matters: the advance must precede the mark so the watermark and
+/// the fresh stamps move together, and the sweep must follow the mark so a
+/// row re-marked this pass is never a sweep candidate. The three steps are
+/// deliberately *not* one transaction — a crash between mark and sweep just
+/// leaves stale rows for the next rebuild to reap, which the K-generation
+/// slack already tolerates, and avoids holding a write lock across the whole
+/// BFS (consistent with the BFS's own per-write idempotent approach).
+///
+/// `readers`, `cap_n`, and `max_depth` are forwarded to the BFS; pass
+/// [`FRONTIER_GC_K`] for `k` unless an operator overrides the GC window.
+pub async fn rebuild_reverse_frontier(
+    db: &SqlitePool,
+    readers: &[FrontierReader],
+    cap_n: usize,
+    max_depth: u32,
+    k: i64,
+) -> Result<RebuildOutcome, sqlx::Error> {
+    let generation = advance_generation(db).await?;
+    let frontier = reverse_frontier_bfs(db, readers, cap_n, generation, max_depth).await?;
+    let sweep = sweep_frontier(db, generation, k).await?;
+    Ok(RebuildOutcome {
+        generation,
+        frontier,
+        sweep,
+    })
 }
 
 /// Collapse a node's inbound edges to one active edge per source: the
@@ -1595,5 +1738,145 @@ mod tests {
         // Both X and Y were admitted by at least one reader, so both expand.
         assert!(f.reachable.contains(&[1u8; 32]));
         assert!(f.reachable.contains(&[2u8; 32]));
+    }
+
+    // -- §8.12 generational mark-sweep GC ---------------------------------
+
+    /// Count surviving `frontier_edges` rows regardless of target.
+    async fn edge_count(pool: &SqlitePool) -> i64 {
+        sqlx::query!("SELECT COUNT(*) AS \"n!: i64\" FROM frontier_edges")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+            .n
+    }
+
+    /// Count surviving `frontier_users` stub rows.
+    async fn stub_count(pool: &SqlitePool) -> i64 {
+        sqlx::query!("SELECT COUNT(*) AS \"n!: i64\" FROM frontier_users")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+            .n
+    }
+
+    #[tokio::test]
+    async fn generation_seeds_at_zero_and_advances_monotonically() {
+        let pool = fresh_pool().await;
+        assert_eq!(current_generation(&pool).await.unwrap(), 0, "seeded at 0");
+        assert_eq!(advance_generation(&pool).await.unwrap(), 1);
+        assert_eq!(advance_generation(&pool).await.unwrap(), 2);
+        assert_eq!(
+            current_generation(&pool).await.unwrap(),
+            2,
+            "reads back the latest advance"
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_evicts_rows_more_than_k_behind_and_keeps_the_watermark() {
+        let pool = fresh_pool().await;
+        // Edges stamped at generations 0..=5, one per (source,target) pair.
+        for g in 0..=5i64 {
+            let src = (g + 1) as u8;
+            put_edge(
+                &pool,
+                &edge_at(src, 9, TrustStance::Trust, 100, None),
+                src,
+                g,
+            )
+            .await;
+        }
+        assert_eq!(edge_count(&pool).await, 6);
+
+        // current = 5, K = 3 → watermark = 2; rows with generation < 2
+        // (i.e. 0 and 1) are reaped; generation 2 sits exactly on the
+        // watermark and is kept.
+        let outcome = sweep_frontier(&pool, 5, 3).await.unwrap();
+        assert_eq!(outcome.edges_swept, 2, "generations 0 and 1 reaped");
+        assert_eq!(outcome.stubs_swept, 0);
+        assert_eq!(edge_count(&pool).await, 4, "generations 2..=5 survive");
+
+        // The exact-watermark row (generation 2) is still present.
+        let survivor = frontier_edges_by_target(&pool, &[9u8; 32]).await.unwrap();
+        assert!(
+            survivor.iter().any(|e| e.generation == 2),
+            "row at current-K is kept, not swept"
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_evicts_stale_stubs_on_the_same_window() {
+        let pool = fresh_pool().await;
+        upsert_frontier_user_stub(&pool, &[1u8; 32], &[7u8; 32], "old.example", 0)
+            .await
+            .unwrap();
+        upsert_frontier_user_stub(&pool, &[2u8; 32], &[7u8; 32], "fresh.example", 4)
+            .await
+            .unwrap();
+        assert_eq!(stub_count(&pool).await, 2);
+
+        // current = 4, K = 3 → watermark = 1; the generation-0 stub is
+        // reaped, the generation-4 stub survives.
+        let outcome = sweep_frontier(&pool, 4, FRONTIER_GC_K).await.unwrap();
+        assert_eq!(outcome.stubs_swept, 1);
+        assert_eq!(stub_count(&pool).await, 1);
+    }
+
+    #[tokio::test]
+    async fn rebuild_advances_marks_live_rows_and_sweeps_stale_ones() {
+        let pool = fresh_pool().await;
+        // A reachable edge A(1)→R(9) left from an earlier era, plus a stale
+        // orphan edge B(2)→C(3) no reader reaches. Both start at generation
+        // 0; bump the counter to 4 so the orphan is already K-stale.
+        put_edge(
+            &pool,
+            &edge_at(1, 9, TrustStance::Trust, 100, None),
+            0x01,
+            0,
+        )
+        .await;
+        put_edge(
+            &pool,
+            &edge_at(2, 3, TrustStance::Trust, 100, None),
+            0x02,
+            0,
+        )
+        .await;
+        for _ in 0..4 {
+            advance_generation(&pool).await.unwrap();
+        }
+
+        // Rebuild from root R(9): advances to generation 5, marks A→R live
+        // at 5, then sweeps with K=3 (watermark 2) — the untouched orphan
+        // at generation 0 falls away.
+        let outcome = rebuild_reverse_frontier(
+            &pool,
+            &readers(&[9]),
+            BIG_CAP,
+            FRONTIER_MAX_DEPTH,
+            FRONTIER_GC_K,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.generation, 5, "advanced once from 4");
+        assert!(
+            outcome.frontier.reachable.contains(&[1u8; 32]),
+            "A expanded"
+        );
+        assert_eq!(outcome.sweep.edges_swept, 1, "stale orphan B→C reaped");
+
+        // A→R was re-marked at the new generation; B→C is gone.
+        let live = frontier_edges_by_target(&pool, &[9u8; 32]).await.unwrap();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].generation, 5, "reachable edge restamped fresh");
+        assert!(
+            frontier_edges_by_target(&pool, &[3u8; 32])
+                .await
+                .unwrap()
+                .is_empty(),
+            "orphan target has no surviving inbound edge"
+        );
     }
 }

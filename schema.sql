@@ -1190,3 +1190,21 @@ CREATE INDEX idx_frontier_edges_pair
     ON frontier_edges(source_pubkey, target_pubkey);
 CREATE INDEX idx_frontier_edges_generation
     ON frontier_edges(generation);
+CREATE TABLE frontier_generation (
+    -- Single-row guard: the table holds exactly one row, id = 1. Any
+    -- second insert violates the CHECK + PK, keeping the counter global.
+    id INTEGER PRIMARY KEY NOT NULL
+            CHECK (id = 1),
+
+    -- The current rebuild generation. Monotonically increasing; advanced
+    -- once per reverse-frontier rebuild immediately before the mark
+    -- phase, so every edge/stub the rebuild touches is stamped with this
+    -- value. The sweep evicts rows whose stamp is < this - K.
+    generation INTEGER NOT NULL DEFAULT 0
+            CHECK (generation >= 0),
+
+    -- ISO-8601 timestamp of the most recent advance. Operator-visible
+    -- only; the GC window keys off `generation`, not this column.
+    updated_at TEXT NOT NULL
+            DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
