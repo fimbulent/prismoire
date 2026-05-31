@@ -1671,11 +1671,18 @@ pub async fn set_trust_edge(
     // enqueue completes before the response returns — the enqueue
     // itself is `Mutex` + `Notify`, never blocks on egress.
     let wire = crate::federation::envelope::encode_signed_object(&payload, &signature);
-    crate::federation::forwarder::forward_signed_object(
+    // `resolve_user_by_pubkey_hex` matched `target` on a 32-byte key, so
+    // `public_key` is exactly 32 bytes — the conversion cannot fail.
+    let to_key: [u8; 32] = target
+        .public_key
+        .as_slice()
+        .try_into()
+        .expect("resolved target public_key is 32 bytes");
+    crate::federation::forwarder::forward_trust_edge(
         state.clone(),
         canonical_hash,
-        crate::federation::routing::ForwardingClass::TrustEdge,
-        signed.public_key.to_vec(),
+        signed.public_key,
+        to_key,
         wire,
         None,
     )
@@ -1842,11 +1849,22 @@ pub async fn delete_trust_edge(
     // are §9.1 erasure-authority objects so peers MUST observe them
     // alongside the active trust-edges they erase.
     let wire = crate::federation::envelope::encode_signed_object(&payload, &signature);
-    crate::federation::forwarder::forward_signed_object(
+    // Shed the tombstone on the same §8.10 predicate as the active edge it
+    // erases (and as the relay path in `edges.rs`): a peer shed the edge
+    // never held it, so it needs no tombstone; a peer that holds the edge is
+    // admitted for both, since the predicate is deterministic on
+    // `(peer, root, source)`. `target.public_key` is 32 bytes (matched by
+    // `resolve_user_by_pubkey_hex`).
+    let to_key: [u8; 32] = target
+        .public_key
+        .as_slice()
+        .try_into()
+        .expect("resolved target public_key is 32 bytes");
+    crate::federation::forwarder::forward_trust_edge(
         state.clone(),
         canonical_hash,
-        crate::federation::routing::ForwardingClass::TrustEdge,
-        signed.public_key.to_vec(),
+        signed.public_key,
+        to_key,
         wire,
         None,
     )

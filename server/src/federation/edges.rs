@@ -85,14 +85,13 @@ use sha2::{Digest, Sha256};
 use crate::AppState;
 use crate::federation::envelope::decode_signed_object;
 use crate::federation::errors::{bad_request, internal_error};
-use crate::federation::forwarder::forward_signed_object;
+use crate::federation::forwarder::forward_trust_edge;
 use crate::federation::identity::CBOR_CONTENT_TYPE;
 use crate::federation::middleware::VerifiedBody;
 use crate::federation::remote_users::{
     TrustEdgeProjection, drain_pending_orphans_after, enqueue_pending_trust_edge,
     try_project_trust_edge,
 };
-use crate::federation::routing::ForwardingClass;
 use crate::signed::{self, FedEnvelope, SignedPayload};
 use crate::signing::store_signed_object;
 
@@ -687,11 +686,11 @@ pub(crate) async fn apply_one_edge_inner(
     // and the signed_objects dedup we just hit above is the local
     // equivalent.
     if matches!(status, EdgeStatus::Applied) {
-        forward_signed_object(
+        forward_trust_edge(
             state.clone(),
             canonical_hash,
-            ForwardingClass::TrustEdge,
-            trust_edge.from_key.to_vec(),
+            trust_edge.from_key,
+            trust_edge.to_key,
             wire_bytes.to_vec(),
             Some(arrived_from),
         )

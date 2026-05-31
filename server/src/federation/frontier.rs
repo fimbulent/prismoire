@@ -47,6 +47,7 @@ use crate::AppState;
 use crate::federation::bloom::{self, BloomFilter};
 use crate::federation::envelope::{self, AUTH_HEADER};
 use crate::federation::errors::{bad_request, conflict, internal_error, not_found, unauthorized};
+use crate::federation::frontier_store::{self, FrontierReader};
 use crate::federation::identity::CBOR_CONTENT_TYPE;
 use crate::federation::instance_key::InstanceKey;
 use crate::federation::middleware::VerifiedBody;
@@ -901,6 +902,49 @@ pub async fn compute_local_frontier(
         visible_keys: visible_keys.into_iter().collect(),
         age_ceilings,
     })
+}
+
+/// Materialise one [`FrontierReader`] per local active user for the
+/// §8.9/§8.12 reverse-frontier rebuild ([`rebuild_reverse_frontier`]).
+///
+/// Each reader carries its Ed25519 public key (a reverse-BFS root) and
+/// its forward trust scores (author UUID → score), read from the
+/// in-memory [`TrustGraph`]. Forward trust is local-only and never
+/// crosses the wire, so the caller materialises it here and hands it in
+/// (`forward_scores`'s own `MINIMUM_TRUST_THRESHOLD` prune applies). A
+/// user without a 32-byte `public_key` is skipped: peers cannot route
+/// against them, so they cannot be a reverse root.
+async fn build_frontier_readers(
+    db: &SqlitePool,
+    trust_graph: &TrustGraph,
+) -> Result<Vec<FrontierReader>, sqlx::Error> {
+    let rows = sqlx::query!(
+        "SELECT id, public_key FROM users \
+         WHERE home_instance IS NULL AND status = 'active' \
+           AND public_key IS NOT NULL AND length(public_key) = 32",
+    )
+    .fetch_all(db)
+    .await?;
+
+    let mut readers = Vec::with_capacity(rows.len());
+    for row in rows {
+        let Ok(uuid) = uuid::Uuid::parse_str(&row.id) else {
+            continue;
+        };
+        let Ok(key) = <[u8; 32]>::try_from(row.public_key.as_slice()) else {
+            continue;
+        };
+        let forward_scores = trust_graph
+            .forward_scores(uuid)
+            .into_iter()
+            .map(|s| (s.target_user, s.score))
+            .collect();
+        readers.push(FrontierReader {
+            key,
+            forward_scores,
+        });
+    }
+    Ok(readers)
 }
 
 /// Load this instance's published §8.10 celebrity-cleave set from
@@ -1821,6 +1865,57 @@ pub async fn operator_announce_frontier(
 pub async fn frontier_fanout_loop(state: Arc<AppState>, frontier_dirty: Arc<tokio::sync::Notify>) {
     loop {
         frontier_dirty.notified().await;
+
+        // §8.9/§8.12 reverse-frontier rebuild. This loop is woken only by
+        // `frontier_dirty`, fired once per coalesced trust-graph swap, so
+        // the reverse rebuild inherits the forward rebuild's debounce — it
+        // can run no more often than the (already minutes-scale on large
+        // instances) graph rebuild, and `Notify`'s single permit collapses
+        // any wakes that land mid-rebuild. That is the §8.12 "same cadence
+        // as re-announce" SHOULD, for free. Runs *before* the forward
+        // refresh so any age ceilings it publishes to
+        // `local_frontier_age_ceilings` are picked up by `compute_local_frontier`
+        // below and ride out on this cycle's announce. Continue-on-error: a
+        // reverse failure must not block the forward re-announce — stale
+        // ceilings are absorbed by the K-generation grace window and the
+        // §8.10 opportunistic source-side backstop.
+        {
+            let trust_graph = state
+                .trust_graph
+                .read()
+                .map(|g| Arc::clone(&g))
+                .unwrap_or_else(|poisoned| Arc::clone(&poisoned.into_inner()));
+            match build_frontier_readers(&state.db, &trust_graph).await {
+                Ok(readers) => {
+                    match frontier_store::rebuild_reverse_frontier(
+                        &state.db,
+                        &readers,
+                        frontier_store::DEFAULT_FRONTIER_CAP,
+                        frontier_store::FRONTIER_MAX_DEPTH,
+                        frontier_store::FRONTIER_GC_K,
+                    )
+                    .await
+                    {
+                        Ok(outcome) => tracing::debug!(
+                            generation = outcome.generation,
+                            edges_swept = outcome.sweep.edges_swept,
+                            stubs_swept = outcome.sweep.stubs_swept,
+                            ceilings_published = outcome.ceilings.published,
+                            ceilings_cleared = outcome.ceilings.cleared,
+                            "frontier fanout: reverse frontier rebuilt",
+                        ),
+                        Err(e) => tracing::warn!(
+                            error = %e,
+                            "frontier fanout: reverse frontier rebuild failed",
+                        ),
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "frontier fanout: building reverse-frontier readers failed",
+                ),
+            }
+        }
 
         let refresh = match refresh_local_frontier_detailed(&state).await {
             Ok(r) => r,

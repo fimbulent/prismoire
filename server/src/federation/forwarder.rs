@@ -65,6 +65,7 @@ use std::time::{Duration, Instant};
 use quick_cache::sync::Cache;
 
 use crate::AppState;
+use crate::federation::frontier_store;
 use crate::federation::routing::{ForwardingClass, peers_interested_in};
 
 /// §7.5 dedup-LRU time bound (`T_propagate_max`, default 1h).
@@ -307,10 +308,44 @@ pub async fn forward_signed_object(
         &routing_key,
         wire_bytes,
         arrived_from,
+        None,
     )
     .await
     {
         tracing::warn!(error = %e, "forwarder fanout failed");
+    }
+}
+
+/// Trust-edge fanout entry that honours §8.10 source-side shedding.
+///
+/// A trust edge `from_key → to_key` routes by its *source* (`from_key`,
+/// the §7.4 trust-edge routing key) but the §8.10 cleave is keyed on the
+/// *root* — the edge target `to_key`. So a peer advertising an age
+/// ceiling for `to_key` does not want this edge when the source is newer
+/// than the cutoff. This entry passes `ceiling = Some((to_key, from_key))`
+/// so [`forward_inner`] drops those peers before enqueue; every other
+/// class uses [`forward_signed_object`] and skips the check. Only
+/// [`crate::federation::edges`]'s apply path calls this.
+pub async fn forward_trust_edge(
+    state: Arc<AppState>,
+    canonical_hash: [u8; 32],
+    from_key: [u8; 32],
+    to_key: [u8; 32],
+    wire_bytes: Vec<u8>,
+    arrived_from: Option<[u8; 32]>,
+) {
+    if let Err(e) = forward_inner(
+        &state,
+        canonical_hash,
+        ForwardingClass::TrustEdge,
+        &from_key,
+        wire_bytes,
+        arrived_from,
+        Some((to_key, from_key)),
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "trust-edge forwarder fanout failed");
     }
 }
 
@@ -325,10 +360,50 @@ async fn forward_inner(
     routing_key: &[u8],
     wire_bytes: Vec<u8>,
     arrived_from: Option<[u8; 32]>,
+    ceiling: Option<([u8; 32], [u8; 32])>,
 ) -> Result<(), sqlx::Error> {
-    let candidates = peers_interested_in(state, class, routing_key).await?;
+    let mut candidates = peers_interested_in(state, class, routing_key).await?;
     if candidates.is_empty() {
         return Ok(());
+    }
+
+    // §8.10 source-side shedding. For a trust edge `source → root`
+    // (`ceiling = Some((root, source))`), a peer that advertises an age
+    // ceiling for `root` and holds an attested `genesis_at(source)` strictly
+    // newer than the cutoff would shed this edge on receipt — so drop it here
+    // and save the futile round-trip. Fail-open (§8.10): an absent ceiling,
+    // an unknown source age, or a DB fault all forward. This `.await`s, so it
+    // MUST run before the bitset lock below (a std `Mutex` that cannot be held
+    // across an await). Only the trust-edge entry supplies a `ceiling`; every
+    // other class passes `None` and skips this loop entirely.
+    if let Some((root, source)) = ceiling {
+        let mut admitted = Vec::with_capacity(candidates.len());
+        for peer in candidates {
+            let keep = match frontier_store::peer_ceiling_admits_source(
+                &state.db,
+                &peer.instance_pubkey,
+                &root,
+                &source,
+            )
+            .await
+            {
+                Ok(admit) => admit,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "forwarder: §8.10 ceiling check failed; forwarding (fail-open)",
+                    );
+                    true
+                }
+            };
+            if keep {
+                admitted.push(peer);
+            }
+        }
+        candidates = admitted;
+        if candidates.is_empty() {
+            return Ok(());
+        }
     }
 
     let entry = state.forwarding_lru.get_or_init_entry(&canonical_hash);
