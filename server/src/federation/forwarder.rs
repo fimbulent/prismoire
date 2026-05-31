@@ -318,14 +318,17 @@ pub async fn forward_signed_object(
 
 /// Trust-edge fanout entry that honours §8.10 source-side shedding.
 ///
-/// A trust edge `from_key → to_key` routes by its *source* (`from_key`,
-/// the §7.4 trust-edge routing key) but the §8.10 cleave is keyed on the
-/// *root* — the edge target `to_key`. So a peer advertising an age
-/// ceiling for `to_key` does not want this edge when the source is newer
-/// than the cutoff. This entry passes `ceiling = Some((to_key, from_key))`
-/// so [`forward_inner`] drops those peers before enqueue; every other
-/// class uses [`forward_signed_object`] and skips the check. Only
-/// [`crate::federation::edges`]'s apply path calls this.
+/// A trust edge `from_key → to_key` routes by its *target* (`to_key`, the
+/// §7.4 trust-edge routing key — the trustee the edge points at, tested
+/// against the receiver's `expansion_filter`, NOT the signer). The §8.10
+/// cleave is keyed on the same *root* `to_key`, while the age it gates is
+/// the *source* `from_key`'s genesis: a peer advertising an age ceiling
+/// for `to_key` does not want this edge when the source is newer than the
+/// cutoff. This entry passes `ceiling = Some((to_key, from_key))` so
+/// [`forward_inner`] drops those peers before enqueue; every other class
+/// uses [`forward_signed_object`] and skips the check. Both
+/// [`crate::federation::edges`]'s apply path and [`crate::users`]'s
+/// origination path call this.
 pub async fn forward_trust_edge(
     state: Arc<AppState>,
     canonical_hash: [u8; 32],
@@ -338,7 +341,7 @@ pub async fn forward_trust_edge(
         &state,
         canonical_hash,
         ForwardingClass::TrustEdge,
-        &from_key,
+        &to_key,
         wire_bytes,
         arrived_from,
         Some((to_key, from_key)),

@@ -759,8 +759,8 @@ where
 
 /// Done-when (Task #16): A pushes a signed trust-edge to B, B applies
 /// it locally, and the §7.5 forwarder relays it on to C because C's
-/// `expansion_filter` says C is interested in edges signed by
-/// alice. The arrival path on C is the same `/federation/v1/edges`
+/// `expansion_filter` says C is interested in edges targeting
+/// bob. The arrival path on C is the same `/federation/v1/edges`
 /// handler the originator push uses — the forwarder is just another
 /// active peer to C — so we assert convergence by polling C's
 /// `trust_edges` projection.
@@ -786,9 +786,10 @@ async fn forwarder_relays_applied_edge_to_interested_peer() {
     insert_user_with_pubkey(&c.state.db, "user-bob", "bob", &bob_pub).await;
 
     // C announces a frontier to B whose `expansion_filter` contains
-    // alice's pubkey. This makes B's `peers_interested_in` return C
-    // for any `ForwardingClass::TrustEdge` keyed on alice.
-    let announce_body = announce_with_edge_origin_keys(&[&alice_pub]).encode();
+    // bob's pubkey (the edge target). This makes B's
+    // `peers_interested_in` return C for any `ForwardingClass::TrustEdge`
+    // keyed on bob, the §7.4 trust-edge routing key.
+    let announce_body = announce_with_edge_origin_keys(&[&bob_pub]).encode();
     let (status, _) = send_envelope_signed(
         &harness,
         "c",
