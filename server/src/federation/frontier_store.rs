@@ -957,9 +957,9 @@ pub fn ceiling_admits(cutoff: i64, source_genesis_at: Option<i64>) -> bool {
 ///
 /// Returns `true` (forward) when the peer advertises **no** ceiling for the
 /// root, or when [`ceiling_admits`] passes. Returns `false` (shed) only on a
-/// positive younger-than-cutoff match. This is the un-wired lookup the
-/// frontier-fanout forwarder will consult before relaying a trust-edge; it
-/// composes the pure [`ceiling_admits`] predicate with the two store reads
+/// positive younger-than-cutoff match. The forwarder's §8.10 source-side
+/// pre-filter (`forward_inner`) consults this before relaying a trust-edge;
+/// it composes the pure [`ceiling_admits`] predicate with the two store reads
 /// (`peer_frontier_age_ceilings` and `user_genesis`).
 pub async fn peer_ceiling_admits_source(
     db: &SqlitePool,
