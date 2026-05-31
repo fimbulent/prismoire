@@ -1125,3 +1125,68 @@ CREATE TABLE local_frontier_age_ceilings (
     updated_at TEXT NOT NULL
             DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
+CREATE TABLE frontier_edges (
+    -- Canonical hash of the signed `trust-edge` object
+    -- (signed-payload-format.md §4.3). The dedup key: a redelivered
+    -- edge collides here and is a no-op (§9 idempotency). Raw 32 bytes.
+    canonical_hash BLOB PRIMARY KEY NOT NULL
+            CHECK (length(canonical_hash) = 32),
+
+    -- Ed25519 public key of the truster (raw 32 bytes). Becomes a new
+    -- frontier node when its target is expanded.
+    source_pubkey BLOB NOT NULL
+            CHECK (length(source_pubkey) = 32),
+
+    -- Ed25519 public key of the trustee (raw 32 bytes). The reverse BFS
+    -- expands "who trusts this key" by reading all rows with this
+    -- target; this is the traversal key.
+    target_pubkey BLOB NOT NULL
+            CHECK (length(target_pubkey) = 32),
+
+    -- Canonical hash of the previous signed row for the same
+    -- `(source, target)` pair, linking the per-pair chain (§9 chain
+    -- continuity). NULL for the genesis edge of a pair. A non-NULL value
+    -- whose predecessor is absent indicates a gap to backfill; that
+    -- buffering happens in `pending_trust_edges`, not here.
+    prior_edge_hash BLOB
+            CHECK (prior_edge_hash IS NULL OR length(prior_edge_hash) = 32),
+
+    -- Resolved stance carried by this signed object, denormalised out
+    -- of `payload` so chain resolution and the active-graph derivation
+    -- do not re-parse the CBOR. CHECK mirrors the local edge stances.
+    stance TEXT NOT NULL
+            CHECK (stance IN ('trust', 'distrust', 'neutral')),
+
+    -- Unix milliseconds UTC from the signed object's `created_at`. Used
+    -- to order the per-pair chain when resolving the active stance.
+    created_at INTEGER NOT NULL,
+
+    -- The full signed `trust-edge` WireFormat object (signed-payload-
+    -- format.md §3), retained for re-forwarding (§7.5) and backfill
+    -- responses (§9 chain continuity) without reconstructing the bytes.
+    payload BLOB NOT NULL,
+
+    -- Ed25519 signature over the payload (raw 64 bytes). Retained so a
+    -- re-forwarded edge carries its original author signature.
+    signature BLOB NOT NULL
+            CHECK (length(signature) = 64),
+
+    -- §8.12 generational GC tag. Restamped with the current rebuild
+    -- generation whenever the reverse BFS marks this edge live. The
+    -- sweep deletes edges whose `generation` is more than K generations
+    -- behind the current one (default K=3).
+    generation INTEGER NOT NULL DEFAULT 0
+            CHECK (generation >= 0),
+
+    -- ISO-8601 timestamp of the most recent write touching this row
+    -- (initial insert or generation restamp). Operator-visible only;
+    -- the sweep keys off `generation`, not this column.
+    updated_at TEXT NOT NULL
+            DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX idx_frontier_edges_target
+    ON frontier_edges(target_pubkey);
+CREATE INDEX idx_frontier_edges_pair
+    ON frontier_edges(source_pubkey, target_pubkey);
+CREATE INDEX idx_frontier_edges_generation
+    ON frontier_edges(generation);

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT payload AS \"payload!: Vec<u8>\", signature AS \"signature!: Vec<u8>\" FROM frontier_edges WHERE canonical_hash = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "payload!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "signature!: Vec<u8>",
+        "ordinal": 1,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "0d6a49980785bb3b3a1ffd7cc7e8f88ba7b323c2fb541b019874626f24e5bd78"
+}

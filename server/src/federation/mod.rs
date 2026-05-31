@@ -43,6 +43,7 @@ pub mod envelope;
 pub mod errors;
 pub mod forwarder;
 pub mod frontier;
+pub mod frontier_store;
 pub mod identity;
 pub mod instance_key;
 pub mod middleware;

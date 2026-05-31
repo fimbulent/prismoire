@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO frontier_edges (canonical_hash, source_pubkey, target_pubkey, prior_edge_hash, stance, created_at, payload, signature, generation) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "4d30f8d39b6c8cf934720f306ae794fef76fcccc837da43a5682e17c95f59daa"
+}
