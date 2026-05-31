@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT public_key FROM users WHERE public_key = ? AND home_instance IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "public_key",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "2a8cad3af61fc45803ecbde6ace60ae6cd135df6cddb025fc608f20d17b0403d"
+}

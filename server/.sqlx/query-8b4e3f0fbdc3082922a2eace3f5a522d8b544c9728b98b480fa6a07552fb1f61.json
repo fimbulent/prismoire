@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT u.home_instance AS \"home_instance!: Vec<u8>\", p.instance_domain FROM users u JOIN peers p ON p.instance_pubkey = u.home_instance WHERE u.public_key = ? AND u.home_instance IS NOT NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "home_instance!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "instance_domain",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "8b4e3f0fbdc3082922a2eace3f5a522d8b544c9728b98b480fa6a07552fb1f61"
+}

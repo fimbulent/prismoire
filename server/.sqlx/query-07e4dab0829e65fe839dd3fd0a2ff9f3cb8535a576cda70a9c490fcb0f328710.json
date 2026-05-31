@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT current_home_key AS \"current_home_key!: Vec<u8>\", current_home_domain FROM user_homes WHERE user_key = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "current_home_key!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "current_home_domain",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "07e4dab0829e65fe839dd3fd0a2ff9f3cb8535a576cda70a9c490fcb0f328710"
+}
