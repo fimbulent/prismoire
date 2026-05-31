@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO peer_frontier_age_ceilings (peer_pubkey, root_key, cutoff) VALUES (?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "7953c836449cbf4355bbeae6f81102a26325badaa48cfdbce43c894ef58da14a"
+}

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT root_key AS \"root_key!: Vec<u8>\", cutoff FROM local_frontier_age_ceilings",
+  "describe": {
+    "columns": [
+      {
+        "name": "root_key!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "cutoff",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "23126a9d61b1fc228eb69a8fbe3a92dec6242080540589ca50e84be7426ce28e"
+}

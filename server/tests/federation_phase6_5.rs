@@ -155,6 +155,7 @@ async fn fresh_instance_with_no_local_users_stays_in_filtered() {
         visible_filter: FilterSpec::from_bloom(&fat_filter),
         expansion_filter: empty_filter(),
         mode: Mode::Filtered,
+        age_ceilings: Default::default(),
     }
     .encode();
     let (status, _) = send_envelope_signed(
@@ -202,6 +203,7 @@ async fn announce_with_full_coverage_promotes_outbound_to_all() {
         visible_filter: covering,
         expansion_filter: empty_filter(),
         mode: Mode::Filtered,
+        age_ceilings: Default::default(),
     }
     .encode();
     let (status, _) = send_envelope_signed(
@@ -254,6 +256,7 @@ async fn follow_up_announce_with_no_coverage_demotes_outbound_to_filtered() {
         visible_filter: covering_filter(&a_local_keys),
         expansion_filter: empty_filter(),
         mode: Mode::Filtered,
+        age_ceilings: Default::default(),
     }
     .encode();
     let (status, _) = send_envelope_signed(
@@ -282,6 +285,7 @@ async fn follow_up_announce_with_no_coverage_demotes_outbound_to_filtered() {
         visible_filter: empty_filter(),
         expansion_filter: empty_filter(),
         mode: Mode::Filtered,
+        age_ceilings: Default::default(),
     }
     .encode();
     let (status, _) = send_envelope_signed(

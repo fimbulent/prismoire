@@ -132,6 +132,7 @@ fn announce_with_edge_origin_keys(interested_keys: &[[u8; 32]], version: u64) ->
         visible_filter: FilterSpec::from_bloom(&BloomFilter::all_ones_sentinel()),
         expansion_filter: FilterSpec::from_bloom(&edge),
         mode: Mode::Filtered,
+        age_ceilings: Default::default(),
     }
 }
 

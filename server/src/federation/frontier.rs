@@ -30,7 +30,7 @@
 //! concern that consumes this helper; Phase 4 ships the helper itself
 //! plus the receiving end.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use axum::body::Bytes;
@@ -71,6 +71,60 @@ const DEFAULT_K: u32 = 7;
 /// the field is advertised honestly as 0 until a future phase wires
 /// in the trim lever.
 const NO_TRIMMING: u32 = 0;
+
+// ---------------------------------------------------------------------------
+// AgeCeilings: §8.10 per-root celebrity cleave (sparse, non-Bloom)
+// ---------------------------------------------------------------------------
+
+/// §8.3/§8.4 `AgeCeilings`: a sparse map `root_pubkey -> genesis_at
+/// cutoff (unix ms)`. Only cleaved roots appear; an absent root means
+/// "no ceiling, admit all". An empty map encodes to no wire field at
+/// all (absent == no celebrity cleave). Held as a `BTreeMap` so the
+/// CBOR encoding is deterministic (key-sorted) — the existing frontier
+/// codec does not chase canonical CBOR, but a stable order keeps
+/// round-trip tests and golden bytes reproducible.
+pub type AgeCeilings = BTreeMap<[u8; 32], u64>;
+
+/// Encode an [`AgeCeilings`] map as a CBOR `Value::Map` of
+/// `bstr(32) -> u64`. Caller decides whether to emit it (skip when
+/// empty so the wire field stays absent).
+fn age_ceilings_to_cbor_value(ceilings: &AgeCeilings) -> Value {
+    Value::Map(
+        ceilings
+            .iter()
+            .map(|(root, cutoff)| {
+                (
+                    Value::Bytes(root.to_vec()),
+                    Value::Integer(Integer::from(*cutoff)),
+                )
+            })
+            .collect(),
+    )
+}
+
+/// Decode a CBOR `Value::Map` of `bstr(32) -> u64` into an
+/// [`AgeCeilings`]. Returns `None` (failing the whole decode) on a
+/// non-map value, a root key that is not exactly 32 bytes, or a cutoff
+/// that is not a non-negative integer in `u64` range.
+fn age_ceilings_from_cbor_value(value: Value) -> Option<AgeCeilings> {
+    let entries = match value {
+        Value::Map(m) => m,
+        _ => return None,
+    };
+    let mut out = AgeCeilings::new();
+    for (k, v) in entries {
+        let root: [u8; 32] = match k {
+            Value::Bytes(b) => b.try_into().ok()?,
+            _ => return None,
+        };
+        let cutoff: u64 = match v {
+            Value::Integer(i) => i.try_into().ok()?,
+            _ => return None,
+        };
+        out.insert(root, cutoff);
+    }
+    Some(out)
+}
 
 // ---------------------------------------------------------------------------
 // Wire types: FilterSpec / FrontierAnnounce / FrontierDelta / FrontierSnapshot
@@ -269,11 +323,18 @@ pub struct FrontierAnnounce {
     /// [`Mode::Filtered`] — the conservative §7.2 default for any
     /// peer whose build predates this field.
     pub mode: Mode,
+    /// §8.10 per-root celebrity cleave. Sparse map of `root_pubkey ->
+    /// genesis_at cutoff (unix ms)`; only cleaved roots appear. Empty
+    /// means "no celebrity cleave" and is omitted from the wire
+    /// entirely (absent == no ceiling). `/announce` carries the full
+    /// snapshot: the receiver replaces its stored ceiling set with this
+    /// map verbatim.
+    pub age_ceilings: AgeCeilings,
 }
 
 impl FrontierAnnounce {
     pub fn encode(&self) -> Vec<u8> {
-        let value = Value::Map(vec![
+        let mut entries = vec![
             (
                 Value::Text("version".into()),
                 Value::Integer(Integer::from(self.version)),
@@ -298,7 +359,17 @@ impl FrontierAnnounce {
                 Value::Text("mode".into()),
                 Value::Text(self.mode.as_db_str().into()),
             ),
-        ]);
+        ];
+        // §8.3: `age_ceilings` is optional — emit it only when at least
+        // one root is cleaved, so an uncleaved frontier stays
+        // byte-for-byte identical to a pre-Slice-C announce.
+        if !self.age_ceilings.is_empty() {
+            entries.push((
+                Value::Text("age_ceilings".into()),
+                age_ceilings_to_cbor_value(&self.age_ceilings),
+            ));
+        }
+        let value = Value::Map(entries);
         let mut buf = Vec::with_capacity(256);
         ciborium::ser::into_writer(&value, &mut buf).expect("ciborium ser infallible");
         buf
@@ -319,6 +390,9 @@ impl FrontierAnnounce {
         // omits the field; per the conservative-default rule we read
         // that as `filtered`.
         let mut mode: Mode = Mode::Filtered;
+        // §8.3 default — absent `age_ceilings` means no celebrity
+        // cleave (admit all roots), which the empty map represents.
+        let mut age_ceilings = AgeCeilings::new();
         for (k, v) in entries {
             let key = match k {
                 Value::Text(s) => s,
@@ -360,6 +434,9 @@ impl FrontierAnnounce {
                         return None;
                     }
                 }
+                "age_ceilings" => {
+                    age_ceilings = age_ceilings_from_cbor_value(v)?;
+                }
                 _ => {}
             }
         }
@@ -370,6 +447,7 @@ impl FrontierAnnounce {
             visible_filter: visible_filter?,
             expansion_filter: expansion_filter?,
             mode,
+            age_ceilings,
         })
     }
 }
@@ -392,6 +470,14 @@ pub struct FrontierDelta {
     /// recomputes the local `outbound_mode` from coverage. Absent on
     /// the wire decodes to [`Mode::Filtered`].
     pub mode: Mode,
+    /// §8.4 per-root celebrity-cleave update. Sparse map of
+    /// `root_pubkey -> genesis_at cutoff (unix ms)` for **moved** roots
+    /// only; merged over the receiver's stored ceiling map
+    /// (last-writer-wins, cutoff MAY decrease to tighten within a
+    /// generation). Empty means "no ceiling change" and is omitted from
+    /// the wire. At least one of `masks` / `age_ceilings` must carry an
+    /// entry, else the delta is `empty_delta`.
+    pub age_ceilings: AgeCeilings,
 }
 
 impl FrontierDelta {
@@ -409,7 +495,7 @@ impl FrontierDelta {
                 Value::Bytes(m.clone()),
             ));
         }
-        let value = Value::Map(vec![
+        let mut entries = vec![
             (
                 Value::Text("prev_version".into()),
                 Value::Integer(Integer::from(self.prev_version)),
@@ -423,7 +509,17 @@ impl FrontierDelta {
                 Value::Text("mode".into()),
                 Value::Text(self.mode.as_db_str().into()),
             ),
-        ]);
+        ];
+        // §8.4: `age_ceilings` is optional — emit only on a ceiling
+        // change so a filter-only delta stays compatible with the
+        // pre-Slice-C wire shape.
+        if !self.age_ceilings.is_empty() {
+            entries.push((
+                Value::Text("age_ceilings".into()),
+                age_ceilings_to_cbor_value(&self.age_ceilings),
+            ));
+        }
+        let value = Value::Map(entries);
         let mut buf = Vec::with_capacity(128);
         ciborium::ser::into_writer(&value, &mut buf).expect("ciborium ser infallible");
         buf
@@ -440,6 +536,7 @@ impl FrontierDelta {
         let mut visible_mask: Option<Vec<u8>> = None;
         let mut expansion_mask: Option<Vec<u8>> = None;
         let mut mode: Mode = Mode::Filtered;
+        let mut age_ceilings = AgeCeilings::new();
         for (k, v) in entries {
             let key = match k {
                 Value::Text(s) => s,
@@ -488,6 +585,9 @@ impl FrontierDelta {
                         return None;
                     }
                 }
+                "age_ceilings" => {
+                    age_ceilings = age_ceilings_from_cbor_value(v)?;
+                }
                 _ => {}
             }
         }
@@ -497,6 +597,7 @@ impl FrontierDelta {
             visible_mask,
             expansion_mask,
             mode,
+            age_ceilings,
         })
     }
 }
@@ -511,11 +612,16 @@ pub struct FrontierSnapshot {
     pub expansion_filter: FilterSpec,
     /// Opaque cursor, ≤ 64 bytes per §8.5.
     pub cursor: Vec<u8>,
+    /// §8.10 per-root celebrity cleave, mirrored from the §8.3 announce
+    /// snapshot so a §8.5 pull conveys the same ceiling set a push
+    /// would. Empty means "no celebrity cleave" and is omitted from the
+    /// wire.
+    pub age_ceilings: AgeCeilings,
 }
 
 impl FrontierSnapshot {
     pub fn encode(&self) -> Vec<u8> {
-        let value = Value::Map(vec![
+        let mut entries = vec![
             (
                 Value::Text("version".into()),
                 Value::Integer(Integer::from(self.version)),
@@ -540,7 +646,14 @@ impl FrontierSnapshot {
                 Value::Text("cursor".into()),
                 Value::Bytes(self.cursor.clone()),
             ),
-        ]);
+        ];
+        if !self.age_ceilings.is_empty() {
+            entries.push((
+                Value::Text("age_ceilings".into()),
+                age_ceilings_to_cbor_value(&self.age_ceilings),
+            ));
+        }
+        let value = Value::Map(entries);
         let mut buf = Vec::with_capacity(256);
         ciborium::ser::into_writer(&value, &mut buf).expect("ciborium ser infallible");
         buf
@@ -558,6 +671,7 @@ impl FrontierSnapshot {
         let mut visible_filter: Option<FilterSpec> = None;
         let mut expansion_filter: Option<FilterSpec> = None;
         let mut cursor: Option<Vec<u8>> = None;
+        let mut age_ceilings = AgeCeilings::new();
         for (k, v) in entries {
             let key = match k {
                 Value::Text(s) => s,
@@ -599,6 +713,9 @@ impl FrontierSnapshot {
                         return None;
                     }
                 }
+                "age_ceilings" => {
+                    age_ceilings = age_ceilings_from_cbor_value(v)?;
+                }
                 _ => {}
             }
         }
@@ -609,6 +726,7 @@ impl FrontierSnapshot {
             visible_filter: visible_filter?,
             expansion_filter: expansion_filter?,
             cursor: cursor?,
+            age_ceilings,
         })
     }
 }
@@ -650,6 +768,13 @@ pub struct LocalFrontier {
     /// frontier, without false positives from bloom membership tests.
     /// Never serialized — purely a local-side diff aid.
     pub visible_keys: HashSet<[u8; 32]>,
+    /// §8.10 per-root celebrity cleave we publish to peers, loaded from
+    /// the `local_frontier_age_ceilings` table on every refresh. Empty
+    /// until the §8.9/§8.10 enforcement layer (Slice E) starts writing
+    /// rows; carried here so the §8.3 announce producer and the §8.5
+    /// GET route can advertise it without a second query. Empty means
+    /// "no cleave" and is omitted from the wire.
+    pub age_ceilings: AgeCeilings,
 }
 
 impl LocalFrontier {
@@ -673,6 +798,7 @@ impl LocalFrontier {
             expansion_filter,
             cursor,
             visible_keys: HashSet::new(),
+            age_ceilings: AgeCeilings::new(),
         }
     }
 }
@@ -761,6 +887,10 @@ pub async fn compute_local_frontier(
     let visible_filter = build_bloom_from_keys(&visible_keys);
     let expansion_filter = build_bloom_from_keys(&edge_keys);
 
+    // §8.10 cleave set we currently publish. Written by the Slice-E
+    // enforcement layer; empty until then.
+    let age_ceilings = load_local_age_ceilings(db).await?;
+
     let now = envelope::now_unix_ms();
     Ok(LocalFrontier {
         version: 0,
@@ -769,7 +899,100 @@ pub async fn compute_local_frontier(
         expansion_filter,
         cursor: encode_cursor(0, now),
         visible_keys: visible_keys.into_iter().collect(),
+        age_ceilings,
     })
+}
+
+/// Load this instance's published §8.10 celebrity-cleave set from
+/// `local_frontier_age_ceilings`. Skips rows whose `root_key` is not
+/// exactly 32 bytes (a corrupt row should not poison the whole
+/// frontier refresh). Cutoffs are stored as `i64`; negatives (which a
+/// genesis_at can never legitimately be) are dropped.
+async fn load_local_age_ceilings(db: &SqlitePool) -> Result<AgeCeilings, sqlx::Error> {
+    let rows = sqlx::query!(
+        "SELECT root_key AS \"root_key!: Vec<u8>\", cutoff FROM local_frontier_age_ceilings",
+    )
+    .fetch_all(db)
+    .await?;
+    let mut out = AgeCeilings::new();
+    for row in rows {
+        let Ok(root) = <[u8; 32]>::try_from(row.root_key) else {
+            continue;
+        };
+        let Ok(cutoff) = u64::try_from(row.cutoff) else {
+            continue;
+        };
+        out.insert(root, cutoff);
+    }
+    Ok(out)
+}
+
+/// §8.3 full-snapshot apply for a peer's celebrity cleave: replace
+/// every `peer_frontier_age_ceilings` row for `peer` with the supplied
+/// map. An `/announce` carries the complete ceiling set, so a root
+/// absent from `ceilings` must be cleared (the peer un-cleaved it).
+/// Runs the delete + inserts in one transaction so the row set never
+/// transiently empties under a concurrent read.
+async fn replace_peer_age_ceilings(
+    db: &SqlitePool,
+    peer: &[u8],
+    ceilings: &AgeCeilings,
+) -> Result<(), sqlx::Error> {
+    let mut tx = db.begin().await?;
+    sqlx::query!(
+        "DELETE FROM peer_frontier_age_ceilings WHERE peer_pubkey = ?",
+        peer,
+    )
+    .execute(&mut *tx)
+    .await?;
+    for (root, cutoff) in ceilings {
+        let root_slice: &[u8] = root;
+        let cutoff_i = *cutoff as i64;
+        sqlx::query!(
+            "INSERT INTO peer_frontier_age_ceilings (peer_pubkey, root_key, cutoff) \
+             VALUES (?, ?, ?)",
+            peer,
+            root_slice,
+            cutoff_i,
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// §8.4 additions-only apply for a peer's celebrity cleave: merge the
+/// supplied roots over `peer`'s stored ceiling map, last-writer-wins
+/// (the delta's cutoff overwrites unconditionally — §8.4 permits a
+/// *tighter* cutoff within a generation, and loosening only happens via
+/// full re-announce). Roots not mentioned in the delta are left
+/// untouched. A no-op when `ceilings` is empty (a filter-only delta).
+async fn merge_peer_age_ceilings(
+    db: &SqlitePool,
+    peer: &[u8],
+    ceilings: &AgeCeilings,
+) -> Result<(), sqlx::Error> {
+    if ceilings.is_empty() {
+        return Ok(());
+    }
+    let mut tx = db.begin().await?;
+    for (root, cutoff) in ceilings {
+        let root_slice: &[u8] = root;
+        let cutoff_i = *cutoff as i64;
+        sqlx::query!(
+            "INSERT INTO peer_frontier_age_ceilings (peer_pubkey, root_key, cutoff) \
+             VALUES (?, ?, ?) \
+             ON CONFLICT(peer_pubkey, root_key) DO UPDATE SET cutoff = excluded.cutoff",
+            peer,
+            root_slice,
+            cutoff_i,
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
 }
 
 /// Fetch the raw 32-byte `public_key` of every local active user.
@@ -1150,6 +1373,19 @@ pub async fn handle_frontier_announce(
         }
     };
 
+    // §8.3 full-snapshot apply of the celebrity cleave — but only when
+    // our write actually won the monotonic guard. If the guard blocked
+    // us (`rows_affected == 0`), a newer announce already owns the row,
+    // and replacing its ceilings with our stale snapshot would clobber
+    // a fresher cleave set.
+    if result.rows_affected() != 0
+        && let Err(e) =
+            replace_peer_age_ceilings(&state.db, sender_slice, &parsed.age_ceilings).await
+    {
+        tracing::error!(error = %e, "failed to replace peer_frontier_age_ceilings on announce");
+        return internal_error();
+    }
+
     // If the monotonic guard (`WHERE excluded.applied_version >
     // peer_frontiers.applied_version`) blocked the write, the row we
     // hold is *newer* than this announce. Don't claim we applied
@@ -1214,8 +1450,13 @@ pub async fn handle_frontier_delta(
     if parsed.new_version <= parsed.prev_version {
         return bad_request("version_not_monotonic");
     }
-    if parsed.visible_mask.is_none() && parsed.expansion_mask.is_none() {
-        return bad_request("empty_masks");
+    // §8.4: at least one of `masks` / `age_ceilings` must carry an
+    // entry — a delta that touches neither has nothing to apply.
+    if parsed.visible_mask.is_none()
+        && parsed.expansion_mask.is_none()
+        && parsed.age_ceilings.is_empty()
+    {
+        return bad_request("empty_delta");
     }
 
     let sender_slice: &[u8] = &envelope.sender;
@@ -1373,6 +1614,14 @@ pub async fn handle_frontier_delta(
         return internal_error();
     }
 
+    // §8.4 additions-only merge of the celebrity cleave. No-op for a
+    // filter-only delta; tightens (or last-writer-wins overwrites) the
+    // stored ceiling for any root the delta carries.
+    if let Err(e) = merge_peer_age_ceilings(&state.db, sender_slice, &parsed.age_ceilings).await {
+        tracing::error!(error = %e, "failed to merge peer_frontier_age_ceilings on delta");
+        return internal_error();
+    }
+
     announce_response(parsed.new_version, &cursor)
 }
 
@@ -1438,6 +1687,7 @@ pub async fn handle_frontier_get(
         visible_filter: FilterSpec::from_bloom(&frontier.visible_filter),
         expansion_filter: FilterSpec::from_bloom(&frontier.expansion_filter),
         cursor: frontier.cursor.clone(),
+        age_ceilings: frontier.age_ceilings.clone(),
     };
     let body = snapshot.encode();
     let mut response = (StatusCode::OK, body).into_response();
@@ -1517,6 +1767,7 @@ pub async fn operator_announce_frontier(
         visible_filter: FilterSpec::from_bloom(&frontier.visible_filter),
         expansion_filter: FilterSpec::from_bloom(&frontier.expansion_filter),
         mode: our_outbound_mode,
+        age_ceilings: frontier.age_ceilings.clone(),
     };
     let body_bytes = announce.encode();
 
@@ -1709,10 +1960,57 @@ mod tests {
             visible_filter: sample_filter(),
             expansion_filter: sample_filter(),
             mode: Mode::All,
+            age_ceilings: AgeCeilings::new(),
         };
         let bytes = a.encode();
         let decoded = FrontierAnnounce::decode(&bytes).expect("decode");
         assert_eq!(decoded, a);
+    }
+
+    #[test]
+    fn announce_round_trips_with_age_ceilings() {
+        let mut ceilings = AgeCeilings::new();
+        ceilings.insert([0x11; 32], 1_600_000_000_000);
+        ceilings.insert([0x22; 32], 1_650_000_000_000);
+        let a = FrontierAnnounce {
+            version: 42,
+            epoch_start: 1_700_000_000_000,
+            active_horizon_days: 0,
+            visible_filter: sample_filter(),
+            expansion_filter: sample_filter(),
+            mode: Mode::All,
+            age_ceilings: ceilings,
+        };
+        let bytes = a.encode();
+        let decoded = FrontierAnnounce::decode(&bytes).expect("decode");
+        assert_eq!(decoded, a);
+    }
+
+    #[test]
+    fn announce_empty_age_ceilings_omits_wire_field() {
+        // An empty cleave set must not emit an `age_ceilings` key —
+        // keeps the wire byte-identical to a pre-Slice-C announce.
+        let a = FrontierAnnounce {
+            version: 1,
+            epoch_start: 1,
+            active_horizon_days: 0,
+            visible_filter: sample_filter(),
+            expansion_filter: sample_filter(),
+            mode: Mode::Filtered,
+            age_ceilings: AgeCeilings::new(),
+        };
+        let value: Value = ciborium::de::from_reader(a.encode().as_slice()).expect("decode value");
+        let keys: Vec<&str> = match &value {
+            Value::Map(m) => m
+                .iter()
+                .filter_map(|(k, _)| match k {
+                    Value::Text(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .collect(),
+            _ => panic!("expected map"),
+        };
+        assert!(!keys.contains(&"age_ceilings"));
     }
 
     #[test]
@@ -1753,6 +2051,7 @@ mod tests {
             visible_mask: Some(vec![0u8; 128]),
             expansion_mask: Some(vec![0xFFu8; 128]),
             mode: Mode::All,
+            age_ceilings: AgeCeilings::new(),
         };
         let bytes = d.encode();
         let decoded = FrontierDelta::decode(&bytes).expect("decode");
@@ -1767,6 +2066,25 @@ mod tests {
             visible_mask: Some(vec![0xAAu8; 128]),
             expansion_mask: None,
             mode: Mode::Filtered,
+            age_ceilings: AgeCeilings::new(),
+        };
+        let bytes = d.encode();
+        let decoded = FrontierDelta::decode(&bytes).expect("decode");
+        assert_eq!(decoded, d);
+    }
+
+    #[test]
+    fn delta_round_trips_age_ceilings_only() {
+        // §8.4 permits a ceiling-only delta (no masks).
+        let mut ceilings = AgeCeilings::new();
+        ceilings.insert([0x33; 32], 1_500_000_000_000);
+        let d = FrontierDelta {
+            prev_version: 41,
+            new_version: 42,
+            visible_mask: None,
+            expansion_mask: None,
+            mode: Mode::Filtered,
+            age_ceilings: ceilings,
         };
         let bytes = d.encode();
         let decoded = FrontierDelta::decode(&bytes).expect("decode");
@@ -1782,6 +2100,25 @@ mod tests {
             visible_filter: sample_filter(),
             expansion_filter: sample_filter(),
             cursor: vec![1, 2, 3, 4],
+            age_ceilings: AgeCeilings::new(),
+        };
+        let bytes = s.encode();
+        let decoded = FrontierSnapshot::decode(&bytes).expect("decode");
+        assert_eq!(decoded, s);
+    }
+
+    #[test]
+    fn snapshot_round_trips_with_age_ceilings() {
+        let mut ceilings = AgeCeilings::new();
+        ceilings.insert([0x44; 32], 1_550_000_000_000);
+        let s = FrontierSnapshot {
+            version: 5,
+            epoch_start: 1_700_000_000_000,
+            active_horizon_days: 30,
+            visible_filter: sample_filter(),
+            expansion_filter: sample_filter(),
+            cursor: vec![1, 2, 3, 4],
+            age_ceilings: ceilings,
         };
         let bytes = s.encode();
         let decoded = FrontierSnapshot::decode(&bytes).expect("decode");

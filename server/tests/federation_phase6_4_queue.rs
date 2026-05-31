@@ -55,6 +55,7 @@ fn announce_all_ones() -> FrontierAnnounce {
         visible_filter: FilterSpec::from_bloom(&BloomFilter::all_ones_sentinel()),
         expansion_filter: FilterSpec::from_bloom(&BloomFilter::all_ones_sentinel()),
         mode: Mode::Filtered,
+        age_ceilings: Default::default(),
     }
 }
 

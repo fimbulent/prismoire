@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO peer_frontier_age_ceilings (peer_pubkey, root_key, cutoff) VALUES (?, ?, ?) ON CONFLICT(peer_pubkey, root_key) DO UPDATE SET cutoff = excluded.cutoff",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "8dace1151f4f1999944365c2c8309ed48b07046ff7dbb5c659e8ba5294cb614e"
+}

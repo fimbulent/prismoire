@@ -144,6 +144,7 @@ async fn announce_at_same_version_is_idempotent() {
         visible_filter: empty_filter_spec(),
         expansion_filter: empty_filter_spec(),
         mode: Mode::Filtered,
+        age_ceilings: Default::default(),
     }
     .encode();
 
@@ -185,6 +186,7 @@ async fn delta_or_mask_updates_filter_bytes_and_version() {
         visible_filter: empty_filter_spec(),
         expansion_filter: empty_filter_spec(),
         mode: Mode::Filtered,
+        age_ceilings: Default::default(),
     }
     .encode();
     let announce_resp = send_announce_envelope(&harness, "a", "b", &baseline).await;
@@ -200,6 +202,7 @@ async fn delta_or_mask_updates_filter_bytes_and_version() {
         visible_mask: Some(mask.clone()),
         expansion_mask: None,
         mode: Mode::Filtered,
+        age_ceilings: Default::default(),
     }
     .encode();
     let delta_resp = send_delta_envelope(&harness, "a", "b", &delta_body).await;
@@ -236,6 +239,7 @@ async fn delta_with_stale_prev_version_returns_409_with_current() {
         visible_filter: empty_filter_spec(),
         expansion_filter: empty_filter_spec(),
         mode: Mode::Filtered,
+        age_ceilings: Default::default(),
     }
     .encode();
     assert_eq!(
@@ -252,6 +256,7 @@ async fn delta_with_stale_prev_version_returns_409_with_current() {
         visible_mask: Some(vec![0u8; 8]),
         expansion_mask: None,
         mode: Mode::Filtered,
+        age_ceilings: Default::default(),
     }
     .encode();
     let resp = send_delta_envelope(&harness, "a", "b", &delta).await;
@@ -292,6 +297,7 @@ async fn delta_without_prior_announce_returns_409_with_zero() {
         visible_mask: Some(vec![0u8; 8]),
         expansion_mask: None,
         mode: Mode::Filtered,
+        age_ceilings: Default::default(),
     }
     .encode();
     let resp = send_delta_envelope(&harness, "a", "b", &delta).await;
@@ -333,6 +339,223 @@ async fn get_frontier_returns_snapshot_then_304_on_matching_cursor() {
     let cursor_b64 = URL_SAFE_NO_PAD.encode(&cursor);
     let resp2 = send_frontier_get(&harness, "a", "b", Some(&cursor_b64)).await;
     assert_eq!(resp2.status, StatusCode::NOT_MODIFIED);
+}
+
+/// Slice C (§8.3): an announce carrying `age_ceilings` persists one
+/// `peer_frontier_age_ceilings` row per cleaved root, keyed by the
+/// sender's pubkey, with the supplied cutoffs intact.
+#[tokio::test]
+async fn announce_persists_age_ceilings() {
+    let harness = MultiInstanceHarness::new(2).await;
+    establish_active_peering(&harness, "a", "b").await;
+    let a = harness.instance("a");
+    let b = harness.instance("b");
+
+    let root1 = [0x11u8; 32];
+    let root2 = [0x22u8; 32];
+    let mut ceilings = std::collections::BTreeMap::new();
+    ceilings.insert(root1, 1_600_000_000_000u64);
+    ceilings.insert(root2, 1_650_000_000_000u64);
+
+    let body = FrontierAnnounce {
+        version: 1,
+        epoch_start: 1_700_000_000_000,
+        active_horizon_days: 0,
+        visible_filter: empty_filter_spec(),
+        expansion_filter: empty_filter_spec(),
+        mode: Mode::Filtered,
+        age_ceilings: ceilings,
+    }
+    .encode();
+    assert_eq!(
+        send_announce_envelope(&harness, "a", "b", &body)
+            .await
+            .status,
+        StatusCode::OK
+    );
+
+    let a_pub: &[u8] = a.state.instance_key.public_bytes();
+    let rows = sqlx::query!(
+        "SELECT root_key, cutoff FROM peer_frontier_age_ceilings \
+         WHERE peer_pubkey = ? ORDER BY root_key",
+        a_pub,
+    )
+    .fetch_all(&b.state.db)
+    .await
+    .expect("ceiling rows");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].root_key, root1.to_vec());
+    assert_eq!(rows[0].cutoff, 1_600_000_000_000);
+    assert_eq!(rows[1].root_key, root2.to_vec());
+    assert_eq!(rows[1].cutoff, 1_650_000_000_000);
+}
+
+/// Slice C (§8.3): `/announce` carries the *full* cleave snapshot, so a
+/// later announce replaces the stored ceiling set wholesale — a root
+/// dropped from the new announce is cleared, not retained.
+#[tokio::test]
+async fn announce_replaces_age_ceilings_snapshot() {
+    let harness = MultiInstanceHarness::new(2).await;
+    establish_active_peering(&harness, "a", "b").await;
+    let a = harness.instance("a");
+    let b = harness.instance("b");
+    let a_pub: &[u8] = a.state.instance_key.public_bytes();
+
+    let root1 = [0x11u8; 32];
+    let root2 = [0x22u8; 32];
+    let root3 = [0x33u8; 32];
+
+    let mut first = std::collections::BTreeMap::new();
+    first.insert(root1, 1_600_000_000_000u64);
+    first.insert(root2, 1_650_000_000_000u64);
+    let body1 = FrontierAnnounce {
+        version: 1,
+        epoch_start: 1_700_000_000_000,
+        active_horizon_days: 0,
+        visible_filter: empty_filter_spec(),
+        expansion_filter: empty_filter_spec(),
+        mode: Mode::Filtered,
+        age_ceilings: first,
+    }
+    .encode();
+    assert_eq!(
+        send_announce_envelope(&harness, "a", "b", &body1)
+            .await
+            .status,
+        StatusCode::OK
+    );
+
+    // Second announce (newer version) lists only root3.
+    let mut second = std::collections::BTreeMap::new();
+    second.insert(root3, 1_550_000_000_000u64);
+    let body2 = FrontierAnnounce {
+        version: 2,
+        epoch_start: 1_700_000_000_000,
+        active_horizon_days: 0,
+        visible_filter: empty_filter_spec(),
+        expansion_filter: empty_filter_spec(),
+        mode: Mode::Filtered,
+        age_ceilings: second,
+    }
+    .encode();
+    assert_eq!(
+        send_announce_envelope(&harness, "a", "b", &body2)
+            .await
+            .status,
+        StatusCode::OK
+    );
+
+    let rows = sqlx::query!(
+        "SELECT root_key, cutoff FROM peer_frontier_age_ceilings \
+         WHERE peer_pubkey = ? ORDER BY root_key",
+        a_pub,
+    )
+    .fetch_all(&b.state.db)
+    .await
+    .expect("ceiling rows");
+    assert_eq!(rows.len(), 1, "snapshot replace dropped root1/root2");
+    assert_eq!(rows[0].root_key, root3.to_vec());
+    assert_eq!(rows[0].cutoff, 1_550_000_000_000);
+}
+
+/// Slice C (§8.4): a ceiling-only delta (no masks) is accepted and
+/// merges its roots over the stored set — adding new roots and
+/// tightening existing ones (last-writer-wins).
+#[tokio::test]
+async fn delta_merges_and_tightens_age_ceilings() {
+    let harness = MultiInstanceHarness::new(2).await;
+    establish_active_peering(&harness, "a", "b").await;
+    let a = harness.instance("a");
+    let b = harness.instance("b");
+    let a_pub: &[u8] = a.state.instance_key.public_bytes();
+
+    let root1 = [0x11u8; 32];
+    let root2 = [0x22u8; 32];
+
+    // Baseline announce at v5 with root1 at a loose cutoff.
+    let mut base = std::collections::BTreeMap::new();
+    base.insert(root1, 1_700_000_000_000u64);
+    let baseline = FrontierAnnounce {
+        version: 5,
+        epoch_start: 1_700_000_000_000,
+        active_horizon_days: 0,
+        visible_filter: empty_filter_spec(),
+        expansion_filter: empty_filter_spec(),
+        mode: Mode::Filtered,
+        age_ceilings: base,
+    }
+    .encode();
+    assert_eq!(
+        send_announce_envelope(&harness, "a", "b", &baseline)
+            .await
+            .status,
+        StatusCode::OK
+    );
+
+    // Delta at v6: no masks, only ceilings — tighten root1, add root2.
+    let mut delta_ceilings = std::collections::BTreeMap::new();
+    delta_ceilings.insert(root1, 1_500_000_000_000u64);
+    delta_ceilings.insert(root2, 1_650_000_000_000u64);
+    let delta = FrontierDelta {
+        prev_version: 5,
+        new_version: 6,
+        visible_mask: None,
+        expansion_mask: None,
+        mode: Mode::Filtered,
+        age_ceilings: delta_ceilings,
+    }
+    .encode();
+    assert_eq!(
+        send_delta_envelope(&harness, "a", "b", &delta).await.status,
+        StatusCode::OK
+    );
+
+    let rows = sqlx::query!(
+        "SELECT root_key, cutoff FROM peer_frontier_age_ceilings \
+         WHERE peer_pubkey = ? ORDER BY root_key",
+        a_pub,
+    )
+    .fetch_all(&b.state.db)
+    .await
+    .expect("ceiling rows");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].root_key, root1.to_vec());
+    assert_eq!(rows[0].cutoff, 1_500_000_000_000, "root1 tightened");
+    assert_eq!(rows[1].root_key, root2.to_vec());
+    assert_eq!(rows[1].cutoff, 1_650_000_000_000, "root2 added");
+}
+
+/// Slice C (§8.4): a delta carrying neither masks nor age_ceilings is
+/// rejected as `empty_delta` (the renamed `empty_masks` code).
+#[tokio::test]
+async fn delta_with_no_masks_or_ceilings_returns_empty_delta() {
+    let harness = MultiInstanceHarness::new(2).await;
+    establish_active_peering(&harness, "a", "b").await;
+
+    let delta = FrontierDelta {
+        prev_version: 0,
+        new_version: 1,
+        visible_mask: None,
+        expansion_mask: None,
+        mode: Mode::Filtered,
+        age_ceilings: Default::default(),
+    }
+    .encode();
+    let resp = send_delta_envelope(&harness, "a", "b", &delta).await;
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    let body: Value = ciborium::de::from_reader(resp.body.as_slice()).expect("cbor parse");
+    let map = match body {
+        Value::Map(m) => m,
+        _ => panic!("expected CBOR map"),
+    };
+    let code = map
+        .iter()
+        .find_map(|(k, v)| match (k, v) {
+            (Value::Text(t), Value::Text(c)) if t == "error" => Some(c.clone()),
+            _ => None,
+        })
+        .expect("error field");
+    assert_eq!(code, "empty_delta");
 }
 
 /// Mode classifier flips Filtered → All when coverage crosses

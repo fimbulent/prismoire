@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM peer_frontier_age_ceilings WHERE peer_pubkey = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "f8af46134d49082e626948e40a55abde5cc285e3d573265fbb571289dddeaa02"
+}

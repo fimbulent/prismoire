@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT root_key, cutoff FROM peer_frontier_age_ceilings WHERE peer_pubkey = ? ORDER BY root_key",
+  "describe": {
+    "columns": [
+      {
+        "name": "root_key",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "cutoff",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "b20c09ce6be79df017bdb0ada59685a3e2888fb278dfe8dd4827d2e3255adc38"
+}

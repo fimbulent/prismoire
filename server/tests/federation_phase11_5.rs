@@ -214,6 +214,7 @@ fn announce_with_visible_keys(interested_keys: &[&[u8; 32]]) -> FrontierAnnounce
         visible_filter: FilterSpec::from_bloom(&content),
         expansion_filter: FilterSpec::from_bloom(&edge),
         mode: Mode::Filtered,
+        age_ceilings: Default::default(),
     }
 }
 
