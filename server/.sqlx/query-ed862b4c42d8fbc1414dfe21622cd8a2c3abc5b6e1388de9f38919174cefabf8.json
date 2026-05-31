@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT p.instance_pubkey AS \"instance_pubkey!: Vec<u8>\", f.cf_k AS \"cf_k?: i64\", f.cf_m AS \"cf_m?: i64\", f.cf_n_est AS \"cf_n_est?: i64\", f.cf_fpr_target AS \"cf_fpr_target?: f64\", f.cf_bytes AS \"cf_bytes?: Vec<u8>\", f.ef_k AS \"ef_k?: i64\", f.ef_m AS \"ef_m?: i64\", f.ef_n_est AS \"ef_n_est?: i64\", f.ef_fpr_target AS \"ef_fpr_target?: f64\", f.ef_bytes AS \"ef_bytes?: Vec<u8>\", f.outbound_mode AS \"outbound_mode?: String\" FROM peers p LEFT JOIN peer_frontiers f ON f.peer_pubkey = p.instance_pubkey WHERE p.status = 'active'",
+  "query": "SELECT p.instance_pubkey AS \"instance_pubkey!: Vec<u8>\", f.visible_k AS \"visible_k?: i64\", f.visible_m AS \"visible_m?: i64\", f.visible_n_est AS \"visible_n_est?: i64\", f.visible_fpr_target AS \"visible_fpr_target?: f64\", f.visible_bytes AS \"visible_bytes?: Vec<u8>\", f.expansion_k AS \"expansion_k?: i64\", f.expansion_m AS \"expansion_m?: i64\", f.expansion_n_est AS \"expansion_n_est?: i64\", f.expansion_fpr_target AS \"expansion_fpr_target?: f64\", f.expansion_bytes AS \"expansion_bytes?: Vec<u8>\", f.outbound_mode AS \"outbound_mode?: String\" FROM peers p LEFT JOIN peer_frontiers f ON f.peer_pubkey = p.instance_pubkey WHERE p.status = 'active'",
   "describe": {
     "columns": [
       {
@@ -9,52 +9,52 @@
         "type_info": "Blob"
       },
       {
-        "name": "cf_k?: i64",
+        "name": "visible_k?: i64",
         "ordinal": 1,
         "type_info": "Integer"
       },
       {
-        "name": "cf_m?: i64",
+        "name": "visible_m?: i64",
         "ordinal": 2,
         "type_info": "Integer"
       },
       {
-        "name": "cf_n_est?: i64",
+        "name": "visible_n_est?: i64",
         "ordinal": 3,
         "type_info": "Integer"
       },
       {
-        "name": "cf_fpr_target?: f64",
+        "name": "visible_fpr_target?: f64",
         "ordinal": 4,
         "type_info": "Float"
       },
       {
-        "name": "cf_bytes?: Vec<u8>",
+        "name": "visible_bytes?: Vec<u8>",
         "ordinal": 5,
         "type_info": "Blob"
       },
       {
-        "name": "ef_k?: i64",
+        "name": "expansion_k?: i64",
         "ordinal": 6,
         "type_info": "Integer"
       },
       {
-        "name": "ef_m?: i64",
+        "name": "expansion_m?: i64",
         "ordinal": 7,
         "type_info": "Integer"
       },
       {
-        "name": "ef_n_est?: i64",
+        "name": "expansion_n_est?: i64",
         "ordinal": 8,
         "type_info": "Integer"
       },
       {
-        "name": "ef_fpr_target?: f64",
+        "name": "expansion_fpr_target?: f64",
         "ordinal": 9,
         "type_info": "Float"
       },
       {
-        "name": "ef_bytes?: Vec<u8>",
+        "name": "expansion_bytes?: Vec<u8>",
         "ordinal": 10,
         "type_info": "Blob"
       },
@@ -82,5 +82,5 @@
       true
     ]
   },
-  "hash": "e0c416dc1fbeca5c7b3acd9c7a55f226d18b8194bbefa0b8ba104924351dc5c4"
+  "hash": "ed862b4c42d8fbc1414dfe21622cd8a2c3abc5b6e1388de9f38919174cefabf8"
 }

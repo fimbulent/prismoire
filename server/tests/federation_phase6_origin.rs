@@ -7,7 +7,7 @@
 //! land on an interested peer's `signed_objects` table.
 //!
 //! Scope is intentionally narrow: each test exercises exactly one
-//! origin site against a single interested peer whose `content_filter`
+//! origin site against a single interested peer whose `visible_filter`
 //! is the all-ones sentinel, so the assertion is "the wiring exists"
 //! rather than "the propagation matrix is correct under interest
 //! filtering". The full matrix (multi-hop, partition-heal, queue retry
@@ -46,14 +46,14 @@ use common::{body_json, json_request, send, setup_admin};
 /// all-ones sentinel — every routing key matches, so the receiver
 /// sees every Authored or TrustEdge object the sender fans out. This
 /// lets the tripwire avoid pre-computing per-user pubkeys for the
-/// peer's `content_filter`.
+/// peer's `visible_filter`.
 fn announce_all_ones() -> FrontierAnnounce {
     FrontierAnnounce {
         version: 1,
         epoch_start: 1_700_000_000_000,
         active_horizon_days: 0,
-        content_filter: FilterSpec::from_bloom(&BloomFilter::all_ones_sentinel()),
-        edge_origin_filter: FilterSpec::from_bloom(&BloomFilter::all_ones_sentinel()),
+        visible_filter: FilterSpec::from_bloom(&BloomFilter::all_ones_sentinel()),
+        expansion_filter: FilterSpec::from_bloom(&BloomFilter::all_ones_sentinel()),
         mode: Mode::Filtered,
     }
 }

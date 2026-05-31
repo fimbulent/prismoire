@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT applied_version, cf_family, ef_family FROM peer_frontiers WHERE peer_pubkey = ?",
+  "query": "SELECT applied_version, visible_family, expansion_family FROM peer_frontiers WHERE peer_pubkey = ?",
   "describe": {
     "columns": [
       {
@@ -9,12 +9,12 @@
         "type_info": "Integer"
       },
       {
-        "name": "cf_family",
+        "name": "visible_family",
         "ordinal": 1,
         "type_info": "Text"
       },
       {
-        "name": "ef_family",
+        "name": "expansion_family",
         "ordinal": 2,
         "type_info": "Text"
       }
@@ -28,5 +28,5 @@
       false
     ]
   },
-  "hash": "7fb11aec937c6684262dce322735feaf2636645ad4f0837bdf87a04337de745a"
+  "hash": "012e0551ff1ef491d984b81c02dc1e8dfc2c8f0b1e48b334a397508b3e8db074"
 }

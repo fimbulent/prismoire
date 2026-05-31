@@ -23,8 +23,8 @@
 //!
 //! **Routing fanout (`POST /announce` outbound).** The operator-side
 //! [`operator_announce_frontier`] helper builds the local snapshot
-//! over the trust graph (3-hop content closure → `content_filter`,
-//! 2-hop edge-origin closure → `edge_origin_filter`), signs the body
+//! over the trust graph (3-hop content closure → `visible_filter`,
+//! 2-hop edge-origin closure → `expansion_filter`), signs the body
 //! per §6, and dispatches to the supplied peer via the federation
 //! transport. Background re-announce / per-peer fanout is the Phase 5+
 //! concern that consumes this helper; Phase 4 ships the helper itself
@@ -77,7 +77,7 @@ const NO_TRIMMING: u32 = 0;
 // ---------------------------------------------------------------------------
 
 /// §8.2 `FilterSpec`: one of the two filters carried in an announce
-/// or snapshot (content_filter or edge_origin_filter).
+/// or snapshot (visible_filter or expansion_filter).
 ///
 /// The wire layout is the same shape used in [`FrontierSnapshot`]
 /// (the GET response) — we keep one CBOR encode/decode pair here to
@@ -258,9 +258,9 @@ pub struct FrontierAnnounce {
     /// 0 == no trimming; informational.
     pub active_horizon_days: u32,
     /// 3-hop content closure.
-    pub content_filter: FilterSpec,
+    pub visible_filter: FilterSpec,
     /// 2-hop edge-origin closure.
-    pub edge_origin_filter: FilterSpec,
+    pub expansion_filter: FilterSpec,
     /// §7.2 routing mode the sender currently uses for the
     /// `sender → receiver` direction (Phase 6.5 fold-in: piggybacked
     /// on the frontier announce instead of the full §7.2 POST /mode
@@ -287,12 +287,12 @@ impl FrontierAnnounce {
                 Value::Integer(Integer::from(self.active_horizon_days)),
             ),
             (
-                Value::Text("content_filter".into()),
-                self.content_filter.to_cbor_value(),
+                Value::Text("visible_filter".into()),
+                self.visible_filter.to_cbor_value(),
             ),
             (
-                Value::Text("edge_origin_filter".into()),
-                self.edge_origin_filter.to_cbor_value(),
+                Value::Text("expansion_filter".into()),
+                self.expansion_filter.to_cbor_value(),
             ),
             (
                 Value::Text("mode".into()),
@@ -313,8 +313,8 @@ impl FrontierAnnounce {
         let mut version: Option<u64> = None;
         let mut epoch_start: Option<u64> = None;
         let mut active_horizon_days: Option<u32> = None;
-        let mut content_filter: Option<FilterSpec> = None;
-        let mut edge_origin_filter: Option<FilterSpec> = None;
+        let mut visible_filter: Option<FilterSpec> = None;
+        let mut expansion_filter: Option<FilterSpec> = None;
         // §7.2 default — a sender whose build predates Phase 6.5
         // omits the field; per the conservative-default rule we read
         // that as `filtered`.
@@ -347,11 +347,11 @@ impl FrontierAnnounce {
                         return None;
                     }
                 }
-                "content_filter" => {
-                    content_filter = Some(FilterSpec::from_cbor_value(v)?);
+                "visible_filter" => {
+                    visible_filter = Some(FilterSpec::from_cbor_value(v)?);
                 }
-                "edge_origin_filter" => {
-                    edge_origin_filter = Some(FilterSpec::from_cbor_value(v)?);
+                "expansion_filter" => {
+                    expansion_filter = Some(FilterSpec::from_cbor_value(v)?);
                 }
                 "mode" => {
                     if let Value::Text(s) = v {
@@ -367,8 +367,8 @@ impl FrontierAnnounce {
             version: version?,
             epoch_start: epoch_start?,
             active_horizon_days: active_horizon_days?,
-            content_filter: content_filter?,
-            edge_origin_filter: edge_origin_filter?,
+            visible_filter: visible_filter?,
+            expansion_filter: expansion_filter?,
             mode,
         })
     }
@@ -382,9 +382,9 @@ pub struct FrontierDelta {
     /// New version; MUST be > prev_version.
     pub new_version: u64,
     /// Optional content-filter OR-mask; `m_c / 8` bytes when present.
-    pub content_mask: Option<Vec<u8>>,
+    pub visible_mask: Option<Vec<u8>>,
     /// Optional edge-origin OR-mask; `m_e / 8` bytes when present.
-    pub edge_origin_mask: Option<Vec<u8>>,
+    pub expansion_mask: Option<Vec<u8>>,
     /// §7.2 routing mode the sender currently uses for the
     /// `sender → receiver` direction. Same Phase 6.5 fold-in
     /// semantics as [`FrontierAnnounce::mode`]: receiver stores this
@@ -397,15 +397,15 @@ pub struct FrontierDelta {
 impl FrontierDelta {
     pub fn encode(&self) -> Vec<u8> {
         let mut mask_entries: Vec<(Value, Value)> = Vec::with_capacity(2);
-        if let Some(m) = &self.content_mask {
+        if let Some(m) = &self.visible_mask {
             mask_entries.push((
-                Value::Text("content_filter".into()),
+                Value::Text("visible_filter".into()),
                 Value::Bytes(m.clone()),
             ));
         }
-        if let Some(m) = &self.edge_origin_mask {
+        if let Some(m) = &self.expansion_mask {
             mask_entries.push((
-                Value::Text("edge_origin_filter".into()),
+                Value::Text("expansion_filter".into()),
                 Value::Bytes(m.clone()),
             ));
         }
@@ -437,8 +437,8 @@ impl FrontierDelta {
         };
         let mut prev_version: Option<u64> = None;
         let mut new_version: Option<u64> = None;
-        let mut content_mask: Option<Vec<u8>> = None;
-        let mut edge_origin_mask: Option<Vec<u8>> = None;
+        let mut visible_mask: Option<Vec<u8>> = None;
+        let mut expansion_mask: Option<Vec<u8>> = None;
         let mut mode: Mode = Mode::Filtered;
         for (k, v) in entries {
             let key = match k {
@@ -475,8 +475,8 @@ impl FrontierDelta {
                             _ => return None,
                         };
                         match mk_str.as_str() {
-                            "content_filter" => content_mask = Some(mb),
-                            "edge_origin_filter" => edge_origin_mask = Some(mb),
+                            "visible_filter" => visible_mask = Some(mb),
+                            "expansion_filter" => expansion_mask = Some(mb),
                             _ => {}
                         }
                     }
@@ -494,8 +494,8 @@ impl FrontierDelta {
         Some(FrontierDelta {
             prev_version: prev_version?,
             new_version: new_version?,
-            content_mask,
-            edge_origin_mask,
+            visible_mask,
+            expansion_mask,
             mode,
         })
     }
@@ -507,8 +507,8 @@ pub struct FrontierSnapshot {
     pub version: u64,
     pub epoch_start: u64,
     pub active_horizon_days: u32,
-    pub content_filter: FilterSpec,
-    pub edge_origin_filter: FilterSpec,
+    pub visible_filter: FilterSpec,
+    pub expansion_filter: FilterSpec,
     /// Opaque cursor, ≤ 64 bytes per §8.5.
     pub cursor: Vec<u8>,
 }
@@ -529,12 +529,12 @@ impl FrontierSnapshot {
                 Value::Integer(Integer::from(self.active_horizon_days)),
             ),
             (
-                Value::Text("content_filter".into()),
-                self.content_filter.to_cbor_value(),
+                Value::Text("visible_filter".into()),
+                self.visible_filter.to_cbor_value(),
             ),
             (
-                Value::Text("edge_origin_filter".into()),
-                self.edge_origin_filter.to_cbor_value(),
+                Value::Text("expansion_filter".into()),
+                self.expansion_filter.to_cbor_value(),
             ),
             (
                 Value::Text("cursor".into()),
@@ -555,8 +555,8 @@ impl FrontierSnapshot {
         let mut version: Option<u64> = None;
         let mut epoch_start: Option<u64> = None;
         let mut active_horizon_days: Option<u32> = None;
-        let mut content_filter: Option<FilterSpec> = None;
-        let mut edge_origin_filter: Option<FilterSpec> = None;
+        let mut visible_filter: Option<FilterSpec> = None;
+        let mut expansion_filter: Option<FilterSpec> = None;
         let mut cursor: Option<Vec<u8>> = None;
         for (k, v) in entries {
             let key = match k {
@@ -586,11 +586,11 @@ impl FrontierSnapshot {
                         return None;
                     }
                 }
-                "content_filter" => {
-                    content_filter = Some(FilterSpec::from_cbor_value(v)?);
+                "visible_filter" => {
+                    visible_filter = Some(FilterSpec::from_cbor_value(v)?);
                 }
-                "edge_origin_filter" => {
-                    edge_origin_filter = Some(FilterSpec::from_cbor_value(v)?);
+                "expansion_filter" => {
+                    expansion_filter = Some(FilterSpec::from_cbor_value(v)?);
                 }
                 "cursor" => {
                     if let Value::Bytes(b) = v {
@@ -606,8 +606,8 @@ impl FrontierSnapshot {
             version: version?,
             epoch_start: epoch_start?,
             active_horizon_days: active_horizon_days?,
-            content_filter: content_filter?,
-            edge_origin_filter: edge_origin_filter?,
+            visible_filter: visible_filter?,
+            expansion_filter: expansion_filter?,
             cursor: cursor?,
         })
     }
@@ -635,21 +635,21 @@ pub struct LocalFrontier {
     /// the current filter pair was first computed.
     pub epoch_start: u64,
     /// 3-hop forward closure over local users.
-    pub content_filter: BloomFilter,
+    pub visible_filter: BloomFilter,
     /// 2-hop forward closure over local users.
-    pub edge_origin_filter: BloomFilter,
+    pub expansion_filter: BloomFilter,
     /// Opaque cursor we hand back from §8.5 GET callers. Server-
     /// chosen format: `version_be(8) || epoch_start_be(8)`. Total 16
     /// bytes, comfortably under the spec's 64-byte ceiling.
     pub cursor: Vec<u8>,
     /// Raw 32-byte pubkeys of every author in the 3-hop content
-    /// closure — the *plaintext* set the `content_filter` bloom was
+    /// closure — the *plaintext* set the `visible_filter` bloom was
     /// built from. Retained (not just the bloom) so the §7.6 / §10.5
     /// proactive pull-backfill path can diff `new − old` across a
     /// refresh and learn exactly which authors newly entered the
     /// frontier, without false positives from bloom membership tests.
     /// Never serialized — purely a local-side diff aid.
-    pub content_keys: HashSet<[u8; 32]>,
+    pub visible_keys: HashSet<[u8; 32]>,
 }
 
 impl LocalFrontier {
@@ -660,19 +660,19 @@ impl LocalFrontier {
     /// `peers_interested_in` routing path treats it as "no local
     /// users known yet, no fanout."
     pub fn empty() -> Self {
-        let content_filter =
+        let visible_filter =
             BloomFilter::new_empty(DEFAULT_K, bloom::MIN_M_BITS, 0, DEFAULT_FPR_TARGET)
                 .expect("MIN_M_BITS and DEFAULT_K are in range");
-        let edge_origin_filter = content_filter.clone();
+        let expansion_filter = visible_filter.clone();
         let now = envelope::now_unix_ms();
         let cursor = encode_cursor(0, now);
         Self {
             version: 0,
             epoch_start: now,
-            content_filter,
-            edge_origin_filter,
+            visible_filter,
+            expansion_filter,
             cursor,
-            content_keys: HashSet::new(),
+            visible_keys: HashSet::new(),
         }
     }
 }
@@ -711,8 +711,8 @@ impl From<sqlx::Error> for ComputeError {
 /// Seeds the BFS from `SELECT id FROM users WHERE home_instance IS
 /// NULL AND status = 'active'` — local active users only, in line
 /// with §7.4 ("authors whose posts are potentially visible to local
-/// users"). The 3-hop forward closure populates the `content_filter`;
-/// the 2-hop closure populates the `edge_origin_filter` (§7.4: hop-3
+/// users"). The 3-hop forward closure populates the `visible_filter`;
+/// the 2-hop closure populates the `expansion_filter` (§7.4: hop-3
 /// users contribute as edge *targets* but never as edge *sources*).
 ///
 /// Each reachable UUID is resolved to its `users.public_key` (raw 32
@@ -755,27 +755,27 @@ pub async fn compute_local_frontier(
     // 3. Resolve UUIDs → public keys. Users without a public_key (no
     //    passkey ever bound) cannot be routed against by peers; skip
     //    them entirely rather than inserting null-equivalent bytes.
-    let content_keys = resolve_public_keys(db, &three_hop).await?;
+    let visible_keys = resolve_public_keys(db, &three_hop).await?;
     let edge_keys = resolve_public_keys(db, &two_hop).await?;
 
-    let content_filter = build_bloom_from_keys(&content_keys);
-    let edge_origin_filter = build_bloom_from_keys(&edge_keys);
+    let visible_filter = build_bloom_from_keys(&visible_keys);
+    let expansion_filter = build_bloom_from_keys(&edge_keys);
 
     let now = envelope::now_unix_ms();
     Ok(LocalFrontier {
         version: 0,
         epoch_start: now,
-        content_filter,
-        edge_origin_filter,
+        visible_filter,
+        expansion_filter,
         cursor: encode_cursor(0, now),
-        content_keys: content_keys.into_iter().collect(),
+        visible_keys: visible_keys.into_iter().collect(),
     })
 }
 
 /// Fetch the raw 32-byte `public_key` of every local active user.
 /// Used by the §7.2 mode-classification path on
 /// `handle_frontier_announce` / `handle_frontier_delta` to compute
-/// `coverage(sender.content_filter, our local users)` without
+/// `coverage(sender.visible_filter, our local users)` without
 /// running the full trust-graph closure. Skips rows whose
 /// `public_key` is NULL or not exactly 32 bytes — those keys cannot
 /// participate in routing.
@@ -892,7 +892,7 @@ pub struct FrontierRefresh {
     /// Authors that newly entered the 3-hop content closure this
     /// refresh (`new − old`), as raw pubkeys. Empty when unchanged.
     /// Drives the §7.6 / §10.5 proactive by-author pull-backfill.
-    pub added_content_keys: Vec<[u8; 32]>,
+    pub added_visible_keys: Vec<[u8; 32]>,
 }
 
 /// Recompute the local frontier and, if its contents changed, swap
@@ -931,13 +931,13 @@ pub async fn refresh_local_frontier_detailed(
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let prev = guard.clone();
-    let changed = filter_bytes_differ(&prev.content_filter, &next.content_filter)
-        || filter_bytes_differ(&prev.edge_origin_filter, &next.edge_origin_filter);
+    let changed = filter_bytes_differ(&prev.visible_filter, &next.visible_filter)
+        || filter_bytes_differ(&prev.expansion_filter, &next.expansion_filter);
 
     if changed {
-        let added_content_keys: Vec<[u8; 32]> = next
-            .content_keys
-            .difference(&prev.content_keys)
+        let added_visible_keys: Vec<[u8; 32]> = next
+            .visible_keys
+            .difference(&prev.visible_keys)
             .copied()
             .collect();
         // Pure monotonic counter — `prev.version + 1` is strictly
@@ -953,13 +953,13 @@ pub async fn refresh_local_frontier_detailed(
         Ok(FrontierRefresh {
             frontier: new_arc,
             changed: true,
-            added_content_keys,
+            added_visible_keys,
         })
     } else {
         Ok(FrontierRefresh {
             frontier: prev,
             changed: false,
-            added_content_keys: Vec::new(),
+            added_visible_keys: Vec::new(),
         })
     }
 }
@@ -1041,17 +1041,17 @@ pub async fn handle_frontier_announce(
 
     // Validate both filters before any persistence — §8.3 says no
     // partial-apply.
-    let content = match parsed.content_filter.clone().into_bloom() {
+    let visible = match parsed.visible_filter.clone().into_bloom() {
         Ok(f) => f,
         Err(code) => return bad_request(code),
     };
-    let edge = match parsed.edge_origin_filter.clone().into_bloom() {
+    let expansion = match parsed.expansion_filter.clone().into_bloom() {
         Ok(f) => f,
         Err(code) => return bad_request(code),
     };
 
     // §7.2 outbound-mode classification: coverage of the sender's
-    // content_filter against *our* local-user pubkeys decides what
+    // visible_filter against *our* local-user pubkeys decides what
     // mode we use to send to them. Hysteresis uses the prior mode
     // pulled above so a pair already in `All` doesn't oscillate just
     // because coverage briefly dipped into [LOW, HIGH).
@@ -1062,7 +1062,7 @@ pub async fn handle_frontier_announce(
             return internal_error();
         }
     };
-    let new_outbound_mode = routing::classify_mode(prior_outbound_mode, &content, &local_keys);
+    let new_outbound_mode = routing::classify_mode(prior_outbound_mode, &visible, &local_keys);
     let inbound_mode_str = parsed.mode.as_db_str();
     let outbound_mode_str = new_outbound_mode.as_db_str();
 
@@ -1073,25 +1073,25 @@ pub async fn handle_frontier_announce(
     let version_i = parsed.version as i64;
     let epoch_i = parsed.epoch_start as i64;
     let horizon_i = parsed.active_horizon_days as i64;
-    let cf_family = parsed.content_filter.family;
-    let cf_k = content.k as i64;
-    let cf_m = content.m as i64;
-    let cf_n = parsed.content_filter.n_est as i64;
-    let cf_fpr = parsed.content_filter.fpr_target as f64;
-    let ef_family = parsed.edge_origin_filter.family;
-    let ef_k = edge.k as i64;
-    let ef_m = edge.m as i64;
-    let ef_n = parsed.edge_origin_filter.n_est as i64;
-    let ef_fpr = parsed.edge_origin_filter.fpr_target as f64;
-    let cf_bytes_slice: &[u8] = &content.bits;
-    let ef_bytes_slice: &[u8] = &edge.bits;
+    let visible_family = parsed.visible_filter.family;
+    let visible_k = visible.k as i64;
+    let visible_m = visible.m as i64;
+    let visible_n = parsed.visible_filter.n_est as i64;
+    let visible_fpr = parsed.visible_filter.fpr_target as f64;
+    let expansion_family = parsed.expansion_filter.family;
+    let expansion_k = expansion.k as i64;
+    let expansion_m = expansion.m as i64;
+    let expansion_n = parsed.expansion_filter.n_est as i64;
+    let expansion_fpr = parsed.expansion_filter.fpr_target as f64;
+    let visible_bytes_slice: &[u8] = &visible.bits;
+    let expansion_bytes_slice: &[u8] = &expansion.bits;
     let cursor_slice: &[u8] = &cursor;
 
     let result = sqlx::query!(
         "INSERT INTO peer_frontiers ( \
              peer_pubkey, applied_version, epoch_start, active_horizon_days, \
-             cf_family, cf_k, cf_m, cf_n_est, cf_fpr_target, cf_bytes, \
-             ef_family, ef_k, ef_m, ef_n_est, ef_fpr_target, ef_bytes, \
+             visible_family, visible_k, visible_m, visible_n_est, visible_fpr_target, visible_bytes, \
+             expansion_family, expansion_k, expansion_m, expansion_n_est, expansion_fpr_target, expansion_bytes, \
              cursor, inbound_mode, outbound_mode, updated_at \
          ) VALUES ( \
              ?, ?, ?, ?, \
@@ -1103,18 +1103,18 @@ pub async fn handle_frontier_announce(
              applied_version = excluded.applied_version, \
              epoch_start = excluded.epoch_start, \
              active_horizon_days = excluded.active_horizon_days, \
-             cf_family = excluded.cf_family, \
-             cf_k = excluded.cf_k, \
-             cf_m = excluded.cf_m, \
-             cf_n_est = excluded.cf_n_est, \
-             cf_fpr_target = excluded.cf_fpr_target, \
-             cf_bytes = excluded.cf_bytes, \
-             ef_family = excluded.ef_family, \
-             ef_k = excluded.ef_k, \
-             ef_m = excluded.ef_m, \
-             ef_n_est = excluded.ef_n_est, \
-             ef_fpr_target = excluded.ef_fpr_target, \
-             ef_bytes = excluded.ef_bytes, \
+             visible_family = excluded.visible_family, \
+             visible_k = excluded.visible_k, \
+             visible_m = excluded.visible_m, \
+             visible_n_est = excluded.visible_n_est, \
+             visible_fpr_target = excluded.visible_fpr_target, \
+             visible_bytes = excluded.visible_bytes, \
+             expansion_family = excluded.expansion_family, \
+             expansion_k = excluded.expansion_k, \
+             expansion_m = excluded.expansion_m, \
+             expansion_n_est = excluded.expansion_n_est, \
+             expansion_fpr_target = excluded.expansion_fpr_target, \
+             expansion_bytes = excluded.expansion_bytes, \
              cursor = excluded.cursor, \
              inbound_mode = excluded.inbound_mode, \
              outbound_mode = excluded.outbound_mode, \
@@ -1124,18 +1124,18 @@ pub async fn handle_frontier_announce(
         version_i,
         epoch_i,
         horizon_i,
-        cf_family,
-        cf_k,
-        cf_m,
-        cf_n,
-        cf_fpr,
-        cf_bytes_slice,
-        ef_family,
-        ef_k,
-        ef_m,
-        ef_n,
-        ef_fpr,
-        ef_bytes_slice,
+        visible_family,
+        visible_k,
+        visible_m,
+        visible_n,
+        visible_fpr,
+        visible_bytes_slice,
+        expansion_family,
+        expansion_k,
+        expansion_m,
+        expansion_n,
+        expansion_fpr,
+        expansion_bytes_slice,
         cursor_slice,
         inbound_mode_str,
         outbound_mode_str,
@@ -1214,15 +1214,15 @@ pub async fn handle_frontier_delta(
     if parsed.new_version <= parsed.prev_version {
         return bad_request("version_not_monotonic");
     }
-    if parsed.content_mask.is_none() && parsed.edge_origin_mask.is_none() {
+    if parsed.visible_mask.is_none() && parsed.expansion_mask.is_none() {
         return bad_request("empty_masks");
     }
 
     let sender_slice: &[u8] = &envelope.sender;
     let row = match sqlx::query!(
         "SELECT applied_version, epoch_start, active_horizon_days, \
-                cf_family, cf_k, cf_m, cf_n_est, cf_fpr_target, cf_bytes, \
-                ef_family, ef_k, ef_m, ef_n_est, ef_fpr_target, ef_bytes, \
+                visible_family, visible_k, visible_m, visible_n_est, visible_fpr_target, visible_bytes, \
+                expansion_family, expansion_k, expansion_m, expansion_n_est, expansion_fpr_target, expansion_bytes, \
                 outbound_mode \
          FROM peer_frontiers WHERE peer_pubkey = ?",
         sender_slice,
@@ -1255,30 +1255,30 @@ pub async fn handle_frontier_delta(
     // coverage reclassification below. `k` / `m` are invariant under
     // OR-mask apply (delta only updates bytes, not sizing) so we
     // round-trip them through the bloom builder unchanged.
-    let cf_k_existing = row.cf_k;
-    let cf_m_existing = row.cf_m;
-    let cf_n_existing = row.cf_n_est;
-    let cf_fpr_existing = row.cf_fpr_target;
+    let visible_k_existing = row.visible_k;
+    let visible_m_existing = row.visible_m;
+    let visible_n_existing = row.visible_n_est;
+    let visible_fpr_existing = row.visible_fpr_target;
 
     // Apply each supplied mask. Either filter may be absent on the
     // wire; absence means "leave this filter alone." The table's
-    // CHECK on `length(cf_bytes) = m/8` already enforced shape at
+    // CHECK on `length(visible_bytes) = m/8` already enforced shape at
     // insert.
-    let mut content_bytes = row.cf_bytes;
-    if let Some(mask) = &parsed.content_mask {
-        if mask.len() != content_bytes.len() {
+    let mut visible_bytes = row.visible_bytes;
+    if let Some(mask) = &parsed.visible_mask {
+        if mask.len() != visible_bytes.len() {
             return bad_request("or_mask_length_mismatch");
         }
-        for (b, m) in content_bytes.iter_mut().zip(mask.iter()) {
+        for (b, m) in visible_bytes.iter_mut().zip(mask.iter()) {
             *b |= *m;
         }
     }
-    let mut edge_bytes = row.ef_bytes;
-    if let Some(mask) = &parsed.edge_origin_mask {
-        if mask.len() != edge_bytes.len() {
+    let mut expansion_bytes = row.expansion_bytes;
+    if let Some(mask) = &parsed.expansion_mask {
+        if mask.len() != expansion_bytes.len() {
             return bad_request("or_mask_length_mismatch");
         }
-        for (b, m) in edge_bytes.iter_mut().zip(mask.iter()) {
+        for (b, m) in expansion_bytes.iter_mut().zip(mask.iter()) {
             *b |= *m;
         }
     }
@@ -1288,35 +1288,35 @@ pub async fn handle_frontier_delta(
     // users, so a delta can promote `Filtered → All` but never
     // demote on its own; hysteresis against the persisted
     // `outbound_mode` keeps an already-`All` pair stable.
-    let cf_k_u = match u32::try_from(cf_k_existing) {
+    let visible_k_u = match u32::try_from(visible_k_existing) {
         Ok(v) => v,
         Err(_) => {
-            tracing::error!("stored cf_k out of range; cannot reclassify mode");
+            tracing::error!("stored visible_k out of range; cannot reclassify mode");
             return internal_error();
         }
     };
-    let cf_m_u = match u32::try_from(cf_m_existing) {
+    let visible_m_u = match u32::try_from(visible_m_existing) {
         Ok(v) => v,
         Err(_) => {
-            tracing::error!("stored cf_m out of range; cannot reclassify mode");
+            tracing::error!("stored visible_m out of range; cannot reclassify mode");
             return internal_error();
         }
     };
-    let cf_n_u = match u64::try_from(cf_n_existing) {
+    let visible_n_u = match u64::try_from(visible_n_existing) {
         Ok(v) => v,
         Err(_) => {
-            tracing::error!("stored cf_n_est out of range; cannot reclassify mode");
+            tracing::error!("stored visible_n_est out of range; cannot reclassify mode");
             return internal_error();
         }
     };
     let new_outbound_mode = match BloomFilter::from_parts(
-        cf_k_u,
-        cf_m_u,
-        cf_n_u,
-        cf_fpr_existing as f32,
-        content_bytes.clone(),
+        visible_k_u,
+        visible_m_u,
+        visible_n_u,
+        visible_fpr_existing as f32,
+        visible_bytes.clone(),
     ) {
-        Ok(cf) => {
+        Ok(visible) => {
             let local_keys = match fetch_local_user_pubkeys(&state.db).await {
                 Ok(k) => k,
                 Err(e) => {
@@ -1324,7 +1324,7 @@ pub async fn handle_frontier_delta(
                     return internal_error();
                 }
             };
-            routing::classify_mode(prior_outbound_mode, &cf, &local_keys)
+            routing::classify_mode(prior_outbound_mode, &visible, &local_keys)
         }
         Err(e) => {
             // The bytes we just merged failed bloom validation. This
@@ -1350,17 +1350,17 @@ pub async fn handle_frontier_delta(
     let new_version_i = parsed.new_version as i64;
     let cursor = encode_cursor(parsed.new_version, row.epoch_start as u64);
     let cursor_slice: &[u8] = &cursor;
-    let cf_slice: &[u8] = &content_bytes;
-    let ef_slice: &[u8] = &edge_bytes;
+    let visible_slice: &[u8] = &visible_bytes;
+    let expansion_slice: &[u8] = &expansion_bytes;
     let update = sqlx::query!(
         "UPDATE peer_frontiers \
-         SET applied_version = ?, cf_bytes = ?, ef_bytes = ?, cursor = ?, \
+         SET applied_version = ?, visible_bytes = ?, expansion_bytes = ?, cursor = ?, \
              inbound_mode = ?, outbound_mode = ?, \
              updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
          WHERE peer_pubkey = ?",
         new_version_i,
-        cf_slice,
-        ef_slice,
+        visible_slice,
+        expansion_slice,
         cursor_slice,
         inbound_mode_str,
         outbound_mode_str,
@@ -1435,8 +1435,8 @@ pub async fn handle_frontier_get(
         version: frontier.version,
         epoch_start: frontier.epoch_start,
         active_horizon_days: NO_TRIMMING,
-        content_filter: FilterSpec::from_bloom(&frontier.content_filter),
-        edge_origin_filter: FilterSpec::from_bloom(&frontier.edge_origin_filter),
+        visible_filter: FilterSpec::from_bloom(&frontier.visible_filter),
+        expansion_filter: FilterSpec::from_bloom(&frontier.expansion_filter),
         cursor: frontier.cursor.clone(),
     };
     let body = snapshot.encode();
@@ -1514,8 +1514,8 @@ pub async fn operator_announce_frontier(
         version: frontier.version,
         epoch_start: frontier.epoch_start,
         active_horizon_days: NO_TRIMMING,
-        content_filter: FilterSpec::from_bloom(&frontier.content_filter),
-        edge_origin_filter: FilterSpec::from_bloom(&frontier.edge_origin_filter),
+        visible_filter: FilterSpec::from_bloom(&frontier.visible_filter),
+        expansion_filter: FilterSpec::from_bloom(&frontier.expansion_filter),
         mode: our_outbound_mode,
     };
     let body_bytes = announce.encode();
@@ -1619,11 +1619,11 @@ pub async fn frontier_fanout_loop(state: Arc<AppState>, frontier_dirty: Arc<toki
         // authors so their existing content arrives, not just future
         // pushes. Only *remote* authors are worth backfilling: a peer
         // has nothing to serve for a local author, so spawning a pull
-        // for one would just burn a futile round-trip. `added_content_keys`
+        // for one would just burn a futile round-trip. `added_visible_keys`
         // is dominated by local authors (every local user expansion), so
         // this filter is the difference between one targeted pull and a
         // burst of dead requests.
-        let remote_authors = match filter_remote_authors(&state.db, &refresh.added_content_keys)
+        let remote_authors = match filter_remote_authors(&state.db, &refresh.added_visible_keys)
             .await
         {
             Ok(keys) => keys,
@@ -1706,8 +1706,8 @@ mod tests {
             version: 42,
             epoch_start: 1_700_000_000_000,
             active_horizon_days: 0,
-            content_filter: sample_filter(),
-            edge_origin_filter: sample_filter(),
+            visible_filter: sample_filter(),
+            expansion_filter: sample_filter(),
             mode: Mode::All,
         };
         let bytes = a.encode();
@@ -1731,11 +1731,11 @@ mod tests {
                 Value::Integer(0.into()),
             ),
             (
-                Value::Text("content_filter".into()),
+                Value::Text("visible_filter".into()),
                 sample_filter().to_cbor_value(),
             ),
             (
-                Value::Text("edge_origin_filter".into()),
+                Value::Text("expansion_filter".into()),
                 sample_filter().to_cbor_value(),
             ),
         ]);
@@ -1750,8 +1750,8 @@ mod tests {
         let d = FrontierDelta {
             prev_version: 41,
             new_version: 42,
-            content_mask: Some(vec![0u8; 128]),
-            edge_origin_mask: Some(vec![0xFFu8; 128]),
+            visible_mask: Some(vec![0u8; 128]),
+            expansion_mask: Some(vec![0xFFu8; 128]),
             mode: Mode::All,
         };
         let bytes = d.encode();
@@ -1764,8 +1764,8 @@ mod tests {
         let d = FrontierDelta {
             prev_version: 41,
             new_version: 42,
-            content_mask: Some(vec![0xAAu8; 128]),
-            edge_origin_mask: None,
+            visible_mask: Some(vec![0xAAu8; 128]),
+            expansion_mask: None,
             mode: Mode::Filtered,
         };
         let bytes = d.encode();
@@ -1779,8 +1779,8 @@ mod tests {
             version: 5,
             epoch_start: 1_700_000_000_000,
             active_horizon_days: 30,
-            content_filter: sample_filter(),
-            edge_origin_filter: sample_filter(),
+            visible_filter: sample_filter(),
+            expansion_filter: sample_filter(),
             cursor: vec![1, 2, 3, 4],
         };
         let bytes = s.encode();
@@ -1816,8 +1816,8 @@ mod tests {
     fn empty_local_frontier_matches_nothing() {
         let lf = LocalFrontier::empty();
         assert_eq!(lf.version, 0);
-        assert_eq!(lf.content_filter.m, bloom::MIN_M_BITS);
-        assert!(!lf.content_filter.contains(b"any key"));
+        assert_eq!(lf.visible_filter.m, bloom::MIN_M_BITS);
+        assert!(!lf.visible_filter.contains(b"any key"));
     }
 
     #[test]

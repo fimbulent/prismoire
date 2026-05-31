@@ -20,7 +20,7 @@
 //! 2. [`forwarder_does_not_deliver_to_uninterested_peer`] — routing.
 //!    The dual sanity check: the convergence above must not just be
 //!    "everyone broadcasts unconditionally". An instance whose
-//!    `edge_origin_filter` lists exactly K₁ (and nothing else) does
+//!    `expansion_filter` lists exactly K₁ (and nothing else) does
 //!    not receive an edge signed by an unrelated key K₂, even though
 //!    every other instance is interested and the gossip storm fans
 //!    around it. False-positive rate enters here only as "≈ 0 for a
@@ -108,8 +108,8 @@ fn encode_wire(payload: &[u8], signature: &[u8]) -> Vec<u8> {
     buf
 }
 
-/// Build a §8.3 announce whose `edge_origin_filter` contains the
-/// given keys and whose `content_filter` is the all-ones sentinel.
+/// Build a §8.3 announce whose `expansion_filter` contains the
+/// given keys and whose `visible_filter` is the all-ones sentinel.
 ///
 /// The sentinel keeps the receiver's filter-bytes validator happy
 /// without us having to compute a real content closure; this test
@@ -129,8 +129,8 @@ fn announce_with_edge_origin_keys(interested_keys: &[[u8; 32]], version: u64) ->
         version,
         epoch_start: 1_700_000_000_000,
         active_horizon_days: 0,
-        content_filter: FilterSpec::from_bloom(&BloomFilter::all_ones_sentinel()),
-        edge_origin_filter: FilterSpec::from_bloom(&edge),
+        visible_filter: FilterSpec::from_bloom(&BloomFilter::all_ones_sentinel()),
+        expansion_filter: FilterSpec::from_bloom(&edge),
         mode: Mode::Filtered,
     }
 }
@@ -411,7 +411,7 @@ async fn gossip_converges_for_random_configurations() {
 // ---------------------------------------------------------------------------
 
 /// Property 2: the convergence above is not "everyone always sends".
-/// An instance whose `edge_origin_filter` contains exactly one key
+/// An instance whose `expansion_filter` contains exactly one key
 /// K₁ does not receive an edge signed by an unrelated key K₂, even
 /// when every other peer in the mesh is interested and would
 /// happily forward.
@@ -553,7 +553,7 @@ async fn forwarder_does_not_deliver_to_uninterested_peer() {
     assert_eq!(
         count_present(&c_inst.state.db, &[k1_hash]).await,
         0,
-        "C received the K1 edge despite empty edge_origin_filter — filter routing is bypassed",
+        "C received the K1 edge despite empty expansion_filter — filter routing is bypassed",
     );
 
     // Negative assertion 2: the K2 edge never escapes A. B, C, D

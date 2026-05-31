@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT applied_version, epoch_start, active_horizon_days, cf_family, cf_k, cf_m, cf_n_est, cf_fpr_target, cf_bytes, ef_family, ef_k, ef_m, ef_n_est, ef_fpr_target, ef_bytes, outbound_mode FROM peer_frontiers WHERE peer_pubkey = ?",
+  "query": "SELECT applied_version, epoch_start, active_horizon_days, visible_family, visible_k, visible_m, visible_n_est, visible_fpr_target, visible_bytes, expansion_family, expansion_k, expansion_m, expansion_n_est, expansion_fpr_target, expansion_bytes, outbound_mode FROM peer_frontiers WHERE peer_pubkey = ?",
   "describe": {
     "columns": [
       {
@@ -19,62 +19,62 @@
         "type_info": "Integer"
       },
       {
-        "name": "cf_family",
+        "name": "visible_family",
         "ordinal": 3,
         "type_info": "Text"
       },
       {
-        "name": "cf_k",
+        "name": "visible_k",
         "ordinal": 4,
         "type_info": "Integer"
       },
       {
-        "name": "cf_m",
+        "name": "visible_m",
         "ordinal": 5,
         "type_info": "Integer"
       },
       {
-        "name": "cf_n_est",
+        "name": "visible_n_est",
         "ordinal": 6,
         "type_info": "Integer"
       },
       {
-        "name": "cf_fpr_target",
+        "name": "visible_fpr_target",
         "ordinal": 7,
         "type_info": "Float"
       },
       {
-        "name": "cf_bytes",
+        "name": "visible_bytes",
         "ordinal": 8,
         "type_info": "Blob"
       },
       {
-        "name": "ef_family",
+        "name": "expansion_family",
         "ordinal": 9,
         "type_info": "Text"
       },
       {
-        "name": "ef_k",
+        "name": "expansion_k",
         "ordinal": 10,
         "type_info": "Integer"
       },
       {
-        "name": "ef_m",
+        "name": "expansion_m",
         "ordinal": 11,
         "type_info": "Integer"
       },
       {
-        "name": "ef_n_est",
+        "name": "expansion_n_est",
         "ordinal": 12,
         "type_info": "Integer"
       },
       {
-        "name": "ef_fpr_target",
+        "name": "expansion_fpr_target",
         "ordinal": 13,
         "type_info": "Float"
       },
       {
-        "name": "ef_bytes",
+        "name": "expansion_bytes",
         "ordinal": 14,
         "type_info": "Blob"
       },
@@ -106,5 +106,5 @@
       false
     ]
   },
-  "hash": "7ed58db69f90667254857317a7c17b77b09daadc57cafffec2631d6dfa6b24a5"
+  "hash": "7e7c5218d948cd1030ebda7ff4e380a8b82a6e998fc2d63881e7bc7b3efe2136"
 }

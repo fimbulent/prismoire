@@ -16,7 +16,7 @@
 //!
 //! Task #16 adds the 3-instance multi-hop (A → B → C) scenario:
 //! the forwarder behind §7.5 now exists, so an edge A pushes to B
-//! gets re-emitted to C whenever C's `edge_origin_filter` says C is
+//! gets re-emitted to C whenever C's `expansion_filter` says C is
 //! interested. See [`forwarder_relays_applied_edge_to_interested_peer`]
 //! below.
 //!
@@ -703,8 +703,8 @@ async fn push_with_wrong_content_type_is_415() {
     assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
 }
 
-/// Build a minimal §8.3 `FrontierAnnounce` whose `edge_origin_filter`
-/// is populated with `interested_keys`. The `content_filter` is the
+/// Build a minimal §8.3 `FrontierAnnounce` whose `expansion_filter`
+/// is populated with `interested_keys`. The `visible_filter` is the
 /// `all_ones_sentinel` so it cannot accidentally route an `Authored`
 /// object — this test only exercises the trust-edge path, and using
 /// the sentinel keeps the receiver's filter-bytes validation happy
@@ -723,8 +723,8 @@ fn announce_with_edge_origin_keys(interested_keys: &[&[u8; 32]]) -> FrontierAnno
         version: 1,
         epoch_start: 1_700_000_000_000,
         active_horizon_days: 0,
-        content_filter: FilterSpec::from_bloom(&BloomFilter::all_ones_sentinel()),
-        edge_origin_filter: FilterSpec::from_bloom(&edge),
+        visible_filter: FilterSpec::from_bloom(&BloomFilter::all_ones_sentinel()),
+        expansion_filter: FilterSpec::from_bloom(&edge),
         mode: Mode::Filtered,
     }
 }
@@ -758,7 +758,7 @@ where
 
 /// Done-when (Task #16): A pushes a signed trust-edge to B, B applies
 /// it locally, and the §7.5 forwarder relays it on to C because C's
-/// `edge_origin_filter` says C is interested in edges signed by
+/// `expansion_filter` says C is interested in edges signed by
 /// alice. The arrival path on C is the same `/federation/v1/edges`
 /// handler the originator push uses — the forwarder is just another
 /// active peer to C — so we assert convergence by polling C's
@@ -784,7 +784,7 @@ async fn forwarder_relays_applied_edge_to_interested_peer() {
     insert_user_with_pubkey(&c.state.db, "user-alice", "alice", &alice_pub).await;
     insert_user_with_pubkey(&c.state.db, "user-bob", "bob", &bob_pub).await;
 
-    // C announces a frontier to B whose `edge_origin_filter` contains
+    // C announces a frontier to B whose `expansion_filter` contains
     // alice's pubkey. This makes B's `peers_interested_in` return C
     // for any `ForwardingClass::TrustEdge` keyed on alice.
     let announce_body = announce_with_edge_origin_keys(&[&alice_pub]).encode();

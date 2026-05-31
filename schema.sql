@@ -175,32 +175,32 @@ CREATE TABLE IF NOT EXISTS "peer_frontiers" (
     -- only `prismoire-bloom-v1` today but persist what the sender
     -- declared so a future build that supports an additional family
     -- can read existing rows without re-syncing.
-    cf_family TEXT NOT NULL,
-    cf_k INTEGER NOT NULL
-                CHECK (cf_k BETWEEN 1 AND 32),
-    cf_m INTEGER NOT NULL
-                CHECK (cf_m >= 64 AND (cf_m % 64) = 0),
-    cf_n_est INTEGER NOT NULL
-                CHECK (cf_n_est >= 0),
-    cf_fpr_target REAL NOT NULL,
+    visible_family TEXT NOT NULL,
+    visible_k INTEGER NOT NULL
+                CHECK (visible_k BETWEEN 1 AND 32),
+    visible_m INTEGER NOT NULL
+                CHECK (visible_m >= 64 AND (visible_m % 64) = 0),
+    visible_n_est INTEGER NOT NULL
+                CHECK (visible_n_est >= 0),
+    visible_fpr_target REAL NOT NULL,
     -- Exactly cf_m / 8 bytes; CHECK enforces it locally so a row
     -- inserted out of band still satisfies the §8.2 invariant.
-    cf_bytes BLOB NOT NULL
-                CHECK (length(cf_bytes) = cf_m / 8),
+    visible_bytes BLOB NOT NULL
+                CHECK (length(visible_bytes) = visible_m / 8),
 
     -- Edge-origin filter (2-hop closure per §7.4). Same field shape
     -- as the content filter; receivers must validate both
     -- independently per §8.3.
-    ef_family TEXT NOT NULL,
-    ef_k INTEGER NOT NULL
-                CHECK (ef_k BETWEEN 1 AND 32),
-    ef_m INTEGER NOT NULL
-                CHECK (ef_m >= 64 AND (ef_m % 64) = 0),
-    ef_n_est INTEGER NOT NULL
-                CHECK (ef_n_est >= 0),
-    ef_fpr_target REAL NOT NULL,
-    ef_bytes BLOB NOT NULL
-                CHECK (length(ef_bytes) = ef_m / 8),
+    expansion_family TEXT NOT NULL,
+    expansion_k INTEGER NOT NULL
+                CHECK (expansion_k BETWEEN 1 AND 32),
+    expansion_m INTEGER NOT NULL
+                CHECK (expansion_m >= 64 AND (expansion_m % 64) = 0),
+    expansion_n_est INTEGER NOT NULL
+                CHECK (expansion_n_est >= 0),
+    expansion_fpr_target REAL NOT NULL,
+    expansion_bytes BLOB NOT NULL
+                CHECK (length(expansion_bytes) = expansion_m / 8),
 
     -- Opaque §8.5 cursor we return to GET callers (≤ 64 bytes per
     -- the spec table). We mint this server-side on each apply and

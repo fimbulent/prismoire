@@ -3,10 +3,10 @@
 //! Pins the Phase-6.5 done-when criteria from
 //! `docs/federation-impl-plan.md`:
 //!
-//! - Receiving an announce whose `content_filter` covers ≥
+//! - Receiving an announce whose `visible_filter` covers ≥
 //!   `HIGH_THRESHOLD` of the receiver's local users promotes the
 //!   receiver's `outbound_mode` for that sender to `'all'`.
-//! - A follow-up announce whose `content_filter` covers <
+//! - A follow-up announce whose `visible_filter` covers <
 //!   `LOW_THRESHOLD` demotes a previously-`all` pair back to
 //!   `'filtered'`.
 //!
@@ -141,7 +141,7 @@ async fn fresh_instance_with_no_local_users_stays_in_filtered() {
     let b = harness.instance("b");
 
     // Deliberately do *not* seed local users on A. B sends an announce
-    // whose content_filter is densely populated — the kind of input
+    // whose visible_filter is densely populated — the kind of input
     // that would maximise the bogus-promote bait.
     let mut fat_filter =
         BloomFilter::new_empty(TEST_K, TEST_M, 16, TEST_FPR).expect("bloom params in range");
@@ -152,8 +152,8 @@ async fn fresh_instance_with_no_local_users_stays_in_filtered() {
         version: 1,
         epoch_start: 1_700_000_000_000,
         active_horizon_days: 0,
-        content_filter: FilterSpec::from_bloom(&fat_filter),
-        edge_origin_filter: empty_filter(),
+        visible_filter: FilterSpec::from_bloom(&fat_filter),
+        expansion_filter: empty_filter(),
         mode: Mode::Filtered,
     }
     .encode();
@@ -177,7 +177,7 @@ async fn fresh_instance_with_no_local_users_stays_in_filtered() {
 }
 
 /// Done-when (1) of Phase 6.5: receiving an announce whose
-/// `content_filter` fully covers the local-user set promotes the
+/// `visible_filter` fully covers the local-user set promotes the
 /// receiver's stored `outbound_mode` for that sender to `'all'`.
 #[tokio::test]
 async fn announce_with_full_coverage_promotes_outbound_to_all() {
@@ -187,7 +187,7 @@ async fn announce_with_full_coverage_promotes_outbound_to_all() {
     let b = harness.instance("b");
 
     // Seed A's local users so its `fetch_local_user_pubkeys` returns a
-    // known set; build B's announce content_filter to cover all of them.
+    // known set; build B's announce visible_filter to cover all of them.
     let a_local_keys = seed_local_users(&a.state.db).await;
     let covering = covering_filter(&a_local_keys);
 
@@ -199,8 +199,8 @@ async fn announce_with_full_coverage_promotes_outbound_to_all() {
         version: 1,
         epoch_start: 1_700_000_000_000,
         active_horizon_days: 0,
-        content_filter: covering,
-        edge_origin_filter: empty_filter(),
+        visible_filter: covering,
+        expansion_filter: empty_filter(),
         mode: Mode::Filtered,
     }
     .encode();
@@ -234,7 +234,7 @@ async fn announce_with_full_coverage_promotes_outbound_to_all() {
 }
 
 /// Done-when (2) of Phase 6.5: an `all`-mode pair demotes back to
-/// `'filtered'` when a follow-up announce's `content_filter` drops the
+/// `'filtered'` when a follow-up announce's `visible_filter` drops the
 /// receiver's coverage below `LOW_THRESHOLD`.
 #[tokio::test]
 async fn follow_up_announce_with_no_coverage_demotes_outbound_to_filtered() {
@@ -251,8 +251,8 @@ async fn follow_up_announce_with_no_coverage_demotes_outbound_to_filtered() {
         version: 1,
         epoch_start: 1_700_000_000_000,
         active_horizon_days: 0,
-        content_filter: covering_filter(&a_local_keys),
-        edge_origin_filter: empty_filter(),
+        visible_filter: covering_filter(&a_local_keys),
+        expansion_filter: empty_filter(),
         mode: Mode::Filtered,
     }
     .encode();
@@ -273,14 +273,14 @@ async fn follow_up_announce_with_no_coverage_demotes_outbound_to_filtered() {
     );
 
     // Step 2 — demote: a fresh announce at version 2 carrying an empty
-    // content_filter. Coverage drops to 0.0 → below LOW_THRESHOLD (0.60)
+    // visible_filter. Coverage drops to 0.0 → below LOW_THRESHOLD (0.60)
     // → `classify_mode(All, …)` returns Filtered.
     let demote_body = FrontierAnnounce {
         version: 2,
         epoch_start: 1_700_000_000_000,
         active_horizon_days: 0,
-        content_filter: empty_filter(),
-        edge_origin_filter: empty_filter(),
+        visible_filter: empty_filter(),
+        expansion_filter: empty_filter(),
         mode: Mode::Filtered,
     }
     .encode();

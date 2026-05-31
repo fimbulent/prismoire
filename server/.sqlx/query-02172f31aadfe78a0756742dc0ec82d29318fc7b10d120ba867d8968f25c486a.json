@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO peer_frontiers ( peer_pubkey, applied_version, epoch_start, active_horizon_days, visible_family, visible_k, visible_m, visible_n_est, visible_fpr_target, visible_bytes, expansion_family, expansion_k, expansion_m, expansion_n_est, expansion_fpr_target, expansion_bytes, cursor, inbound_mode, outbound_mode, updated_at ) VALUES ( ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now') ) ON CONFLICT(peer_pubkey) DO UPDATE SET applied_version = excluded.applied_version, epoch_start = excluded.epoch_start, active_horizon_days = excluded.active_horizon_days, visible_family = excluded.visible_family, visible_k = excluded.visible_k, visible_m = excluded.visible_m, visible_n_est = excluded.visible_n_est, visible_fpr_target = excluded.visible_fpr_target, visible_bytes = excluded.visible_bytes, expansion_family = excluded.expansion_family, expansion_k = excluded.expansion_k, expansion_m = excluded.expansion_m, expansion_n_est = excluded.expansion_n_est, expansion_fpr_target = excluded.expansion_fpr_target, expansion_bytes = excluded.expansion_bytes, cursor = excluded.cursor, inbound_mode = excluded.inbound_mode, outbound_mode = excluded.outbound_mode, updated_at = excluded.updated_at WHERE excluded.applied_version > peer_frontiers.applied_version",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 19
+    },
+    "nullable": []
+  },
+  "hash": "02172f31aadfe78a0756742dc0ec82d29318fc7b10d120ba867d8968f25c486a"
+}

@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT applied_version, cf_bytes FROM peer_frontiers WHERE peer_pubkey = ?",
+  "query": "SELECT applied_version, visible_bytes FROM peer_frontiers WHERE peer_pubkey = ?",
   "describe": {
     "columns": [
       {
@@ -9,7 +9,7 @@
         "type_info": "Integer"
       },
       {
-        "name": "cf_bytes",
+        "name": "visible_bytes",
         "ordinal": 1,
         "type_info": "Blob"
       }
@@ -22,5 +22,5 @@
       false
     ]
   },
-  "hash": "cf363da49d82aeda8b319450cce3099ea5079088120b21b15c62a0d2a8078276"
+  "hash": "40417e11a75bee15f89d5beeb50cf139fc60c76531f2707f1c2b9995252f8bef"
 }

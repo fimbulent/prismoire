@@ -178,12 +178,12 @@ async fn refresh_detailed_reports_added_authors_and_version_bump() {
     assert!(r1.changed, "creating a local user changes the frontier");
     assert!(r1.frontier.version >= 1, "version bumped on change");
     assert_eq!(
-        r1.added_content_keys.len(),
+        r1.added_visible_keys.len(),
         1,
         "exactly alice newly entered the content closure",
     );
     assert_eq!(
-        to_hex(&r1.added_content_keys[0]),
+        to_hex(&r1.added_visible_keys[0]),
         alice.public_key_hex.to_lowercase(),
         "the added author is alice's signing pubkey",
     );
@@ -193,7 +193,7 @@ async fn refresh_detailed_reports_added_authors_and_version_bump() {
         .expect("refresh #2");
     assert!(!r2.changed, "an unchanged re-run is a no-op");
     assert!(
-        r2.added_content_keys.is_empty(),
+        r2.added_visible_keys.is_empty(),
         "no new authors on an unchanged refresh",
     );
 }

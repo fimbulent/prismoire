@@ -113,15 +113,15 @@ async fn announce_persists_a_peer_frontiers_row() {
     // The row B persisted should be keyed by A's pubkey, not B's.
     let a_pub_bytes: &[u8] = a.state.instance_key.public_bytes();
     let row = sqlx::query!(
-        "SELECT applied_version, cf_family, ef_family FROM peer_frontiers WHERE peer_pubkey = ?",
+        "SELECT applied_version, visible_family, expansion_family FROM peer_frontiers WHERE peer_pubkey = ?",
         a_pub_bytes,
     )
     .fetch_one(&b.state.db)
     .await
     .expect("peer_frontiers row");
     assert_eq!(row.applied_version as u64, version);
-    assert_eq!(row.cf_family, "prismoire-bloom-v1");
-    assert_eq!(row.ef_family, "prismoire-bloom-v1");
+    assert_eq!(row.visible_family, "prismoire-bloom-v1");
+    assert_eq!(row.expansion_family, "prismoire-bloom-v1");
 }
 
 /// Done-when (2) of Phase 4: a same-version replay of the announce is
@@ -141,8 +141,8 @@ async fn announce_at_same_version_is_idempotent() {
         version: 1_000,
         epoch_start: 1_700_000_000_000,
         active_horizon_days: 0,
-        content_filter: empty_filter_spec(),
-        edge_origin_filter: empty_filter_spec(),
+        visible_filter: empty_filter_spec(),
+        expansion_filter: empty_filter_spec(),
         mode: Mode::Filtered,
     }
     .encode();
@@ -182,8 +182,8 @@ async fn delta_or_mask_updates_filter_bytes_and_version() {
         version: 5,
         epoch_start: 1_700_000_000_000,
         active_horizon_days: 0,
-        content_filter: empty_filter_spec(),
-        edge_origin_filter: empty_filter_spec(),
+        visible_filter: empty_filter_spec(),
+        expansion_filter: empty_filter_spec(),
         mode: Mode::Filtered,
     }
     .encode();
@@ -197,8 +197,8 @@ async fn delta_or_mask_updates_filter_bytes_and_version() {
     let delta_body = FrontierDelta {
         prev_version: 5,
         new_version: 6,
-        content_mask: Some(mask.clone()),
-        edge_origin_mask: None,
+        visible_mask: Some(mask.clone()),
+        expansion_mask: None,
         mode: Mode::Filtered,
     }
     .encode();
@@ -207,7 +207,7 @@ async fn delta_or_mask_updates_filter_bytes_and_version() {
 
     let a_pub: &[u8] = a.state.instance_key.public_bytes();
     let row = sqlx::query!(
-        "SELECT applied_version, cf_bytes FROM peer_frontiers WHERE peer_pubkey = ?",
+        "SELECT applied_version, visible_bytes FROM peer_frontiers WHERE peer_pubkey = ?",
         a_pub,
     )
     .fetch_one(&b.state.db)
@@ -215,7 +215,7 @@ async fn delta_or_mask_updates_filter_bytes_and_version() {
     .expect("peer_frontiers row");
     assert_eq!(row.applied_version as u64, 6, "version bumped to 6");
     assert_eq!(
-        row.cf_bytes[3], 0b1010_1010,
+        row.visible_bytes[3], 0b1010_1010,
         "byte index 3 reflects the OR-mask"
     );
 }
@@ -233,8 +233,8 @@ async fn delta_with_stale_prev_version_returns_409_with_current() {
         version: 10,
         epoch_start: 1_700_000_000_000,
         active_horizon_days: 0,
-        content_filter: empty_filter_spec(),
-        edge_origin_filter: empty_filter_spec(),
+        visible_filter: empty_filter_spec(),
+        expansion_filter: empty_filter_spec(),
         mode: Mode::Filtered,
     }
     .encode();
@@ -249,8 +249,8 @@ async fn delta_with_stale_prev_version_returns_409_with_current() {
     let delta = FrontierDelta {
         prev_version: 7,
         new_version: 11,
-        content_mask: Some(vec![0u8; 8]),
-        edge_origin_mask: None,
+        visible_mask: Some(vec![0u8; 8]),
+        expansion_mask: None,
         mode: Mode::Filtered,
     }
     .encode();
@@ -289,8 +289,8 @@ async fn delta_without_prior_announce_returns_409_with_zero() {
     let delta = FrontierDelta {
         prev_version: 0,
         new_version: 1,
-        content_mask: Some(vec![0u8; 8]),
-        edge_origin_mask: None,
+        visible_mask: Some(vec![0u8; 8]),
+        expansion_mask: None,
         mode: Mode::Filtered,
     }
     .encode();

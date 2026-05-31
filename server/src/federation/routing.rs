@@ -18,8 +18,8 @@
 //! 2. **Interest-filter dispatch** ([`ForwardingClass`],
 //!    [`peers_interested_in`]) — the §7.4 routing rule that maps a
 //!    signed object class plus its routing key to the receiver's
-//!    appropriate filter (`content_filter` for everything except
-//!    trust-edges, `edge_origin_filter` for trust-edges) and yields
+//!    appropriate filter (`visible_filter` for everything except
+//!    trust-edges, `expansion_filter` for trust-edges) and yields
 //!    the subset of active peers that should receive a push.
 //!
 //! Outbound delivery itself (queueing, retry, dedup-LRU bookkeeping,
@@ -53,7 +53,7 @@ pub enum Mode {
     /// Skip the filter check entirely and unconditionally push every
     /// locally-routed object. Per §7.2 a direction is promoted to
     /// `All` once the sender's local coverage of the receiver's
-    /// content filter crosses [`HIGH_THRESHOLD`].
+    /// visible filter crosses [`HIGH_THRESHOLD`].
     All,
 }
 
@@ -108,7 +108,7 @@ pub const REDUNDANCY_K: usize = 2;
 pub const REDUNDANCY_K_MOVE: usize = 5;
 
 /// §7.2 mode-promote threshold (default 80%). When the sender's local
-/// coverage scan against the peer's `content_filter` reaches or
+/// coverage scan against the peer's `visible_filter` reaches or
 /// exceeds this value, the sender promotes the direction to [`Mode::All`]
 /// (subject to the mode-change wire handshake, Phase 5+). Expressed
 /// as a fraction so it composes directly with [`BloomFilter::coverage`].
@@ -127,11 +127,11 @@ pub const LOW_THRESHOLD: f64 = 0.60;
 /// The class determines two things:
 ///
 /// 1. Which of the receiver's two filters to consult — trust-edges
-///    look up against `edge_origin_filter`; user-status looks up
+///    look up against `expansion_filter`; user-status looks up
 ///    against EITHER filter (a status about a user is relevant to a
 ///    peer that hosts the subject's content OR traverses the
 ///    subject's edges); everything else looks up against
-///    `content_filter`.
+///    `visible_filter`.
 /// 2. What the routing *key* is for an object — for most classes the
 ///    key is the author's public key; for trust-edges it is the
 ///    signer (== source) of the edge; for user-status it is the
@@ -147,19 +147,19 @@ pub const LOW_THRESHOLD: f64 = 0.60;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForwardingClass {
     /// Trust-edge signature → routes against the receiver's
-    /// `edge_origin_filter` (§7.4); key is `signer(edge)`.
+    /// `expansion_filter` (§7.4); key is `signer(edge)`.
     TrustEdge,
     /// Every author-keyed content class — post-rev, retract, profile,
     /// thread-create, deactivate, admin-rm (key = target_author).
-    /// Routes against the receiver's `content_filter` (§7.4) and is
+    /// Routes against the receiver's `visible_filter` (§7.4) and is
     /// pushed to the `/content` route.
     Authored,
     /// §16 `user-status`. Key is `subject(obj)`; routed against
-    /// EITHER `content_filter` OR `edge_origin_filter` (§7.4 — the
+    /// EITHER `visible_filter` OR `expansion_filter` (§7.4 — the
     /// only OR-filter class) and pushed to the `/user-status` route.
     UserStatus,
     /// §17 `thread-status`. Key is the thread's OP author pubkey;
-    /// routed against `content_filter` (the status rides with the
+    /// routed against `visible_filter` (the status rides with the
     /// thread's content) but pushed to the `/thread-status` route
     /// rather than `/content`, which is why it is a distinct class
     /// from [`Self::Authored`] despite sharing the filter.
@@ -177,20 +177,20 @@ pub enum ForwardingClass {
 impl ForwardingClass {
     /// Decide whether `key` is admitted for this class against the
     /// peer's two filters, per the §7.4 dispatch table. Trust-edges
-    /// test `edge_origin_filter`; user-status tests EITHER filter (the
+    /// test `expansion_filter`; user-status tests EITHER filter (the
     /// OR-filter class — a status is relevant to a peer hosting the
     /// subject's content or traversing its edges); every other content
-    /// class (including thread-status) tests `content_filter`.
+    /// class (including thread-status) tests `visible_filter`.
     ///
     /// `Move` bypasses every filter under the §12 unconditional-flood
     /// override; callers must check [`Self::bypasses_filters`] before
     /// reaching this method, or the bloom path below would erroneously
     /// gate move propagation on the per-peer interest filters.
-    fn admits(&self, cf: &BloomFilter, ef: &BloomFilter, key: &[u8]) -> bool {
+    fn admits(&self, visible: &BloomFilter, expansion: &BloomFilter, key: &[u8]) -> bool {
         match self {
-            ForwardingClass::TrustEdge => ef.contains(key),
-            ForwardingClass::Authored | ForwardingClass::ThreadStatus => cf.contains(key),
-            ForwardingClass::UserStatus => cf.contains(key) || ef.contains(key),
+            ForwardingClass::TrustEdge => expansion.contains(key),
+            ForwardingClass::Authored | ForwardingClass::ThreadStatus => visible.contains(key),
+            ForwardingClass::UserStatus => visible.contains(key) || expansion.contains(key),
             // `Move` is documented to bypass §7.4 filter dispatch via
             // [`Self::bypasses_filters`]; reaching this arm means a
             // caller went through the bloom-membership path for a
@@ -257,7 +257,7 @@ pub struct PeerRouting {
 ///
 /// Walks `peers WHERE status = 'active'` joined with `peer_frontiers`,
 /// and for each row picks the receiver-side filter from the §7.4
-/// table (content vs edge-origin), reconstructs the [`BloomFilter`]
+/// table (visible vs expansion), reconstructs the [`BloomFilter`]
 /// from the persisted parameters + bytes, and checks membership for
 /// `key`. A peer with no `peer_frontiers` row yet (we have never
 /// received their frontier) is treated as "filtered, empty
@@ -290,14 +290,14 @@ pub async fn peers_interested_in(
 ) -> Result<Vec<PeerRouting>, sqlx::Error> {
     let rows = sqlx::query!(
         "SELECT p.instance_pubkey AS \"instance_pubkey!: Vec<u8>\", \
-                f.cf_k AS \"cf_k?: i64\", f.cf_m AS \"cf_m?: i64\", \
-                f.cf_n_est AS \"cf_n_est?: i64\", \
-                f.cf_fpr_target AS \"cf_fpr_target?: f64\", \
-                f.cf_bytes AS \"cf_bytes?: Vec<u8>\", \
-                f.ef_k AS \"ef_k?: i64\", f.ef_m AS \"ef_m?: i64\", \
-                f.ef_n_est AS \"ef_n_est?: i64\", \
-                f.ef_fpr_target AS \"ef_fpr_target?: f64\", \
-                f.ef_bytes AS \"ef_bytes?: Vec<u8>\", \
+                f.visible_k AS \"visible_k?: i64\", f.visible_m AS \"visible_m?: i64\", \
+                f.visible_n_est AS \"visible_n_est?: i64\", \
+                f.visible_fpr_target AS \"visible_fpr_target?: f64\", \
+                f.visible_bytes AS \"visible_bytes?: Vec<u8>\", \
+                f.expansion_k AS \"expansion_k?: i64\", f.expansion_m AS \"expansion_m?: i64\", \
+                f.expansion_n_est AS \"expansion_n_est?: i64\", \
+                f.expansion_fpr_target AS \"expansion_fpr_target?: f64\", \
+                f.expansion_bytes AS \"expansion_bytes?: Vec<u8>\", \
                 f.outbound_mode AS \"outbound_mode?: String\" \
          FROM peers p \
          LEFT JOIN peer_frontiers f ON f.peer_pubkey = p.instance_pubkey \
@@ -337,21 +337,21 @@ pub async fn peers_interested_in(
         // No frontier row yet → treat as Filtered + empty filter:
         // miss every key. The peer joins the routing population only
         // after their first §8.3 announce.
-        let Some(cf) = build_filter(
-            row.cf_k,
-            row.cf_m,
-            row.cf_n_est,
-            row.cf_fpr_target,
-            row.cf_bytes,
+        let Some(visible) = build_filter(
+            row.visible_k,
+            row.visible_m,
+            row.visible_n_est,
+            row.visible_fpr_target,
+            row.visible_bytes,
         ) else {
             continue;
         };
-        let Some(ef) = build_filter(
-            row.ef_k,
-            row.ef_m,
-            row.ef_n_est,
-            row.ef_fpr_target,
-            row.ef_bytes,
+        let Some(expansion) = build_filter(
+            row.expansion_k,
+            row.expansion_m,
+            row.expansion_n_est,
+            row.expansion_fpr_target,
+            row.expansion_bytes,
         ) else {
             continue;
         };
@@ -364,7 +364,7 @@ pub async fn peers_interested_in(
         // Filtered falls back to the per-class membership test.
         let admitted = match outbound_mode {
             Mode::All => true,
-            Mode::Filtered => class.admits(&cf, &ef, key),
+            Mode::Filtered => class.admits(&visible, &expansion, key),
         };
         if admitted {
             out.push(PeerRouting {
@@ -410,7 +410,7 @@ fn build_filter(
     }
 }
 
-/// §7.2 mode classification given a peer's `content_filter` and the
+/// §7.2 mode classification given a peer's `visible_filter` and the
 /// local user pubkeys. Returns the mode this sender should now use
 /// for the `sender → peer` direction, applied by the receiver-side
 /// handlers in `handle_frontier_announce` / `handle_frontier_delta`
@@ -434,13 +434,13 @@ fn build_filter(
 /// coverage measurement to act on.
 pub fn classify_mode(
     current_mode: Mode,
-    peer_content_filter: &BloomFilter,
+    peer_visible_filter: &BloomFilter,
     local_user_keys: &[[u8; 32]],
 ) -> Mode {
     if local_user_keys.is_empty() {
         return current_mode;
     }
-    let coverage = peer_content_filter.coverage(local_user_keys);
+    let coverage = peer_visible_filter.coverage(local_user_keys);
     match current_mode {
         Mode::Filtered if coverage >= HIGH_THRESHOLD => Mode::All,
         Mode::All if coverage < LOW_THRESHOLD => Mode::Filtered,
@@ -538,25 +538,25 @@ mod tests {
 
     #[test]
     fn forwarding_class_dispatch() {
-        // content_filter contains "alice"; edge_origin_filter
+        // visible_filter contains "alice"; expansion_filter
         // contains "bob". A trust-edge keyed on "alice" must NOT
         // match (wrong filter); a post-rev keyed on "alice" must
         // match.
-        let cf = one_key_filter(&[b"alice"]);
-        let ef = one_key_filter(&[b"bob"]);
-        assert!(ForwardingClass::Authored.admits(&cf, &ef, b"alice"));
-        assert!(!ForwardingClass::TrustEdge.admits(&cf, &ef, b"alice"));
-        assert!(ForwardingClass::TrustEdge.admits(&cf, &ef, b"bob"));
-        // thread-status rides the content filter (like Authored).
-        assert!(ForwardingClass::ThreadStatus.admits(&cf, &ef, b"alice"));
-        assert!(!ForwardingClass::ThreadStatus.admits(&cf, &ef, b"bob"));
+        let visible = one_key_filter(&[b"alice"]);
+        let expansion = one_key_filter(&[b"bob"]);
+        assert!(ForwardingClass::Authored.admits(&visible, &expansion, b"alice"));
+        assert!(!ForwardingClass::TrustEdge.admits(&visible, &expansion, b"alice"));
+        assert!(ForwardingClass::TrustEdge.admits(&visible, &expansion, b"bob"));
+        // thread-status rides the visible filter (like Authored).
+        assert!(ForwardingClass::ThreadStatus.admits(&visible, &expansion, b"alice"));
+        assert!(!ForwardingClass::ThreadStatus.admits(&visible, &expansion, b"bob"));
         // user-status is the OR-filter class: matches if EITHER filter
         // admits the subject key.
-        assert!(ForwardingClass::UserStatus.admits(&cf, &ef, b"alice"));
-        assert!(ForwardingClass::UserStatus.admits(&cf, &ef, b"bob"));
-        let cf_empty = one_key_filter(&[b"zzz"]);
-        let ef_empty = one_key_filter(&[b"zzz"]);
-        assert!(!ForwardingClass::UserStatus.admits(&cf_empty, &ef_empty, b"alice"));
+        assert!(ForwardingClass::UserStatus.admits(&visible, &expansion, b"alice"));
+        assert!(ForwardingClass::UserStatus.admits(&visible, &expansion, b"bob"));
+        let visible_empty = one_key_filter(&[b"zzz"]);
+        let expansion_empty = one_key_filter(&[b"zzz"]);
+        assert!(!ForwardingClass::UserStatus.admits(&visible_empty, &expansion_empty, b"alice"));
     }
 
     #[test]

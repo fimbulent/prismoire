@@ -52,8 +52,8 @@ fn announce_all_ones() -> FrontierAnnounce {
         version: 1,
         epoch_start: 1_700_000_000_000,
         active_horizon_days: 0,
-        content_filter: FilterSpec::from_bloom(&BloomFilter::all_ones_sentinel()),
-        edge_origin_filter: FilterSpec::from_bloom(&BloomFilter::all_ones_sentinel()),
+        visible_filter: FilterSpec::from_bloom(&BloomFilter::all_ones_sentinel()),
+        expansion_filter: FilterSpec::from_bloom(&BloomFilter::all_ones_sentinel()),
         mode: Mode::Filtered,
     }
 }

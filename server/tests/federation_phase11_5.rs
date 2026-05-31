@@ -194,13 +194,13 @@ async fn insert_thread(
     .expect("insert thread");
 }
 
-/// Build a §8.3 `FrontierAnnounce` whose `content_filter` carries
+/// Build a §8.3 `FrontierAnnounce` whose `visible_filter` carries
 /// `interested_keys`. The content filter is the gate for both the §16
-/// user-status OR-filter (`cf || ef`) and the §17 thread-status filter
-/// (`cf`), so populating it alone makes the announcer interested in both
-/// classes keyed on those bytes. `edge_origin_filter` is a real but empty
+/// user-status OR-filter (`visible || expansion`) and the §17 thread-status filter
+/// (`visible`), so populating it alone makes the announcer interested in both
+/// classes keyed on those bytes. `expansion_filter` is a real but empty
 /// bloom (it is irrelevant to the status classes under test).
-fn announce_with_content_keys(interested_keys: &[&[u8; 32]]) -> FrontierAnnounce {
+fn announce_with_visible_keys(interested_keys: &[&[u8; 32]]) -> FrontierAnnounce {
     let cap = interested_keys.len().max(1) as u64;
     let mut content = BloomFilter::new_empty(7, 1024, cap, 0.01).expect("build content filter");
     for k in interested_keys {
@@ -211,8 +211,8 @@ fn announce_with_content_keys(interested_keys: &[&[u8; 32]]) -> FrontierAnnounce
         version: 1,
         epoch_start: 1_700_000_000_000,
         active_horizon_days: 0,
-        content_filter: FilterSpec::from_bloom(&content),
-        edge_origin_filter: FilterSpec::from_bloom(&edge),
+        visible_filter: FilterSpec::from_bloom(&content),
+        expansion_filter: FilterSpec::from_bloom(&edge),
         mode: Mode::Filtered,
     }
 }
@@ -281,7 +281,7 @@ async fn user_status_relays_to_non_adjacent_interested_peer() {
     // Each announce records the downstream peer's frontier in the
     // upstream's `peer_frontiers`, so `peers_interested_in` returns the
     // next hop for a UserStatus keyed on S.
-    let announce = announce_with_content_keys(&[&s_pub]).encode();
+    let announce = announce_with_visible_keys(&[&s_pub]).encode();
     let (st, _) = send_envelope_signed(
         &harness,
         "b",
@@ -382,7 +382,7 @@ async fn thread_status_relays_to_non_adjacent_interested_peer() {
     }
 
     // Interest keyed on the OP author pubkey: B → A, C → B.
-    let announce = announce_with_content_keys(&[&author_pub]).encode();
+    let announce = announce_with_visible_keys(&[&author_pub]).encode();
     let (st, _) = send_envelope_signed(
         &harness,
         "b",
@@ -460,7 +460,7 @@ async fn user_status_not_forwarded_to_uninterested_peer() {
     // cover S, so A's `peers_interested_in` must exclude B for S.
     let other_key = SigningKey::generate(&mut OsRng);
     let other_pub: [u8; 32] = *other_key.verifying_key().as_bytes();
-    let announce = announce_with_content_keys(&[&other_pub]).encode();
+    let announce = announce_with_visible_keys(&[&other_pub]).encode();
     let (st, _) = send_envelope_signed(
         &harness,
         "b",
