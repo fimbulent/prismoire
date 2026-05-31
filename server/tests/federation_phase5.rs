@@ -704,11 +704,21 @@ async fn push_with_wrong_content_type_is_415() {
 }
 
 /// Build a minimal §8.3 `FrontierAnnounce` whose `expansion_filter`
-/// is populated with `interested_keys`. The `visible_filter` is the
-/// `all_ones_sentinel` so it cannot accidentally route an `Authored`
-/// object — this test only exercises the trust-edge path, and using
-/// the sentinel keeps the receiver's filter-bytes validation happy
-/// without us computing a real closure.
+/// is populated with `interested_keys` and whose `visible_filter` is
+/// empty.
+///
+/// The empty `visible_filter` is load-bearing. `classify_mode` (§7.2)
+/// measures the receiver's coverage of the *announcer's* visible filter
+/// to decide the sender→announcer `outbound_mode`: an `all_ones_sentinel`
+/// here scores 100% coverage of the sender's local users and promotes
+/// the pair to `Mode::All`, which floods every object past the per-class
+/// bloom check (the §7.2 short-circuit in `peers_interested_in`). Under
+/// `All` the trust-edge `expansion_filter` is never consulted, so a
+/// routing-key assertion would pass regardless of source-vs-target. A
+/// non-covering (empty) visible filter keeps the pair in `Mode::Filtered`
+/// so the expansion-membership test actually decides delivery. An empty
+/// `new_empty` bloom is still a well-formed filter — the announce's
+/// filter-bytes validation only checks `len == m/8`.
 fn announce_with_edge_origin_keys(interested_keys: &[&[u8; 32]]) -> FrontierAnnounce {
     // 1024-bit filter is the smallest in-spec size that comfortably
     // holds a handful of keys at the reference 1% FPR. k=7 matches
@@ -719,15 +729,51 @@ fn announce_with_edge_origin_keys(interested_keys: &[&[u8; 32]]) -> FrontierAnno
     for k in interested_keys {
         edge.insert(k.as_slice());
     }
+    let visible = BloomFilter::new_empty(7, 1024, 0, 0.01).expect("build empty visible filter");
     FrontierAnnounce {
         version: 1,
         epoch_start: 1_700_000_000_000,
         active_horizon_days: 0,
-        visible_filter: FilterSpec::from_bloom(&BloomFilter::all_ones_sentinel()),
+        visible_filter: FilterSpec::from_bloom(&visible),
         expansion_filter: FilterSpec::from_bloom(&edge),
         mode: Mode::Filtered,
         age_ceilings: Default::default(),
     }
+}
+
+/// Like [`announce_with_edge_origin_keys`] but also carries §8.3
+/// `age_ceilings`, so the receiver advertises a per-root age cutoff —
+/// the input the forwarder's §8.10 source-side shedding pre-filter
+/// consults before relaying a trust-edge keyed on that root.
+fn announce_with_edge_keys_and_ceilings(
+    interested_keys: &[&[u8; 32]],
+    ceilings: std::collections::BTreeMap<[u8; 32], u64>,
+) -> FrontierAnnounce {
+    let mut announce = announce_with_edge_origin_keys(interested_keys);
+    announce.age_ceilings = ceilings;
+    announce
+}
+
+/// Insert a `user_genesis` attestation row so the forwarder's §8.10
+/// pre-filter can read an instance-attested `genesis_at` for `key`. The
+/// `birth_instance_key` / `attestation_sig` are correct-length
+/// placeholders — the shedding resolver only reads `genesis_at` and
+/// never re-verifies the attestation signature.
+async fn insert_user_genesis(db: &SqlitePool, key: &[u8; 32], genesis_at: i64) {
+    let key_slice: &[u8] = key.as_slice();
+    let birth_instance: &[u8] = &[0u8; 32];
+    let sig: &[u8] = &[0u8; 64];
+    sqlx::query!(
+        "INSERT INTO user_genesis (user_key, genesis_at, birth_instance_key, attestation_sig) \
+         VALUES (?, ?, ?, ?)",
+        key_slice,
+        genesis_at,
+        birth_instance,
+        sig,
+    )
+    .execute(db)
+    .await
+    .expect("insert user_genesis");
 }
 
 /// Wait up to `timeout_ms` for `predicate` to return `true`. Phase
@@ -876,5 +922,194 @@ async fn forwarder_relays_applied_edge_to_interested_peer() {
     assert_eq!(
         count_on_a, 0,
         "originator A must not receive its own object back via gossip",
+    );
+}
+
+/// Done-when (A2 / §8.10 source-side shedding): when a peer advertises
+/// an age ceiling for the edge's *root* (`to_key`) and the forwarder
+/// holds an instance-attested `genesis_at` for the *source* (`from_key`)
+/// strictly younger than that cutoff, the relay is shed before enqueue —
+/// the peer would reject it on receipt (§8.10), so the round-trip is
+/// saved. This is the negative companion to
+/// [`forwarder_relays_applied_edge_to_interested_peer`]: C IS otherwise
+/// interested (its `expansion_filter` carries the target bob), so the
+/// only thing keeping the edge from C is the §8.10 cleave. Flip the
+/// genesis to older-than-cutoff (or drop the ceiling) and the edge would
+/// flow — exactly the positive test above.
+#[tokio::test]
+async fn forwarder_sheds_relay_when_source_younger_than_peer_ceiling() {
+    let harness = MultiInstanceHarness::new(3).await;
+    establish_active_peering(&harness, "a", "b").await;
+    establish_active_peering(&harness, "b", "c").await;
+    let b = harness.instance("b");
+    let c = harness.instance("c");
+
+    let alice_key = SigningKey::generate(&mut OsRng);
+    let bob_key = SigningKey::generate(&mut OsRng);
+    let alice_pub = alice_key.verifying_key().to_bytes();
+    let bob_pub = bob_key.verifying_key().to_bytes();
+    insert_user_with_pubkey(&b.state.db, "user-alice", "alice", &alice_pub).await;
+    insert_user_with_pubkey(&b.state.db, "user-bob", "bob", &bob_pub).await;
+    insert_user_with_pubkey(&c.state.db, "user-alice", "alice", &alice_pub).await;
+    insert_user_with_pubkey(&c.state.db, "user-bob", "bob", &bob_pub).await;
+
+    // C announces to B: interested in edges targeting bob, AND a §8.3
+    // age ceiling for root bob at cutoff T. B records both — the
+    // `expansion_filter` into `peer_frontiers` (so C is a candidate) and
+    // the ceiling into `peer_frontier_age_ceilings` (so the §8.10
+    // pre-filter has a cutoff to test the source's age against).
+    let cutoff = 1_600_000_000_000u64;
+    let mut ceilings = std::collections::BTreeMap::new();
+    ceilings.insert(bob_pub, cutoff);
+    let announce_body = announce_with_edge_keys_and_ceilings(&[&bob_pub], ceilings).encode();
+    let (status, _) = send_envelope_signed(
+        &harness,
+        "c",
+        "b",
+        Method::POST,
+        "/federation/v1/frontier/announce",
+        &announce_body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "C → B announce must apply");
+
+    // B holds an instance-attested genesis for the SOURCE alice that is
+    // strictly younger than the cutoff → `ceiling_admits` is false → C
+    // is shed. (`genesis_at <= cutoff` would admit; we go above it.)
+    insert_user_genesis(&b.state.db, &alice_pub, (cutoff + 100_000_000) as i64).await;
+
+    // A pushes the signed alice → bob edge to B.
+    let signed = sign_trust_edge_with_key(
+        &alice_key,
+        &bob_pub,
+        TrustStance::Trust,
+        1_700_000_000_000,
+        None,
+    );
+    let wire = encode_wire(&signed.payload, &signed.signature);
+    let body = encode_edges_body(&[wire]);
+    let (status, resp_body) = send_envelope_signed(
+        &harness,
+        "a",
+        "b",
+        Method::POST,
+        "/federation/v1/edges",
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "A → B push must apply");
+    assert_eq!(parse_results_body(&resp_body)[0].1, "applied");
+
+    // The §7.5 forward runs inline in B's apply path (awaited before the
+    // push response returns), so the §8.10 shed decision is already made
+    // by the time we get `applied`. Drain B's outbound queue to settle
+    // any egress, then assert C never received the object — the shed
+    // dropped C before enqueue, so nothing was ever queued for it.
+    assert!(
+        b.state
+            .outbound_queues
+            .wait_idle(std::time::Duration::from_secs(2))
+            .await,
+        "B outbound queue did not drain within 2s",
+    );
+    let hash_slice: &[u8] = signed.canonical_hash.as_slice();
+    let count_on_c: i64 = sqlx::query_scalar!(
+        "SELECT COUNT(*) AS \"c!: i64\" FROM signed_objects WHERE canonical_hash = ?",
+        hash_slice,
+    )
+    .fetch_one(&c.state.db)
+    .await
+    .expect("count on c");
+    assert_eq!(
+        count_on_c, 0,
+        "§8.10: B must shed the relay to C (source younger than C's ceiling for the root)",
+    );
+}
+
+/// Done-when (§7.4 trust-edge routing direction): a peer interested ONLY
+/// in the edge's *source* (`from_key`) is NOT a forward target — trust
+/// edges route by their *target* (`to_key`), so a filter that matches
+/// alice (source) but not bob (target) does not pull the alice → bob
+/// edge. This pins the post-flip direction: were the forwarder to
+/// regress to source-keyed routing, C — interested in alice — would
+/// receive the edge and this assertion would fail. Mirror-negative of
+/// [`forwarder_relays_applied_edge_to_interested_peer`], which puts the
+/// target bob in C's filter and asserts arrival.
+#[tokio::test]
+async fn forwarder_does_not_relay_to_peer_interested_only_in_edge_source() {
+    let harness = MultiInstanceHarness::new(3).await;
+    establish_active_peering(&harness, "a", "b").await;
+    establish_active_peering(&harness, "b", "c").await;
+    let b = harness.instance("b");
+    let c = harness.instance("c");
+
+    let alice_key = SigningKey::generate(&mut OsRng);
+    let bob_key = SigningKey::generate(&mut OsRng);
+    let alice_pub = alice_key.verifying_key().to_bytes();
+    let bob_pub = bob_key.verifying_key().to_bytes();
+    insert_user_with_pubkey(&b.state.db, "user-alice", "alice", &alice_pub).await;
+    insert_user_with_pubkey(&b.state.db, "user-bob", "bob", &bob_pub).await;
+    insert_user_with_pubkey(&c.state.db, "user-alice", "alice", &alice_pub).await;
+    insert_user_with_pubkey(&c.state.db, "user-bob", "bob", &bob_pub).await;
+
+    // C announces to B with the edge's SOURCE alice in its
+    // `expansion_filter` — and NOT the target bob. Under §7.4
+    // target-routing, B's `peers_interested_in` keyed on bob does not
+    // return C, so the edge is never forwarded.
+    let announce_body = announce_with_edge_origin_keys(&[&alice_pub]).encode();
+    let (status, _) = send_envelope_signed(
+        &harness,
+        "c",
+        "b",
+        Method::POST,
+        "/federation/v1/frontier/announce",
+        &announce_body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "C → B announce must apply");
+
+    let signed = sign_trust_edge_with_key(
+        &alice_key,
+        &bob_pub,
+        TrustStance::Trust,
+        1_700_000_000_000,
+        None,
+    );
+    let wire = encode_wire(&signed.payload, &signed.signature);
+    let body = encode_edges_body(&[wire]);
+    let (status, resp_body) = send_envelope_signed(
+        &harness,
+        "a",
+        "b",
+        Method::POST,
+        "/federation/v1/edges",
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "A → B push must apply");
+    assert_eq!(parse_results_body(&resp_body)[0].1, "applied");
+
+    // The forward runs inline in B's apply path, so by the time we get
+    // `applied` the routing decision is made. C was never a candidate
+    // (its filter matches the source, not the §7.4 target key), so
+    // nothing was enqueued for it; drain and assert absence.
+    assert!(
+        b.state
+            .outbound_queues
+            .wait_idle(std::time::Duration::from_secs(2))
+            .await,
+        "B outbound queue did not drain within 2s",
+    );
+    let hash_slice: &[u8] = signed.canonical_hash.as_slice();
+    let count_on_c: i64 = sqlx::query_scalar!(
+        "SELECT COUNT(*) AS \"c!: i64\" FROM signed_objects WHERE canonical_hash = ?",
+        hash_slice,
+    )
+    .fetch_one(&c.state.db)
+    .await
+    .expect("count on c");
+    assert_eq!(
+        count_on_c, 0,
+        "§7.4: edge targeting bob must not reach a peer interested only in source alice",
     );
 }

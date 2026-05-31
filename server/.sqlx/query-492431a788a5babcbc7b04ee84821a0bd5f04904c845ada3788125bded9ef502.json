@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO user_genesis (user_key, genesis_at, birth_instance_key, attestation_sig) VALUES (?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "492431a788a5babcbc7b04ee84821a0bd5f04904c845ada3788125bded9ef502"
+}
