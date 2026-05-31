@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT genesis_at AS \"genesis_at!: i64\",\n                  birth_instance_key AS \"birth_instance_key!: Vec<u8>\",\n                  attestation_sig AS \"attestation_sig!: Vec<u8>\"\n             FROM user_genesis WHERE user_key = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "genesis_at!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "birth_instance_key!: Vec<u8>",
+        "ordinal": 1,
+        "type_info": "Blob"
+      },
+      {
+        "name": "attestation_sig!: Vec<u8>",
+        "ordinal": 2,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "248a512e370810c515d55e1931706facd76eb08db9ac8095095d8e3560506112"
+}

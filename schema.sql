@@ -995,3 +995,133 @@ CREATE TABLE IF NOT EXISTS "user_homes" (
     updated_at TEXT NOT NULL
             DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
+CREATE TABLE frontier_users (
+    -- Ed25519 public key of the remote frontier identity (raw 32
+    -- bytes). Matches the `key` field of §5.1 payloads and the
+    -- routing key used by reverse-BFS frontier traversal. This is the
+    -- stub's identity; there is at most one stub per key.
+    user_key BLOB PRIMARY KEY NOT NULL
+            CHECK (length(user_key) = 32),
+
+    -- Ed25519 `instance_pubkey` (raw 32 bytes) of the instance this
+    -- key currently advertises its home from, as last learned through
+    -- gossip. Used to route/backfill content authored by the frontier
+    -- node. Distinct from `user_homes.current_home_key`, which is the
+    -- chain-grounded resolution for keys we have applied a §5.1 move
+    -- for; a frontier stub may exist for a key we have never seen a
+    -- move chain for.
+    home_instance_key BLOB NOT NULL
+            CHECK (length(home_instance_key) = 32),
+
+    -- Bare canonical domain of the home instance, carried alongside
+    -- the key for operator-facing rendering and backfill URL
+    -- construction. Never empty.
+    home_instance_domain TEXT NOT NULL
+            CHECK (length(home_instance_domain) > 0),
+
+    -- Opportunistic, non-authoritative display name carried in gossip
+    -- (§8.11). NULL until a peer supplies one. Renderers MUST treat a
+    -- NULL as "unknown" and fall back to a key-derived handle rather
+    -- than assuming a name is always present.
+    display_name TEXT,
+
+    -- §8.12 generational GC tag. Stamped with the current rebuild
+    -- generation whenever this stub is observed live during a frontier
+    -- rebuild. The sweep phase deletes stubs whose `generation` is
+    -- more than K generations behind the current one (default K=3).
+    generation INTEGER NOT NULL DEFAULT 0
+            CHECK (generation >= 0),
+
+    -- ISO-8601 timestamp of the most recent UPSERT against this row.
+    -- Operator-visible only; the GC sweep keys off `generation`, not
+    -- this column.
+    updated_at TEXT NOT NULL
+            DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX idx_frontier_users_generation
+    ON frontier_users(generation);
+CREATE TABLE user_genesis (
+    -- Ed25519 public key of the identity K whose genesis this is (raw
+    -- 32 bytes). Matches the `key` field of §5.1 declarations and the
+    -- `attestation.key` field; the two MUST agree (enforced in
+    -- application verification, not here).
+    user_key BLOB PRIMARY KEY NOT NULL
+            CHECK (length(user_key) = 32),
+
+    -- Immutable account-age anchor (Unix milliseconds UTC), copied
+    -- verbatim from the declaration's `genesis_at` field. Forward-
+    -- carried unchanged across every move in the chain. The §8.9
+    -- cap-at-N age ranking and the §8.3 age_ceilings cutoffs compare
+    -- against this value; receivers MUST NOT re-derive it locally.
+    genesis_at INTEGER NOT NULL,
+
+    -- Ed25519 `instance_pubkey` (raw 32 bytes) of the instance that
+    -- minted the identity and counter-signed the genesis attestation
+    -- (`attestation.birth_instance_key`). This is the signing key the
+    -- `attestation_sig` below verifies against.
+    birth_instance_key BLOB NOT NULL
+            CHECK (length(birth_instance_key) = 32),
+
+    -- Ed25519 signature (raw 64 bytes) by `birth_instance_key` over
+    -- the canonical GenesisAttestation {key, genesis_at,
+    -- birth_instance_key} (signed-payload-format.md §5.1). Persisted
+    -- so this instance can re-serve and re-verify the attestation when
+    -- forwarding the key's declarations to peers, without re-fetching
+    -- it from the birth instance.
+    attestation_sig BLOB NOT NULL
+            CHECK (length(attestation_sig) = 64),
+
+    -- ISO-8601 timestamp of when this row was first inserted.
+    -- Operator-visible only — distinct from `genesis_at` (the signer-
+    -- attested account-birth wall clock).
+    received_at TEXT NOT NULL
+            DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE TABLE peer_frontier_age_ceilings (
+    -- Sender's instance signing pubkey (raw 32 bytes). Joins to the
+    -- parent `peer_frontiers` row; ON DELETE CASCADE drops a peer's
+    -- ceilings when its frontier (and the peering) is dropped.
+    peer_pubkey BLOB NOT NULL
+            CHECK (length(peer_pubkey) = 32),
+
+    -- Ed25519 public key (raw 32 bytes) of the peer's root that this
+    -- ceiling applies to. The §8.3 map key.
+    root_key BLOB NOT NULL
+            CHECK (length(root_key) = 32),
+
+    -- `genesis_at` cutoff (Unix milliseconds UTC) for this root.
+    -- Frontier targets whose `genesis_at` (see `user_genesis`) is
+    -- strictly newer than this value are not expanded under `root_key`.
+    -- Carried on the wire as u64; stored as i64 (fits any realistic
+    -- timestamp). Tightening lowers this value; §8.4 enforces the
+    -- monotonic-tighten rule in application code.
+    cutoff INTEGER NOT NULL,
+
+    -- ISO-8601 timestamp of the last upsert of this ceiling.
+    -- Operator-visible only.
+    updated_at TEXT NOT NULL
+            DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+
+    PRIMARY KEY (peer_pubkey, root_key),
+
+    FOREIGN KEY (peer_pubkey) REFERENCES peer_frontiers(peer_pubkey)
+        ON DELETE CASCADE
+);
+CREATE TABLE local_frontier_age_ceilings (
+    -- Ed25519 public key (raw 32 bytes) of the local root this ceiling
+    -- applies to. One ceiling per root; the PK enforces it.
+    root_key BLOB PRIMARY KEY NOT NULL
+            CHECK (length(root_key) = 32),
+
+    -- `genesis_at` cutoff (Unix milliseconds UTC) we advertise for
+    -- this root. Peers do not expand frontier targets newer than this
+    -- under `root_key`. Emitted on the wire as u64; stored as i64.
+    -- Lowering it tightens the ceiling (sheds more of the tail).
+    cutoff INTEGER NOT NULL,
+
+    -- ISO-8601 timestamp of the last time we set or tightened this
+    -- ceiling. Operator-visible; also a useful audit trail for the
+    -- §8.10 controller's decisions.
+    updated_at TEXT NOT NULL
+            DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);

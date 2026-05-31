@@ -195,6 +195,11 @@ pub struct DataExport {
     /// is flagged via `is_current`. Empty for users who have never
     /// moved between instances. Phase 7 GDPR fold-in.
     pub home_history: Vec<UserMoveExport>,
+    /// Federation §12.8 genesis attestation for this user's key: the
+    /// immutable account-age anchor and the birth-instance
+    /// counter-signature that pins it. `None` when this instance has
+    /// never applied a genesis/move declaration for the user_key.
+    pub genesis: Option<GenesisExport>,
     /// In-flight §13.1 registration challenges keyed on the user's
     /// pubkey. Normally empty — the row is consumed on `complete` and
     /// otherwise GC'd within
@@ -393,6 +398,25 @@ pub struct UserMoveExport {
     /// True iff this is the active home per §12.4 latest-wins (i.e.
     /// `user_homes.current_move_hash == canonical_hash`).
     pub is_current: bool,
+}
+
+/// Mirrors the `user_genesis` row keyed on the user's pubkey: the
+/// §12.8 immutable account-age anchor (`genesis_at`) plus the
+/// birth-instance counter-signature that pins it. Present only when
+/// this instance has applied a §5.1 genesis/move declaration for the
+/// user's key (so it may be `None` for a purely-local user whose
+/// genesis was never materialized here).
+#[derive(Serialize)]
+pub struct GenesisExport {
+    /// Immutable account-age anchor in Unix milliseconds (copied
+    /// verbatim from the signed declaration's `genesis_at`).
+    pub genesis_at_ms: i64,
+    /// Ed25519 pubkey of the birth instance that minted the identity
+    /// and counter-signed the attestation, base64url (no padding).
+    pub birth_instance_key_b64: String,
+    /// Birth-instance Ed25519 signature over the canonical
+    /// GenesisAttestation, base64url (no padding).
+    pub attestation_sig_b64: String,
 }
 
 /// One pending §13.1 registration challenge row. Surfaces the wire
@@ -923,6 +947,25 @@ pub async fn export_my_data(
         })
         .collect();
 
+    // §12.8 genesis attestation keyed on the user's pubkey. Present
+    // once this instance has applied any genesis/move declaration for
+    // the key; absent for a never-federated local user whose genesis
+    // was never materialized here.
+    let genesis = sqlx::query!(
+        r#"SELECT genesis_at AS "genesis_at!: i64",
+                  birth_instance_key AS "birth_instance_key!: Vec<u8>",
+                  attestation_sig AS "attestation_sig!: Vec<u8>"
+             FROM user_genesis WHERE user_key = ?"#,
+        public_key_bytes,
+    )
+    .fetch_optional(db)
+    .await?
+    .map(|r| GenesisExport {
+        genesis_at_ms: r.genesis_at,
+        birth_instance_key_b64: b64(&r.birth_instance_key),
+        attestation_sig_b64: b64(&r.attestation_sig),
+    });
+
     // §13.1 in-flight registration challenges keyed on the user's
     // pubkey. Almost always empty (consumed-or-GC'd within an hour);
     // included for completeness so the export covers every
@@ -986,6 +1029,7 @@ pub async fn export_my_data(
         storage_budget,
         attachments_blob_archive: ATTACHMENTS_BLOB_ARCHIVE_PATH.to_string(),
         home_history,
+        genesis,
         registration_challenges,
     };
 
@@ -2034,7 +2078,8 @@ pub(crate) async fn soft_delete_user(
     .await?;
 
     // 10. Federation per-key migration / registration state.
-    //     `user_homes`, `user_moves`, and `registration_challenges` are
+    //     `user_homes`, `user_moves`, `user_genesis`, and
+    //     `registration_challenges` are
     //     keyed on the user's raw 32-byte public key (not `users.id`),
     //     so they're invisible to every FK cascade above. Fetch the
     //     pubkey from the users row to drive the targeted deletes.
@@ -2086,6 +2131,19 @@ pub(crate) async fn soft_delete_user(
         //      move declarations the user authored — the same
         //      "accountability is preserved" rationale that keeps
         //      signing-key publics around (step 9) applies here.
+
+        // 10d. Drop the §12.8 genesis attestation projection. Like
+        //      `user_homes` (10a) this is a rebuildable projection:
+        //      the genesis_attestation is a field of every §5.1
+        //      declaration payload, so the retained `user_moves` chain
+        //      + `signed_objects` bytes (10c) can reconstruct it. We
+        //      drop the materialized account-birth row so an erased
+        //      local user leaves no directly-queryable age metadata
+        //      behind, while the chain evidence peers rely on for
+        //      §12.3 backfill stays intact.
+        sqlx::query!("DELETE FROM user_genesis WHERE user_key = ?", user_key,)
+            .execute(&mut **tx)
+            .await?;
     }
 
     Ok(DeactivationFanout {

@@ -1145,8 +1145,8 @@ const VISIBILITY_THRESHOLD: f64 = 0.45;
 /// bounding their visible set — and the per-author downstream work (fetch,
 /// rank, render) — to a predictable N.
 ///
-/// Under the root-advertisement model (docs/federation-root-advertisement.md
-/// §6.2) the cap is not just an output filter but a **frontier-admission /
+/// Under the root-advertisement model (docs/federation-protocol.md
+/// §8.9) the cap is not just an output filter but a **frontier-admission /
 /// retention rule**: the home instance stores at most N inbound trusters per
 /// local reader, evicting by the ranking. So the cap also bounds the *stored*
 /// reverse frontier — the CSR + stub footprint the reverse BFS works over.
@@ -1155,11 +1155,11 @@ const VISIBILITY_THRESHOLD: f64 = 0.45;
 const VISIBILITY_CAP: usize = 100_000;
 
 /// Estimated bytes per retained remote frontier user ("stub"). Models the
-/// lean `frontier_users` row of docs/federation-root-advertisement.md §8.1 /
-/// §11.1: a 32-byte content public key + 32-byte home-instance key + a dense
-/// u32 id and small per-row overhead ≈ 80 bytes. A full `users` row would be
-/// several times larger — which is exactly why §11.1 flags a lighter stub
-/// table as an open question. Stub bytes are reported separately from CSR
+/// lean `frontier_users` row of docs/federation-protocol.md §8.11: a 32-byte
+/// content public key + 32-byte home-instance key + a dense u32 id and small
+/// per-row overhead ≈ 80 bytes. A full `users` row would be several times
+/// larger — which is exactly why §8.11 specifies a lighter stub
+/// table. Stub bytes are reported separately from CSR
 /// bytes so the two footprint drivers stay legible.
 const STUB_ROW_BYTES: u64 = 80;
 
