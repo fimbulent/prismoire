@@ -154,6 +154,7 @@ use crate::display_name::{display_name_skeleton, validate_display_name};
 use crate::error::{AppError, ErrorCode};
 use crate::federation::envelope::encode_signed_object;
 use crate::federation::forwarder::forward_signed_object;
+use crate::federation::moves::load_genesis_attestation;
 use crate::federation::prior_home_client::{ProbeError, ProbeOutcome, probe_peer_for_key};
 use crate::federation::routing::ForwardingClass;
 use crate::federation::transport::PeerId;
@@ -1234,68 +1235,95 @@ pub async fn complete(
     // somehow blocks doesn't hold the write transaction.
     let move_for_forward: Option<([u8; 32], Vec<u8>)> =
         if let Some((from_key, from_domain)) = move_source {
-            let to_instance_key = *state.instance_key.public_bytes();
-            let to_instance = state.instance_domain.clone();
-            let signed_move = signing::sign_move_with_key(
-                &imported,
-                &from_key,
-                &from_domain,
-                &to_instance_key,
-                &to_instance,
-                now,
-                None, // §13-originated moves are the user's first move from us
-            );
+            // §5.1/§12.8 forward-carry: a re-home move MUST re-state the
+            // original birth-instance attestation and the immutable
+            // `genesis_at` verbatim — we are not the birth instance, so
+            // we never re-sign the birth fact under our own key. The
+            // anchor was written to `user_genesis` when an earlier
+            // declaration for this key was grounded (via gossip or the
+            // §14 recovery path). If it is absent we cannot mint a
+            // spec-valid move (every move now carries an attestation that
+            // the receive path verifies), so we skip minting rather than
+            // fabricate one; the user is still registered locally and a
+            // later declaration can be authored once the anchor arrives.
+            match load_genesis_attestation(&mut *tx, &challenge.user_key).await? {
+                None => {
+                    tracing::warn!(
+                        user_key_prefix = ?&challenge.user_key[..4],
+                        "§13 re-home: no genesis anchor for moving identity; skipping move \
+                         publication (cannot forward-carry an absent attestation)"
+                    );
+                    None
+                }
+                Some(genesis_attestation) => {
+                    let genesis_at = genesis_attestation.genesis_at;
+                    let to_instance_key = *state.instance_key.public_bytes();
+                    let to_instance = state.instance_domain.clone();
+                    let signed_move = signing::sign_move_with_key(
+                        &imported,
+                        Some(&from_key),
+                        Some(from_domain.as_str()),
+                        &to_instance_key,
+                        &to_instance,
+                        now,
+                        genesis_at,
+                        genesis_attestation,
+                        None, // §13-originated moves are the user's first move from us
+                    );
 
-            signing::store_signed_object(
-                &mut *tx,
-                "move",
-                &signed_move.payload,
-                &signed_move.signature,
-                &signed_move.canonical_hash,
-            )
-            .await?;
+                    signing::store_signed_object(
+                        &mut *tx,
+                        "move",
+                        &signed_move.payload,
+                        &signed_move.signature,
+                        &signed_move.canonical_hash,
+                    )
+                    .await?;
 
-            // Project into user_moves (§12.3 backfill index).
-            let key_slice: &[u8] = challenge.user_key.as_slice();
-            let canonical_hash_db: Vec<u8> = signed_move.canonical_hash.to_vec();
-            let created_at_db = now as i64;
-            sqlx::query!(
-                "INSERT OR IGNORE INTO user_moves (user_key, canonical_hash, created_at) \
-             VALUES (?, ?, ?)",
-                key_slice,
-                canonical_hash_db,
-                created_at_db,
-            )
-            .execute(&mut *tx)
-            .await?;
+                    // Project into user_moves (§12.3 backfill index).
+                    let key_slice: &[u8] = challenge.user_key.as_slice();
+                    let canonical_hash_db: Vec<u8> = signed_move.canonical_hash.to_vec();
+                    let created_at_db = now as i64;
+                    sqlx::query!(
+                        "INSERT OR IGNORE INTO user_moves (user_key, canonical_hash, created_at) \
+                     VALUES (?, ?, ?)",
+                        key_slice,
+                        canonical_hash_db,
+                        created_at_db,
+                    )
+                    .execute(&mut *tx)
+                    .await?;
 
-            // UPSERT user_homes — we're the §12.4 winner by construction
-            // (we just signed `to_instance = us` with the freshest
-            // timestamp). If a future inbound move with a later
-            // `created_at` arrives, the receive path will overwrite us.
-            let to_key_db: Vec<u8> = to_instance_key.to_vec();
-            sqlx::query!(
-                "INSERT INTO user_homes \
-                (user_key, current_home_key, current_home_domain, \
-                 current_move_hash, current_created_at) \
-             VALUES (?, ?, ?, ?, ?) \
-             ON CONFLICT(user_key) DO UPDATE SET \
-                current_home_key = excluded.current_home_key, \
-                current_home_domain = excluded.current_home_domain, \
-                current_move_hash = excluded.current_move_hash, \
-                current_created_at = excluded.current_created_at, \
-                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
-                key_slice,
-                to_key_db,
-                to_instance,
-                canonical_hash_db,
-                created_at_db,
-            )
-            .execute(&mut *tx)
-            .await?;
+                    // UPSERT user_homes — we're the §12.4 winner by
+                    // construction (we just signed `to_instance = us` with
+                    // the freshest timestamp). If a future inbound move
+                    // with a later `created_at` arrives, the receive path
+                    // will overwrite us.
+                    let to_key_db: Vec<u8> = to_instance_key.to_vec();
+                    sqlx::query!(
+                        "INSERT INTO user_homes \
+                        (user_key, current_home_key, current_home_domain, \
+                         current_move_hash, current_created_at) \
+                     VALUES (?, ?, ?, ?, ?) \
+                     ON CONFLICT(user_key) DO UPDATE SET \
+                        current_home_key = excluded.current_home_key, \
+                        current_home_domain = excluded.current_home_domain, \
+                        current_move_hash = excluded.current_move_hash, \
+                        current_created_at = excluded.current_created_at, \
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+                        key_slice,
+                        to_key_db,
+                        to_instance,
+                        canonical_hash_db,
+                        created_at_db,
+                    )
+                    .execute(&mut *tx)
+                    .await?;
 
-            let wire = encode_signed_object(&signed_move.payload, &signed_move.signature);
-            Some((signed_move.canonical_hash, wire))
+                    let wire = encode_signed_object(&signed_move.payload, &signed_move.signature);
+                    Some((signed_move.canonical_hash, wire))
+                }
+            }
         } else {
             None
         };

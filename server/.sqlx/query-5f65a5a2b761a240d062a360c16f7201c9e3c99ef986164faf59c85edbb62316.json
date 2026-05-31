@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT genesis_at AS \"genesis_at!: i64\" FROM user_genesis WHERE user_key = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "genesis_at!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5f65a5a2b761a240d062a360c16f7201c9e3c99ef986164faf59c85edbb62316"
+}

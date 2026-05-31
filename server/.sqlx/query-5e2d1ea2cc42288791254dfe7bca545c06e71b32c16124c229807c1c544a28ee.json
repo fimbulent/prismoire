@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO user_genesis (user_key, genesis_at, birth_instance_key, attestation_sig, received_at) VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "5e2d1ea2cc42288791254dfe7bca545c06e71b32c16124c229807c1c544a28ee"
+}

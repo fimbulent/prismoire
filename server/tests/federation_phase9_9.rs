@@ -29,8 +29,9 @@
 mod common;
 
 use ciborium::value::Value;
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signer, SigningKey};
 use http::{Method, StatusCode};
+use prismoire_server::signed::{self, GenesisAttestation};
 use prismoire_server::signing::sign_move_with_key;
 use sqlx::SqlitePool;
 use uuid::Uuid;
@@ -108,6 +109,28 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Fixed account-birth time + pinned synthetic birth instance for
+/// synthetic move chains. See the equivalent constants in
+/// `federation_phase7.rs` for the rationale (constant `genesis_at`
+/// satisfies the §5.1/§12.8 immutability gate; off-graph birth instance
+/// forges a crypto-valid attestation the receive path accepts).
+const GENESIS_AT_MS: u64 = 1_600_000_000_000;
+const BIRTH_INSTANCE_SEED: [u8; 32] = [0xe1; 32];
+
+fn test_attestation(user_key: &[u8; 32]) -> GenesisAttestation {
+    let birth = SigningKey::from_bytes(&BIRTH_INSTANCE_SEED);
+    let birth_instance_key = birth.verifying_key().to_bytes();
+    let bytes =
+        signed::genesis_attestation_signing_bytes(user_key, GENESIS_AT_MS, &birth_instance_key);
+    let sig = birth.sign(&bytes).to_bytes();
+    GenesisAttestation {
+        key: *user_key,
+        genesis_at: GENESIS_AT_MS,
+        birth_instance_key,
+        sig,
+    }
+}
+
 /// Mint a signed Move from `user_key`. Mirrors the helper in
 /// `federation_phase7.rs`.
 fn mint_move(
@@ -119,13 +142,16 @@ fn mint_move(
     created_at_ms: u64,
     prior: Option<&[u8; 32]>,
 ) -> (Vec<u8>, Vec<u8>) {
+    let user_pub = user_key.verifying_key().to_bytes();
     let signed = sign_move_with_key(
         user_key,
-        from_key,
-        from_domain,
+        Some(from_key),
+        Some(from_domain),
         to_key,
         to_domain,
         created_at_ms,
+        GENESIS_AT_MS,
+        test_attestation(&user_pub),
         prior,
     );
     (

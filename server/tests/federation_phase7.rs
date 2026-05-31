@@ -36,11 +36,12 @@
 mod common;
 
 use ciborium::value::Value;
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signer, SigningKey};
 use http::{Method, StatusCode};
 use prismoire_server::federation::moves::{
     MAX_CLOCK_SKEW_MS, MAX_MOVE_BATCH, MAX_MOVE_OBJECTS_PER_HOUR,
 };
+use prismoire_server::signed::{self, GenesisAttestation};
 use prismoire_server::signing::sign_move_with_key;
 use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
@@ -195,6 +196,36 @@ fn now_ms() -> u64 {
 /// with the given `created_at_ms` and optional `prior_move_hash`. Returns
 /// the (canonical_hash, wire-bytes) so the test can assert on the hash and
 /// send the wire-bytes verbatim.
+/// Fixed account-birth time for synthetic move chains. Well before any
+/// test's `created_at_ms` (which is `now_ms()`), and constant so every
+/// move minted for a given user re-states the same immutable `genesis_at`
+/// — satisfying the §5.1/§12.8 immutability gate on the receive side.
+const GENESIS_AT_MS: u64 = 1_600_000_000_000;
+
+/// Pinned synthetic birth-instance seed. The receive path verifies the
+/// attestation `sig` against `birth_instance_key`; it does not require
+/// that key to match `from`/`to`, so a fixed off-graph birth instance is
+/// sufficient to forge a crypto-valid attestation for these chains.
+const BIRTH_INSTANCE_SEED: [u8; 32] = [0xe1; 32];
+
+/// Forge a §5.1 birth-instance attestation for `user_key` over the fixed
+/// [`GENESIS_AT_MS`], signed by the pinned [`BIRTH_INSTANCE_SEED`]. The
+/// `key`/`genesis_at` mirror the outer move so parse's inner==outer bind
+/// passes, and the sig verifies on the receive side.
+fn test_attestation(user_key: &[u8; 32]) -> GenesisAttestation {
+    let birth = SigningKey::from_bytes(&BIRTH_INSTANCE_SEED);
+    let birth_instance_key = birth.verifying_key().to_bytes();
+    let bytes =
+        signed::genesis_attestation_signing_bytes(user_key, GENESIS_AT_MS, &birth_instance_key);
+    let sig = birth.sign(&bytes).to_bytes();
+    GenesisAttestation {
+        key: *user_key,
+        genesis_at: GENESIS_AT_MS,
+        birth_instance_key,
+        sig,
+    }
+}
+
 fn mint_move(
     user_key: &SigningKey,
     from_key: &[u8; 32],
@@ -204,14 +235,95 @@ fn mint_move(
     created_at_ms: u64,
     prior: Option<&[u8; 32]>,
 ) -> ([u8; 32], Vec<u8>) {
+    let user_pub = user_key.verifying_key().to_bytes();
     let signed = sign_move_with_key(
         user_key,
-        from_key,
-        from_domain,
+        Some(from_key),
+        Some(from_domain),
         to_key,
         to_domain,
         created_at_ms,
+        GENESIS_AT_MS,
+        test_attestation(&user_pub),
         prior,
+    );
+    let wire = encode_wire(&signed.payload, &signed.signature);
+    (signed.canonical_hash, wire)
+}
+
+/// Mint a move with a caller-chosen `genesis_at` (and matching, valid
+/// attestation). Used to exercise the §5.1/§12.8 immutability gate by
+/// pushing a second declaration whose birth time diverges from the
+/// first.
+#[allow(clippy::too_many_arguments)]
+fn mint_move_with_genesis(
+    user_key: &SigningKey,
+    from_key: &[u8; 32],
+    from_domain: &str,
+    to_key: &[u8; 32],
+    to_domain: &str,
+    created_at_ms: u64,
+    genesis_at_ms: u64,
+    prior: Option<&[u8; 32]>,
+) -> ([u8; 32], Vec<u8>) {
+    let user_pub = user_key.verifying_key().to_bytes();
+    let birth = SigningKey::from_bytes(&BIRTH_INSTANCE_SEED);
+    let birth_instance_key = birth.verifying_key().to_bytes();
+    let bytes =
+        signed::genesis_attestation_signing_bytes(&user_pub, genesis_at_ms, &birth_instance_key);
+    let attestation = GenesisAttestation {
+        key: user_pub,
+        genesis_at: genesis_at_ms,
+        birth_instance_key,
+        sig: birth.sign(&bytes).to_bytes(),
+    };
+    let signed = sign_move_with_key(
+        user_key,
+        Some(from_key),
+        Some(from_domain),
+        to_key,
+        to_domain,
+        created_at_ms,
+        genesis_at_ms,
+        attestation,
+        prior,
+    );
+    let wire = encode_wire(&signed.payload, &signed.signature);
+    (signed.canonical_hash, wire)
+}
+
+/// Mint a move carrying a structurally-valid but **cryptographically
+/// bogus** attestation: the embedded `sig` does not verify against
+/// `birth_instance_key`. The outer move signature is still valid (we
+/// sign the whole payload with the user key), so the receive path's
+/// Step-4b attestation check is what must reject it.
+fn mint_move_bad_attestation(
+    user_key: &SigningKey,
+    from_key: &[u8; 32],
+    from_domain: &str,
+    to_key: &[u8; 32],
+    to_domain: &str,
+    created_at_ms: u64,
+) -> ([u8; 32], Vec<u8>) {
+    let user_pub = user_key.verifying_key().to_bytes();
+    let birth = SigningKey::from_bytes(&BIRTH_INSTANCE_SEED);
+    let attestation = GenesisAttestation {
+        key: user_pub,
+        genesis_at: GENESIS_AT_MS,
+        birth_instance_key: birth.verifying_key().to_bytes(),
+        // Garbage signature: 64 zero bytes never verify.
+        sig: [0u8; 64],
+    };
+    let signed = sign_move_with_key(
+        user_key,
+        Some(from_key),
+        Some(from_domain),
+        to_key,
+        to_domain,
+        created_at_ms,
+        GENESIS_AT_MS,
+        attestation,
+        None,
     );
     let wire = encode_wire(&signed.payload, &signed.signature);
     (signed.canonical_hash, wire)
@@ -221,6 +333,26 @@ fn mint_move(
 // DB-introspection helpers (assert the projections that `apply_one_move`
 // writes — these are the read paths the rest of the server consults).
 // ---------------------------------------------------------------------------
+
+/// Read the `user_genesis` birth anchor for K: `(genesis_at,
+/// birth_instance_key, attestation_sig)`.
+async fn read_user_genesis(
+    db: &SqlitePool,
+    user_key: &[u8; 32],
+) -> Option<(i64, Vec<u8>, Vec<u8>)> {
+    let key: &[u8] = user_key.as_slice();
+    sqlx::query!(
+        "SELECT genesis_at AS \"genesis_at!: i64\", \
+                birth_instance_key AS \"birth_instance_key!: Vec<u8>\", \
+                attestation_sig AS \"attestation_sig!: Vec<u8>\" \
+         FROM user_genesis WHERE user_key = ?",
+        key,
+    )
+    .fetch_optional(db)
+    .await
+    .expect("query user_genesis")
+    .map(|r| (r.genesis_at, r.birth_instance_key, r.attestation_sig))
+}
 
 async fn read_user_home(db: &SqlitePool, user_key: &[u8; 32]) -> Option<(Vec<u8>, String, i64)> {
     let key: &[u8] = user_key.as_slice();
@@ -781,4 +913,197 @@ async fn move_backfill_returns_unknown_chain_for_never_seen_key() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(parse_error_body(&body_bytes), "unknown_chain");
+}
+
+// ---------------------------------------------------------------------------
+// §5.1/§12.8 genesis attestation — verify, persist, immutability
+// ---------------------------------------------------------------------------
+
+/// An applied move persists the §12.8 birth anchor into `user_genesis`,
+/// copying `genesis_at`, `birth_instance_key`, and the attestation `sig`
+/// verbatim. This is the row the §8.10 age-ceiling slice will read.
+#[tokio::test]
+async fn move_push_persists_genesis_anchor() {
+    let harness = MultiInstanceHarness::new(2).await;
+    establish_active_peering(&harness, "a", "b").await;
+    let a = harness.instance("a");
+    let b = harness.instance("b");
+
+    let user = fresh_user_key();
+    let user_pub = *user.verifying_key().as_bytes();
+    let from_key = *a.state.instance_key.public_bytes();
+    let to_key = *b.state.instance_key.public_bytes();
+    let (canonical_hash, wire) = mint_move(
+        &user,
+        &from_key,
+        &a.state.instance_domain,
+        &to_key,
+        &b.state.instance_domain,
+        now_ms(),
+        None,
+    );
+
+    let body = encode_moves_body(&[wire]);
+    let (status, body_bytes) = send_envelope_signed(
+        &harness,
+        "a",
+        "b",
+        Method::POST,
+        "/federation/v1/moves",
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let results = parse_results_body(&body_bytes);
+    assert_eq!(results[0].0, canonical_hash);
+    assert_eq!(results[0].1, "applied");
+
+    let expected_birth_key = SigningKey::from_bytes(&BIRTH_INSTANCE_SEED)
+        .verifying_key()
+        .to_bytes()
+        .to_vec();
+    let (genesis_at, birth_key, _sig) = read_user_genesis(&b.state.db, &user_pub)
+        .await
+        .expect("user_genesis anchor persisted");
+    assert_eq!(
+        genesis_at, GENESIS_AT_MS as i64,
+        "genesis_at copied verbatim"
+    );
+    assert_eq!(
+        birth_key, expected_birth_key,
+        "birth_instance_key copied verbatim"
+    );
+}
+
+/// A move whose attestation `sig` does not verify against
+/// `birth_instance_key` is rejected as `schema_invalid` at Step 4b, and
+/// nothing is persisted — not the signed object, not the genesis anchor.
+#[tokio::test]
+async fn move_push_with_bad_attestation_is_rejected_and_not_persisted() {
+    let harness = MultiInstanceHarness::new(2).await;
+    establish_active_peering(&harness, "a", "b").await;
+    let a = harness.instance("a");
+    let b = harness.instance("b");
+
+    let user = fresh_user_key();
+    let user_pub = *user.verifying_key().as_bytes();
+    let from_key = *a.state.instance_key.public_bytes();
+    let to_key = *b.state.instance_key.public_bytes();
+    let (canonical_hash, wire) = mint_move_bad_attestation(
+        &user,
+        &from_key,
+        &a.state.instance_domain,
+        &to_key,
+        &b.state.instance_domain,
+        now_ms(),
+    );
+
+    let body = encode_moves_body(&[wire]);
+    let (status, body_bytes) = send_envelope_signed(
+        &harness,
+        "a",
+        "b",
+        Method::POST,
+        "/federation/v1/moves",
+        &body,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "request-level OK; per-object reject"
+    );
+    let results = parse_results_body(&body_bytes);
+    assert_eq!(results[0].0, canonical_hash);
+    assert_eq!(results[0].1, "rejected");
+    assert_eq!(results[0].2.as_deref(), Some("schema_invalid"));
+
+    assert!(
+        !signed_object_present(&b.state.db, &canonical_hash).await,
+        "bad-attestation move not stored"
+    );
+    assert!(
+        read_user_genesis(&b.state.db, &user_pub).await.is_none(),
+        "no genesis anchor written for a rejected move"
+    );
+}
+
+/// §5.1/§12.8 immutability: once a key's birth time is grounded, a later
+/// declaration claiming a *different* `genesis_at` is `schema_invalid`.
+/// The first move applies and pins the anchor; the divergent second move
+/// is rejected and the anchor is unchanged.
+#[tokio::test]
+async fn divergent_genesis_at_for_same_key_is_rejected() {
+    let harness = MultiInstanceHarness::new(2).await;
+    establish_active_peering(&harness, "a", "b").await;
+    let a = harness.instance("a");
+    let b = harness.instance("b");
+
+    let user = fresh_user_key();
+    let user_pub = *user.verifying_key().as_bytes();
+    let from_key = *a.state.instance_key.public_bytes();
+    let to_key = *b.state.instance_key.public_bytes();
+
+    // First declaration grounds genesis_at = GENESIS_AT_MS.
+    let (first_hash, first_wire) = mint_move_with_genesis(
+        &user,
+        &from_key,
+        &a.state.instance_domain,
+        &to_key,
+        &b.state.instance_domain,
+        now_ms(),
+        GENESIS_AT_MS,
+        None,
+    );
+    let body = encode_moves_body(&[first_wire]);
+    let (status, body_bytes) = send_envelope_signed(
+        &harness,
+        "a",
+        "b",
+        Method::POST,
+        "/federation/v1/moves",
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let results = parse_results_body(&body_bytes);
+    assert_eq!(results[0].0, first_hash);
+    assert_eq!(results[0].1, "applied");
+
+    // Second declaration for the same key claims a *different* birth time.
+    let divergent_genesis = GENESIS_AT_MS + 86_400_000; // +1 day
+    let (second_hash, second_wire) = mint_move_with_genesis(
+        &user,
+        &from_key,
+        &a.state.instance_domain,
+        &to_key,
+        &b.state.instance_domain,
+        now_ms() + 1,
+        divergent_genesis,
+        None,
+    );
+    let body = encode_moves_body(&[second_wire]);
+    let (status, body_bytes) = send_envelope_signed(
+        &harness,
+        "a",
+        "b",
+        Method::POST,
+        "/federation/v1/moves",
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let results = parse_results_body(&body_bytes);
+    assert_eq!(results[0].0, second_hash);
+    assert_eq!(results[0].1, "rejected");
+    assert_eq!(results[0].2.as_deref(), Some("schema_invalid"));
+
+    // Anchor still pins the original birth time.
+    let (genesis_at, _birth_key, _sig) = read_user_genesis(&b.state.db, &user_pub)
+        .await
+        .expect("original anchor retained");
+    assert_eq!(
+        genesis_at, GENESIS_AT_MS as i64,
+        "birth time unchanged by the rejected move"
+    );
 }

@@ -56,18 +56,19 @@ use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use ciborium::value::Value;
-use ed25519_dalek::VerifyingKey;
+use ed25519_dalek::{Signature, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 
 use crate::AppState;
-use crate::federation::envelope::decode_signed_object;
+use crate::federation::envelope::{decode_signed_object, encode_signed_object};
 use crate::federation::errors::{bad_request, internal_error};
 use crate::federation::forwarder::forward_signed_object;
 use crate::federation::identity::CBOR_CONTENT_TYPE;
+use crate::federation::instance_key::InstanceKey;
 use crate::federation::middleware::VerifiedBody;
 use crate::federation::routing::ForwardingClass;
-use crate::signed::{self, FedEnvelope, Move, SignedPayload};
-use crate::signing::store_signed_object;
+use crate::signed::{self, FedEnvelope, GenesisAttestation, Move, SignedPayload};
+use crate::signing::{build_genesis_attestation, sign_move_with_key, store_signed_object};
 
 /// Per-source rolling-hour Move-object cap (mirrors the §10.6 fold-in
 /// for `/content`). Closes the equivalent abuse window flagged for
@@ -429,6 +430,42 @@ async fn apply_one_move(
         });
     }
 
+    // Step 4b: §5.1 step-4 genesis-attestation verification. The
+    // structural binding (inner key/genesis_at == outer) is already
+    // enforced at parse time; here we close the crypto half — the
+    // attestation `sig` MUST verify against `birth_instance_key`'s
+    // admin key over the canonical `{key, genesis_at,
+    // birth_instance_key}` triple. This is what converts a user's
+    // self-asserted `genesis_at` into an instance-vouched age, so a
+    // failed check is `schema_invalid` (a malformed declaration), not
+    // `invalid_signature` (which is reserved for the outer user
+    // signature). The BYOK self-genesis corner — where
+    // `birth_instance_key` collapses to the user's own anchor — is
+    // deferred (§23); for now every declaration carries an
+    // instance-anchored attestation.
+    let att = &mv.genesis_attestation;
+    let birth_vk = match VerifyingKey::from_bytes(&att.birth_instance_key) {
+        Ok(k) => k,
+        Err(_) => {
+            return Ok(MoveResult {
+                canonical_hash,
+                status: MoveStatus::Rejected(MoveRejectReason::SchemaInvalid),
+            });
+        }
+    };
+    let att_signing_bytes = signed::genesis_attestation_signing_bytes(
+        &att.key,
+        att.genesis_at,
+        &att.birth_instance_key,
+    );
+    let att_sig = Signature::from_bytes(&att.sig);
+    if birth_vk.verify(&att_signing_bytes, &att_sig).is_err() {
+        return Ok(MoveResult {
+            canonical_hash,
+            status: MoveStatus::Rejected(MoveRejectReason::SchemaInvalid),
+        });
+    }
+
     // Step 5: §12.7 `MAX_CLOCK_SKEW` check. `now_ms` is captured once
     // per batch in the handler so a long batch can't drift across
     // entries; `|now - move.created_at| > MAX_CLOCK_SKEW` is terminal
@@ -481,6 +518,31 @@ async fn apply_one_move(
     .fetch_optional(&mut *tx)
     .await?;
 
+    // §5.1/§12.8 `genesis_at` immutability. The birth time is constant
+    // across a key's entire declaration chain: the first declaration we
+    // ground establishes it in `user_genesis`, and any later
+    // declaration claiming a *different* birth time is `schema_invalid`
+    // — a forgery detectable against the retained anchor. Read under
+    // the same IMMEDIATE snapshot as the home resolution so a
+    // concurrent first-declaration insert can't slip a divergent value
+    // past this gate.
+    let existing_genesis = sqlx::query_scalar!(
+        "SELECT genesis_at AS \"genesis_at!: i64\" FROM user_genesis WHERE user_key = ?",
+        key_slice,
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(prior_genesis) = existing_genesis
+        && prior_genesis as u64 != mv.genesis_at
+    {
+        // Drop the transaction (no persistence) and reject the
+        // age-divergent declaration.
+        return Ok(MoveResult {
+            canonical_hash,
+            status: MoveStatus::Rejected(MoveRejectReason::SchemaInvalid),
+        });
+    }
+
     // §12.4 winner determination. Latest `created_at` wins; ties broken
     // by canonical_hash bytewise compare (smaller wins — picking
     // *some* deterministic rule both peers can agree on; the spec
@@ -530,6 +592,27 @@ async fn apply_one_move(
         &signature_bytes,
         &canonical_hash,
     )
+    .await?;
+
+    // Persist the immutable birth anchor (§12.8). `INSERT OR IGNORE`:
+    // the first grounded declaration for K establishes it; later
+    // declarations carry the same `genesis_at` (the immutability gate
+    // above already rejected any divergence), so re-inserts are no-ops.
+    // Stored for the §8.10 age-ceiling enforcement slice, which reads
+    // `genesis_at` to admit/deny an edge against a per-root cutoff.
+    let birth_key_db: Vec<u8> = att.birth_instance_key.to_vec();
+    let att_sig_db: Vec<u8> = att.sig.to_vec();
+    let genesis_at_db = mv.genesis_at as i64;
+    sqlx::query!(
+        "INSERT OR IGNORE INTO user_genesis \
+            (user_key, genesis_at, birth_instance_key, attestation_sig, received_at) \
+         VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))",
+        key_slice,
+        genesis_at_db,
+        birth_key_db,
+        att_sig_db,
+    )
+    .execute(&mut *tx)
     .await?;
 
     // Project into `user_moves` for §12.3 backfill. Both `applied`
@@ -626,8 +709,13 @@ async fn apply_one_move(
     // *where* they ended up). The receiver-side authority disposal is
     // independent of which branch wins on the wire.
     let local_key: &[u8] = state.instance_key.public_bytes().as_slice();
-    let outbound_from_self =
-        mv.from_instance_key.as_slice() == local_key && mv.to_instance_key.as_slice() != local_key;
+    // A genesis declaration (`from_instance_key == None`) is never an
+    // outbound-from-self move: there is no prior home to leave. Only a
+    // declaration whose source half names *us* triggers §12.6 disposal.
+    let outbound_from_self = mv
+        .from_instance_key
+        .is_some_and(|k| k.as_slice() == local_key)
+        && mv.to_instance_key.as_slice() != local_key;
     if outbound_from_self && matches!(status, MoveStatus::Applied | MoveStatus::Superseded) {
         dispose_local_user_authority(&mut tx, &mv.key).await?;
     }
@@ -765,6 +853,184 @@ fn move_routing_key_from_bytes(payload_bytes: &[u8]) -> Option<Vec<u8>> {
         Ok(SignedPayload::Move(m)) => Some(m.key.to_vec()),
         _ => None,
     }
+}
+
+/// Reconstruct the [`GenesisAttestation`] for `user_key` from the
+/// retained `user_genesis` anchor row, for §13 re-home forward-carry.
+///
+/// When a user re-homes away from us (the §13 ceremony on the *prior*
+/// home), the outbound move we mint must re-state the original
+/// birth-instance attestation verbatim — we never re-sign it under our
+/// own key (we are not the birth instance, except in the local-signup
+/// case where this row was written by [`mint_local_user_genesis`]). The
+/// `key` field is filled from the lookup argument since `user_genesis`
+/// is keyed by it and does not store it redundantly. Returns `Ok(None)`
+/// when no anchor exists — the caller decides whether that is fatal
+/// (it skips minting rather than fabricate an attestation).
+pub(crate) async fn load_genesis_attestation<'e, E>(
+    executor: E,
+    user_key: &[u8; 32],
+) -> Result<Option<GenesisAttestation>, sqlx::Error>
+where
+    E: sqlx::SqliteExecutor<'e>,
+{
+    let key_slice: &[u8] = user_key.as_slice();
+    let row = sqlx::query!(
+        "SELECT genesis_at AS \"genesis_at!: i64\", \
+                birth_instance_key, attestation_sig \
+         FROM user_genesis WHERE user_key = ?",
+        key_slice,
+    )
+    .fetch_optional(executor)
+    .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let birth_instance_key: [u8; 32] =
+        row.birth_instance_key.try_into().map_err(|v: Vec<u8>| {
+            sqlx::Error::Decode(
+                format!(
+                    "user_genesis.birth_instance_key is {} bytes, expected 32",
+                    v.len()
+                )
+                .into(),
+            )
+        })?;
+    let sig: [u8; 64] = row.attestation_sig.try_into().map_err(|v: Vec<u8>| {
+        sqlx::Error::Decode(
+            format!(
+                "user_genesis.attestation_sig is {} bytes, expected 64",
+                v.len()
+            )
+            .into(),
+        )
+    })?;
+
+    Ok(Some(GenesisAttestation {
+        key: *user_key,
+        genesis_at: row.genesis_at as u64,
+        birth_instance_key,
+        sig,
+    }))
+}
+
+/// Mint a §5.1/§12.8 **genesis declaration** for a user born on *this*
+/// instance, inside the caller's transaction.
+///
+/// Called at local invite signup, where this instance is both the
+/// account's birth instance and its first home. A genesis declaration is
+/// a move with `from_*` absent and `prior_move_hash` absent — it
+/// establishes `(key → home)` with no predecessor (§12.8). We are the
+/// birth instance, so we self-counter-sign the embedded
+/// [`GenesisAttestation`] over the `{key, genesis_at, birth_instance_key}`
+/// triple via [`build_genesis_attestation`]; `genesis_at == created_at`
+/// because the birth time *is* this signing moment for a fresh account.
+///
+/// Persists the canonical bytes (`signed_objects`), the §12.3 backfill
+/// projection (`user_moves`), the self-home pointer (`user_homes`), and
+/// the immutable birth anchor (`user_genesis`) — all in `tx` so signup
+/// commits the identity and its genesis atomically. Returns
+/// `(canonical_hash, wire_bytes)` so the caller can §12.2-flood the
+/// declaration *after* the transaction commits.
+pub(crate) async fn mint_local_user_genesis(
+    tx: &mut sqlx::SqliteConnection,
+    instance_key: &InstanceKey,
+    instance_domain: &str,
+    user_signing_key: &SigningKey,
+    created_at_ms: u64,
+) -> Result<([u8; 32], Vec<u8>), sqlx::Error> {
+    let user_pubkey = *user_signing_key.verifying_key().as_bytes();
+    let to_instance_key = *instance_key.public_bytes();
+
+    // Birth time is the signing moment for a fresh local account; the
+    // attestation and the move both carry it.
+    let genesis_at_ms = created_at_ms;
+    let attestation = build_genesis_attestation(instance_key, &user_pubkey, genesis_at_ms);
+    let birth_key_db: Vec<u8> = attestation.birth_instance_key.to_vec();
+    let att_sig_db: Vec<u8> = attestation.sig.to_vec();
+
+    // Genesis declaration: from_* absent, prior_move_hash absent.
+    let signed = sign_move_with_key(
+        user_signing_key,
+        None,
+        None,
+        &to_instance_key,
+        instance_domain,
+        created_at_ms,
+        genesis_at_ms,
+        attestation,
+        None,
+    );
+    let canonical_hash = signed.canonical_hash;
+
+    store_signed_object(
+        &mut *tx,
+        "move",
+        &signed.payload,
+        &signed.signature,
+        &canonical_hash,
+    )
+    .await?;
+
+    let key_slice: &[u8] = user_pubkey.as_slice();
+    let canonical_hash_db: Vec<u8> = canonical_hash.to_vec();
+    let created_at_db = created_at_ms as i64;
+    let genesis_at_db = genesis_at_ms as i64;
+    let to_key_db: Vec<u8> = to_instance_key.to_vec();
+
+    // §12.3 backfill projection.
+    sqlx::query!(
+        "INSERT OR IGNORE INTO user_moves (user_key, canonical_hash, created_at) \
+         VALUES (?, ?, ?)",
+        key_slice,
+        canonical_hash_db,
+        created_at_db,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    // Self-home pointer. `current_home_domain` is the bare canonical
+    // domain verbatim from the declaration (no re-derivation), matching
+    // the §12 joint-binding rule the receive path enforces.
+    sqlx::query!(
+        "INSERT INTO user_homes \
+            (user_key, current_home_key, current_home_domain, \
+             current_move_hash, current_created_at) \
+         VALUES (?, ?, ?, ?, ?) \
+         ON CONFLICT(user_key) DO UPDATE SET \
+            current_home_key = excluded.current_home_key, \
+            current_home_domain = excluded.current_home_domain, \
+            current_move_hash = excluded.current_move_hash, \
+            current_created_at = excluded.current_created_at, \
+            updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+        key_slice,
+        to_key_db,
+        instance_domain,
+        canonical_hash_db,
+        created_at_db,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    // Immutable birth anchor (§12.8). Same shape the receive path
+    // writes, so a later inbound declaration for this key hits the
+    // `INSERT OR IGNORE` no-op and the immutability gate.
+    sqlx::query!(
+        "INSERT OR IGNORE INTO user_genesis \
+            (user_key, genesis_at, birth_instance_key, attestation_sig, received_at) \
+         VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))",
+        key_slice,
+        genesis_at_db,
+        birth_key_db,
+        att_sig_db,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    let wire = encode_signed_object(&signed.payload, &signed.signature);
+    Ok((canonical_hash, wire))
 }
 
 fn sha256(bytes: &[u8]) -> [u8; 32] {

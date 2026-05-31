@@ -6,9 +6,9 @@ use uuid::Uuid;
 
 use crate::federation::instance_key::InstanceKey;
 use crate::signed::{
-    AdminRemoval, AttachmentRef, Deactivation, Move, PostRevision, ProfileRevision, Report,
-    ReportReason, Retraction, SignedPayload, ThreadCreate, ThreadStatus, ThreadStatusKind,
-    TrustEdge, TrustStance, UserStatus, UserStatusKind,
+    self, AdminRemoval, AttachmentRef, Deactivation, GenesisAttestation, Move, PostRevision,
+    ProfileRevision, Report, ReportReason, Retraction, SignedPayload, ThreadCreate, ThreadStatus,
+    ThreadStatusKind, TrustEdge, TrustStance, UserStatus, UserStatusKind,
 };
 
 /// Output of signing a class-specific payload.
@@ -882,27 +882,38 @@ pub fn sign_admin_removal_with_instance_key(
 /// destination instances' `instance_pubkey`s as observed at signing
 /// time; `from_instance` / `to_instance` are the bare canonical domains.
 /// Both are bound jointly per the §5.1 verification rule (see also
-/// §12 "Joint binding of pubkey and domain"). `prior_move_hash` chains
-/// to K's previous move's canonical hash; `None` for the user's first
-/// move ever.
+/// §12 "Joint binding of pubkey and domain"). Pass `from_instance_key`
+/// / `from_instance` as `None` for a **genesis declaration** (the key
+/// was born at `to_instance`, no predecessor — §12.8); they are
+/// coupled, so either both `Some` or both `None`. `genesis_at_ms` is
+/// the immutable account-birth time, re-stated in every declaration;
+/// `genesis_attestation` is the birth-instance counter-signature (build
+/// it with [`build_genesis_attestation`] when this instance is the
+/// birth instance, or forward-carry the original on a re-home).
+/// `prior_move_hash` chains to K's previous move's canonical hash;
+/// `None` for the user's first (genesis) declaration.
 #[allow(clippy::too_many_arguments)]
 pub fn sign_move_with_key(
     key: &SigningKey,
-    from_instance_key: &[u8; 32],
-    from_instance: &str,
+    from_instance_key: Option<&[u8; 32]>,
+    from_instance: Option<&str>,
     to_instance_key: &[u8; 32],
     to_instance: &str,
     created_at_ms: u64,
+    genesis_at_ms: u64,
+    genesis_attestation: GenesisAttestation,
     prior_move_hash: Option<&[u8; 32]>,
 ) -> SigningOutput {
     let public_key = *key.verifying_key().as_bytes();
     let payload = Move {
         key: public_key,
-        from_instance_key: *from_instance_key,
-        from_instance: from_instance.to_string(),
+        from_instance_key: from_instance_key.copied(),
+        from_instance: from_instance.map(str::to_string),
         to_instance_key: *to_instance_key,
         to_instance: to_instance.to_string(),
         created_at: created_at_ms,
+        genesis_at: genesis_at_ms,
+        genesis_attestation,
         prior_move_hash: prior_move_hash.copied(),
     };
     let payload_bytes = SignedPayload::Move(payload).encode();
@@ -913,6 +924,34 @@ pub fn sign_move_with_key(
         signature,
         public_key,
         canonical_hash,
+    }
+}
+
+/// Build a birth-instance [`GenesisAttestation`] (§5.1) by
+/// counter-signing the `{key, genesis_at, birth_instance_key}` triple
+/// with this instance's signing key.
+///
+/// Used when *this* instance is the birth instance — i.e. at local
+/// signup, where the instance both hosts the account at creation and
+/// vouches its age. `birth_instance_key` is set to this instance's
+/// `instance_pubkey`. The resulting attestation is embedded verbatim in
+/// the genesis declaration and re-carried by every subsequent move in
+/// the chain, so a peer enforcing an age ceiling (§8.10) can convert the
+/// user-signed `genesis_at` into an instance-vouched age.
+pub fn build_genesis_attestation(
+    instance_key: &InstanceKey,
+    user_key: &[u8; 32],
+    genesis_at_ms: u64,
+) -> GenesisAttestation {
+    let birth_instance_key = *instance_key.public_bytes();
+    let signing_bytes =
+        signed::genesis_attestation_signing_bytes(user_key, genesis_at_ms, &birth_instance_key);
+    let sig = instance_key.sign(&signing_bytes);
+    GenesisAttestation {
+        key: *user_key,
+        genesis_at: genesis_at_ms,
+        birth_instance_key,
+        sig,
     }
 }
 

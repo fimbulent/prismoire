@@ -11,6 +11,9 @@ use webauthn_rs::prelude::*;
 
 use crate::display_name::{display_name_skeleton, validate_display_name};
 use crate::error::{AppError, ErrorCode};
+use crate::federation::forwarder::forward_signed_object;
+use crate::federation::moves::mint_local_user_genesis;
+use crate::federation::routing::ForwardingClass;
 use crate::invites;
 use crate::session::{
     RestrictedAuthUser, clear_session_cookie, create_session, delete_session, session_cookie,
@@ -514,7 +517,35 @@ pub async fn signup_complete(
     )
     .await?;
 
+    // §5.1/§12.8 genesis declaration. This instance is the account's
+    // birth instance (it was created here at this signup), so we mint
+    // and self-counter-sign a genesis move establishing `(key → us)`
+    // with no predecessor. Done in-tx so a rollback nukes the genesis
+    // alongside the identity; flooded post-commit (below) so a slow
+    // fanout can't hold the write transaction.
+    let (genesis_hash, genesis_wire) = mint_local_user_genesis(
+        &mut tx,
+        &state.instance_key,
+        &state.instance_domain,
+        &signing_key,
+        created_at_ms,
+    )
+    .await?;
+
     tx.commit().await?;
+
+    // §12.2 unconditional flood, post-commit. `arrived_from = None`
+    // because we are the originator. Routing key for moves is the
+    // moving identity K (§7.4 + §12) — here the new user's pubkey.
+    forward_signed_object(
+        state.clone(),
+        genesis_hash,
+        ForwardingClass::Move,
+        verifying_bytes.to_vec(),
+        genesis_wire,
+        None,
+    )
+    .await;
 
     state.trust_graph_notify.notify_one();
 

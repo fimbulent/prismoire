@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT genesis_at AS \"genesis_at!: i64\", birth_instance_key, attestation_sig FROM user_genesis WHERE user_key = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "genesis_at!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "birth_instance_key",
+        "ordinal": 1,
+        "type_info": "Blob"
+      },
+      {
+        "name": "attestation_sig",
+        "ordinal": 2,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "8cabc5e202b3e20af43709046d428fba0636c134ac104f9b0021d205db0f8d41"
+}

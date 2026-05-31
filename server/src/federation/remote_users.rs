@@ -970,7 +970,9 @@ where
         Some(m) => m,
         None => return Ok(None),
     };
-    Ok(Some(mv.from_instance_key))
+    // `None` for a genesis declaration (no predecessor home) is the
+    // same "no source key" signal as a missing move row.
+    Ok(mv.from_instance_key)
 }
 
 /// Fetch + parse a `move` signed object by canonical_hash.

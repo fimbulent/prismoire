@@ -31,9 +31,9 @@ use std::path::{Path, PathBuf};
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 
 use prismoire_server::signed::{
-    self, AdminRemoval, Deactivation, FedEnvelope, Move, ParseError, PostRevision,
-    PriorHomeChallenge, PriorHomeResponse, ProfileRevision, RegistrationChallenge, Report,
-    ReportReason, Retraction, SignedPayload, ThreadCreate, ThreadStatus, ThreadStatusKind,
+    self, AdminRemoval, Deactivation, FedEnvelope, GenesisAttestation, Move, ParseError,
+    PostRevision, PriorHomeChallenge, PriorHomeResponse, ProfileRevision, RegistrationChallenge,
+    Report, ReportReason, Retraction, SignedPayload, ThreadCreate, ThreadStatus, ThreadStatusKind,
     TrustEdge, TrustStance, UserStatus, UserStatusKind,
 };
 
@@ -52,6 +52,28 @@ const KEY_INSTANCE_B_SEED: [u8; 32] = [0xb2; 32];
 
 fn signing_key(seed: &[u8; 32]) -> SigningKey {
     SigningKey::from_bytes(seed)
+}
+
+/// Build a §5.1 [`GenesisAttestation`] for a move fixture: the birth
+/// instance (`birth_seed`) counter-signs the `{key, genesis_at,
+/// birth_instance_key}` triple. `key`/`genesis_at` mirror the outer
+/// move so the parse-time inner==outer binding check passes.
+fn genesis_attestation(
+    user_key: &[u8; 32],
+    genesis_at: u64,
+    birth_seed: &[u8; 32],
+) -> GenesisAttestation {
+    let birth = signing_key(birth_seed);
+    let birth_instance_key = birth.verifying_key().to_bytes();
+    let bytes =
+        signed::genesis_attestation_signing_bytes(user_key, genesis_at, &birth_instance_key);
+    let sig = birth.sign(&bytes).to_bytes();
+    GenesisAttestation {
+        key: *user_key,
+        genesis_at,
+        birth_instance_key,
+        sig,
+    }
 }
 
 fn fixtures_dir() -> PathBuf {
@@ -301,13 +323,21 @@ fn positive_fixtures() -> Vec<PositiveFixture> {
                 // declared homes with the harness's instance keys.
                 let from_key = signing_key(&KEY_INSTANCE_A_SEED).verifying_key().to_bytes();
                 let to_key = signing_key(&KEY_INSTANCE_B_SEED).verifying_key().to_bytes();
+                let user_key = *key.verifying_key().as_bytes();
+                let genesis_at = 1_700_000_000_000;
                 let m = Move {
-                    key: *key.verifying_key().as_bytes(),
-                    from_instance_key: from_key,
-                    from_instance: "old.example".to_string(),
+                    key: user_key,
+                    from_instance_key: Some(from_key),
+                    from_instance: Some("old.example".to_string()),
                     to_instance_key: to_key,
                     to_instance: "new.example".to_string(),
                     created_at: 1_700_000_020_000,
+                    genesis_at,
+                    genesis_attestation: genesis_attestation(
+                        &user_key,
+                        genesis_at,
+                        &KEY_INSTANCE_A_SEED,
+                    ),
                     prior_move_hash: None,
                 };
                 (SignedPayload::Move(m), key)
@@ -326,13 +356,24 @@ fn positive_fixtures() -> Vec<PositiveFixture> {
                 // back exercises a real key rotation across the move
                 // chain.
                 let to_key = signing_key(&[0xc3; 32]).verifying_key().to_bytes();
+                let user_key = *key.verifying_key().as_bytes();
+                // Same identity as v1-first, so the immutable birth time
+                // and birth instance match — a downstream chain test can
+                // treat the two fixtures as successive links for Alice.
+                let genesis_at = 1_700_000_000_000;
                 let m = Move {
-                    key: *key.verifying_key().as_bytes(),
-                    from_instance_key: from_key,
-                    from_instance: "new.example".to_string(),
+                    key: user_key,
+                    from_instance_key: Some(from_key),
+                    from_instance: Some("new.example".to_string()),
                     to_instance_key: to_key,
                     to_instance: "newer.example".to_string(),
                     created_at: 1_700_000_021_000,
+                    genesis_at,
+                    genesis_attestation: genesis_attestation(
+                        &user_key,
+                        genesis_at,
+                        &KEY_INSTANCE_A_SEED,
+                    ),
                     prior_move_hash: Some([0x5a; 32]),
                 };
                 (SignedPayload::Move(m), key)

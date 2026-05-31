@@ -468,10 +468,13 @@ pub struct Move {
     pub key: [u8; 32],
     /// Ed25519 `instance_pubkey` of the source instance, as
     /// observed at signing time. The trust anchor for "where K was
-    /// hosted before this move."
-    pub from_instance_key: [u8; 32],
-    /// Bare canonical domain of the source instance.
-    pub from_instance: String,
+    /// hosted before this move." **`None` ⇒ genesis declaration** (the
+    /// key was born at `to_instance`, no predecessor); coupled with
+    /// `from_instance` — both present or both absent (§5.1).
+    pub from_instance_key: Option<[u8; 32]>,
+    /// Bare canonical domain of the source instance. `None` iff
+    /// `from_instance_key` is `None` (genesis declaration).
+    pub from_instance: Option<String>,
     /// Ed25519 `instance_pubkey` of the destination instance, as
     /// observed at signing time. For moves originating from a §13
     /// registration ceremony this MUST equal the `dest_instance_key`
@@ -479,11 +482,43 @@ pub struct Move {
     pub to_instance_key: [u8; 32],
     /// Bare canonical domain of the destination instance.
     pub to_instance: String,
-    /// Move time, Unix milliseconds, UTC.
+    /// Move time, Unix milliseconds, UTC. *Not* account age — see
+    /// `genesis_at`.
     pub created_at: u64,
+    /// Immutable account **birth** time, Unix milliseconds, UTC.
+    /// Re-stated and re-signed in every declaration in the chain
+    /// (genesis and moves alike); MUST be identical across the chain
+    /// (§5.1, §12.8). Forward-carried so one flooded declaration
+    /// conveys the key's age without walking the chain to genesis.
+    pub genesis_at: u64,
+    /// Birth-instance counter-signature over the birth fact. Anchors
+    /// `genesis_at` against self-attestation (§5.1, §12.8).
+    pub genesis_attestation: GenesisAttestation,
     /// SHA-256 of the canonical bytes of the previous `move` for
-    /// `key`. `None` for the user's first move.
+    /// `key`. `None` for the user's first (genesis) declaration.
     pub prior_move_hash: Option<[u8; 32]>,
+}
+
+/// Birth-instance counter-signature embedded in every move/genesis
+/// declaration (`docs/signed-payload-format.md` §5.1). Converts the
+/// user-signed `genesis_at` into an instance-vouched account age so an
+/// age-ceiling forwarder (`federation-protocol.md` §8.10) can honour it
+/// without trusting a pure self-attestation — closing the tail-spam
+/// vector. The user signs the **outer** move declaration; the birth
+/// instance signs this **inner** birth fact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenesisAttestation {
+    /// MUST equal the enclosing declaration's `key`.
+    pub key: [u8; 32],
+    /// MUST equal the enclosing declaration's `genesis_at`.
+    pub genesis_at: u64,
+    /// The birth instance's `instance_pubkey` — the instance that
+    /// hosted `key` at account creation.
+    pub birth_instance_key: [u8; 32],
+    /// Ed25519 signature by `birth_instance_key`'s admin key over the
+    /// canonical CBOR of `{key, genesis_at, birth_instance_key}` (see
+    /// [`genesis_attestation_signing_bytes`]).
+    pub sig: [u8; 64],
 }
 
 /// Admin-issued post removal. Instance-signed (signed by the
@@ -850,6 +885,15 @@ pub enum ParseError {
     /// was not `suspended`. Per spec §5.10 the field MUST be absent
     /// for non-suspended statuses.
     IllegalSuspendedUntil,
+    /// A `move` violated §5.1 presence coupling: `from_instance_key`
+    /// and `from_instance` must both be present (move) or both absent
+    /// (genesis declaration), and a genesis declaration (both absent)
+    /// must carry no `prior_move_hash`.
+    MovePresenceCoupling,
+    /// A `move`'s embedded `genesis_attestation` had an inner `key` or
+    /// `genesis_at` that did not equal the outer declaration's
+    /// fields (§5.1 verification step 4, structural half).
+    GenesisAttestationMismatch,
 }
 
 impl std::fmt::Display for ParseError {
@@ -895,6 +939,12 @@ impl std::fmt::Display for ParseError {
             Self::InvalidReportReason(s) => write!(f, "invalid report reason: {s}"),
             Self::IllegalSuspendedUntil => f.write_str(
                 "suspended_until present on user-status whose status is not 'suspended'",
+            ),
+            Self::MovePresenceCoupling => f.write_str(
+                "move violates §5.1 from_* presence coupling / genesis prior_move_hash rule",
+            ),
+            Self::GenesisAttestationMismatch => f.write_str(
+                "genesis_attestation inner key/genesis_at does not match outer declaration",
             ),
         }
     }
@@ -1113,16 +1163,61 @@ fn move_to_cbor(m: &Move) -> Value {
         ("v", uint(V1)),
         ("t", text(TAG_MOVE)),
         ("key", bytes(&m.key)),
-        ("from_instance_key", bytes(&m.from_instance_key)),
-        ("from_instance", text(&m.from_instance)),
         ("to_instance_key", bytes(&m.to_instance_key)),
         ("to_instance", text(&m.to_instance)),
         ("created_at", uint(m.created_at)),
+        ("genesis_at", uint(m.genesis_at)),
+        (
+            "genesis_attestation",
+            genesis_attestation_to_cbor(&m.genesis_attestation),
+        ),
     ];
+    // §5.1 presence coupling: `from_*` are emitted together for a move
+    // and omitted together for a genesis declaration. The struct keeps
+    // them as a coupled `Option` pair, so a desynchronised half-set
+    // (only one `Some`) silently drops both rather than emitting a
+    // non-canonical half — but construction always sets them together.
+    if let (Some(from_key), Some(from_domain)) = (&m.from_instance_key, &m.from_instance) {
+        entries.push(("from_instance_key", bytes(from_key)));
+        entries.push(("from_instance", text(from_domain)));
+    }
     if let Some(prior) = m.prior_move_hash {
         entries.push(("prior_move_hash", bytes(&prior)));
     }
     build_map(entries)
+}
+
+/// Encode an embedded [`GenesisAttestation`] to a canonical CBOR map.
+/// Keys are sorted by [`build_map`]; this same key set (minus `sig`)
+/// is what [`genesis_attestation_signing_bytes`] signs.
+fn genesis_attestation_to_cbor(a: &GenesisAttestation) -> Value {
+    build_map(vec![
+        ("key", bytes(&a.key)),
+        ("genesis_at", uint(a.genesis_at)),
+        ("birth_instance_key", bytes(&a.birth_instance_key)),
+        ("sig", bytes(&a.sig)),
+    ])
+}
+
+/// Canonical CBOR of the genesis-attestation **signing input**: the
+/// `{key, genesis_at, birth_instance_key}` triple a birth instance
+/// signs (`docs/signed-payload-format.md` §5.1). Both the signer (the
+/// birth instance's admin key) and every verifier reconstruct these
+/// exact bytes; the embedded `sig` is an Ed25519 signature over them.
+/// Excludes `sig` itself — the signature can't cover its own bytes.
+pub fn genesis_attestation_signing_bytes(
+    key: &[u8; 32],
+    genesis_at: u64,
+    birth_instance_key: &[u8; 32],
+) -> Vec<u8> {
+    let value = build_map(vec![
+        ("key", bytes(key)),
+        ("genesis_at", uint(genesis_at)),
+        ("birth_instance_key", bytes(birth_instance_key)),
+    ]);
+    let mut buf = Vec::new();
+    ciborium::ser::into_writer(&value, &mut buf).expect("ciborium ser of well-formed Value");
+    buf
 }
 
 fn admin_removal_to_cbor(a: &AdminRemoval) -> Value {
@@ -1625,16 +1720,41 @@ fn parse_trust_edge(fields: &BTreeMap<String, Value>) -> Result<TrustEdge, Parse
 
 fn parse_move(fields: &BTreeMap<String, Value>) -> Result<Move, ParseError> {
     let key = field_bytes_fixed::<32>(fields, "key")?;
-    let from_instance_key = field_bytes_fixed::<32>(fields, "from_instance_key")?;
-    let from_instance = field_text(fields, "from_instance")?;
+
+    // §5.1 presence coupling: `from_instance_key` and `from_instance`
+    // MUST both be present (a move) or both absent (a genesis
+    // declaration). A half-set is `schema_invalid`.
+    let has_from_key = fields.contains_key("from_instance_key");
+    let has_from_domain = fields.contains_key("from_instance");
+    if has_from_key != has_from_domain {
+        return Err(ParseError::MovePresenceCoupling);
+    }
+    let (from_instance_key, from_instance) = if has_from_key {
+        (
+            Some(field_bytes_fixed::<32>(fields, "from_instance_key")?),
+            Some(field_text(fields, "from_instance")?),
+        )
+    } else {
+        (None, None)
+    };
+
     let to_instance_key = field_bytes_fixed::<32>(fields, "to_instance_key")?;
     let to_instance = field_text(fields, "to_instance")?;
     let created_at = field_uint(fields, "created_at")?;
+    let genesis_at = field_uint(fields, "genesis_at")?;
+    let genesis_attestation = parse_genesis_attestation(fields, &key, genesis_at)?;
     let prior_move_hash = if fields.contains_key("prior_move_hash") {
         Some(field_bytes_fixed::<32>(fields, "prior_move_hash")?)
     } else {
         None
     };
+
+    // §5.1 step 5: a genesis declaration (from_* absent) requires
+    // `prior_move_hash` absent — it has no predecessor by definition.
+    if from_instance_key.is_none() && prior_move_hash.is_some() {
+        return Err(ParseError::MovePresenceCoupling);
+    }
+
     Ok(Move {
         key,
         from_instance_key,
@@ -1642,7 +1762,68 @@ fn parse_move(fields: &BTreeMap<String, Value>) -> Result<Move, ParseError> {
         to_instance_key,
         to_instance,
         created_at,
+        genesis_at,
+        genesis_attestation,
         prior_move_hash,
+    })
+}
+
+/// Parse the embedded `genesis_attestation` sub-map (§5.1). Walks the
+/// inner map with the same canonical-order + duplicate-key checks the
+/// top-level parser applies (the outer re-encode comparison does not
+/// catch inner key-order violations — ciborium preserves `Value::Map`
+/// insertion order). Enforces the §5.1-step-4 *structural* binding:
+/// inner `key` / `genesis_at` MUST equal the outer declaration's
+/// fields. The `sig` cryptographic check is deferred to the receive
+/// path (`federation::moves`), which holds `birth_instance_key` as a
+/// verifying key — mirroring how the outer move signature is verified
+/// there, not at parse time.
+fn parse_genesis_attestation(
+    fields: &BTreeMap<String, Value>,
+    outer_key: &[u8; 32],
+    outer_genesis_at: u64,
+) -> Result<GenesisAttestation, ParseError> {
+    let v = fields
+        .get("genesis_attestation")
+        .ok_or(ParseError::MissingField("genesis_attestation"))?;
+    let map_entries = match v {
+        Value::Map(m) => m,
+        _ => return Err(ParseError::WrongType("genesis_attestation")),
+    };
+
+    let mut inner: BTreeMap<String, Value> = BTreeMap::new();
+    let mut last_key: Option<String> = None;
+    for (k, v) in map_entries {
+        let key_str = match k {
+            Value::Text(s) => s.clone(),
+            _ => return Err(ParseError::NonTextKey),
+        };
+        if let Some(prev) = &last_key
+            && cbor_text_key_cmp(prev, &key_str) != Ordering::Less
+        {
+            return Err(ParseError::KeysOutOfOrder);
+        }
+        if inner.contains_key(&key_str) {
+            return Err(ParseError::DuplicateKey(key_str));
+        }
+        last_key = Some(key_str.clone());
+        inner.insert(key_str, v.clone());
+    }
+
+    let key = field_bytes_fixed::<32>(&inner, "key")?;
+    let genesis_at = field_uint(&inner, "genesis_at")?;
+    let birth_instance_key = field_bytes_fixed::<32>(&inner, "birth_instance_key")?;
+    let sig = field_bytes_fixed::<64>(&inner, "sig")?;
+
+    if &key != outer_key || genesis_at != outer_genesis_at {
+        return Err(ParseError::GenesisAttestationMismatch);
+    }
+
+    Ok(GenesisAttestation {
+        key,
+        genesis_at,
+        birth_instance_key,
+        sig,
     })
 }
 
@@ -1988,9 +2169,17 @@ mod tests {
         // move fields — `created_at` overlaps everywhere; `key` is also
         // distinct from `from_key`/`to_key`/`user_key`/`subject_key`.
         "key",
+        "from_instance_key",
         "from_instance",
+        "to_instance_key",
         "to_instance",
+        "genesis_at",
         "prior_move_hash",
+        // genesis_attestation: the outer key plus its inner sub-map keys
+        // (`key`/`genesis_at` overlap the outer move; `sig` is distinct).
+        "genesis_attestation",
+        "birth_instance_key",
+        "sig",
         // admin-rm fields — `post_id`/`created_at` overlap.
         "target_author",
         "signing_instance",
@@ -2820,15 +3009,53 @@ mod tests {
     // earlier in this module — those tests apply to every class
     // because dispatch lives in `SignedPayload::parse`.
 
+    /// Build a sample attestation whose inner `key` / `genesis_at`
+    /// match the enclosing declaration (the §5.1 structural binding the
+    /// parser enforces). The `sig` is filler — these unit tests only
+    /// exercise the wire round-trip and the *outer* user signature, not
+    /// the birth-instance counter-signature (that lives in the
+    /// receive-path integration tests).
+    fn sample_attestation(key: [u8; 32], genesis_at: u64) -> GenesisAttestation {
+        GenesisAttestation {
+            key,
+            genesis_at,
+            birth_instance_key: [0xb4; 32],
+            sig: [0xb5; 64],
+        }
+    }
+
+    /// A move declaration (from_* present). `with_prior` toggles the
+    /// optional `prior_move_hash`.
     fn sample_move(with_prior: bool) -> Move {
+        let key = [0xb0; 32];
+        let genesis_at = 1_699_999_000_000;
         Move {
-            key: [0xb0; 32],
-            from_instance_key: [0xb2; 32],
-            from_instance: "old.example".to_string(),
+            key,
+            from_instance_key: Some([0xb2; 32]),
+            from_instance: Some("old.example".to_string()),
             to_instance_key: [0xb3; 32],
             to_instance: "new.example".to_string(),
             created_at: 1_700_000_100_000,
+            genesis_at,
+            genesis_attestation: sample_attestation(key, genesis_at),
             prior_move_hash: if with_prior { Some([0xb1; 32]) } else { None },
+        }
+    }
+
+    /// A genesis declaration (from_* absent, no predecessor).
+    fn sample_genesis() -> Move {
+        let key = [0xc0; 32];
+        let genesis_at = 1_700_000_100_000;
+        Move {
+            key,
+            from_instance_key: None,
+            from_instance: None,
+            to_instance_key: [0xc3; 32],
+            to_instance: "birth.example".to_string(),
+            created_at: genesis_at,
+            genesis_at,
+            genesis_attestation: sample_attestation(key, genesis_at),
+            prior_move_hash: None,
         }
     }
 
@@ -2843,10 +3070,68 @@ mod tests {
     }
 
     #[test]
+    fn genesis_declaration_round_trips() {
+        let m = sample_genesis();
+        let bytes = SignedPayload::Move(m.clone()).encode();
+        let decoded = SignedPayload::parse(&bytes).unwrap();
+        assert_eq!(decoded, SignedPayload::Move(m));
+    }
+
+    #[test]
+    fn parse_rejects_genesis_with_prior_move_hash() {
+        let mut m = sample_genesis();
+        m.prior_move_hash = Some([0x07; 32]);
+        let bytes = SignedPayload::Move(m).encode();
+        assert!(matches!(
+            SignedPayload::parse(&bytes),
+            Err(ParseError::MovePresenceCoupling)
+        ));
+    }
+
+    #[test]
+    fn parse_rejects_half_set_from_fields() {
+        // Encode a move with only `from_instance` present (the encoder
+        // couples them, so build the CBOR map by hand to desync).
+        let key = [0xd0; 32];
+        let genesis_at = 1_700_000_000_000;
+        let att = genesis_attestation_to_cbor(&sample_attestation(key, genesis_at));
+        let value = build_map(vec![
+            ("v", uint(V1)),
+            ("t", text(TAG_MOVE)),
+            ("key", bytes(&key)),
+            ("from_instance", text("orphan.example")),
+            ("to_instance_key", bytes(&[0xd3; 32])),
+            ("to_instance", text("dest.example")),
+            ("created_at", uint(genesis_at)),
+            ("genesis_at", uint(genesis_at)),
+            ("genesis_attestation", att),
+        ]);
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&value, &mut bytes).unwrap();
+        assert!(matches!(
+            SignedPayload::parse(&bytes),
+            Err(ParseError::MovePresenceCoupling)
+        ));
+    }
+
+    #[test]
+    fn parse_rejects_attestation_outer_inner_mismatch() {
+        let mut m = sample_move(false);
+        // Desync the inner attestation genesis_at from the outer.
+        m.genesis_attestation.genesis_at = m.genesis_at + 1;
+        let bytes = SignedPayload::Move(m).encode();
+        assert!(matches!(
+            SignedPayload::parse(&bytes),
+            Err(ParseError::GenesisAttestationMismatch)
+        ));
+    }
+
+    #[test]
     fn sign_and_verify_move_binds_to_key_field() {
         let signing_key = SigningKey::generate(&mut OsRng);
         let mut m = sample_move(false);
         m.key = *signing_key.verifying_key().as_bytes();
+        m.genesis_attestation.key = m.key;
         let bytes = SignedPayload::Move(m).encode();
         let sig = signing_key.sign(&bytes);
         let result = verify(&bytes, &sig.to_bytes(), &signing_key.verifying_key()).expect("verify");
@@ -2859,6 +3144,7 @@ mod tests {
         let other = SigningKey::generate(&mut OsRng);
         let mut m = sample_move(false);
         m.key = *signer.verifying_key().as_bytes();
+        m.genesis_attestation.key = m.key;
         let bytes = SignedPayload::Move(m).encode();
         let sig = signer.sign(&bytes);
         let result = verify(&bytes, &sig.to_bytes(), &other.verifying_key());
