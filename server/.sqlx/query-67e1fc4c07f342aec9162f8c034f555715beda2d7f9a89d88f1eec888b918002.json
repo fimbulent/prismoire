@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT cutoff FROM peer_frontier_age_ceilings WHERE peer_pubkey = ? AND root_key = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "cutoff",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "67e1fc4c07f342aec9162f8c034f555715beda2d7f9a89d88f1eec888b918002"
+}

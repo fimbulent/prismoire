@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT cutoff FROM local_frontier_age_ceilings WHERE root_key = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "cutoff",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c441108441c32ce269b2b39350f4f25abb6d4c86dd9c98ccd9308519645875c9"
+}

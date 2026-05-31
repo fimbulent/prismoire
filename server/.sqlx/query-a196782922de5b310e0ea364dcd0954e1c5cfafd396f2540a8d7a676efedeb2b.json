@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO local_frontier_age_ceilings (root_key, cutoff) VALUES (?, ?) ON CONFLICT(root_key) DO UPDATE SET cutoff = excluded.cutoff, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "a196782922de5b310e0ea364dcd0954e1c5cfafd396f2540a8d7a676efedeb2b"
+}

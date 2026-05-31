@@ -547,10 +547,13 @@ pub struct RebuildOutcome {
     /// on everything the mark phase touched.
     pub generation: i64,
     /// The §8.9 reverse-BFS result — reachable set, materialization counts,
-    /// per-reader caps (Slice E reads these for age ceilings).
+    /// per-reader caps (the §8.10 ceiling derivation reads these).
     pub frontier: ReverseFrontier,
     /// Rows reaped after the mark phase (§8.12 sweep).
     pub sweep: SweepOutcome,
+    /// §8.10 outbound cleave map reconciled from the caps: roots published
+    /// vs cleared this pass.
+    pub ceilings: CeilingPublication,
 }
 
 /// Drive one complete generational mark-sweep rebuild of the reverse
@@ -564,14 +567,18 @@ pub struct RebuildOutcome {
 ///    touches is restamped fresh.
 /// 3. **Sweep** ([`sweep_frontier`]) every row left more than `K`
 ///    generations behind.
+/// 4. **Publish** ([`publish_local_age_ceilings`]) the §8.10 outbound
+///    cleave map from the finished caps.
 ///
 /// Order matters: the advance must precede the mark so the watermark and
 /// the fresh stamps move together, and the sweep must follow the mark so a
-/// row re-marked this pass is never a sweep candidate. The three steps are
-/// deliberately *not* one transaction — a crash between mark and sweep just
-/// leaves stale rows for the next rebuild to reap, which the K-generation
-/// slack already tolerates, and avoids holding a write lock across the whole
-/// BFS (consistent with the BFS's own per-write idempotent approach).
+/// row re-marked this pass is never a sweep candidate. The publish runs last
+/// because it reads the caps the mark phase filled. The steps are
+/// deliberately *not* one transaction — a crash partway just leaves stale
+/// rows / a stale ceiling for the next rebuild to reconcile, which the
+/// K-generation slack and the §8.10 opportunistic backstop already tolerate,
+/// and avoids holding a write lock across the whole BFS (consistent with the
+/// BFS's own per-write idempotent approach).
 ///
 /// `readers`, `cap_n`, and `max_depth` are forwarded to the BFS; pass
 /// [`FRONTIER_GC_K`] for `k` unless an operator overrides the GC window.
@@ -585,10 +592,12 @@ pub async fn rebuild_reverse_frontier(
     let generation = advance_generation(db).await?;
     let frontier = reverse_frontier_bfs(db, readers, cap_n, generation, max_depth).await?;
     let sweep = sweep_frontier(db, generation, k).await?;
+    let ceilings = publish_local_age_ceilings(db, &frontier).await?;
     Ok(RebuildOutcome {
         generation,
         frontier,
         sweep,
+        ceilings,
     })
 }
 
@@ -794,6 +803,197 @@ impl AdmissionCap {
     pub fn into_admitted(self) -> Vec<Admission> {
         self.heap.into_iter().map(|Reverse(adm)| adm).collect()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Age-ceiling production (§8.10) — the source-side celebrity cleave
+// ---------------------------------------------------------------------------
+
+/// Derive the §8.10 age ceiling a reader's cap advertises, or `None` when
+/// the reader is **not** age-cleaved and should keep flooding its whole
+/// tail.
+///
+/// A ceiling is published iff two conditions hold:
+///
+/// 1. **The cap is saturated** ([`AdmissionCap::is_full`]). With spare
+///    capacity every inbound truster still fits, so nothing is shed and
+///    there is no cleave to advertise — absence of a row means "admit all"
+///    (§8.3 wire semantics).
+/// 2. **The worst-admitted has an attested `genesis_at`**. The cutoff is a
+///    `genesis_at` watermark; a worst-admitted at the unattested floor
+///    (`None`) cannot be expressed as an age, and publishing one would
+///    falsely shed every attested-age source. So when the marginal slot is
+///    held by an unattested key we publish nothing and let those losers
+///    flow to the receiver's cap heap (the §8.10 opportunistic backstop).
+///
+/// When set, the cutoff is exactly the worst-admitted account's
+/// `genesis_at` — the cleave point: a peer forwards `S → R` only when
+/// `genesis_at(S) ≤ cutoff` (§8.3), so any source younger than the worst
+/// admitted is shed at the source.
+pub fn derive_age_ceiling(cap: &AdmissionCap) -> Option<i64> {
+    if !cap.is_full() {
+        return None;
+    }
+    cap.worst_admitted().and_then(|worst| worst.genesis_at)
+}
+
+/// Reconcile this instance's outbound §8.10 cleave map
+/// (`local_frontier_age_ceilings`) against a finished rebuild's per-reader
+/// caps. For every local root: publish (UPSERT) the [`derive_age_ceiling`]
+/// cutoff when the root is cleaved, else clear (DELETE) any stale ceiling
+/// it no longer warrants. The existing §8.3/§8.4 producer
+/// (`compute_local_frontier`) reads this table, so a written row reaches the
+/// wire on the next announce/delta with no further plumbing.
+///
+/// Returns the count of roots published vs cleared this pass. The two
+/// writes per root are independent UPSERT/DELETE statements, not one
+/// transaction: the map is advisory (a stale row only mis-sheds a tail
+/// truster the receiver's cap recovers anyway, §8.10), so a partial
+/// reconcile is self-correcting on the next rebuild.
+pub async fn publish_local_age_ceilings(
+    db: &SqlitePool,
+    frontier: &ReverseFrontier,
+) -> Result<CeilingPublication, sqlx::Error> {
+    let mut published = 0u64;
+    let mut cleared = 0u64;
+    for outcome in &frontier.caps {
+        match derive_age_ceiling(&outcome.cap) {
+            Some(cutoff) => {
+                upsert_local_age_ceiling(db, &outcome.key, cutoff).await?;
+                published += 1;
+            }
+            None => {
+                if delete_local_age_ceiling(db, &outcome.key).await? {
+                    cleared += 1;
+                }
+            }
+        }
+    }
+    Ok(CeilingPublication { published, cleared })
+}
+
+/// Tally from one [`publish_local_age_ceilings`] reconcile.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CeilingPublication {
+    /// Roots for which a ceiling was UPSERTed (cleaved this pass).
+    pub published: u64,
+    /// Roots whose stale ceiling row was DELETEd (no longer cleaved).
+    pub cleared: u64,
+}
+
+/// UPSERT one local root's advertised §8.10 cutoff (unix ms). Bumps
+/// `updated_at` so operators can audit when the §8.10 controller last
+/// tightened the root.
+async fn upsert_local_age_ceiling(
+    db: &SqlitePool,
+    root_key: &[u8; 32],
+    cutoff: i64,
+) -> Result<(), sqlx::Error> {
+    let key_slice: &[u8] = root_key.as_slice();
+    sqlx::query!(
+        "INSERT INTO local_frontier_age_ceilings (root_key, cutoff) \
+         VALUES (?, ?) \
+         ON CONFLICT(root_key) DO UPDATE SET \
+             cutoff = excluded.cutoff, \
+             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+        key_slice,
+        cutoff,
+    )
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// Clear a local root's advertised ceiling. Returns `true` if a row was
+/// actually removed (the root had been cleaved before and is not now), so
+/// the caller can count genuine clears rather than no-op deletes.
+async fn delete_local_age_ceiling(
+    db: &SqlitePool,
+    root_key: &[u8; 32],
+) -> Result<bool, sqlx::Error> {
+    let key_slice: &[u8] = root_key.as_slice();
+    let deleted = sqlx::query!(
+        "DELETE FROM local_frontier_age_ceilings WHERE root_key = ?",
+        key_slice,
+    )
+    .execute(db)
+    .await?
+    .rows_affected();
+    Ok(deleted > 0)
+}
+
+// ---------------------------------------------------------------------------
+// Source-side shedding (§8.10) — the forwarder honouring a peer's ceiling
+// ---------------------------------------------------------------------------
+
+/// The §8.10 ceiling predicate: may an edge whose source has
+/// `source_genesis_at` be forwarded under a root carrying `cutoff`?
+///
+/// Honouring is **opportunistic and fail-open** (§8.3/§8.10): the edge is
+/// shed *only* when the forwarder positively knows the source is younger
+/// than the cutoff. So it forwards when —
+///
+/// - `source_genesis_at` is `None`: the source's instance-attested age is
+///   unknown here, so the ceiling cannot be evaluated; the edge flows and
+///   loses (or wins) at the receiver's cap heap.
+/// - `genesis_at ≤ cutoff`: the source is at least as old as the worst
+///   admitted, so it is on the keep side of the cleave.
+///
+/// and sheds only when `genesis_at > cutoff` (strictly younger). The cutoff
+/// MUST come from an instance-attested `genesis_at` (§12); a self-attested
+/// age must never satisfy a ceiling, which is why the resolver
+/// [`peer_ceiling_admits_source`] reads `user_genesis` and never a
+/// self-reported field.
+pub fn ceiling_admits(cutoff: i64, source_genesis_at: Option<i64>) -> bool {
+    match source_genesis_at {
+        Some(genesis_at) => genesis_at <= cutoff,
+        None => true,
+    }
+}
+
+/// Resolve the full §8.10 forward/shed decision for one edge `source → root`
+/// being relayed toward `peer`: look up the ceiling `peer` advertised for
+/// `root`, and if one exists, evaluate the source's attested age against it.
+///
+/// Returns `true` (forward) when the peer advertises **no** ceiling for the
+/// root, or when [`ceiling_admits`] passes. Returns `false` (shed) only on a
+/// positive younger-than-cutoff match. This is the un-wired lookup the
+/// frontier-fanout forwarder will consult before relaying a trust-edge; it
+/// composes the pure [`ceiling_admits`] predicate with the two store reads
+/// (`peer_frontier_age_ceilings` and `user_genesis`).
+pub async fn peer_ceiling_admits_source(
+    db: &SqlitePool,
+    peer: &[u8; 32],
+    root: &[u8; 32],
+    source: &[u8; 32],
+) -> Result<bool, sqlx::Error> {
+    let Some(cutoff) = load_peer_age_ceiling(db, peer, root).await? else {
+        // No ceiling for this root ⇒ admit all (§8.3 absent-root semantics).
+        return Ok(true);
+    };
+    let source_genesis_at = load_genesis_at(db, source).await?;
+    Ok(ceiling_admits(cutoff, source_genesis_at))
+}
+
+/// Read the §8.10 cutoff `peer` currently advertises for `root` from
+/// `peer_frontier_age_ceilings`, or `None` when the peer publishes no
+/// ceiling for that root (the common case — the map is sparse).
+async fn load_peer_age_ceiling(
+    db: &SqlitePool,
+    peer: &[u8; 32],
+    root: &[u8; 32],
+) -> Result<Option<i64>, sqlx::Error> {
+    let peer_slice: &[u8] = peer.as_slice();
+    let root_slice: &[u8] = root.as_slice();
+    let row = sqlx::query!(
+        "SELECT cutoff FROM peer_frontier_age_ceilings \
+         WHERE peer_pubkey = ? AND root_key = ?",
+        peer_slice,
+        root_slice,
+    )
+    .fetch_optional(db)
+    .await?;
+    Ok(row.map(|r| r.cutoff))
 }
 
 /// How a reached frontier node was materialized.
@@ -1877,6 +2077,208 @@ mod tests {
                 .unwrap()
                 .is_empty(),
             "orphan target has no surviving inbound edge"
+        );
+    }
+
+    // -- §8.10 age-ceiling production (E1) --------------------------------
+
+    /// A saturated cap (capacity 1) whose lone — hence worst — admitted
+    /// entry is `a`.
+    fn full_cap(a: Admission) -> AdmissionCap {
+        let mut cap = AdmissionCap::new(1);
+        cap.admit(a);
+        cap
+    }
+
+    /// Read a local root's stored cutoff, if any.
+    async fn stored_local_ceiling(pool: &SqlitePool, root: u8) -> Option<i64> {
+        let root_slice: &[u8] = &[root; 32];
+        sqlx::query!(
+            "SELECT cutoff FROM local_frontier_age_ceilings WHERE root_key = ?",
+            root_slice,
+        )
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+        .map(|r| r.cutoff)
+    }
+
+    #[test]
+    fn derive_ceiling_none_until_cap_saturates() {
+        // Cap of 2 holding one entry has room — no cleave, flood all.
+        let mut cap = AdmissionCap::new(2);
+        cap.admit(adm(1, 0.0, Some(100)));
+        assert_eq!(derive_age_ceiling(&cap), None);
+    }
+
+    #[test]
+    fn derive_ceiling_is_the_worst_admitted_genesis() {
+        let cap = full_cap(adm(1, 0.0, Some(150)));
+        assert_eq!(derive_age_ceiling(&cap), Some(150));
+    }
+
+    #[test]
+    fn derive_ceiling_none_when_worst_is_unattested() {
+        // Saturated, but the marginal slot holds a key with no attested
+        // age: a genesis_at cutoff cannot be expressed, so no ceiling.
+        let cap = full_cap(adm(1, 0.0, None));
+        assert_eq!(derive_age_ceiling(&cap), None);
+    }
+
+    #[tokio::test]
+    async fn publish_writes_cleaved_and_clears_uncleaved_roots() {
+        let pool = fresh_pool().await;
+
+        // Root 9 is cleaved (full cap, attested worst); root 8 is not
+        // (room to spare). Build the outcome the rebuild would hand us.
+        let mut frontier = ReverseFrontier::default();
+        frontier.caps.push(ReaderCapOutcome {
+            key: [9u8; 32],
+            cap: full_cap(adm(1, 0.0, Some(150))),
+        });
+        let mut roomy = AdmissionCap::new(2);
+        roomy.admit(adm(2, 0.0, Some(100)));
+        frontier.caps.push(ReaderCapOutcome {
+            key: [8u8; 32],
+            cap: roomy,
+        });
+
+        let pub1 = publish_local_age_ceilings(&pool, &frontier).await.unwrap();
+        assert_eq!(pub1.published, 1);
+        assert_eq!(pub1.cleared, 0);
+        assert_eq!(stored_local_ceiling(&pool, 9).await, Some(150));
+        assert_eq!(stored_local_ceiling(&pool, 8).await, None);
+
+        // Root 9 un-cleaves on the next pass (cap no longer full): its
+        // stale ceiling is cleared.
+        let mut frontier2 = ReverseFrontier::default();
+        let mut roomy9 = AdmissionCap::new(2);
+        roomy9.admit(adm(1, 0.0, Some(150)));
+        frontier2.caps.push(ReaderCapOutcome {
+            key: [9u8; 32],
+            cap: roomy9,
+        });
+        let pub2 = publish_local_age_ceilings(&pool, &frontier2).await.unwrap();
+        assert_eq!(pub2.published, 0);
+        assert_eq!(pub2.cleared, 1);
+        assert_eq!(stored_local_ceiling(&pool, 9).await, None);
+    }
+
+    #[tokio::test]
+    async fn rebuild_publishes_ceiling_from_a_saturated_root() {
+        let pool = fresh_pool().await;
+        // Two attested inbound trusters of root R(9); A(1) older than B(2).
+        put_edge(
+            &pool,
+            &edge_at(1, 9, TrustStance::Trust, 100, None),
+            0x01,
+            0,
+        )
+        .await;
+        put_edge(
+            &pool,
+            &edge_at(2, 9, TrustStance::Trust, 100, None),
+            0x02,
+            0,
+        )
+        .await;
+        seed_genesis(&pool, 1, 100).await; // A older — wins the single slot
+        seed_genesis(&pool, 2, 200).await; // B younger — shed; the cleave point
+
+        // Cap of 1 saturates: A admitted, so the worst-admitted is A(100).
+        let outcome =
+            rebuild_reverse_frontier(&pool, &readers(&[9]), 1, FRONTIER_MAX_DEPTH, FRONTIER_GC_K)
+                .await
+                .unwrap();
+
+        assert_eq!(outcome.ceilings.published, 1);
+        assert_eq!(
+            stored_local_ceiling(&pool, 9).await,
+            Some(100),
+            "advertised cutoff is the worst-admitted genesis_at"
+        );
+    }
+
+    // -- §8.10 source-side shedding (E2) ----------------------------------
+
+    /// Seed the FK chain (`peers` → `peer_frontiers` → ceiling) so a peer
+    /// advertises `cutoff` for `root`.
+    async fn seed_peer_ceiling(pool: &SqlitePool, peer: u8, root: u8, cutoff: i64) {
+        seed_peer(pool, peer, "peer.example").await;
+        sqlx::query(
+            "INSERT INTO peer_frontiers ( \
+                 peer_pubkey, applied_version, epoch_start, \
+                 visible_family, visible_k, visible_m, visible_n_est, visible_fpr_target, visible_bytes, \
+                 expansion_family, expansion_k, expansion_m, expansion_n_est, expansion_fpr_target, expansion_bytes, \
+                 cursor) \
+             VALUES (?, 1, 0, \
+                 'prismoire-bloom-v1', 1, 64, 0, 0.01, ?, \
+                 'prismoire-bloom-v1', 1, 64, 0, 0.01, ?, \
+                 ?)",
+        )
+        .bind([peer; 32].as_slice())
+        .bind(vec![0u8; 8])
+        .bind(vec![0u8; 8])
+        .bind(vec![0u8; 0])
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO peer_frontier_age_ceilings (peer_pubkey, root_key, cutoff) \
+             VALUES (?, ?, ?)",
+        )
+        .bind([peer; 32].as_slice())
+        .bind([root; 32].as_slice())
+        .bind(cutoff)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn ceiling_admits_keeps_older_sheds_younger_and_passes_unknown() {
+        assert!(ceiling_admits(150, None), "unknown age flows (fail-open)");
+        assert!(ceiling_admits(150, Some(100)), "older than cutoff kept");
+        assert!(ceiling_admits(150, Some(150)), "exactly at cutoff kept");
+        assert!(!ceiling_admits(150, Some(200)), "younger than cutoff shed");
+    }
+
+    #[tokio::test]
+    async fn peer_ceiling_forwards_when_root_has_no_ceiling() {
+        let pool = fresh_pool().await;
+        // No ceiling rows at all — every edge forwards.
+        let pass = peer_ceiling_admits_source(&pool, &[7u8; 32], &[9u8; 32], &[1u8; 32])
+            .await
+            .unwrap();
+        assert!(pass, "absent root ⇒ admit all");
+    }
+
+    #[tokio::test]
+    async fn peer_ceiling_sheds_younger_keeps_older_and_passes_unattested() {
+        let pool = fresh_pool().await;
+        // Peer 7 advertises cutoff 150 for root 9.
+        seed_peer_ceiling(&pool, 7, 9, 150).await;
+        seed_genesis(&pool, 1, 100).await; // older source — kept
+        seed_genesis(&pool, 2, 200).await; // younger source — shed
+        // source 3 has no genesis attestation — flows (fail-open).
+
+        assert!(
+            peer_ceiling_admits_source(&pool, &[7u8; 32], &[9u8; 32], &[1u8; 32])
+                .await
+                .unwrap(),
+            "older-than-cutoff source forwarded"
+        );
+        assert!(
+            !peer_ceiling_admits_source(&pool, &[7u8; 32], &[9u8; 32], &[2u8; 32])
+                .await
+                .unwrap(),
+            "younger-than-cutoff source shed"
+        );
+        assert!(
+            peer_ceiling_admits_source(&pool, &[7u8; 32], &[9u8; 32], &[3u8; 32])
+                .await
+                .unwrap(),
+            "unattested source flows and loses at the receiver's cap"
         );
     }
 }

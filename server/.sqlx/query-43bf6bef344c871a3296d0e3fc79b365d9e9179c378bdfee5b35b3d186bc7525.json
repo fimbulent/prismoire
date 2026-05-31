@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM local_frontier_age_ceilings WHERE root_key = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "43bf6bef344c871a3296d0e3fc79b365d9e9179c378bdfee5b35b3d186bc7525"
+}
