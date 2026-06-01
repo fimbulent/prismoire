@@ -1209,3 +1209,9 @@ CREATE TABLE frontier_generation (
     updated_at TEXT NOT NULL
             DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
+CREATE TABLE attachment_fetch_failures (
+    content_hash    BLOB PRIMARY KEY NOT NULL
+                    REFERENCES attachment_blobs(content_hash) ON DELETE CASCADE,
+    kind            TEXT NOT NULL CHECK (kind IN ('mismatch', 'transient')),
+    last_attempt_at INTEGER NOT NULL
+);

@@ -49,6 +49,7 @@
 //! where the durable hard-fail gate lives.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::http::{Method, Request, StatusCode, header};
@@ -65,6 +66,21 @@ use crate::users::hex_lower;
 /// `prior_home_recovery::MAX_FALLBACK_PEERS`. Bounds the fan-out a
 /// single miss can trigger.
 const MAX_FETCH_FALLBACK_PEERS: usize = 16;
+
+/// How long a `'transient'` failure suppresses re-fetches on the
+/// synchronous serve path. A remote post whose bytes 404'd everywhere
+/// might gain a resident copy later (the origin comes back, a fallback
+/// peer consumes the author), so we retry — but only once the failure
+/// row is older than this, to keep a render storm from hammering an
+/// origin that is simply down. `'mismatch'` failures are terminal and
+/// ignore this entirely.
+const ATTACHMENT_RETRY_BACKOFF: Duration = Duration::from_secs(60);
+
+/// Wall-clock budget for the inline [`fetch_attachment`] call on the
+/// synchronous serve path. The viewer is blocked on this request, so a
+/// candidate that hangs must not hold the response open indefinitely —
+/// on timeout we record a transient failure and 404 to the placeholder.
+const ATTACHMENT_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Why a [`fetch_attachment`] call did not result in stored bytes.
 /// Phase C maps these onto `attachment_fetch_failures` rows; here they
@@ -172,6 +188,140 @@ pub async fn fetch_attachment(
         Err(FetchError::HashMismatch)
     } else {
         Err(FetchError::Unavailable)
+    }
+}
+
+/// §11.4 synchronous serve trigger: the bridge between the local serve
+/// path ([`crate::attachments::serve`]) and [`fetch_attachment`].
+///
+/// Called when `/api/attachments/{hash}` finds a visible binding but a
+/// `NULL` (fetch-pending) blob. Returns `true` iff the bytes are now
+/// resident — the caller re-reads the row and serves 200; `false` means
+/// 404 → placeholder. The durable `attachment_fetch_failures` row is
+/// what keeps this from re-fetching on every render:
+///
+/// - `'mismatch'` present → terminal (§11.4 integrity violation needing
+///   operator intervention). Never re-fetch; `false`.
+/// - `'transient'` present and younger than [`ATTACHMENT_RETRY_BACKOFF`]
+///   → still backing off; `false` without a transport attempt.
+/// - otherwise → attempt [`fetch_attachment`] under
+///   [`ATTACHMENT_FETCH_TIMEOUT`] and map the result:
+///   - stored → delete any failure row, `true`.
+///   - [`FetchError::HashMismatch`] → upsert `'mismatch'`, `false`.
+///   - [`FetchError::Unavailable`] / [`FetchError::Db`] / timeout →
+///     upsert `'transient'` (refreshing `last_attempt_at`), `false`.
+///   - [`FetchError::NoOrigin`] → `false`, no row (nothing to fetch from
+///     and nothing to back off; a binding may arrive later).
+///
+/// Failures to read/write the failure table are logged and swallowed:
+/// the serve outcome follows the fetch, never a bookkeeping error.
+pub async fn try_fetch_for_serve(state: &Arc<AppState>, content_hash: [u8; 32]) -> bool {
+    let hash_vec: Vec<u8> = content_hash.to_vec();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+
+    match sqlx::query!(
+        "SELECT kind, last_attempt_at FROM attachment_fetch_failures WHERE content_hash = ?",
+        hash_vec,
+    )
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(Some(row)) => {
+            if row.kind == "mismatch" {
+                // Terminal: bytes are corrupt at the source. Don't fetch.
+                return false;
+            }
+            // 'transient': honour the backoff window.
+            let age_ms = now_ms.saturating_sub(row.last_attempt_at);
+            if age_ms < ATTACHMENT_RETRY_BACKOFF.as_millis() as i64 {
+                return false;
+            }
+        }
+        Ok(None) => {}
+        Err(e) => {
+            // Can't read the gate — fall through and attempt the fetch
+            // rather than wedging a servable attachment behind a DB blip.
+            tracing::debug!(
+                hash = %hex_lower(&content_hash),
+                error = %e,
+                "attachment serve trigger: failed to read failure row; attempting fetch",
+            );
+        }
+    }
+
+    match tokio::time::timeout(
+        ATTACHMENT_FETCH_TIMEOUT,
+        fetch_attachment(state, content_hash),
+    )
+    .await
+    {
+        Ok(Ok(())) => {
+            clear_failure(state, &hash_vec).await;
+            true
+        }
+        Ok(Err(FetchError::NoOrigin)) => false,
+        Ok(Err(FetchError::HashMismatch)) => {
+            record_failure(state, &hash_vec, "mismatch", now_ms).await;
+            false
+        }
+        Ok(Err(FetchError::Unavailable)) | Ok(Err(FetchError::Db(_))) => {
+            record_failure(state, &hash_vec, "transient", now_ms).await;
+            false
+        }
+        Err(_elapsed) => {
+            tracing::debug!(
+                hash = %hex_lower(&content_hash),
+                "attachment serve trigger: fetch timed out; recording transient failure",
+            );
+            record_failure(state, &hash_vec, "transient", now_ms).await;
+            false
+        }
+    }
+}
+
+/// Upsert a failure row for `hash_vec`, refreshing `last_attempt_at`.
+/// A `'transient'` row may be promoted to `'mismatch'`, and a
+/// `'mismatch'` row stays terminal even if a later attempt is transient
+/// (the conflict update only ever moves `kind` to the value passed and
+/// refreshes the timestamp). Errors are logged and swallowed.
+async fn record_failure(state: &Arc<AppState>, hash_vec: &[u8], kind: &str, now_ms: i64) {
+    if let Err(e) = sqlx::query!(
+        "INSERT INTO attachment_fetch_failures (content_hash, kind, last_attempt_at) \
+         VALUES (?, ?, ?) \
+         ON CONFLICT(content_hash) DO UPDATE SET kind = excluded.kind, \
+                                                 last_attempt_at = excluded.last_attempt_at",
+        hash_vec,
+        kind,
+        now_ms,
+    )
+    .execute(&state.db)
+    .await
+    {
+        tracing::warn!(
+            hash = %hex_lower(hash_vec),
+            kind,
+            error = %e,
+            "attachment serve trigger: failed to persist failure row",
+        );
+    }
+}
+
+/// Drop the failure row for `hash_vec` after a successful fetch so a
+/// later cache eviction starts from a clean slate. Errors are logged
+/// and swallowed — the bytes are already resident.
+async fn clear_failure(state: &Arc<AppState>, hash_vec: &[u8]) {
+    if let Err(e) = sqlx::query!(
+        "DELETE FROM attachment_fetch_failures WHERE content_hash = ?",
+        hash_vec,
+    )
+    .execute(&state.db)
+    .await
+    {
+        tracing::warn!(
+            hash = %hex_lower(hash_vec),
+            error = %e,
+            "attachment serve trigger: failed to clear failure row after fetch",
+        );
     }
 }
 

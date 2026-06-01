@@ -17,7 +17,7 @@ use axum::response::{IntoResponse, Response};
 
 use super::bind::parse_hash_hex;
 use crate::error::{AppError, ErrorCode};
-use crate::federation::attachment_cache;
+use crate::federation::{attachment_cache, attachment_fetch};
 use crate::session::AuthUser;
 use crate::state::AppState;
 use crate::trust::{MINIMUM_TRUST_THRESHOLD, load_distrust_set, lookup_score};
@@ -119,8 +119,32 @@ pub async fn serve_attachment(
     let Some(blob_row) = blob_row else {
         return Err(AppError::code(ErrorCode::AttachmentNotFound));
     };
-    let Some(blob_bytes) = blob_row.blob else {
-        return Err(AppError::code(ErrorCode::AttachmentNotFound));
+    let content_type = blob_row.content_type;
+
+    // §11.4 synchronous fetch trigger: a visible binding with a NULL
+    // blob is the fetch-pending state for a federated attachment. Try
+    // to pull the bytes inline (subject to the failure-table backoff),
+    // and re-read the row on success. A locally-authored attachment is
+    // never NULL here, so this only fires for remote posts. If the
+    // trigger can't obtain the bytes we fall through to the same 404 as
+    // a cache-evicted / never-existed blob — the placeholder UX.
+    let blob_bytes = match blob_row.blob {
+        Some(bytes) => bytes,
+        None => {
+            if !attachment_fetch::try_fetch_for_serve(&state, hash).await {
+                return Err(AppError::code(ErrorCode::AttachmentNotFound));
+            }
+            let refetched = sqlx::query!(
+                "SELECT blob FROM attachment_blobs WHERE content_hash = ?",
+                hash_bytes,
+            )
+            .fetch_optional(&state.db)
+            .await?;
+            match refetched.and_then(|r| r.blob) {
+                Some(bytes) => bytes,
+                None => return Err(AppError::code(ErrorCode::AttachmentNotFound)),
+            }
+        }
     };
 
     // §11.5 sloppy-LRU touch: this is the local-serve path that hands
@@ -144,12 +168,12 @@ pub async fn serve_attachment(
     // fallback `filename=` and an RFC 5987 `filename*=UTF-8''…` form so
     // intermediaries that don't support the extended parameter still
     // get a usable name.
-    let disposition = build_content_disposition(&blob_row.content_type, &serving.filename);
+    let disposition = build_content_disposition(&content_type, &serving.filename);
 
     let body = Body::from(blob_bytes);
     let response = Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, &blob_row.content_type)
+        .header(header::CONTENT_TYPE, &content_type)
         // §4 step 5: nosniff is mandatory on every serve so a browser
         // cannot reinterpret a text/plain attachment as HTML.
         .header("X-Content-Type-Options", "nosniff")

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO attachment_fetch_failures (content_hash, kind, last_attempt_at) VALUES (?, ?, ?) ON CONFLICT(content_hash) DO UPDATE SET kind = excluded.kind, last_attempt_at = excluded.last_attempt_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "0e6ded4d8a72d1b94e54e7ff970c66f25544e59509fbe42e6efbf536271b6892"
+}

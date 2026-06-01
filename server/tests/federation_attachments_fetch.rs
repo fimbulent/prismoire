@@ -30,7 +30,9 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use prismoire_server::AppState;
-use prismoire_server::federation::attachment_fetch::{FetchError, fetch_attachment};
+use prismoire_server::federation::attachment_fetch::{
+    FetchError, fetch_attachment, try_fetch_for_serve,
+};
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use uuid::Uuid;
@@ -222,6 +224,20 @@ async fn stored_blob(db: &SqlitePool, content_hash: &[u8; 32]) -> Option<Vec<u8>
     .blob
 }
 
+/// Read back the durable failure row for `content_hash` as
+/// `(kind, last_attempt_at)`, or `None` if no row exists.
+async fn failure_row(db: &SqlitePool, content_hash: &[u8; 32]) -> Option<(String, i64)> {
+    let hash_vec: Vec<u8> = content_hash.to_vec();
+    sqlx::query!(
+        "SELECT kind, last_attempt_at FROM attachment_fetch_failures WHERE content_hash = ?",
+        hash_vec,
+    )
+    .fetch_optional(db)
+    .await
+    .expect("read failure row")
+    .map(|r| (r.kind, r.last_attempt_at))
+}
+
 /// Establish mutual active peering so B's signed GET passes A's
 /// `verify_known_peer`, and return `(receiver_state, origin_pubkey)`.
 async fn peered_pair(harness: &MultiInstanceHarness) -> (Arc<AppState>, [u8; 32]) {
@@ -319,4 +335,146 @@ async fn no_remote_binding_resolves_no_origin() {
         .await
         .expect_err("no origin must fail");
     assert!(matches!(err, FetchError::NoOrigin), "got {err:?}");
+}
+
+// ---------------------------------------------------------------------
+// §11.4 synchronous serve trigger (`try_fetch_for_serve`) — Phase C.
+// These exercise the failure-table state machine that the local serve
+// path (`/api/attachments/{hash}`) drives on a NULL blob.
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn serve_trigger_fetches_and_clears_failure_state() {
+    let harness = MultiInstanceHarness::new(2).await;
+    let (b_state, a_pub) = peered_pair(&harness).await;
+    let a = harness.instance("a");
+
+    let blob = b"servable federated bytes \x09\x08\x07".to_vec();
+    let hash = sha256(&blob);
+
+    seed_origin(&a.state.db, &hash, &blob, "image/png").await;
+    seed_pending_receiver(&b_state.db, &hash, "image/png", blob.len() as i64, &a_pub).await;
+
+    assert!(
+        try_fetch_for_serve(&b_state, hash).await,
+        "trigger must report the bytes are now resident",
+    );
+    assert_eq!(
+        stored_blob(&b_state.db, &hash).await.as_deref(),
+        Some(blob.as_slice()),
+        "trigger must leave the verified bytes in the receiver blob",
+    );
+    assert!(
+        failure_row(&b_state.db, &hash).await.is_none(),
+        "a successful fetch must leave no failure row",
+    );
+}
+
+#[tokio::test]
+async fn serve_trigger_records_mismatch_and_is_terminal() {
+    let harness = MultiInstanceHarness::new(2).await;
+    let (b_state, a_pub) = peered_pair(&harness).await;
+    let a = harness.instance("a");
+
+    // A serves corrupt bytes under the requested key (see the Phase B
+    // mismatch test for the construction).
+    let declared = b"what the reference claims (c)".to_vec();
+    let hash = sha256(&declared);
+    let corrupt = b"corrupt origin bytes (c)".to_vec();
+    assert_ne!(sha256(&corrupt), hash);
+
+    seed_origin(&a.state.db, &hash, &corrupt, "image/png").await;
+    seed_pending_receiver(
+        &b_state.db,
+        &hash,
+        "image/png",
+        declared.len() as i64,
+        &a_pub,
+    )
+    .await;
+
+    assert!(
+        !try_fetch_for_serve(&b_state, hash).await,
+        "a mismatch must not produce servable bytes",
+    );
+    let (kind, _) = failure_row(&b_state.db, &hash)
+        .await
+        .expect("mismatch must persist a failure row");
+    assert_eq!(kind, "mismatch", "integrity failure must be terminal");
+    assert_eq!(
+        b_state
+            .metrics
+            .attachment_hash_mismatch
+            .load(Ordering::Relaxed),
+        1,
+        "the first attempt bumps the §20 counter once",
+    );
+
+    // A second trigger must short-circuit on the terminal row WITHOUT a
+    // transport attempt — proven by the mismatch counter staying at 1
+    // (a re-fetch would re-bump it).
+    assert!(!try_fetch_for_serve(&b_state, hash).await);
+    assert_eq!(
+        b_state
+            .metrics
+            .attachment_hash_mismatch
+            .load(Ordering::Relaxed),
+        1,
+        "a terminal mismatch row must suppress further fetches",
+    );
+}
+
+#[tokio::test]
+async fn serve_trigger_records_transient_and_backs_off() {
+    let harness = MultiInstanceHarness::new(2).await;
+    let (b_state, a_pub) = peered_pair(&harness).await;
+
+    // The receiver binds the hash (origin resolves to A) but A was never
+    // seeded with the blob, so A's content-addressed serve 404s → every
+    // candidate is Unavailable → §11.4 transient.
+    let blob = b"bytes the origin does not hold".to_vec();
+    let hash = sha256(&blob);
+    seed_pending_receiver(&b_state.db, &hash, "image/png", blob.len() as i64, &a_pub).await;
+
+    assert!(
+        !try_fetch_for_serve(&b_state, hash).await,
+        "an unavailable origin must not produce bytes",
+    );
+    let (kind, first_attempt) = failure_row(&b_state.db, &hash)
+        .await
+        .expect("a transient miss must persist a failure row");
+    assert_eq!(kind, "transient");
+    assert!(
+        stored_blob(&b_state.db, &hash).await.is_none(),
+        "transient miss leaves the row fetch-pending",
+    );
+
+    // An immediate re-trigger is inside ATTACHMENT_RETRY_BACKOFF, so it
+    // must 404 WITHOUT re-attempting — proven by `last_attempt_at`
+    // staying byte-for-byte identical (a re-attempt would refresh it).
+    assert!(!try_fetch_for_serve(&b_state, hash).await);
+    let (_, second_attempt) = failure_row(&b_state.db, &hash)
+        .await
+        .expect("failure row must persist across the backoff");
+    assert_eq!(
+        first_attempt, second_attempt,
+        "within-backoff re-trigger must not refresh last_attempt_at",
+    );
+}
+
+#[tokio::test]
+async fn serve_trigger_no_origin_returns_false_without_row() {
+    let harness = MultiInstanceHarness::new(2).await;
+    let (b_state, _a_pub) = peered_pair(&harness).await;
+
+    // No binding → no origin to fetch from. The trigger reports false
+    // but writes no failure row: there is nothing to back off from, and
+    // a binding may arrive later.
+    let unknown = sha256(b"never bound - serve trigger");
+
+    assert!(!try_fetch_for_serve(&b_state, unknown).await);
+    assert!(
+        failure_row(&b_state.db, &unknown).await.is_none(),
+        "a no-origin miss must not write a failure row",
+    );
 }

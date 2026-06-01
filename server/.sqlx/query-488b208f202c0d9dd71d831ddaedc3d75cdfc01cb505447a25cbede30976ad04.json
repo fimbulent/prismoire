@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT kind, last_attempt_at FROM attachment_fetch_failures WHERE content_hash = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "kind",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_attempt_at",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "488b208f202c0d9dd71d831ddaedc3d75cdfc01cb505447a25cbede30976ad04"
+}
