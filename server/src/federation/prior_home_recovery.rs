@@ -644,6 +644,23 @@ pub(crate) async fn list_active_peers(
         .collect())
 }
 
+/// Best-effort `instance_domain` lookup for a peer pubkey, used only to
+/// label log lines when the delivering peer isn't in the active-peer
+/// set returned by [`list_active_peers`]. `None` if no row matches.
+async fn peer_domain(state: &Arc<AppState>, pubkey: &[u8; 32]) -> Option<String> {
+    let key_slice: &[u8] = pubkey.as_slice();
+    sqlx::query!(
+        "SELECT instance_domain AS \"instance_domain!: String\" \
+         FROM peers WHERE instance_pubkey = ?",
+        key_slice,
+    )
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .map(|r| r.instance_domain)
+}
+
 /// §7.6 / §10.5 proactive by-author pull-backfill for a single author
 /// `author_key` that newly entered our local content frontier.
 ///
@@ -660,7 +677,22 @@ pub(crate) async fn list_active_peers(
 /// [`recover_via_peer_network`]): this is steady-state frontier
 /// expansion, not account-move recovery. The author's edges arrive via
 /// the normal §7.5 push / §9.3 ancestor-miss paths.
-pub(crate) async fn proactive_author_backfill(state: &Arc<AppState>, author_key: [u8; 32]) {
+///
+/// `prefer_peer`, when set, is the peer that delivered the edge whose
+/// `EndpointMissing` projection triggered this run (§11.9.5). For a
+/// trust-coded `S → local` edge pushed straight from `S`'s home, that
+/// peer *is* the author's home, so it is queried first and exempted
+/// from the [`MAX_FALLBACK_PEERS`] cap — best case the source's stub
+/// hydrates in one round-trip; worst case (the deliverer was a relay
+/// that doesn't host the author) we fall through to the recency-ranked
+/// sweep. Without this hint the cap could clip the one peer that hosts
+/// the author out of a large active-peer set, and even within the cap
+/// we would query peers one-by-one until we stumbled onto the home.
+pub(crate) async fn proactive_author_backfill(
+    state: &Arc<AppState>,
+    author_key: [u8; 32],
+    prefer_peer: Option<[u8; 32]>,
+) {
     let mut candidates = match list_active_peers(state).await {
         Ok(v) => v,
         Err(e) => {
@@ -672,6 +704,27 @@ pub(crate) async fn proactive_author_backfill(state: &Arc<AppState>, author_key:
             return;
         }
     };
+
+    // Promote the delivering peer to the front *before* the cap, so a
+    // large active-peer set can't truncate away the one peer most likely
+    // to host the author. If it isn't already in the active set (e.g.
+    // not `status = 'active'`), prepend it with a best-effort domain for
+    // logging — `paginate_peer_backfill` keys off the pubkey alone.
+    if let Some(prefer) = prefer_peer {
+        match candidates.iter().position(|(k, _)| *k == prefer) {
+            Some(pos) => {
+                let hit = candidates.remove(pos);
+                candidates.insert(0, hit);
+            }
+            None => {
+                let domain = peer_domain(state, &prefer)
+                    .await
+                    .unwrap_or_else(|| hex_lower(&prefer));
+                candidates.insert(0, (prefer, domain));
+            }
+        }
+    }
+
     if candidates.is_empty() {
         return;
     }
@@ -690,7 +743,20 @@ pub(crate) async fn proactive_author_backfill(state: &Arc<AppState>, author_key:
         })
         .await;
         match res {
-            Ok(stats) if stats.complete => {
+            // Success requires the peer to have actually served the
+            // author. `by-author` returns `complete: true` with ZERO
+            // objects for a key the peer has never seen (the remote-author
+            // carve-out in `backfill.rs`), so `complete` alone is not
+            // enough — a peer that doesn't host this author would
+            // otherwise satisfy the loop and we'd never ask the peer that
+            // does, leaving the source's stub unhydrated and its edge
+            // unprojected. §10.5.6 is explicit: `200`+empty+`complete:true`
+            // means "peer has nothing matching → try next candidate peer",
+            // NOT done. A peer that genuinely hosts the author serves at
+            // least its genesis profile-rev (§11.9.5), so `objects_seen > 0`
+            // is the real "found it here" signal. Do not relax this back to
+            // `complete` alone.
+            Ok(stats) if stats.complete && stats.objects_seen > 0 => {
                 tracing::debug!(
                     author = %key_hex,
                     peer = %peer_domain,
@@ -700,8 +766,10 @@ pub(crate) async fn proactive_author_backfill(state: &Arc<AppState>, author_key:
                 return;
             }
             Ok(_) => {
-                // Incomplete from this peer (hit page cap or a
-                // !complete page) — move on to the next candidate.
+                // Either incomplete (hit page cap / a !complete page) or
+                // complete-but-empty (this peer doesn't host the author).
+                // Both mean "this peer can't finish the job" — move on to
+                // the next candidate.
             }
             Err(e) => {
                 tracing::debug!(

@@ -436,27 +436,29 @@ pub(crate) async fn apply_one_edge(
         // the source's content via §10.5 by-author so its stub hydrates
         // and `sweep_pending_projections` projects the stored edge. Same
         // outbound-backfill budget as the §9.3 path above.
-        Some(EdgeRecovery::UnknownSource { source }) => {
-            match crate::federation::edge_backfill::try_acquire_outbound_permit() {
-                Some(permit) => {
-                    let state_for_backfill = state.clone();
-                    tokio::spawn(async move {
-                        let _permit = permit;
-                        crate::federation::prior_home_recovery::proactive_author_backfill(
-                            &state_for_backfill,
-                            source,
-                        )
-                        .await;
-                    });
-                }
-                None => {
-                    tracing::debug!(
-                        source = %crate::users::hex_lower(&source),
-                        "outbound backfill concurrency cap reached; skipping unknown-source hydration (will retrigger on next push or §9.6 sweep)",
-                    );
-                }
+        Some(EdgeRecovery::UnknownSource {
+            source,
+            arrived_from,
+        }) => match crate::federation::edge_backfill::try_acquire_outbound_permit() {
+            Some(permit) => {
+                let state_for_backfill = state.clone();
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    crate::federation::prior_home_recovery::proactive_author_backfill(
+                        &state_for_backfill,
+                        source,
+                        Some(arrived_from),
+                    )
+                    .await;
+                });
             }
-        }
+            None => {
+                tracing::debug!(
+                    source = %crate::users::hex_lower(&source),
+                    "outbound backfill concurrency cap reached; skipping unknown-source hydration (will retrigger on next push or §9.6 sweep)",
+                );
+            }
+        },
         None => {}
     }
     Ok(result)
@@ -479,7 +481,13 @@ pub(crate) enum EdgeRecovery {
     /// §11.9.5 reverse bootstrap: an `EndpointMissing` edge toward a
     /// local user whose `source` (the signer) we have never seen. Pull
     /// the source's content via §10.5 by-author so its stub hydrates.
-    UnknownSource { source: [u8; 32] },
+    /// `arrived_from` is the peer that delivered this edge — in the
+    /// common direct-push case it *is* the source's home, so the
+    /// backfill queries it first instead of guessing across all peers.
+    UnknownSource {
+        source: [u8; 32],
+        arrived_from: [u8; 32],
+    },
 }
 
 /// Core per-edge state machine. Returns `(EdgeResult,
@@ -701,6 +709,7 @@ pub(crate) async fn apply_one_edge_inner(
             if target_is_local && !source_known {
                 recovery = Some(EdgeRecovery::UnknownSource {
                     source: trust_edge.from_key,
+                    arrived_from,
                 });
             }
             // No frontier_edges insert here: an `EndpointMissing` edge is

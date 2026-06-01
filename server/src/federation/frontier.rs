@@ -2256,7 +2256,7 @@ pub async fn frontier_fanout_loop(state: Arc<AppState>, frontier_dirty: Arc<toki
             let state = Arc::clone(&state);
             tokio::spawn(async move {
                 crate::federation::prior_home_recovery::proactive_author_backfill(
-                    &state, author_key,
+                    &state, author_key, None,
                 )
                 .await;
             });

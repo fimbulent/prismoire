@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT instance_domain AS \"instance_domain!: String\" FROM peers WHERE instance_pubkey = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "instance_domain!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4bb60e400a6b7df41e961d85f6024c7f468ef6c74f8b04a6201cddf4c87e3dd4"
+}

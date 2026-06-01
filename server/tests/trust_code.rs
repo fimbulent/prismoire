@@ -1349,3 +1349,134 @@ async fn reciprocal_edge_stranded_when_peer_frontier_absent_at_creation() {
          never receives the edge and sees none of sam1's content",
     );
 }
+
+/// Repro for the "first remote source goes missing from `trusted_by`"
+/// report: with TWO remote sources each trusting the same local user —
+/// `sam2 -> sam1` (sam2 homed on B) and `sam3 -> sam1` (sam3 homed on C) —
+/// both edges arrive at A as §11.9.5 `EndpointMissing` (A has seen neither
+/// source). Each triggers `proactive_author_backfill`, which walks A's
+/// active peers to pull the source's genesis profile so the stub hydrates
+/// and `sweep_pending_projections` can project the edge.
+///
+/// The bug: `proactive_author_backfill` stops at the first peer that
+/// answers `complete: true`, but `GET /backfill/by-author` returns
+/// `complete: true` with ZERO objects for an author the peer has never
+/// seen (`backfill.rs` remote-author carve-out). A's peer set is the same
+/// fixed order for both backfills, and the first-tried peer hosts only one
+/// of the two sources — so the other source's real home is never asked,
+/// its stub never hydrates, and its edge stays unprojected. Exactly one of
+/// {sam2, sam3} is silently dropped from sam1's `trusted_by`, matching the
+/// live report.
+///
+/// One `/federation/v1/edges` call per source is hand-delivered (the
+/// harness spawns no frontier loops); everything else is the public `/api`
+/// surface plus the autonomous recovery under test.
+#[tokio::test]
+async fn two_remote_sources_both_surface_in_trusted_by() {
+    let harness = MultiInstanceHarness::new(3).await;
+    // Peer a<->b FIRST, then a<->c — so A's most-recently-handshaken peer
+    // (tried first by `proactive_author_backfill`) is C, the home of only
+    // one of the two sources.
+    establish_active_peering(&harness, "a", "b").await;
+    establish_active_peering(&harness, "a", "c").await;
+    let a = harness.instance("a");
+    let b = harness.instance("b");
+    let c = harness.instance("c");
+
+    // sam1: edge target, born on A (the receiver under test).
+    // sam2: source, born on B.   sam3: source, born on C.
+    let sam1 = setup_admin(&a.router, "sam1").await;
+    let sam2 = setup_admin(&b.router, "sam2").await;
+    let sam3 = setup_admin(&c.router, "sam3").await;
+
+    // sam1 mints one code (its identity card); sam2 and sam3 each redeem it
+    // on their home instance, signing `sam2 -> sam1` on B and
+    // `sam3 -> sam1` on C.
+    let mint = send(
+        &a.router,
+        get_request("/api/me/trust-code", Some(&sam1.cookie)),
+    )
+    .await;
+    assert_eq!(mint.status(), StatusCode::OK);
+    let code = body_json(mint).await["code"]
+        .as_str()
+        .expect("code field")
+        .to_string();
+
+    for (inst, who) in [(b, &sam2), (c, &sam3)] {
+        let redeem = send(
+            &inst.router,
+            json_request(
+                Method::POST,
+                "/api/users/by-trust-code",
+                Some(&who.cookie),
+                &json!({ "code": code }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            redeem.status(),
+            StatusCode::OK,
+            "{} redeems sam1's code",
+            who.display_name,
+        );
+    }
+
+    // Hand-deliver each edge to A, mirroring the §7.5 forward the harness
+    // can't run. Each source instance holds exactly its own edge.
+    for from in ["b", "c"] {
+        let db = &harness.instance(from).state.db;
+        let (payload, signature): (Vec<u8>, Vec<u8>) = sqlx::query_as(
+            "SELECT payload, signature FROM signed_objects \
+             WHERE inner_class = 'trust-edge' AND payload IS NOT NULL LIMIT 1",
+        )
+        .fetch_one(db)
+        .await
+        .expect("source -> sam1 edge bytes");
+        let body = encode_edges_body(&[encode_wire(&payload, &signature)]);
+        let (status, resp_body) = send_envelope_signed(
+            &harness,
+            from,
+            "a",
+            Method::POST,
+            "/federation/v1/edges",
+            &body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            parse_result_statuses(&resp_body),
+            vec!["applied".to_string()],
+            "§9.1 promises `applied` even for an unknown-source edge",
+        );
+    }
+
+    // Recovery is async (A backfills each source's genesis profile, then
+    // sweeps the pending edge into the projection). Poll the public read
+    // endpoint until sam1's `trusted_by` lists BOTH sources; refresh the
+    // graph cache each tick since `rebuild_loop` isn't spawned in tests.
+    let trusted_by_url = format!(
+        "/api/users/{}/trust/edges?direction=trusted_by",
+        sam1.public_key_hex
+    );
+    let both_surfaced = poll_until(5_000, || async {
+        refresh_trust_graph(&a.state).await;
+        let resp = send(&a.router, get_request(&trusted_by_url, Some(&sam1.cookie))).await;
+        if resp.status() != StatusCode::OK {
+            return false;
+        }
+        let users = body_json(resp).await;
+        let Some(arr) = users["users"].as_array() else {
+            return false;
+        };
+        let has = |pk: &str| arr.iter().any(|u| u["public_key_hex"] == pk);
+        has(&sam2.public_key_hex) && has(&sam3.public_key_hex)
+    })
+    .await;
+    assert!(
+        both_surfaced,
+        "BUG: only one of sam2/sam3 surfaces in sam1's trusted_by — \
+         proactive_author_backfill stopped at the first peer's empty \
+         `complete:true` and never asked the other source's home",
+    );
+}
