@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT blob, refcount AS \"refcount!: i64\" FROM attachment_blobs WHERE content_hash = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "blob",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "refcount!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "3c7319a9aa998f9546b10a1f3a17e7d07857bcb45ea2ed182b03543ef39fc23d"
+}

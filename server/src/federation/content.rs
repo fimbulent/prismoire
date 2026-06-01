@@ -1410,6 +1410,18 @@ async fn project_remote_post_revision(
     .execute(&mut **tx)
     .await?;
 
+    // §11: project the signed attachment references into local
+    // `post_attachments` bindings (and fetch-pending `attachment_blobs`
+    // rows). Must follow the `post_revisions` INSERT above — the
+    // bindings FK to `post_revisions(post_id, revision)`.
+    crate::federation::attachments_projection::project_post_attachments(
+        tx,
+        &post_id_text,
+        revision_db,
+        &prev.attachments,
+    )
+    .await?;
+
     Ok(ProjectionOutcome::Projected)
 }
 

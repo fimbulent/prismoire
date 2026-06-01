@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO attachment_blobs (content_hash, blob, content_type, size, uploader) VALUES (?, NULL, ?, ?, NULL) ON CONFLICT(content_hash) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "5e55cf5d105339842521181663dc0755fecf68d0ec9dcc868ae0ad5686c243f0"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO posts (id, author, thread, revision_count, home_instance) VALUES ('post-1', 'user_a', 'thread-1', 1, X'ABAB')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "ab08906dca9da3440e07892571c77653840215ec0775b452a9d0cc9a9adee3ee"
+}

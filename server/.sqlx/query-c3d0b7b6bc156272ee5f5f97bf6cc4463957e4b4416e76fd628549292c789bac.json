@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT position AS \"position!: i64\", content_hash AS \"content_hash!: Vec<u8>\", filename AS \"filename!: String\" FROM post_attachments WHERE post_id = 'post-1' AND revision = 0 ORDER BY position",
+  "describe": {
+    "columns": [
+      {
+        "name": "position!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "content_hash!: Vec<u8>",
+        "ordinal": 1,
+        "type_info": "Blob"
+      },
+      {
+        "name": "filename!: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "c3d0b7b6bc156272ee5f5f97bf6cc4463957e4b4416e76fd628549292c789bac"
+}

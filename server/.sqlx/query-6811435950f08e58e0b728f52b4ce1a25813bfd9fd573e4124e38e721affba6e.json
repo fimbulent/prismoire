@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT blob, content_type AS \"content_type!: String\", size AS \"size!: i64\", refcount AS \"refcount!: i64\" FROM attachment_blobs WHERE content_hash = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "blob",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "content_type!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "size!: i64",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "refcount!: i64",
+        "ordinal": 3,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "6811435950f08e58e0b728f52b4ce1a25813bfd9fd573e4124e38e721affba6e"
+}
