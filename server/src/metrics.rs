@@ -110,6 +110,15 @@ pub struct Metrics {
     /// content the sweep can't reach (e.g. a row stuck under a lock);
     /// any persistent non-zero value is an operator escalation signal.
     pub attachment_cache_overshoot_bytes: AtomicU64,
+    /// §11.3/§20 **hash-mismatch counter**. Incremented once per
+    /// fetched attachment response whose SHA-256 did not equal the
+    /// requested content hash, so the bytes were discarded rather than
+    /// stored. Cumulative since process start. A persistent non-zero
+    /// value means a candidate (origin or fallback peer) is serving
+    /// corrupt or wrong bytes for a content-addressed hash — an
+    /// integrity-violation escalation signal, distinct from a benign
+    /// 404/timeout.
+    pub attachment_hash_mismatch: AtomicU64,
 }
 
 /// Key identifying a route for metrics aggregation. We key on the
@@ -292,6 +301,7 @@ impl Metrics {
             attachment_cache_bytes_used: AtomicU64::new(0),
             attachment_cache_evictions_total: AtomicU64::new(0),
             attachment_cache_overshoot_bytes: AtomicU64::new(0),
+            attachment_hash_mismatch: AtomicU64::new(0),
         }
     }
 
@@ -316,6 +326,14 @@ impl Metrics {
     pub fn add_attachment_cache_evictions(&self, n: u64) {
         self.attachment_cache_evictions_total
             .fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Increment the §11.3/§20 attachment hash-mismatch counter — one
+    /// fetched response whose bytes did not hash to the requested
+    /// content hash and were discarded.
+    pub fn record_attachment_hash_mismatch(&self) {
+        self.attachment_hash_mismatch
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Increment the BFS forward-cache hit counter.

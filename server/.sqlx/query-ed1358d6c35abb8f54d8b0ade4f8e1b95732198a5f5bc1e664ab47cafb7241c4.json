@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT p.home_instance AS \"home_instance!: Vec<u8>\"\n             FROM post_attachments pa\n             JOIN posts p ON p.id = pa.post_id\n            WHERE pa.content_hash = ?\n              AND p.home_instance IS NOT NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "home_instance!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "ed1358d6c35abb8f54d8b0ade4f8e1b95732198a5f5bc1e664ab47cafb7241c4"
+}
