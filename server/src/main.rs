@@ -269,6 +269,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         reports_rate_limiter: Arc::new(
             prismoire_server::federation::push_rate_limit::PushRateLimiter::for_reports(),
         ),
+        attachment_serve_rate_limiter: Arc::new(
+            prismoire_server::federation::backfill_rate_limit::BackfillRateLimiter::new(
+                prismoire_server::federation::attachments::ATTACHMENT_RPM_PER_PEER,
+                prismoire_server::federation::attachments::ATTACHMENT_BYTES_PER_MIN_PER_PEER,
+            ),
+        ),
+        attachment_fetch_gate: Arc::new(
+            prismoire_server::federation::attachment_fetch::AttachmentFetchGate::default(),
+        ),
     });
 
     // Spawn the debounced trust graph rebuild background task.
@@ -359,6 +368,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         shared_state.reports_rate_limiter.clone(),
         "reports",
     ));
+    tokio::spawn(
+        prismoire_server::federation::backfill_rate_limit::cleanup_loop(
+            shared_state.attachment_serve_rate_limiter.clone(),
+            "attachment_serve",
+        ),
+    );
 
     // Spawn the attachment staging-expiry + orphan-blob GC + §11.5
     // receiver-local cache-eviction sweep. Cadence is the server-static

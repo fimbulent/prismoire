@@ -332,6 +332,19 @@ pub async fn test_app_with_pool_transport_domain_and_outbound_config(
         reports_rate_limiter: Arc::new(
             prismoire_server::federation::push_rate_limit::PushRateLimiter::for_reports(),
         ),
+        // §11.6 serve limiter defaults to the production spec budgets;
+        // harness tests fetch a handful of attachments per peer, well
+        // under 600 RPM / 50 MiB, so they aren't silently throttled. The
+        // dedicated Phase-D test tightens the cap to exercise the 429.
+        attachment_serve_rate_limiter: Arc::new(
+            prismoire_server::federation::backfill_rate_limit::BackfillRateLimiter::new(
+                prismoire_server::federation::attachments::ATTACHMENT_RPM_PER_PEER,
+                prismoire_server::federation::attachments::ATTACHMENT_BYTES_PER_MIN_PER_PEER,
+            ),
+        ),
+        attachment_fetch_gate: Arc::new(
+            prismoire_server::federation::attachment_fetch::AttachmentFetchGate::default(),
+        ),
     });
 
     let layers = rate_limit::build_layers(&test_rate_limit_config(), false);

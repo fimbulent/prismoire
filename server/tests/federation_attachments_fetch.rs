@@ -29,15 +29,24 @@ mod common;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use axum::http::{Method, StatusCode};
 use prismoire_server::AppState;
 use prismoire_server::federation::attachment_fetch::{
     FetchError, fetch_attachment, try_fetch_for_serve,
+};
+use prismoire_server::federation::attachments::{
+    ATTACHMENT_BYTES_PER_MIN_PER_PEER, ATTACHMENT_RPM_PER_PEER,
 };
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
-use common::federation::{MultiInstanceHarness, establish_active_peering};
+use common::federation::{MultiInstanceHarness, establish_active_peering, send_envelope_signed};
+
+/// Lowercase hex of a byte slice — the §3 URL form of a content hash.
+fn hex_lower(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
 
 fn sha256(bytes: &[u8]) -> [u8; 32] {
     let mut h = Sha256::new();
@@ -476,5 +485,70 @@ async fn serve_trigger_no_origin_returns_false_without_row() {
     assert!(
         failure_row(&b_state.db, &unknown).await.is_none(),
         "a no-origin miss must not write a failure row",
+    );
+}
+
+// ---------------------------------------------------------------------
+// §11.6 serve-side rate limiting on `GET /federation/v1/attachments/{h}`
+// — Phase D. The limiter keys on the envelope sender (the requesting
+// peer's instance pubkey); we drive it into the rejecting state via its
+// own public surface (cheap, in-memory) and assert the real handler
+// returns 429 instead of serving the origin bytes it otherwise would.
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn serve_route_429s_when_peer_exceeds_request_budget() {
+    let harness = MultiInstanceHarness::new(2).await;
+    establish_active_peering(&harness, "b", "a").await;
+    let a = harness.instance("a");
+    let b_pub = *harness.instance("b").state.instance_key.public_bytes();
+
+    let blob = b"servable bytes behind the rpm gate".to_vec();
+    let hash = sha256(&blob);
+    seed_origin(&a.state.db, &hash, &blob, "image/png").await;
+    let path = format!("/federation/v1/attachments/{}", hex_lower(&hash));
+
+    // Control: under budget, A is the origin and holds the bytes → 200.
+    let (status, body) = send_envelope_signed(&harness, "b", "a", Method::GET, &path, b"").await;
+    assert_eq!(status, StatusCode::OK, "origin must serve under budget");
+    assert_eq!(body, blob, "served bytes must be the origin blob");
+
+    // Saturate B's per-peer request window on A, then the same request
+    // that just succeeded must shed.
+    for _ in 0..ATTACHMENT_RPM_PER_PEER {
+        a.state.attachment_serve_rate_limiter.try_admit(b_pub);
+    }
+    let (status, _) = send_envelope_signed(&harness, "b", "a", Method::GET, &path, b"").await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "request over the per-peer RPM budget must 429",
+    );
+}
+
+#[tokio::test]
+async fn serve_route_429s_when_peer_exceeds_byte_budget() {
+    let harness = MultiInstanceHarness::new(2).await;
+    establish_active_peering(&harness, "b", "a").await;
+    let a = harness.instance("a");
+    let b_pub = *harness.instance("b").state.instance_key.public_bytes();
+
+    let blob = b"servable bytes behind the byte gate".to_vec();
+    let hash = sha256(&blob);
+    seed_origin(&a.state.db, &hash, &blob, "image/png").await;
+    let path = format!("/federation/v1/attachments/{}", hex_lower(&hash));
+
+    // Burn B's whole per-minute byte budget on A in one charge; the
+    // request-count budget is untouched, so the 429 is attributable to
+    // the byte budget alone.
+    a.state
+        .attachment_serve_rate_limiter
+        .charge_bytes(b_pub, ATTACHMENT_BYTES_PER_MIN_PER_PEER);
+
+    let (status, _) = send_envelope_signed(&harness, "b", "a", Method::GET, &path, b"").await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "request over the per-peer byte budget must 429",
     );
 }

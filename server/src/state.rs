@@ -7,6 +7,7 @@ use tokio::sync::Notify;
 use webauthn_rs::Webauthn;
 
 use crate::error::{AppError, ErrorCode};
+use crate::federation::attachment_fetch::AttachmentFetchGate;
 use crate::federation::backfill_rate_limit::BackfillRateLimiter;
 use crate::federation::content_rate_limit::ContentRateLimiter;
 use crate::federation::envelope::NonceLru;
@@ -187,6 +188,18 @@ pub struct AppState {
     /// `post_id` to flood the moderation queue. Overflow returns `429`
     /// with `Retry-After: 60`. In-memory only; resets on restart.
     pub reports_rate_limiter: Arc<PushRateLimiter>,
+    /// §11.6 serve-side per-source-peer request + byte budgets gating
+    /// `GET /federation/v1/attachments/{hash}`
+    /// (`ATTACHMENT_RPM_PER_PEER` / `ATTACHMENT_BYTES_PER_MIN_PER_PEER`).
+    /// Reuses the [`BackfillRateLimiter`] two-budget fixed-window shape
+    /// (same as the §10.5.5 backfill routes). Overflow returns `429`
+    /// with `Retry-After: 60`. In-memory only; resets on restart.
+    pub attachment_serve_rate_limiter: Arc<BackfillRateLimiter>,
+    /// §11.6 sender-side per-peer concurrency gate bounding simultaneous
+    /// outbound §11.3 attachment fetches to any one origin
+    /// (`ATTACHMENT_CONCURRENT_PER_PEER`). In-memory only; resets on
+    /// restart.
+    pub attachment_fetch_gate: Arc<AttachmentFetchGate>,
 }
 
 impl AppState {

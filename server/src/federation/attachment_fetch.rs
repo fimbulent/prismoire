@@ -48,12 +48,14 @@
 //! counter surfaces it; the synchronous-fetch trigger (Phase C) is
 //! where the durable hard-fail gate lives.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::http::{Method, Request, StatusCode, header};
 use sha2::{Digest, Sha256};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::AppState;
 use crate::federation::envelope::{self, AUTH_HEADER};
@@ -81,6 +83,50 @@ const ATTACHMENT_RETRY_BACKOFF: Duration = Duration::from_secs(60);
 /// candidate that hangs must not hold the response open indefinitely —
 /// on timeout we record a transient failure and 404 to the placeholder.
 const ATTACHMENT_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// §11.6 per-peer cap on concurrent outbound attachment fetches. A
+/// thread render can fan out to many distinct hashes homed at one
+/// origin; without a cap, a burst of simultaneous first-renders would
+/// open one connection per hash to that peer. 8 bounds the fan-out to
+/// any single peer while leaving distinct peers fully parallel.
+pub const ATTACHMENT_CONCURRENT_PER_PEER: usize = 8;
+
+/// §11.6 per-peer concurrency gate for outbound §11.3 fetches.
+///
+/// One process-wide instance lives on [`crate::AppState`]; every
+/// candidate dispatch in [`fetch_from_candidate`] holds a permit for
+/// the target peer across the transport request. Waiting (rather than
+/// skipping) on saturation is deliberate: the wait is bounded by
+/// [`ATTACHMENT_FETCH_TIMEOUT`], a healthy origin drains its queue fast
+/// enough that legitimate bursts just serialise past 8-in-flight, and a
+/// dead peer times out the same way it would without the gate — so a
+/// merely-busy origin never spuriously records a §11.4 failure.
+///
+/// The per-peer `Semaphore` map grows by distinct-peer count and is
+/// never pruned: each entry is a single `Arc<Semaphore>`, so the
+/// footprint is O(peers-ever-fetched-from), negligible next to the
+/// blob cache itself.
+#[derive(Default)]
+pub struct AttachmentFetchGate {
+    inner: Mutex<HashMap<[u8; 32], Arc<Semaphore>>>,
+}
+
+impl AttachmentFetchGate {
+    /// Acquire a permit for an outbound fetch to `peer`, waiting if the
+    /// per-peer cap is currently saturated. The returned permit releases
+    /// the slot on drop.
+    pub async fn acquire(&self, peer: [u8; 32]) -> OwnedSemaphorePermit {
+        let sem = {
+            let mut g = self.inner.lock().expect("attachment fetch gate poisoned");
+            g.entry(peer)
+                .or_insert_with(|| Arc::new(Semaphore::new(ATTACHMENT_CONCURRENT_PER_PEER)))
+                .clone()
+        };
+        sem.acquire_owned()
+            .await
+            .expect("attachment fetch semaphore is never closed")
+    }
+}
 
 /// Why a [`fetch_attachment`] call did not result in stored bytes.
 /// Phase C maps these onto `attachment_fetch_failures` rows; here they
@@ -347,6 +393,11 @@ async fn fetch_from_candidate(
     path: &str,
     content_hash: &[u8; 32],
 ) -> CandidateOutcome {
+    // §11.6: hold a per-peer concurrency permit across the dispatch so a
+    // burst of fetches homed at one origin can't open unbounded
+    // simultaneous connections to it. Released on drop at fn exit.
+    let _permit = state.attachment_fetch_gate.acquire(candidate).await;
+
     let header_value =
         envelope::sign_outbound(&state.instance_key, candidate, &Method::GET, path, b"");
     let request = Request::builder()
@@ -440,4 +491,47 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(bytes);
     h.finalize().into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Holding all of one peer's permits blocks a further acquire for
+    /// that peer until a slot frees.
+    #[tokio::test]
+    async fn gate_caps_concurrency_per_peer() {
+        let gate = AttachmentFetchGate::default();
+        let peer = [7u8; 32];
+
+        let mut held = Vec::new();
+        for _ in 0..ATTACHMENT_CONCURRENT_PER_PEER {
+            held.push(gate.acquire(peer).await);
+        }
+
+        // The next acquire must wait — prove it by showing it does not
+        // complete within a short budget while all permits are held.
+        let blocked = tokio::time::timeout(Duration::from_millis(50), gate.acquire(peer)).await;
+        assert!(blocked.is_err(), "over-cap fetch to one peer must wait");
+
+        // Freeing a slot admits the waiter.
+        held.pop();
+        let unblocked = tokio::time::timeout(Duration::from_millis(50), gate.acquire(peer)).await;
+        assert!(unblocked.is_ok(), "a freed slot admits the next fetch");
+    }
+
+    /// Saturating one peer's permits leaves a different peer's full
+    /// budget untouched.
+    #[tokio::test]
+    async fn gate_budget_is_per_peer() {
+        let gate = AttachmentFetchGate::default();
+
+        let mut held = Vec::new();
+        for _ in 0..ATTACHMENT_CONCURRENT_PER_PEER {
+            held.push(gate.acquire([1u8; 32]).await);
+        }
+
+        let other = tokio::time::timeout(Duration::from_millis(50), gate.acquire([2u8; 32])).await;
+        assert!(other.is_ok(), "one saturated peer must not block another");
+    }
 }

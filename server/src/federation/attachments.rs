@@ -67,13 +67,27 @@
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
 use crate::AppState;
 use crate::attachments::parse_hash_hex;
 use crate::federation::errors::{internal_error, not_found};
+use crate::signed::FedEnvelope;
+
+/// §11.6 `ATTACHMENT_RPM_PER_PEER`: per-source-peer request cap inside
+/// the limiter's rolling 60-second window. Generous relative to the
+/// status/backfill routes — a single thread render can legitimately
+/// fan out to dozens of distinct attachment GETs — but still bounds a
+/// peer that loops on the route. Spec default; revisit on soak data.
+pub const ATTACHMENT_RPM_PER_PEER: u32 = 600;
+
+/// §11.6 `ATTACHMENT_BYTES_PER_MIN_PER_PEER`: per-source-peer served-
+/// byte budget inside the same 60-second window. 50 MiB — the dominant
+/// cost on this route is bytes on the wire, not request count, so this
+/// is the budget that actually gates a peer draining large blobs.
+pub const ATTACHMENT_BYTES_PER_MIN_PER_PEER: u64 = 50 * 1024 * 1024;
 
 /// `GET /federation/v1/attachments/{hash}` handler (§11.1).
 ///
@@ -82,8 +96,23 @@ use crate::federation::errors::{internal_error, not_found};
 /// to 404, matching §11.4's "we authoritatively don't have this".
 pub async fn handle_attachment_fetch(
     State(state): State<Arc<AppState>>,
+    Extension(envelope): Extension<FedEnvelope>,
     Path(hash_hex): Path<String>,
 ) -> Response {
+    // §11.6 per-source-peer rate limit. Gated on entry — before any
+    // hex-decode or DB work — so a peer that floods the route (even
+    // with malformed hashes) is shed cheaply. The byte budget is
+    // charged after a successful 200 below; an in-flight response that
+    // tips the peer over still completes, and only subsequent requests
+    // see the 429 (the fixed-window `try_admit` / `charge_bytes`
+    // contract, identical to the §10.5.5 backfill limiter).
+    if !state
+        .attachment_serve_rate_limiter
+        .try_admit(envelope.sender)
+    {
+        return too_many_requests();
+    }
+
     // Hex decode — bad form is observationally indistinguishable from
     // "no such blob" per §11.4 (the spec collapses every "we don't
     // have it" sub-case into the same 404).
@@ -190,9 +219,46 @@ pub async fn handle_attachment_fetch(
         }
     };
 
+    // §11.6 byte budget: charge the served payload to the source peer's
+    // current window now that we know we're returning 200 with these
+    // bytes. Errors / 404s above never reach here, so they cost a
+    // request slot but no byte budget.
+    state
+        .attachment_serve_rate_limiter
+        .charge_bytes(envelope.sender, blob_bytes.len() as u64);
+
     let mut response = (StatusCode::OK, Body::from(blob_bytes)).into_response();
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, content_type);
     response
+}
+
+/// §11.6 `429 Too Many Requests` with `Retry-After: 60`. Empty body —
+/// the `Retry-After` header is the only signal the sender consumes,
+/// matching the §10.5.5 backfill limiter's overflow shape.
+fn too_many_requests() -> Response {
+    let mut r = (StatusCode::TOO_MANY_REQUESTS, "").into_response();
+    r.headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from_static("60"));
+    r
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn too_many_requests_carries_retry_after_60() {
+        let r = too_many_requests();
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            r.headers()
+                .get(header::RETRY_AFTER)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "60",
+        );
+    }
 }
