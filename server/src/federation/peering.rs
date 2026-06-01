@@ -1002,6 +1002,13 @@ pub async fn handle_peer_response(
                 state.clone(),
                 recorded_pubkey,
             );
+            // §7.3 step 2: also pull the peer's frontier so our own
+            // routing leaves empty-filter mode even if their announce
+            // never reaches us — the redundant backstop for a lost push.
+            crate::federation::frontier::spawn_bootstrap_frontier_pull(
+                state.clone(),
+                recorded_pubkey,
+            );
         }
         PeerDecision::Reject => {
             // Terminal `rejected` per §5.4 ("rejected (archive)"); the

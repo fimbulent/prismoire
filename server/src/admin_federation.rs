@@ -409,6 +409,9 @@ pub async fn accept_peer(
     // §8.6 first-contact: now that the peer is active on our side,
     // announce our frontier so its routing leaves empty-filter mode.
     crate::federation::frontier::spawn_first_contact_announce(state.clone(), pubkey);
+    // §7.3 step 2: also pull the peer's frontier so *our* routing leaves
+    // empty-filter mode even if their first-contact announce is lost.
+    crate::federation::frontier::spawn_bootstrap_frontier_pull(state.clone(), pubkey);
 
     Ok(StatusCode::OK)
 }

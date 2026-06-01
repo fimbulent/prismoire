@@ -1279,50 +1279,142 @@ pub async fn handle_frontier_announce(
         }
     }
 
+    // Apply through the shared inbound path (validate filters, §7.2
+    // mode classification, §8.3 monotonic-guarded upsert, §8.10 age
+    // ceilings, §7.6 replay-on-apply). The same path serves the §8.5
+    // bootstrap pull ([`bootstrap_frontier_pull`]).
+    let apply = match apply_inbound_frontier(
+        &state,
+        sender_slice,
+        parsed.version,
+        parsed.epoch_start,
+        parsed.active_horizon_days,
+        &parsed.visible_filter,
+        &parsed.expansion_filter,
+        parsed.mode,
+        prior_outbound_mode,
+        &parsed.age_ceilings,
+    )
+    .await
+    {
+        Ok(a) => a,
+        Err(InboundFrontierError::BadFilter(code)) => return bad_request(code),
+        Err(InboundFrontierError::Db) => return internal_error(),
+    };
+
+    // If the monotonic guard (`WHERE excluded.applied_version >
+    // peer_frontiers.applied_version`) blocked the write, the row we
+    // hold is *newer* than this announce. Don't claim we applied
+    // `parsed.version` — re-read the persisted row so the 200 reports
+    // the version/cursor the peer should actually sync against.
+    if !apply.won {
+        match sqlx::query!(
+            "SELECT applied_version, cursor AS \"cursor!: Vec<u8>\" \
+             FROM peer_frontiers WHERE peer_pubkey = ?",
+            sender_slice,
+        )
+        .fetch_optional(&state.db)
+        .await
+        {
+            Ok(Some(row)) => {
+                return announce_response(row.applied_version as u64, &row.cursor);
+            }
+            Ok(None) => {
+                // No conflicting row existed, yet nothing was inserted —
+                // shouldn't happen, but fall through to the optimistic
+                // response rather than fabricate a state.
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to re-read peer_frontiers after guarded upsert");
+                return internal_error();
+            }
+        }
+    }
+
+    announce_response(parsed.version, &apply.cursor)
+}
+
+/// Outcome of [`apply_inbound_frontier`].
+struct InboundFrontierApply {
+    /// True when the §8.3 monotonic guard was won (the row was inserted
+    /// or updated). False means a same-or-newer version already owns it.
+    won: bool,
+    /// Server-minted cursor for this apply (opaque to the peer, ≤64 B).
+    cursor: Vec<u8>,
+}
+
+/// Error from [`apply_inbound_frontier`].
+enum InboundFrontierError {
+    /// A filter failed §8.2 validation; carries the `bad_request` code.
+    BadFilter(&'static str),
+    /// A DB fault during persistence (already logged).
+    Db,
+}
+
+/// Shared apply path for an inbound peer frontier, whether it arrived by
+/// §8.3 push (`POST /frontier/announce`) or §8.5 pull (the §7.3 bootstrap
+/// GET). Validates both filters, classifies the §7.2 outbound mode,
+/// performs the §8.3 monotonic-guarded upsert into `peer_frontiers`, and
+/// — only when the guard is won — replaces the §8.10 age ceilings and
+/// runs §7.6 replay-on-apply for `sender`.
+///
+/// `declared_inbound_mode` is the §7.2 mode the sender advertised: a
+/// push carries it in the announce body; a pull (the §8.5 snapshot has
+/// no mode field) passes `Mode::Filtered`, the "fresh peering" default.
+#[allow(clippy::too_many_arguments)]
+async fn apply_inbound_frontier(
+    state: &Arc<AppState>,
+    sender: &[u8],
+    version: u64,
+    epoch_start: u64,
+    active_horizon_days: u32,
+    visible_spec: &FilterSpec,
+    expansion_spec: &FilterSpec,
+    declared_inbound_mode: Mode,
+    prior_outbound_mode: Mode,
+    age_ceilings: &AgeCeilings,
+) -> Result<InboundFrontierApply, InboundFrontierError> {
     // Validate both filters before any persistence — §8.3 says no
     // partial-apply.
-    let visible = match parsed.visible_filter.clone().into_bloom() {
-        Ok(f) => f,
-        Err(code) => return bad_request(code),
-    };
-    let expansion = match parsed.expansion_filter.clone().into_bloom() {
-        Ok(f) => f,
-        Err(code) => return bad_request(code),
-    };
+    let visible = visible_spec
+        .clone()
+        .into_bloom()
+        .map_err(InboundFrontierError::BadFilter)?;
+    let expansion = expansion_spec
+        .clone()
+        .into_bloom()
+        .map_err(InboundFrontierError::BadFilter)?;
 
     // §7.2 outbound-mode classification: coverage of the sender's
     // visible_filter against *our* local-user pubkeys decides what
-    // mode we use to send to them. Hysteresis uses the prior mode
-    // pulled above so a pair already in `All` doesn't oscillate just
-    // because coverage briefly dipped into [LOW, HIGH).
-    let local_keys = match fetch_local_user_pubkeys(&state.db).await {
-        Ok(k) => k,
-        Err(e) => {
-            tracing::error!(error = %e, "db error reading local users for mode classification");
-            return internal_error();
-        }
-    };
+    // mode we use to send to them. Hysteresis uses `prior_outbound_mode`
+    // so a pair already in `All` doesn't oscillate just because coverage
+    // briefly dipped into [LOW, HIGH).
+    let local_keys = fetch_local_user_pubkeys(&state.db).await.map_err(|e| {
+        tracing::error!(error = %e, "db error reading local users for mode classification");
+        InboundFrontierError::Db
+    })?;
     let new_outbound_mode = routing::classify_mode(prior_outbound_mode, &visible, &local_keys);
-    let inbound_mode_str = parsed.mode.as_db_str();
+    let inbound_mode_str = declared_inbound_mode.as_db_str();
     let outbound_mode_str = new_outbound_mode.as_db_str();
 
     // Mint a server-side cursor for this apply. Same shape as
     // LocalFrontier — opaque to the peer.
-    let cursor = encode_cursor(parsed.version, parsed.epoch_start);
+    let cursor = encode_cursor(version, epoch_start);
 
-    let version_i = parsed.version as i64;
-    let epoch_i = parsed.epoch_start as i64;
-    let horizon_i = parsed.active_horizon_days as i64;
-    let visible_family = parsed.visible_filter.family;
+    let version_i = version as i64;
+    let epoch_i = epoch_start as i64;
+    let horizon_i = active_horizon_days as i64;
+    let visible_family = &visible_spec.family;
     let visible_k = visible.k as i64;
     let visible_m = visible.m as i64;
-    let visible_n = parsed.visible_filter.n_est as i64;
-    let visible_fpr = parsed.visible_filter.fpr_target as f64;
-    let expansion_family = parsed.expansion_filter.family;
+    let visible_n = visible_spec.n_est as i64;
+    let visible_fpr = visible_spec.fpr_target as f64;
+    let expansion_family = &expansion_spec.family;
     let expansion_k = expansion.k as i64;
     let expansion_m = expansion.m as i64;
-    let expansion_n = parsed.expansion_filter.n_est as i64;
-    let expansion_fpr = parsed.expansion_filter.fpr_target as f64;
+    let expansion_n = expansion_spec.n_est as i64;
+    let expansion_fpr = expansion_spec.fpr_target as f64;
     let visible_bytes_slice: &[u8] = &visible.bits;
     let expansion_bytes_slice: &[u8] = &expansion.bits;
     let cursor_slice: &[u8] = &cursor;
@@ -1360,7 +1452,7 @@ pub async fn handle_frontier_announce(
              outbound_mode = excluded.outbound_mode, \
              updated_at = excluded.updated_at \
          WHERE excluded.applied_version > peer_frontiers.applied_version",
-        sender_slice,
+        sender,
         version_i,
         epoch_i,
         horizon_i,
@@ -1381,58 +1473,42 @@ pub async fn handle_frontier_announce(
         outbound_mode_str,
     )
     .execute(&state.db)
-    .await;
-    let result = match result {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!(error = %e, "failed to persist peer_frontiers row");
-            return internal_error();
-        }
-    };
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "failed to persist peer_frontiers row");
+        InboundFrontierError::Db
+    })?;
+
+    let won = result.rows_affected() != 0;
 
     // §8.3 full-snapshot apply of the celebrity cleave — but only when
     // our write actually won the monotonic guard. If the guard blocked
-    // us (`rows_affected == 0`), a newer announce already owns the row,
-    // and replacing its ceilings with our stale snapshot would clobber
-    // a fresher cleave set.
-    if result.rows_affected() != 0
-        && let Err(e) =
-            replace_peer_age_ceilings(&state.db, sender_slice, &parsed.age_ceilings).await
-    {
-        tracing::error!(error = %e, "failed to replace peer_frontier_age_ceilings on announce");
-        return internal_error();
-    }
-
-    // If the monotonic guard (`WHERE excluded.applied_version >
-    // peer_frontiers.applied_version`) blocked the write, the row we
-    // hold is *newer* than this announce. Don't claim we applied
-    // `parsed.version` — re-read the persisted row so the 200 reports
-    // the version/cursor the peer should actually sync against.
-    if result.rows_affected() == 0 {
-        match sqlx::query!(
-            "SELECT applied_version, cursor AS \"cursor!: Vec<u8>\" \
-             FROM peer_frontiers WHERE peer_pubkey = ?",
-            sender_slice,
-        )
-        .fetch_optional(&state.db)
-        .await
-        {
-            Ok(Some(row)) => {
-                return announce_response(row.applied_version as u64, &row.cursor);
-            }
-            Ok(None) => {
-                // No conflicting row existed, yet nothing was inserted —
-                // shouldn't happen, but fall through to the optimistic
-                // response rather than fabricate a state.
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "failed to re-read peer_frontiers after guarded upsert");
-                return internal_error();
-            }
+    // us, a newer announce already owns the row, and replacing its
+    // ceilings with our stale snapshot would clobber a fresher cleave
+    // set.
+    if won {
+        if let Err(e) = replace_peer_age_ceilings(&state.db, sender, age_ceilings).await {
+            tracing::error!(error = %e, "failed to replace peer_frontier_age_ceilings on apply");
+            return Err(InboundFrontierError::Db);
         }
+
+        // §7.6 replay-on-apply (best-effort anti-entropy). Applying a
+        // peer's frontier can reveal local-origin trust edges signed
+        // *before* we held any frontier for this peer, which therefore
+        // missed fanout at origination — the §8.6 first-contact race,
+        // where one side completes the handshake and signs an edge
+        // targeting a user the peer expands, but our `peers_interested_in`
+        // probe saw no frontier row yet and dropped it (routing.rs "no
+        // frontier → empty filter → miss every key"). Nothing else
+        // replays such an edge. Now that the peer's `expansion_filter`
+        // is on hand, re-push the edges whose target it covers. Spec
+        // frames this best-effort with no completeness claim (push
+        // remains the real backstop), so a DB error inside is logged,
+        // not surfaced — the frontier already applied.
+        replay_local_edges_to_peer(state, &expansion).await;
     }
 
-    announce_response(parsed.version, &cursor)
+    Ok(InboundFrontierApply { won, cursor })
 }
 
 fn announce_response(applied_version: u64, cursor: &[u8]) -> Response {
@@ -1451,6 +1527,77 @@ fn announce_response(applied_version: u64, cursor: &[u8]) -> Response {
         HeaderValue::from_static(CBOR_CONTENT_TYPE),
     );
     response
+}
+
+/// §7.6 replay-on-apply: re-fan local-origin trust edges whose target
+/// the just-applied peer `expansion` filter now covers.
+///
+/// Enumerates the current (latest-wins, non-neutral) trust edges signed
+/// by *local* users, and for each whose target the peer expands,
+/// reconstructs the canonical wire bytes from `signed_objects` and hands
+/// it back to [`forward_trust_edge`] — the same originator-side fanout
+/// `users::set_trust_edge` runs, complete with §8.10 source-side
+/// shedding and the dedup-LRU that makes redelivery a no-op for peers
+/// that already hold the edge. `arrived_from = None` marks it as a
+/// local re-origination.
+///
+/// Best-effort by design (§7.6 grants no completeness claim): a DB fault
+/// is logged and the loop abandoned rather than failing the announce
+/// that already committed.
+async fn replay_local_edges_to_peer(state: &Arc<AppState>, expansion: &BloomFilter) {
+    let rows = match sqlx::query!(
+        "SELECT su.public_key AS \"source_pk!: Vec<u8>\", \
+                tu.public_key AS \"target_pk!: Vec<u8>\", \
+                te.canonical_hash AS \"canonical_hash!: Vec<u8>\", \
+                so.payload AS \"payload!: Vec<u8>\", \
+                so.signature AS \"signature!: Vec<u8>\" \
+         FROM current_trust_edges cte \
+         JOIN trust_edges te ON te.id = cte.id \
+         JOIN users su ON su.id = te.source_user \
+         JOIN users tu ON tu.id = te.target_user \
+         JOIN signed_objects so ON so.canonical_hash = te.canonical_hash \
+         WHERE su.home_instance IS NULL \
+           AND so.erased_by IS NULL \
+           AND te.canonical_hash IS NOT NULL \
+           AND su.public_key IS NOT NULL AND length(su.public_key) = 32 \
+           AND tu.public_key IS NOT NULL AND length(tu.public_key) = 32",
+    )
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = %e, "replay-on-apply: failed to enumerate local-origin trust edges");
+            return;
+        }
+    };
+
+    for row in rows {
+        // Trust edges route by *target* against the peer's
+        // expansion_filter. Skip edges the peer doesn't expand — they'd
+        // be shed at `peers_interested_in` anyway, so re-forwarding them
+        // is wasted fanout work.
+        if !expansion.contains(&row.target_pk) {
+            continue;
+        }
+        let (Ok(from_key), Ok(to_key), Ok(canonical_hash)) = (
+            <[u8; 32]>::try_from(row.source_pk.as_slice()),
+            <[u8; 32]>::try_from(row.target_pk.as_slice()),
+            <[u8; 32]>::try_from(row.canonical_hash.as_slice()),
+        ) else {
+            continue;
+        };
+        let wire = envelope::encode_signed_object(&row.payload, &row.signature);
+        crate::federation::forwarder::forward_trust_edge(
+            state.clone(),
+            canonical_hash,
+            from_key,
+            to_key,
+            wire,
+            None,
+        )
+        .await;
+    }
 }
 
 /// `POST /federation/v1/frontier/delta` handler (§8.4).
@@ -1807,6 +1954,131 @@ pub async fn operator_announce_frontier(
         return Err(AnnounceError::UnexpectedStatus(response.status()));
     }
     Ok(frontier.version)
+}
+
+/// §7.3 step 2 / §8.5 bootstrap pull: fetch `peer`'s current frontier
+/// over `GET /federation/v1/frontier` and apply it locally through the
+/// shared [`apply_inbound_frontier`] path (so §7.6 replay-on-apply runs
+/// exactly as it does for a push).
+///
+/// This is the redundant backstop the fire-and-forget §8.6 first-contact
+/// announce lacks: a lost or failed push leaves us in §7.4 empty-filter
+/// mode toward the peer with nothing to recover it (the live "18-minute
+/// gap" where one side never held the other's frontier and so dropped a
+/// freshly-signed edge at origination). §7.3 mandates each side pull the
+/// other's frontier at peering, so the two mechanisms are redundant —
+/// whichever lands first unblocks routing.
+///
+/// Returns the version applied. A 304 (our stored cursor already matches
+/// the peer's current frontier) returns the version we already hold.
+pub async fn bootstrap_frontier_pull(
+    state: &Arc<AppState>,
+    peer_pubkey: [u8; 32],
+) -> Result<u64, AnnounceError> {
+    let path = "/federation/v1/frontier";
+    let header_value =
+        envelope::sign_outbound(&state.instance_key, peer_pubkey, &Method::GET, path, b"");
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri(path)
+        .header(header::CONTENT_TYPE, CBOR_CONTENT_TYPE)
+        .header(AUTH_HEADER, header_value)
+        .body(Bytes::new())
+        .expect("request builder");
+
+    let response = state
+        .federation_transport
+        .request(&PeerId::from_bytes(peer_pubkey), request)
+        .await
+        .map_err(AnnounceError::Transport)?;
+
+    // §8.5: 304 means our stored cursor already matches the peer's
+    // current frontier — nothing to apply; report what we hold.
+    if response.status() == StatusCode::NOT_MODIFIED {
+        let peer_slice: &[u8] = &peer_pubkey;
+        let current = sqlx::query!(
+            "SELECT applied_version FROM peer_frontiers WHERE peer_pubkey = ?",
+            peer_slice,
+        )
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| AnnounceError::Compute(ComputeError::Db(e)))?
+        .map(|r| r.applied_version as u64)
+        .unwrap_or(0);
+        return Ok(current);
+    }
+    if response.status() != StatusCode::OK {
+        return Err(AnnounceError::UnexpectedStatus(response.status()));
+    }
+
+    let body = response.into_body();
+    let snapshot =
+        FrontierSnapshot::decode(&body).ok_or(AnnounceError::UnexpectedStatus(StatusCode::OK))?;
+
+    // §7.2 mode: a pull snapshot carries no mode field, so the peer's
+    // declared inbound mode defaults to `Filtered` (fresh-peering
+    // default). Our prior outbound mode for the pair is preserved for
+    // the §7.2 hysteresis band, same as the announce path.
+    let peer_slice: &[u8] = &peer_pubkey;
+    let prior_outbound_mode = match sqlx::query!(
+        "SELECT outbound_mode FROM peer_frontiers WHERE peer_pubkey = ?",
+        peer_slice,
+    )
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(Some(r)) => Mode::from_db_str(&r.outbound_mode),
+        Ok(None) => Mode::Filtered,
+        Err(e) => {
+            tracing::warn!(error = %e, "db error reading outbound_mode on bootstrap pull; defaulting to Filtered");
+            Mode::Filtered
+        }
+    };
+
+    match apply_inbound_frontier(
+        state,
+        &peer_pubkey,
+        snapshot.version,
+        snapshot.epoch_start,
+        snapshot.active_horizon_days,
+        &snapshot.visible_filter,
+        &snapshot.expansion_filter,
+        Mode::Filtered,
+        prior_outbound_mode,
+        &snapshot.age_ceilings,
+    )
+    .await
+    {
+        Ok(_) => Ok(snapshot.version),
+        Err(InboundFrontierError::BadFilter(code)) => {
+            tracing::warn!(peer = %crate::users::hex_lower(&peer_pubkey), code, "bootstrap pull: peer frontier failed filter validation");
+            Err(AnnounceError::UnexpectedStatus(StatusCode::OK))
+        }
+        Err(InboundFrontierError::Db) => Err(AnnounceError::Compute(ComputeError::Db(
+            sqlx::Error::Protocol("frontier apply failed".into()),
+        ))),
+    }
+}
+
+/// Spawn-and-forget the §7.3 bootstrap pull at peering activation, the
+/// pull-side sibling of [`spawn_first_contact_announce`]. Either landing
+/// first unblocks routing; running both makes a single dropped message
+/// non-fatal.
+pub fn spawn_bootstrap_frontier_pull(state: Arc<AppState>, peer_pubkey: [u8; 32]) {
+    tokio::spawn(async move {
+        match bootstrap_frontier_pull(&state, peer_pubkey).await {
+            Ok(version) => tracing::debug!(
+                peer = %crate::users::hex_lower(&peer_pubkey),
+                version,
+                "§7.3 bootstrap frontier pull applied",
+            ),
+            Err(e) => tracing::debug!(
+                peer = %crate::users::hex_lower(&peer_pubkey),
+                error = ?e,
+                "§7.3 bootstrap frontier pull failed (push remains the primary path)",
+            ),
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------

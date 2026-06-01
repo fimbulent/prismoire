@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT su.public_key AS \"source_pk!: Vec<u8>\", tu.public_key AS \"target_pk!: Vec<u8>\", te.canonical_hash AS \"canonical_hash!: Vec<u8>\", so.payload AS \"payload!: Vec<u8>\", so.signature AS \"signature!: Vec<u8>\" FROM current_trust_edges cte JOIN trust_edges te ON te.id = cte.id JOIN users su ON su.id = te.source_user JOIN users tu ON tu.id = te.target_user JOIN signed_objects so ON so.canonical_hash = te.canonical_hash WHERE su.home_instance IS NULL AND so.erased_by IS NULL AND te.canonical_hash IS NOT NULL AND su.public_key IS NOT NULL AND length(su.public_key) = 32 AND tu.public_key IS NOT NULL AND length(tu.public_key) = 32",
+  "describe": {
+    "columns": [
+      {
+        "name": "source_pk!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "target_pk!: Vec<u8>",
+        "ordinal": 1,
+        "type_info": "Blob"
+      },
+      {
+        "name": "canonical_hash!: Vec<u8>",
+        "ordinal": 2,
+        "type_info": "Blob"
+      },
+      {
+        "name": "payload!: Vec<u8>",
+        "ordinal": 3,
+        "type_info": "Blob"
+      },
+      {
+        "name": "signature!: Vec<u8>",
+        "ordinal": 4,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "f88cee06b56cbf83c81f34f3628a4d33140cdd292606288c5b49a519d36755d8"
+}

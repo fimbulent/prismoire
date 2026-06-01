@@ -1330,6 +1330,15 @@ pub async fn complete(
 
     tx.commit().await?;
 
+    // §8.7 re-announce: this commit added a new local root (the
+    // re-homed identity), which widens our frontier closure. Wake the
+    // trust-graph rebuild so `frontier_fanout_loop` recomputes and
+    // re-announces to active peers — otherwise peers keep routing
+    // against a filter that lacks the new user and starve them of
+    // inbound edges/content until some unrelated graph change happens
+    // to fire this notify. Mirrors the invited-signup path.
+    state.trust_graph_notify.notify_one();
+
     // §12.2 unconditional flood, post-commit so a slow fanout can't
     // hold the write tx. `arrived_from = None` because we are the
     // originator. Routing-key for moves is the moving identity K
