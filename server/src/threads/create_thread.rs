@@ -318,6 +318,7 @@ pub async fn create_thread(
                 viewer: UserViewerInfo::self_view(),
                 has_more_children: false,
                 distrust_scaffold: false,
+                is_remote: false,
                 attachments: response_attachments,
             },
             reply_count: 0,

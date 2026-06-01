@@ -243,6 +243,7 @@ pub async fn create_reply(
             viewer: UserViewerInfo::self_view(),
             has_more_children: false,
             distrust_scaffold: false,
+            is_remote: false,
             // Replies never carry attachments (rejected upstream by
             // the `req.attachments.is_empty()` check), so the field
             // is always empty here.

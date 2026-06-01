@@ -221,6 +221,14 @@ pub struct PostResponse {
     /// distrusted user's post is visible. See spec §"Distrust action UX".
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub distrust_scaffold: bool,
+    /// True when this post is federated (authored on a remote instance,
+    /// i.e. `posts.home_instance IS NOT NULL`). The frontend uses it to
+    /// gate the §11.4 attachment-availability probe: a local post's
+    /// blobs are always resident, so only remote posts need the
+    /// fetch-on-demand HEAD check. Omitted from JSON for local posts (the
+    /// overwhelming majority) via `skip_serializing_if`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub is_remote: bool,
     /// Per-revision attachment array for OP posts
     /// (`docs/attachments.md` §4 / §9). Empty for replies and for any
     /// post whose latest revision carries no attachments — the field

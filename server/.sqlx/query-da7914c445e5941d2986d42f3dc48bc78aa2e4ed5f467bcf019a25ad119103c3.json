@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT p.id AS \"id!\", p.parent, p.author AS \"author!\",\n                  u.display_name, u.public_key, u.status, u.deleted_at,\n                  p.created_at AS \"created_at!\", p.retracted_at\n           FROM posts p\n           JOIN users u ON u.id = p.author\n           WHERE p.thread = ?\n           ORDER BY p.created_at ASC",
+  "query": "SELECT p.id AS \"id!\", p.parent, p.author AS \"author!\",\n                  u.display_name, u.public_key, u.status, u.deleted_at,\n                  p.created_at AS \"created_at!\", p.retracted_at,\n                  p.home_instance\n           FROM posts p\n           JOIN users u ON u.id = p.author\n           WHERE p.thread = ?\n           ORDER BY p.created_at ASC",
   "describe": {
     "columns": [
       {
@@ -47,6 +47,11 @@
         "name": "retracted_at",
         "ordinal": 8,
         "type_info": "Text"
+      },
+      {
+        "name": "home_instance",
+        "ordinal": 9,
+        "type_info": "Blob"
       }
     ],
     "parameters": {
@@ -61,8 +66,9 @@
       false,
       true,
       false,
+      true,
       true
     ]
   },
-  "hash": "f15c9b244831d070bd8a0d006c13c41d9084811016606f47b7234b20a4153744"
+  "hash": "da7914c445e5941d2986d42f3dc48bc78aa2e4ed5f467bcf019a25ad119103c3"
 }

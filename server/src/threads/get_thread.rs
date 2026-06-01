@@ -74,6 +74,10 @@ struct PostMeta {
     author_status: UserStatus,
     created_at: String,
     retracted_at: Option<String>,
+    /// True when the post is federated (`posts.home_instance` is set).
+    /// Threaded into `PostResponse::is_remote` for the frontend §11.4
+    /// attachment-availability gate.
+    is_remote: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -434,6 +438,7 @@ impl TreeCtx<'_> {
             children: child_posts,
             has_more_children,
             distrust_scaffold: is_distrusted_scaffold,
+            is_remote: meta.is_remote,
             attachments: post_attachments,
         }
     }
@@ -510,7 +515,8 @@ async fn fetch_post_metadata(
     let rows = sqlx::query!(
         r#"SELECT p.id AS "id!", p.parent, p.author AS "author!",
                   u.display_name, u.public_key, u.status, u.deleted_at,
-                  p.created_at AS "created_at!", p.retracted_at
+                  p.created_at AS "created_at!", p.retracted_at,
+                  p.home_instance
            FROM posts p
            JOIN users u ON u.id = p.author
            WHERE p.thread = ?
@@ -533,6 +539,7 @@ async fn fetch_post_metadata(
                 author_status: UserStatus::effective(raw, row.deleted_at.as_deref()),
                 created_at: row.created_at,
                 retracted_at: row.retracted_at,
+                is_remote: row.home_instance.is_some(),
             }
         })
         .collect())
@@ -751,6 +758,7 @@ pub async fn get_thread(
         children: op_children,
         has_more_children: false,
         distrust_scaffold: op_distrust_scaffold,
+        is_remote: op_meta.is_remote,
         attachments: op_attachments,
     };
 
@@ -910,6 +918,7 @@ async fn build_focused_response(
         children: op_children,
         has_more_children: false,
         distrust_scaffold: op_distrust_scaffold,
+        is_remote: op_meta.is_remote,
         attachments: op_attachments,
     };
 

@@ -419,7 +419,7 @@
 	{#if post.parent_id === null}
 		{@const chipAtts = getChipAttachments()}
 		{#if chipAtts.length > 0}
-			<AttachmentList attachments={chipAtts} />
+			<AttachmentList attachments={chipAtts} isRemote={post.is_remote ?? false} />
 		{/if}
 	{/if}
 {/if}

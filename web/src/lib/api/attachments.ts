@@ -48,6 +48,20 @@ export function isImageMime(mime: string): boolean {
 	return (IMAGE_MIMES as readonly string[]).includes(mime);
 }
 
+/** Short, human-facing label for a MIME — `image/png` → `PNG`,
+ *  `application/pdf` → `PDF`. Used by the federation §11.4
+ *  "attachment unavailable" placeholder, where the blob bytes aren't
+ *  resident but the signed MIME still tells the reader what's missing.
+ *  Falls back to the raw MIME for shapes without a recognisable
+ *  subtype so we never render an empty token. */
+export function formatMime(mime: string): string {
+	const subtype = mime.split('/')[1];
+	if (!subtype) return mime;
+	// Drop structured-suffix noise (`svg+xml` → `svg`) and uppercase the
+	// bare format token, which reads as a familiar file-type label.
+	return subtype.split('+')[0].toUpperCase();
+}
+
 /** Per-blob storage cap (mirrors `signed::MAX_ATTACHMENT_SIZE`). */
 export const MAX_ATTACHMENT_SIZE = 500 * 1024;
 

@@ -358,6 +358,7 @@ pub async fn edit_post(
         viewer: UserViewerInfo::self_view(),
         has_more_children: false,
         distrust_scaffold: false,
+        is_remote: false,
         attachments: response_attachments,
     }))
 }

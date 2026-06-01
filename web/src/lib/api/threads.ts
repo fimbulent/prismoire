@@ -83,6 +83,12 @@ export interface PostResponse {
 	 * subtree. Render a small hint next to the author explaining why a
 	 * distrusted user's post is visible. */
 	distrust_scaffold?: boolean;
+	/** True when the post is federated (authored on a remote instance).
+	 * Omitted by the server for local posts; treat `undefined` as `false`.
+	 * Gates the §11.4 attachment-availability probe in `AttachmentList` —
+	 * local posts' blobs are always resident, so only remote posts need
+	 * the fetch-on-demand HEAD check. */
+	is_remote?: boolean;
 	/** Per-revision attachments for OP posts. Omitted by the server when
 	 * empty; treat `undefined` as the empty array. Replies never carry
 	 * attachments. */
