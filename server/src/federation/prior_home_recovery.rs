@@ -40,7 +40,9 @@
 //! omitted on the wire so each peer's `MAX_BACKFILL_PAGE` default
 //! applies (currently 100 per Phase 8).
 
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Duration;
 
 use axum::body::Bytes;
 use ciborium::value::Value;
@@ -76,6 +78,121 @@ const MAX_RECOVERY_PAGES: usize = 64;
 /// so the bound clips the long tail of stale-but-active peers, not
 /// the live core.
 const MAX_FALLBACK_PEERS: usize = 16;
+
+/// §10.5.5 `BACKFILL_CONCURRENT_PER_PEER`. Max concurrent outbound
+/// §10.5.1 backfill pagination streams to a *single* destination peer.
+/// [`proactive_backfill_batch`] runs up to
+/// [`PROACTIVE_BACKFILL_BATCH_CONCURRENCY`] authors at once; if several of
+/// them home on the same peer, an uncapped fanout opens that many
+/// simultaneous `/backfill/by-author` streams to it and trips the peer's
+/// own `BACKFILL_RPM_PER_PEER` / `BACKFILL_BYTES_PER_MIN_PER_PEER` budget —
+/// which 429s us off the *only* peer that hosts the author. Gating per
+/// destination peer keeps a single peer's inbound view of us within the
+/// same per-peer budget it would apply, so backfill makes forward progress
+/// instead of self-throttling.
+const BACKFILL_CONCURRENT_PER_PEER: usize = 4;
+
+/// Total number of `429 Too Many Requests` responses
+/// [`paginate_peer_backfill`] will absorb (honoring `Retry-After`) before
+/// abandoning a peer. Cumulative across the whole pagination, not
+/// per-page: a peer that 429s every page would otherwise pin the worker
+/// for `MAX_RECOVERY_PAGES * MAX_RETRY_AFTER_SECS`. Bounding the *total*
+/// caps the added wall-clock at `THROTTLE_MAX_RETRIES * MAX_RETRY_AFTER_SECS`
+/// (~5 min) per surface; a backfill too large to finish within that budget
+/// simply resumes on the next §7.6 retrigger (best-effort, off the
+/// critical path).
+const THROTTLE_MAX_RETRIES: u32 = 5;
+
+/// Clamp ceiling for a peer-supplied `Retry-After` (seconds). Our own
+/// limiters always emit `60`; this clamp bounds a peer that returns an
+/// absurd value so it can't park the worker arbitrarily long. A missing
+/// or unparseable header defaults to this same value.
+const MAX_RETRY_AFTER_SECS: u64 = 60;
+
+/// Per-destination-peer concurrency gate for §10.5.1 backfill pagination,
+/// keyed by peer pubkey, each a [`BACKFILL_CONCURRENT_PER_PEER`]-permit
+/// semaphore. Process-wide so every backfill call site (the frontier batch
+/// and the §13.3 registration fallback) shares one budget per peer. The
+/// map grows bounded-by-peer-count (operator-gated); entries are never
+/// reclaimed, which is fine at peer-set scale.
+static PER_PEER_BACKFILL_SEMAPHORES: LazyLock<
+    Mutex<HashMap<[u8; 32], Arc<tokio::sync::Semaphore>>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Fetch (or lazily create) the [`BACKFILL_CONCURRENT_PER_PEER`]-permit
+/// semaphore gating outbound backfill pagination to `peer`.
+fn per_peer_backfill_semaphore(peer: [u8; 32]) -> Arc<tokio::sync::Semaphore> {
+    PER_PEER_BACKFILL_SEMAPHORES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(peer)
+        .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(BACKFILL_CONCURRENT_PER_PEER)))
+        .clone()
+}
+
+/// Parse a `Retry-After` header as delta-seconds. Returns `None` for an
+/// absent, non-ASCII, or non-integer value (incl. the rarely-used
+/// HTTP-date form, which our peers never emit) so the caller can fall back
+/// to a default. Not clamped here — the caller clamps to
+/// [`MAX_RETRY_AFTER_SECS`].
+fn retry_after_secs(response: &http::Response<Bytes>) -> Option<u64> {
+    response
+        .headers()
+        .get(header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+}
+
+/// Max concurrent by-author backfills driven by
+/// [`proactive_backfill_batch`]. Matches `OUTBOUND_BACKFILL_CONCURRENCY`
+/// (8) in `edge_backfill.rs`, so the frontier Trigger-3 batch and the
+/// §11.9.5 reverse-bootstrap edge path stay in the same order-of-magnitude
+/// outbound budget instead of the unbounded per-author `tokio::spawn`
+/// fanout this batch replaced (one task per newly-frontier'd author, each
+/// able to sweep up to `MAX_FALLBACK_PEERS`).
+const PROACTIVE_BACKFILL_BATCH_CONCURRENCY: usize = 8;
+
+/// §10.5.5 single-peer-per-author rule, enforced process-wide: at most one
+/// outstanding by-author proactive backfill per `author_key` across *all*
+/// call sites. Both the frontier Trigger-3 batch and the §11.9.5
+/// reverse-bootstrap edge path funnel through [`proactive_author_backfill`],
+/// so without a shared claim a trust edge arriving for K at the same moment
+/// K enters the content frontier would fire two concurrent by-author sweeps
+/// for the same key, doubling outbound load and racing the same stub
+/// hydration. Keyed by author pubkey; entries are held only for the
+/// lifetime of an in-flight backfill via [`AuthorInFlightGuard`].
+static IN_FLIGHT_AUTHORS: LazyLock<Mutex<HashSet<[u8; 32]>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// RAII claim on an `author_key` in [`IN_FLIGHT_AUTHORS`]. Construction via
+/// [`AuthorInFlightGuard::try_claim`] returns `None` when the key is already
+/// claimed (the §10.5.5 skip case); the claim is released on `Drop`, so an
+/// early return — or a panic — in the backfill body cannot leak a permanent
+/// claim that would wedge the author out of all future backfills.
+struct AuthorInFlightGuard([u8; 32]);
+
+impl AuthorInFlightGuard {
+    /// Claim `author_key`, or `None` if a backfill for it is already in
+    /// flight anywhere in the process.
+    fn try_claim(author_key: [u8; 32]) -> Option<Self> {
+        let mut set = IN_FLIGHT_AUTHORS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        set.insert(author_key).then_some(Self(author_key))
+    }
+}
+
+impl Drop for AuthorInFlightGuard {
+    fn drop(&mut self) {
+        IN_FLIGHT_AUTHORS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.0);
+    }
+}
 
 /// `POST /federation/v1/prior-home/content-by-key` (§14.5).
 const CONTENT_BY_KEY_PATH: &str = "/federation/v1/prior-home/content-by-key";
@@ -452,9 +569,24 @@ where
     F: FnMut(Vec<u8>) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
+    // §10.5.5 per-destination-peer concurrency cap. Acquire-and-wait (not
+    // skip): the caller has already committed to this peer for this author,
+    // and the upstream single-flight guard means only one task per author
+    // queues here, so blocking briefly behind other streams to the same
+    // peer is preferable to abandoning the backfill. Held for the whole
+    // pagination; released on any return path below.
+    let peer_sem = per_peer_backfill_semaphore(*peer.as_bytes());
+    let _peer_permit = peer_sem
+        .acquire()
+        .await
+        .expect("per-peer backfill semaphore is never closed");
+
     let mut stats = SurfaceStats::default();
     let mut cursor: Option<String> = None;
-    for _ in 0..MAX_RECOVERY_PAGES {
+    // Cumulative across all pages of this surface — see `THROTTLE_MAX_RETRIES`.
+    let mut throttle_retries = 0u32;
+    let mut pages_fetched = 0usize;
+    while pages_fetched < MAX_RECOVERY_PAGES {
         // Compose the full URI. Cursor is base64url-encoded raw bytes
         // on the wire — `decode_backfill_body` returned the raw
         // version; we re-encode here to match the §10.5.1 GET
@@ -488,9 +620,34 @@ where
             .await
             .map_err(PageError::Transport)?;
         let status = response.status();
+        // §10.5.5 backpressure: the peer is rate-limiting us. Honor
+        // `Retry-After` and retry the *same* page rather than abandoning the
+        // peer — for a by-author backfill this may be the only peer that
+        // hosts the author, so bailing to the next candidate would just fail
+        // the whole backfill against a peer that has nothing. Bounded by
+        // `THROTTLE_MAX_RETRIES` total so a peer that 429s forever can't pin
+        // the worker; the retry does not consume a page from the cap.
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            if throttle_retries >= THROTTLE_MAX_RETRIES {
+                return Err(PageError::Status(status));
+            }
+            throttle_retries += 1;
+            let wait = retry_after_secs(&response)
+                .unwrap_or(MAX_RETRY_AFTER_SECS)
+                .clamp(1, MAX_RETRY_AFTER_SECS);
+            tracing::debug!(
+                peer = %peer,
+                wait_secs = wait,
+                attempt = throttle_retries,
+                "peer-backfill 429; honoring Retry-After and retrying same page",
+            );
+            tokio::time::sleep(Duration::from_secs(wait)).await;
+            continue;
+        }
         if !status.is_success() {
             return Err(PageError::Status(status));
         }
+        pages_fetched += 1;
         stats.pages_fetched += 1;
 
         let body = response.into_body();
@@ -693,6 +850,23 @@ pub(crate) async fn proactive_author_backfill(
     author_key: [u8; 32],
     prefer_peer: Option<[u8; 32]>,
 ) {
+    // §10.5.5: at most one outstanding by-author request per author across
+    // the whole process. Claim the key for the duration of this run; if a
+    // backfill for it is already in flight (from the other call site or a
+    // prior still-running batch entry), skip cheaply rather than racing a
+    // duplicate sweep. The guard releases the claim on drop (incl. early
+    // returns below and panics).
+    let _in_flight = match AuthorInFlightGuard::try_claim(author_key) {
+        Some(guard) => guard,
+        None => {
+            tracing::debug!(
+                author = %hex_lower(&author_key),
+                "proactive by-author backfill: already in flight, skipping (§10.5.5)",
+            );
+            return;
+        }
+    };
+
     let mut candidates = match list_active_peers(state).await {
         Ok(v) => v,
         Err(e) => {
@@ -780,6 +954,47 @@ pub(crate) async fn proactive_author_backfill(
                 );
             }
         }
+    }
+}
+
+/// Bounded-concurrency drain of [`proactive_author_backfill`] across a
+/// batch of newly-frontier'd authors (frontier Trigger-3, §7.6).
+///
+/// Replaces a per-author `tokio::spawn` fanout: the old loop launched one
+/// detached task per author with no ceiling, so a single trust-graph
+/// rebuild that admitted N new remote authors could fire N ×
+/// `MAX_FALLBACK_PEERS` outbound by-author sweeps at once, bypassing the
+/// outbound budget the sibling §11.9.5 edge path respects. This drives the
+/// whole batch through a [`tokio::task::JoinSet`] holding at most
+/// [`PROACTIVE_BACKFILL_BATCH_CONCURRENCY`] in flight: prime that many,
+/// then admit one more each time a slot frees, until the batch is drained.
+/// The burst is bounded while every author still gets serviced.
+///
+/// Per-author single-flight (§10.5.5) lives inside
+/// [`proactive_author_backfill`], so any author already being backfilled
+/// from another call site is skipped cheaply here rather than de-duped at
+/// this layer. Meant to be `tokio::spawn`ed once, off the rebuild critical
+/// path; each task is best-effort and self-logging.
+pub(crate) async fn proactive_backfill_batch(state: Arc<AppState>, authors: Vec<[u8; 32]>) {
+    let mut pending = authors.into_iter();
+    let mut workers: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+
+    let spawn_next = |workers: &mut tokio::task::JoinSet<()>,
+                      pending: &mut std::vec::IntoIter<[u8; 32]>| {
+        if let Some(author) = pending.next() {
+            let state = Arc::clone(&state);
+            workers.spawn(async move {
+                proactive_author_backfill(&state, author, None).await;
+            });
+        }
+    };
+
+    for _ in 0..PROACTIVE_BACKFILL_BATCH_CONCURRENCY {
+        spawn_next(&mut workers, &mut pending);
+    }
+
+    while workers.join_next().await.is_some() {
+        spawn_next(&mut workers, &mut pending);
     }
 }
 
@@ -895,6 +1110,36 @@ mod tests {
         assert_eq!(m.len(), 3);
         assert_eq!(m[2].0, Value::Text("since".into()));
         assert_eq!(m[2].1, Value::Bytes(b"cursor".to_vec()));
+    }
+
+    fn response_with_retry_after(value: &str) -> http::Response<Bytes> {
+        http::Response::builder()
+            .status(StatusCode::TOO_MANY_REQUESTS)
+            .header(header::RETRY_AFTER, value)
+            .body(Bytes::new())
+            .unwrap()
+    }
+
+    #[test]
+    fn retry_after_secs_parses_delta_seconds() {
+        assert_eq!(retry_after_secs(&response_with_retry_after("60")), Some(60));
+        // Leading/trailing whitespace is tolerated.
+        assert_eq!(retry_after_secs(&response_with_retry_after(" 5 ")), Some(5));
+    }
+
+    #[test]
+    fn retry_after_secs_rejects_non_integer_and_absent() {
+        // HTTP-date form (which our peers never emit) is not parsed.
+        assert_eq!(
+            retry_after_secs(&response_with_retry_after("Wed, 21 Oct 2026 07:28:00 GMT")),
+            None,
+        );
+        assert_eq!(retry_after_secs(&response_with_retry_after("soon")), None);
+        let no_header = http::Response::builder()
+            .status(StatusCode::TOO_MANY_REQUESTS)
+            .body(Bytes::new())
+            .unwrap();
+        assert_eq!(retry_after_secs(&no_header), None);
     }
 
     #[test]

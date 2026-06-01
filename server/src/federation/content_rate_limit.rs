@@ -16,9 +16,22 @@
 //! [`ContentRateLimiter::check_and_count`] with the batch size; if
 //! the post-increment count would exceed
 //! [`MAX_CONTENT_OBJECTS_PER_HOUR`], the entire batch is rejected
-//! with `400 rate_limited` *before* per-object processing — the
+//! with `429 Too Many Requests` (`Retry-After: 60`, via
+//! [`content_too_many_requests`]) *before* per-object processing — the
 //! whole-batch reject is the simplest backpressure signal that lets
 //! the sender drop into backoff without re-trying object-by-object.
+//!
+//! The status is deliberately `429`, not `400`: the sender's
+//! `outbound_queue` drain worker classifies `429` (and `5xx`) as
+//! *transient* and retries the same batch with exponential backoff,
+//! whereas any other `4xx` is *terminal* and drops the batch. A
+//! rate-limited push is transient by nature — the budget refills when
+//! the window rolls — so dropping the batch would silently lose content
+//! a well-behaved peer is entitled to deliver, leaving the §7.7 pull
+//! backstop to clean up. `429` keeps the batch alive across the
+//! window. This matches the `BackfillRateLimiter` / `PushRateLimiter`
+//! 429 shape so every per-peer federation limiter signals overflow
+//! identically.
 //!
 //! Fixed-window (rather than sliding) is intentional: a peer near
 //! the cap may burst slightly over at window-rollover, but the
@@ -39,6 +52,9 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
 
 /// Default per-source per-hour object cap. Chosen to admit
 /// substantial steady-state traffic (≈156 max-batches per hour, or
@@ -162,6 +178,20 @@ impl Default for ContentRateLimiter {
     }
 }
 
+/// Build a `429 Too Many Requests` response with `Retry-After: 60` for
+/// an over-budget `/content` push. Mirrors `backfill_too_many_requests`
+/// / `push_too_many_requests`: the `Retry-After` header is the only
+/// sender signal, body is empty. The sender's `outbound_queue` treats
+/// `429` as transient (exponential backoff + jittered retry of the same
+/// batch), so the `60` here is an advisory floor — actual retry spacing
+/// is governed by the sender's own backoff schedule.
+pub fn content_too_many_requests() -> Response {
+    let mut r = (StatusCode::TOO_MANY_REQUESTS, "").into_response();
+    r.headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from_static("60"));
+    r
+}
+
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -219,6 +249,16 @@ mod tests {
         // budget is still 10 available
         assert!(l.check_and_count_at(peer(1), 10, 1000));
         assert!(!l.check_and_count_at(peer(1), 1, 1000));
+    }
+
+    #[test]
+    fn too_many_requests_response_is_429_with_retry_after() {
+        let r = content_too_many_requests();
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            r.headers().get(header::RETRY_AFTER).unwrap(),
+            HeaderValue::from_static("60"),
+        );
     }
 
     #[test]

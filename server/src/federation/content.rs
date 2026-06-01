@@ -73,8 +73,10 @@
 //! The `/content` route is whole-batch rate-limited per source-instance
 //! via [`ContentRateLimiter`], capped at
 //! [`MAX_CONTENT_OBJECTS_PER_HOUR`] objects/hour/source. A push that
-//! would exceed the budget returns `400 { "error": "rate_limited" }`
-//! before per-object processing. Closes the Phase-6 abuse-window punt
+//! would exceed the budget returns `429 Too Many Requests`
+//! (`Retry-After: 60`) before per-object processing, so the sender's
+//! outbound queue retries the batch with backoff rather than dropping
+//! it. Closes the Phase-6 abuse-window punt
 //! (a single peer could otherwise sustain `MAX_CONTENT_BATCH = 64`
 //! objects per request indefinitely).
 //!
@@ -308,12 +310,14 @@ pub async fn handle_content_push(
     // §10.6 fold-in (Phase 7): per-source rolling-hour object cap.
     // Whole-batch reject on overflow — simplest backpressure signal that
     // lets a well-behaved sender drop into backoff rather than retrying
-    // object-by-object. A rejected batch does not burn budget.
+    // object-by-object. A rejected batch does not burn budget. 429 (not
+    // 400) so the sender's outbound queue retries the batch on the next
+    // window instead of treating it as a terminal 4xx and dropping it.
     if !state
         .content_rate_limiter
         .check_and_count(envelope.sender, parsed.objects.len() as u32)
     {
-        return bad_request("rate_limited");
+        return crate::federation::content_rate_limit::content_too_many_requests();
     }
 
     let mut results: Vec<ContentResult> = Vec::with_capacity(parsed.objects.len());

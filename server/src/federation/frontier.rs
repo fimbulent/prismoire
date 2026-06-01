@@ -2252,11 +2252,20 @@ pub async fn frontier_fanout_loop(state: Arc<AppState>, frontier_dirty: Arc<toki
                 continue;
             }
         };
-        for author_key in remote_authors {
+        // Drain the batch through a single bounded-concurrency worker
+        // instead of one detached `tokio::spawn` per author. A rebuild that
+        // admits many new remote authors otherwise fires an unbounded burst
+        // of by-author sweeps (each up to `MAX_FALLBACK_PEERS`), all racing
+        // the outbound budget the §11.9.5 edge path respects.
+        // `proactive_backfill_batch` caps in-flight backfills and the
+        // §10.5.5 per-author single-flight guard de-dupes against other
+        // call sites. Spawned once so the fanout loop never blocks here.
+        if !remote_authors.is_empty() {
             let state = Arc::clone(&state);
             tokio::spawn(async move {
-                crate::federation::prior_home_recovery::proactive_author_backfill(
-                    &state, author_key, None,
+                crate::federation::prior_home_recovery::proactive_backfill_batch(
+                    state,
+                    remote_authors,
                 )
                 .await;
             });
