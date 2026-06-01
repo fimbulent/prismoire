@@ -45,6 +45,18 @@ use rand::rngs::OsRng;
 use sqlx::SqlitePool;
 
 use common::federation::{MultiInstanceHarness, establish_active_peering, send_envelope_signed};
+use common::{body_json, get_request, json_request, send, setup_admin};
+use serde_json::json;
+
+/// Decode 64-char lowercase hex into 32 bytes.
+fn hex32(s: &str) -> [u8; 32] {
+    assert_eq!(s.len(), 64, "pubkey hex must be 64 chars");
+    let mut out = [0u8; 32];
+    for (i, chunk) in s.as_bytes().chunks_exact(2).enumerate() {
+        out[i] = u8::from_str_radix(std::str::from_utf8(chunk).unwrap(), 16).unwrap();
+    }
+    out
+}
 
 /// Push body builder: wrap each `(payload, signature)` pair into a
 /// canonical WireFormat blob and pack the lot under `{ "edges": [bstr, ...] }`.
@@ -1111,5 +1123,264 @@ async fn forwarder_does_not_relay_to_peer_interested_only_in_edge_source() {
     assert_eq!(
         count_on_c, 0,
         "§7.4: edge targeting bob must not reach a peer interested only in source alice",
+    );
+}
+
+/// §11.9.5 cross-instance bootstrap, target's-home side. Mirrors the
+/// two-instance manual scenario: A homes sam1, B homes sam2, and B's
+/// sam2 redeems sam1's trust code — minting a signed `sam2 -> sam1`
+/// trust-edge on B. The edge is target-routed (§7.4) to A (sam1's
+/// home). On A the edge *source* sam2 is a never-seen remote key, so
+/// `try_project_trust_edge` returns `EndpointMissing` and the receive
+/// path persists the bytes but writes no `trust_edges` row.
+///
+/// Unlike `push_between_unknown_users_persists_signed_object_only`
+/// (both endpoints strangers, nothing to recover from), here the
+/// source is *recoverable*: sam2 is a real local user on B, the very
+/// peer that delivered the edge. The redeemer's instance only breaks
+/// the bootstrap deadlock on its own side (it seeds the target stub);
+/// the target's home has no symmetric recovery, so sam1's "trusted by"
+/// silently stays empty.
+///
+/// This test pins the desired end-state — A hydrates the unknown source
+/// from the delivering peer and projects the edge — and is RED until
+/// that unknown-source recovery is wired. (`EndpointMissing` is
+/// currently passive: it waits for sam2's profile-rev to arrive, but
+/// nothing pushes it, and sam2's content is itself gated on this edge.)
+#[tokio::test]
+async fn unknown_source_edge_to_local_target_recovers_and_projects() {
+    let harness = MultiInstanceHarness::new(2).await;
+    // Mutual active peering: B pushes the edge to A, and A must be able
+    // to pull sam2's profile back from B to recover the missing source.
+    establish_active_peering(&harness, "a", "b").await;
+
+    let a = harness.instance("a");
+    let b = harness.instance("b");
+
+    // sam1: real local user on A (edge target, sam1's home).
+    let sam1 = setup_admin(&a.router, "sam1").await;
+    // sam2: real local user on B (edge source, sam2's home).
+    let sam2 = setup_admin(&b.router, "sam2").await;
+
+    // Give sam2 a published profile-rev on B. A real signup mints a
+    // genesis revision; the test bypass route does not, so without this
+    // the by-author backfill A runs to recover the unknown source would
+    // find no content to hydrate sam2's stub from.
+    let sam2_profile = send(
+        &b.router,
+        json_request(
+            Method::PATCH,
+            &format!("/api/users/{}", sam2.public_key_hex),
+            Some(&sam2.cookie),
+            &json!({ "bio": "sam2 on instance b" }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        sam2_profile.status(),
+        StatusCode::NO_CONTENT,
+        "sam2 publishes a profile revision on B",
+    );
+
+    // sam1 mints a trust code on A; sam2 redeems it on B. Redemption
+    // seeds a sam1 stub on B and signs a `sam2 -> sam1` trust-edge with
+    // sam2's key, storing the canonical bytes in B's `signed_objects`.
+    let mint = send(
+        &a.router,
+        get_request("/api/me/trust-code", Some(&sam1.cookie)),
+    )
+    .await;
+    assert_eq!(mint.status(), StatusCode::OK, "mint sam1's trust code");
+    let code = body_json(mint).await["code"]
+        .as_str()
+        .expect("code field")
+        .to_string();
+
+    let redeem = send(
+        &b.router,
+        json_request(
+            Method::POST,
+            "/api/users/by-trust-code",
+            Some(&sam2.cookie),
+            &json!({ "code": code }),
+        ),
+    )
+    .await;
+    assert_eq!(redeem.status(), StatusCode::OK, "sam2 redeems sam1's code");
+
+    // Pull the canonical `sam2 -> sam1` edge bytes B just signed and
+    // deliver them to A straight from B, mirroring the §7.4 forward.
+    let (payload, signature): (Vec<u8>, Vec<u8>) = sqlx::query_as(
+        "SELECT payload, signature FROM signed_objects \
+         WHERE inner_class = 'trust-edge' AND payload IS NOT NULL LIMIT 1",
+    )
+    .fetch_one(&b.state.db)
+    .await
+    .expect("sam2 -> sam1 edge bytes on B");
+    let body = encode_edges_body(&[encode_wire(&payload, &signature)]);
+
+    let (status, resp_body) = send_envelope_signed(
+        &harness,
+        "b",
+        "a",
+        Method::POST,
+        "/federation/v1/edges",
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        parse_results_body(&resp_body)[0].1,
+        "applied",
+        "§9.1 promises `applied` (durable bytes) even for an unknown-source edge",
+    );
+
+    // Desired: A recovers the unknown source sam2 from peer B and
+    // projects the edge, so sam1's "trusted by" shows sam2.
+    let sam1_pub = hex32(&sam1.public_key_hex);
+    let sam2_pub = hex32(&sam2.public_key_hex);
+    let projected = poll_until(2_000, || async {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM current_trust_edges cte \
+               JOIN users su ON su.id = cte.source_user \
+               JOIN users tu ON tu.id = cte.target_user \
+              WHERE su.public_key = ? AND tu.public_key = ? \
+                AND cte.trust_type = 'trust'",
+        )
+        .bind(&sam2_pub[..])
+        .bind(&sam1_pub[..])
+        .fetch_one(&a.state.db)
+        .await
+        .expect("count sam2 -> sam1 on A");
+        n > 0
+    })
+    .await;
+    assert!(
+        projected,
+        "A must hydrate the unknown source sam2 from peer B and project \
+         the edge into sam1's trusted-by",
+    );
+}
+
+/// Second gap (§11.9.5 follow-on): once A learns the unknown source sam2,
+/// sam2's *pre-existing* thread (authored on B before A had any interest)
+/// must also surface on A. The unknown-source recovery pulls sam2's
+/// by-author content; the OP `post-rev` is served, but a thread's OP post
+/// cannot project without its paired `thread-create`, which by-author has
+/// historically not served — so the thread stays invisible on A.
+#[tokio::test]
+async fn unknown_source_recovery_backfills_authors_existing_thread() {
+    let harness = MultiInstanceHarness::new(2).await;
+    establish_active_peering(&harness, "a", "b").await;
+
+    let a = harness.instance("a");
+    let b = harness.instance("b");
+
+    let sam1 = setup_admin(&a.router, "sam1").await;
+    let sam2 = setup_admin(&b.router, "sam2").await;
+
+    // sam2 publishes a profile-rev (stub hydration) and a thread on B,
+    // both BEFORE A learns sam2 exists.
+    let sam2_profile = send(
+        &b.router,
+        json_request(
+            Method::PATCH,
+            &format!("/api/users/{}", sam2.public_key_hex),
+            Some(&sam2.cookie),
+            &json!({ "bio": "sam2 on instance b" }),
+        ),
+    )
+    .await;
+    assert_eq!(sam2_profile.status(), StatusCode::NO_CONTENT);
+
+    let thread = send(
+        &b.router,
+        json_request(
+            Method::POST,
+            "/api/threads",
+            Some(&sam2.cookie),
+            &json!({
+                "room": "lounge",
+                "title": "sam2's pre-existing thread",
+                "body": "kumquat tangerine — authored before A knew sam2",
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        thread.status(),
+        StatusCode::CREATED,
+        "sam2 creates a thread on B"
+    );
+    let thread_id = body_json(thread).await["id"]
+        .as_str()
+        .expect("thread.id")
+        .to_string();
+
+    // Trust-code edge sam2 -> sam1, delivered to A (same as the sibling
+    // test). Recovery pulls sam2's by-author content as a side effect.
+    let mint = send(
+        &a.router,
+        get_request("/api/me/trust-code", Some(&sam1.cookie)),
+    )
+    .await;
+    assert_eq!(mint.status(), StatusCode::OK);
+    let code = body_json(mint).await["code"]
+        .as_str()
+        .expect("code field")
+        .to_string();
+
+    let redeem = send(
+        &b.router,
+        json_request(
+            Method::POST,
+            "/api/users/by-trust-code",
+            Some(&sam2.cookie),
+            &json!({ "code": code }),
+        ),
+    )
+    .await;
+    assert_eq!(redeem.status(), StatusCode::OK);
+
+    let (payload, signature): (Vec<u8>, Vec<u8>) = sqlx::query_as(
+        "SELECT payload, signature FROM signed_objects \
+         WHERE inner_class = 'trust-edge' AND payload IS NOT NULL LIMIT 1",
+    )
+    .fetch_one(&b.state.db)
+    .await
+    .expect("sam2 -> sam1 edge bytes on B");
+    let body = encode_edges_body(&[encode_wire(&payload, &signature)]);
+
+    let (status, _resp_body) = send_envelope_signed(
+        &harness,
+        "b",
+        "a",
+        Method::POST,
+        "/federation/v1/edges",
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Desired: A backfills sam2's thread-create AND OP post and projects
+    // both. The thread id is content-derived (Uuid::from_bytes of the
+    // thread-create's thread_id), so it matches B's id byte-for-byte.
+    // Asserting on the OP `posts` row is the stronger check — a `posts`
+    // row FK-requires its `threads` row, so it proves both the
+    // thread-create and the OP post-rev converged regardless of the order
+    // by-author returned them.
+    let projected_post = poll_until(3_000, || async {
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM posts WHERE thread = ?")
+            .bind(&thread_id)
+            .fetch_one(&a.state.db)
+            .await
+            .expect("count sam2's OP post on A");
+        n > 0
+    })
+    .await;
+    assert!(
+        projected_post,
+        "A must backfill and project sam2's pre-existing thread (and its \
+         OP post) once it learns sam2 via the unknown-source recovery",
     );
 }

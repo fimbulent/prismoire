@@ -646,7 +646,19 @@ pub(crate) async fn apply_one_object(
                     status: ContentStatus::Rejected(ContentRejectReason::SchemaInvalid),
                 });
             };
-            let _ = project_remote_thread_create(state, &mut tx, tc, arrived_from).await?;
+            let outcome =
+                project_remote_thread_create(state, &mut tx, tc, &canonical_hash, arrived_from)
+                    .await?;
+            // §9.5/§9.6 convergence: a freshly-landed thread row may
+            // unblock an OP `post-rev` that arrived first and FkMissing'd
+            // (by-author returns the pair with identical second-precision
+            // `received_at`, so order is nondeterministic). Re-project any
+            // orphaned post-revs for this thread now that its FK target
+            // exists.
+            if matches!(outcome, ProjectionOutcome::Projected) {
+                reproject_orphan_post_revs_for_thread(state, &mut tx, tc.thread_id, arrived_from)
+                    .await?;
+            }
             ContentStatus::Applied
         }
     };
@@ -1174,13 +1186,72 @@ async fn project_remote_profile(
     .execute(&mut **tx)
     .await?;
 
-    // Newly-hydrated stub may unblock pre-arrived post-rev /
-    // thread-create orphans for this author. (Currently a no-op
-    // pending the Phase 9.5 follow-up that fills it in; see
-    // `remote_users::sweep_pending_projections`.)
+    // Newly-hydrated stub may unblock pre-arrived trust-edge orphans
+    // for this author (§9.6 trust-edge sweep)...
     crate::federation::remote_users::sweep_pending_projections(tx, &prev.user).await?;
+    // ...and pre-arrived `thread-create` / `post-rev` content orphans
+    // (§9.5). by-author returns a freshly-trusted author's profile-rev,
+    // thread-create and post-rev with identical second-precision
+    // `received_at`, so a thread-create can land first and StubMissing
+    // before this profile-rev hydrates the stub. Re-project those now.
+    reproject_orphan_threads_for_author(state, tx, prev.user, arrived_from).await?;
 
     Ok(ProjectionOutcome::Projected)
+}
+
+/// §9.5 convergence sweep: re-attempt projection of orphaned
+/// `thread-create`s for `author_key` whose stub was just hydrated.
+///
+/// A `thread-create` that arrived before the author's `profile-rev`
+/// (which hydrates the `users` stub) StubMissing'd — the canonical
+/// bytes are durable in `signed_objects` but no `threads` row exists.
+/// Once the stub lands, this projects them, then chains into
+/// [`reproject_orphan_post_revs_for_thread`] so the OP `post-rev` (and
+/// same-thread replies) converge in the same transaction.
+async fn reproject_orphan_threads_for_author(
+    state: &Arc<AppState>,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    author_key: [u8; 32],
+    arrived_from: [u8; 32],
+) -> Result<(), sqlx::Error> {
+    let rows = sqlx::query!(
+        "SELECT canonical_hash AS \"canonical_hash!: Vec<u8>\", \
+                payload        AS \"payload!: Vec<u8>\", \
+                signature      AS \"signature!: Vec<u8>\" \
+           FROM signed_objects \
+          WHERE inner_class = 'thread-create' \
+            AND payload IS NOT NULL \
+            AND canonical_hash NOT IN ( \
+                SELECT thread_create_hash FROM threads \
+                 WHERE thread_create_hash IS NOT NULL)",
+    )
+    .fetch_all(&mut **tx)
+    .await?;
+
+    for row in rows {
+        let Ok(SignedPayload::ThreadCreate(tc)) = SignedPayload::parse(&row.payload) else {
+            continue;
+        };
+        if tc.author != author_key {
+            continue;
+        }
+        if row.canonical_hash.len() != 32 {
+            tracing::error!(
+                canonical_hash = %crate::users::hex_lower(&row.canonical_hash),
+                "signed_objects.canonical_hash has unexpected length",
+            );
+            continue;
+        }
+        let mut canonical = [0u8; 32];
+        canonical.copy_from_slice(&row.canonical_hash);
+        if matches!(
+            project_remote_thread_create(state, tx, &tc, &canonical, arrived_from).await?,
+            ProjectionOutcome::Projected
+        ) {
+            reproject_orphan_post_revs_for_thread(state, tx, tc.thread_id, arrived_from).await?;
+        }
+    }
+    Ok(())
 }
 
 /// Project a remote-authored `post-rev` into `posts` + `post_revisions`.
@@ -1342,6 +1413,91 @@ async fn project_remote_post_revision(
     Ok(ProjectionOutcome::Projected)
 }
 
+/// §9.5/§9.6 convergence sweep: re-attempt projection of orphaned
+/// `post-rev`s for a thread whose `threads` row just landed.
+///
+/// A `post-rev` that arrived before its paired `thread-create`
+/// FkMissing'd — [`apply_one_object`] stored the canonical bytes but
+/// inserted no `post_revisions` row. by-author returns the pair with
+/// identical second-precision `received_at`, so the OP post-rev can
+/// land first nondeterministically. Once the thread-create projects the
+/// FK target, this re-projects those orphans. Scans `signed_objects`
+/// for post-revs not yet in `post_revisions`, filters to this thread,
+/// and loops to a fixed point so the OP (revision 0) unblocks
+/// same-thread replies in a single call.
+async fn reproject_orphan_post_revs_for_thread(
+    state: &Arc<AppState>,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    thread_id: [u8; 16],
+    arrived_from: [u8; 32],
+) -> Result<(), sqlx::Error> {
+    let rows = sqlx::query!(
+        "SELECT canonical_hash AS \"canonical_hash!: Vec<u8>\", \
+                payload        AS \"payload!: Vec<u8>\", \
+                signature      AS \"signature!: Vec<u8>\" \
+           FROM signed_objects \
+          WHERE inner_class = 'post-rev' \
+            AND payload IS NOT NULL \
+            AND canonical_hash NOT IN ( \
+                SELECT canonical_hash FROM post_revisions \
+                 WHERE canonical_hash IS NOT NULL)",
+    )
+    .fetch_all(&mut **tx)
+    .await?;
+
+    let mut pending: Vec<(crate::signed::PostRevision, [u8; 32], Vec<u8>)> = Vec::new();
+    for row in rows {
+        let Ok(SignedPayload::PostRevision(prev)) = SignedPayload::parse(&row.payload) else {
+            // Schema-invalid bytes shouldn't sit in signed_objects (the
+            // receive path rejects before storing); skip defensively.
+            continue;
+        };
+        if prev.thread_id != thread_id {
+            continue;
+        }
+        if row.canonical_hash.len() != 32 {
+            tracing::error!(
+                canonical_hash = %crate::users::hex_lower(&row.canonical_hash),
+                "signed_objects.canonical_hash has unexpected length",
+            );
+            continue;
+        }
+        let mut canonical = [0u8; 32];
+        canonical.copy_from_slice(&row.canonical_hash);
+        pending.push((prev, canonical, row.signature));
+    }
+
+    // Fixed-point loop: a projected OP (revision 0) unblocks same-thread
+    // replies that FK to it. Each pass either projects at least one
+    // orphan (shrinking the set) or makes no progress (loop break).
+    // Non-`Projected` outcomes (StubMissing for a reply by an unknown
+    // author, etc.) stay durable in signed_objects for a future sweep.
+    loop {
+        let mut progressed = false;
+        let mut still_pending: Vec<(crate::signed::PostRevision, [u8; 32], Vec<u8>)> = Vec::new();
+        for (prev, canonical, signature) in std::mem::take(&mut pending) {
+            match project_remote_post_revision(
+                state,
+                tx,
+                &prev,
+                &signature,
+                &canonical,
+                arrived_from,
+            )
+            .await?
+            {
+                ProjectionOutcome::Projected => progressed = true,
+                _ => still_pending.push((prev, canonical, signature)),
+            }
+        }
+        pending = still_pending;
+        if !progressed || pending.is_empty() {
+            break;
+        }
+    }
+    Ok(())
+}
+
 /// Project a remote-authored `thread-create` into `threads` (and
 /// `rooms`, get-or-create on slug).
 ///
@@ -1359,6 +1515,7 @@ async fn project_remote_thread_create(
     state: &Arc<AppState>,
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     tc: &crate::signed::ThreadCreate,
+    canonical_hash: &[u8; 32],
     arrived_from: [u8; 32],
 ) -> Result<ProjectionOutcome, sqlx::Error> {
     if is_local_authoritative(tx, state, &tc.author, &arrived_from).await? {
@@ -1422,10 +1579,14 @@ async fn project_remote_thread_create(
         .as_deref()
         .map(crate::threads::normalize_url_for_fts);
 
+    // Record the thread-create's canonical hash so this remote-projected
+    // thread is itself serveable via the §10.5.1 by-author backfill (a
+    // second hop can pull it from us, not just from the home instance).
+    let thread_create_hash_db: &[u8] = canonical_hash.as_slice();
     sqlx::query!(
         "INSERT INTO threads (id, title, author, room, created_at, last_activity, \
-                              link_url, link_url_normalized, home_instance) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                              link_url, link_url_normalized, home_instance, thread_create_hash) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         thread_id_text,
         tc.title,
         user_id,
@@ -1435,6 +1596,7 @@ async fn project_remote_thread_create(
         tc.link_url,
         link_url_normalized,
         home_for_threads,
+        thread_create_hash_db,
     )
     .execute(&mut **tx)
     .await?;

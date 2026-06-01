@@ -377,8 +377,7 @@ fn forward_bfs(source: u32, graph: &CsrGraph, distrust_sets: &DistrustSets) -> V
 /// node's neighbors come from the cached `graph` directly.
 ///
 /// `max_depth` bounds the BFS hop count. Visibility-bearing callers pass
-/// `MAX_DEPTH`; the federation frontier closure (`forward_visible_closure`)
-/// passes shallower depths for the 2-hop edge-origin filter.
+/// `MAX_DEPTH`; shallower depths yield a tighter reachable set.
 fn forward_bfs_inner(
     source: u32,
     graph: &CsrGraph,
@@ -1330,65 +1329,6 @@ impl TrustGraph {
         self.distrust_sets
             .get(&viewer_id)
             .is_some_and(|s| s.contains(&target_id))
-    }
-
-    /// Forward "visible closure": the union over `sources` of users
-    /// reachable within `max_depth` hops with a combined trust score
-    /// ≥ [`MINIMUM_TRUST_THRESHOLD`] from at least one source.
-    ///
-    /// This is the set advertised in the federation frontier per
-    /// `docs/federation-protocol.md` §7.4 — "authors whose posts are
-    /// potentially visible to local users." A UUID belongs in the
-    /// closure iff some local source can read its posts under the
-    /// instance's visibility rules.
-    ///
-    /// Shares its scoring kernel with [`forward_scores`] via
-    /// `forward_bfs_inner`, so future changes to the trust algorithm
-    /// (decay, distrust handling, reliability) automatically tighten
-    /// or loosen the frontier in lockstep.
-    /// Each source contributes its own per-viewer BFS; reachables
-    /// whose combined score clears the threshold are unioned into
-    /// the returned set.
-    ///
-    /// Sources are included unconditionally — a local user is
-    /// trivially "visible to themselves," and their own posts must be
-    /// gossiped to peers that route by author. Sources not present in
-    /// the graph (no trust edges yet) are still added to the closure
-    /// via this unconditional insert; BFS expansion is simply skipped
-    /// for them.
-    ///
-    /// Cost: O(|sources|) BFS passes, each bounded by `max_depth` and
-    /// the per-viewer reachable subgraph. The frontier is recomputed
-    /// on a background schedule (not per-request), so the
-    /// multiplicative cost is amortised.
-    pub fn forward_visible_closure(&self, sources: &[Uuid], max_depth: u32) -> HashSet<Uuid> {
-        let mut closure: HashSet<Uuid> = HashSet::new();
-        let empty: HashSet<u32> = HashSet::new();
-
-        for src in sources {
-            // A local source is trivially visible to itself — always include.
-            closure.insert(*src);
-
-            let Some(src_id) = self.index.get_id(src) else {
-                continue;
-            };
-            let source_neighbors: Vec<u32> = self.forward.neighbors(src_id).to_vec();
-            let viewer_distrusts = self.distrust_sets.get(&src_id).unwrap_or(&empty);
-
-            for (target_id, score) in forward_bfs_inner(
-                src_id,
-                &self.forward,
-                &source_neighbors,
-                viewer_distrusts,
-                max_depth,
-            ) {
-                if score >= MINIMUM_TRUST_THRESHOLD {
-                    closure.insert(self.index.get_uuid(target_id));
-                }
-            }
-        }
-
-        closure
     }
 
     /// Compute forward trust scores from `reader` to all reachable users

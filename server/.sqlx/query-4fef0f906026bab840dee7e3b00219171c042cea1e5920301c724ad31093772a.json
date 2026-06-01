@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT user_key AS \"user_key!: Vec<u8>\", reverse_hop FROM frontier_users WHERE generation = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "user_key!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "reverse_hop",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "4fef0f906026bab840dee7e3b00219171c042cea1e5920301c724ad31093772a"
+}

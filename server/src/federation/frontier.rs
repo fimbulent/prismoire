@@ -832,58 +832,70 @@ impl From<sqlx::Error> for ComputeError {
     }
 }
 
-/// Build a fresh [`LocalFrontier`] from the current trust graph and
+/// Build a fresh [`LocalFrontier`] from the §8.1 reverse frontier and
 /// the `users` table.
 ///
-/// Seeds the BFS from `SELECT id FROM users WHERE home_instance IS
-/// NULL AND status = 'active'` — local active users only, in line
-/// with §7.4 ("authors whose posts are potentially visible to local
-/// users"). The 3-hop forward closure populates the `visible_filter`;
-/// the 2-hop closure populates the `expansion_filter` (§7.4: hop-3
-/// users contribute as edge *targets* but never as edge *sources*).
+/// The advertised filters describe B's **reverse frontier** — "the users
+/// who trust a B-local reader within MAX_DEPTH" (§8.1). That set is two
+/// parts unioned: B's local active roots (reverse-hop 0), and the remote
+/// trusters the §8.9/§8.12 reverse-BFS rebuild materialized into
+/// `frontier_users` (reverse-hop 1..3, stamped with the current
+/// generation). The two filters are hop slices: `visible_filter` carries
+/// the full frontier (hop 0..3) for content interest, `expansion_filter`
+/// the hop-0..2 subset for inbound-edge interest (the hop-3 rim is never
+/// expanded past, so soliciting edges that target it would be wasted).
 ///
-/// Each reachable UUID is resolved to its `users.public_key` (raw 32
-/// bytes) before being inserted into the filter — the wire key for
-/// federation is the user's signing pubkey, not their local UUID. A
-/// user with no `public_key` (legacy local-only account that never
-/// minted a passkey) is silently skipped: it has nothing for a peer
-/// to route content against.
+/// Roots are taken straight from `users.public_key` (raw 32 bytes — the
+/// federation wire key, not the local UUID); a user with no `public_key`
+/// (legacy local-only account that never minted a passkey) is silently
+/// skipped, as it has nothing for a peer to route content against.
 ///
 /// `version` is left as 0; the caller (`refresh_local_frontier`)
 /// decides whether to bump it based on whether the filter bytes
 /// actually changed.
-pub async fn compute_local_frontier(
-    db: &SqlitePool,
-    trust_graph: &TrustGraph,
-) -> Result<LocalFrontier, ComputeError> {
-    // 1. Seed set: all local active users.
-    let local_user_rows =
-        sqlx::query!("SELECT id FROM users WHERE home_instance IS NULL AND status = 'active'",)
-            .fetch_all(db)
-            .await?;
-    let local_users: Vec<uuid::Uuid> = local_user_rows
+pub async fn compute_local_frontier(db: &SqlitePool) -> Result<LocalFrontier, ComputeError> {
+    // 1. Roots: every local active user with a routable key, at
+    //    reverse-hop 0. A local user is unconditionally in both filters —
+    //    their own authored content must be advertised, and they are the
+    //    BFS seeds the reverse frontier grows out from. Keys without a
+    //    `public_key` (no passkey ever bound) cannot be routed against by
+    //    peers, so they are skipped rather than inserted as null bytes.
+    let root_rows = sqlx::query!(
+        "SELECT public_key AS \"public_key!: Vec<u8>\" FROM users \
+         WHERE home_instance IS NULL AND status = 'active' \
+           AND public_key IS NOT NULL AND length(public_key) = 32",
+    )
+    .fetch_all(db)
+    .await?;
+    let root_keys: Vec<[u8; 32]> = root_rows
         .into_iter()
-        .filter_map(|r| uuid::Uuid::parse_str(&r.id).ok())
+        .filter_map(|r| <[u8; 32]>::try_from(r.public_key.as_slice()).ok())
         .collect();
 
-    // 2. Forward closures via the trust graph. `forward_visible_closure`
-    //    shares the scoring kernel with `forward_scores` (decay, distrust
-    //    handling) and prunes paths whose combined score falls below
-    //    `MINIMUM_TRUST_THRESHOLD` — the same visibility cutoff the rest
-    //    of the app uses. Without this pruning the bloom would carry
-    //    users that are structurally invisible to every local reader,
-    //    wasting frontier bytes and inflating peers' fetch traffic.
-    //    Sources are included unconditionally (a local user is trivially
-    //    visible to themselves and must be advertised for author-keyed
-    //    routing).
-    let three_hop = trust_graph.forward_visible_closure(&local_users, 3);
-    let two_hop = trust_graph.forward_visible_closure(&local_users, 2);
+    // 2. Remote frontier nodes (§8.1). The reverse frontier — "the users
+    //    who trust a B-local reader within MAX_DEPTH" — is materialized by
+    //    the §8.9/§8.12 reverse-BFS rebuild into `frontier_users`, stamped
+    //    with the current generation and each node's reverse-hop. We read
+    //    that live set rather than recomputing here: the forward trust
+    //    graph cannot see remote-only trusters who reach a local reader
+    //    purely through federated `trust-edge`s (they have no local
+    //    `users` row), which is exactly the population the reverse-frontier
+    //    store exists to track. The two filters are hop slices of this set:
+    //    `visible` carries the full frontier (hop 0..3) for content
+    //    interest; `expansion` carries hop 0..2 for inbound-edge interest,
+    //    since the hop-3 rim is never expanded past.
+    let generation = frontier_store::current_generation(db).await?;
+    let stubs = frontier_store::load_frontier_stub_keys(db, generation).await?;
 
-    // 3. Resolve UUIDs → public keys. Users without a public_key (no
-    //    passkey ever bound) cannot be routed against by peers; skip
-    //    them entirely rather than inserting null-equivalent bytes.
-    let visible_keys = resolve_public_keys(db, &three_hop).await?;
-    let edge_keys = resolve_public_keys(db, &two_hop).await?;
+    // 3. Union roots into each slice. Local roots are not stubbed (they
+    //    are hop 0, not in `frontier_users`), so they are added here.
+    let mut visible_set: HashSet<[u8; 32]> = root_keys.iter().copied().collect();
+    visible_set.extend(stubs.visible.iter().copied());
+    let mut expansion_set: HashSet<[u8; 32]> = root_keys.into_iter().collect();
+    expansion_set.extend(stubs.expansion.iter().copied());
+
+    let visible_keys: Vec<[u8; 32]> = visible_set.iter().copied().collect();
+    let edge_keys: Vec<[u8; 32]> = expansion_set.into_iter().collect();
 
     let visible_filter = build_bloom_from_keys(&visible_keys);
     let expansion_filter = build_bloom_from_keys(&edge_keys);
@@ -1094,40 +1106,6 @@ async fn filter_remote_authors(
     Ok(remote)
 }
 
-/// Resolve a set of user UUIDs to their `public_key` BLOBs. Skips
-/// rows where `public_key` is NULL or not exactly 32 bytes — those
-/// can't be used as routing keys regardless.
-async fn resolve_public_keys(
-    db: &SqlitePool,
-    uuids: &HashSet<uuid::Uuid>,
-) -> Result<Vec<[u8; 32]>, sqlx::Error> {
-    if uuids.is_empty() {
-        return Ok(Vec::new());
-    }
-    // SQLite has no array-binding; issue a single query that pulls
-    // every user's public_key and filter in-memory. The local users
-    // table is small relative to the closure size — the join cost
-    // here is dominated by the closure size, not the user count.
-    let rows = sqlx::query!(
-        "SELECT id, public_key FROM users WHERE public_key IS NOT NULL AND length(public_key) = 32",
-    )
-    .fetch_all(db)
-    .await?;
-    let mut out = Vec::with_capacity(uuids.len());
-    for row in rows {
-        let Ok(id) = uuid::Uuid::parse_str(&row.id) else {
-            continue;
-        };
-        if !uuids.contains(&id) {
-            continue;
-        }
-        if let Ok(arr) = <[u8; 32]>::try_from(row.public_key.as_slice()) {
-            out.push(arr);
-        }
-    }
-    Ok(out)
-}
-
 /// Build a sized bloom filter populated with `keys`. Sizes `m` per
 /// `bloom::recommend_m(n, 1%)` and `k` per `bloom::recommend_k`.
 ///
@@ -1186,12 +1164,7 @@ pub async fn refresh_local_frontier(state: &AppState) -> Result<Arc<LocalFrontie
 pub async fn refresh_local_frontier_detailed(
     state: &AppState,
 ) -> Result<FrontierRefresh, ComputeError> {
-    let trust_graph = state
-        .trust_graph
-        .read()
-        .map(|g| Arc::clone(&g))
-        .unwrap_or_else(|poisoned| Arc::clone(&poisoned.into_inner()));
-    let mut next = compute_local_frontier(&state.db, &trust_graph).await?;
+    let mut next = compute_local_frontier(&state.db).await?;
 
     let mut guard = state
         .local_frontier
@@ -1863,6 +1836,19 @@ pub async fn operator_announce_frontier(
 /// All federation I/O is `tokio::spawn`ed so neither a slow peer nor a
 /// large backfill can stall the next rebuild's fanout.
 pub async fn frontier_fanout_loop(state: Arc<AppState>, frontier_dirty: Arc<tokio::sync::Notify>) {
+    // The in-memory `local_frontier` boots `LocalFrontier::empty()`, so the
+    // first refresh that changes diffs the freshly-computed closure against
+    // an empty set — `added_visible_keys` is then *every* visible remote
+    // author, not the handful that genuinely just entered. Firing Trigger 3
+    // for that artifact turns every process restart into an O(visible
+    // authors) burst of `/backfill/by-author` GETs across the peer set. We
+    // suppress proactive backfill on exactly that first changed rebuild:
+    // peers still learn our interest via the Trigger-2 re-announce below, so
+    // future content flows by push, and any pre-existing backlog is the §7.7
+    // "residual missed-push gap" the spec already declares best-effort. A
+    // precise restart-aware catch-up (a real per-author since-watermark) is
+    // tracked as a federation-protocol open question.
+    let mut cold_start_backfill_suppressed = false;
     loop {
         frontier_dirty.notified().await;
 
@@ -1959,6 +1945,22 @@ pub async fn frontier_fanout_loop(state: Arc<AppState>, frontier_dirty: Arc<toki
             Err(e) => {
                 tracing::warn!(error = %e, "frontier fanout: db error listing active peers");
             }
+        }
+
+        // First changed rebuild after boot: the diff is against the empty
+        // boot frontier, so `added_visible_keys` is every visible author,
+        // not a real delta. Skip Trigger 3 this once (see the loop-top
+        // comment) — the Trigger-2 re-announce above already re-established
+        // our interest with every peer.
+        if !cold_start_backfill_suppressed {
+            cold_start_backfill_suppressed = true;
+            tracing::info!(
+                added = refresh.added_visible_keys.len(),
+                "frontier fanout: suppressing proactive by-author backfill on \
+                 first post-boot rebuild (cold-start diff against empty frontier); \
+                 relying on push + reactive backfill",
+            );
+            continue;
         }
 
         // Trigger 3 — proactive by-author backfill for newly-frontier'd

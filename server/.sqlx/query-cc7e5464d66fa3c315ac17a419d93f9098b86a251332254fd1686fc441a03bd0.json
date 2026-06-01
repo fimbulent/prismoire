@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 1 AS \"x!: i64\" FROM users WHERE public_key = ? LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "x!: i64",
+        "ordinal": 0,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "cc7e5464d66fa3c315ac17a419d93f9098b86a251332254fd1686fc441a03bd0"
+}

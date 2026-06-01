@@ -84,14 +84,17 @@ pub struct FrontierEdgeRef {
 /// orphan buffering (`pending_trust_edges`), and signature verification
 /// are the receive path's responsibility (§9.1) and are layered on in a
 /// later sub-slice.
-pub async fn insert_frontier_edge(
-    db: &SqlitePool,
+pub async fn insert_frontier_edge<'e, E>(
+    db: E,
     edge: &TrustEdge,
     canonical_hash: &[u8; 32],
     signature: &[u8; 64],
     payload: &[u8],
     generation: i64,
-) -> Result<bool, sqlx::Error> {
+) -> Result<bool, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     let canonical = canonical_hash.as_slice();
     let source = edge.from_key.as_slice();
     let target = edge.to_key.as_slice();
@@ -259,11 +262,60 @@ pub const FRONTIER_GC_K: i64 = 3;
 /// `frontier_generation` row. The row is seeded at migration time, so this
 /// always finds it; a missing row is a corrupted DB and surfaces as the
 /// `RowNotFound` error rather than being papered over with a default.
-pub async fn current_generation(db: &SqlitePool) -> Result<i64, sqlx::Error> {
+pub async fn current_generation<'e, E>(db: E) -> Result<i64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     let row = sqlx::query!("SELECT generation FROM frontier_generation WHERE id = 1")
         .fetch_one(db)
         .await?;
     Ok(row.generation)
+}
+
+/// The §8.1 advertised-filter key sets reconstructed from the live
+/// `frontier_users` stubs of one rebuild generation. Both sets are
+/// *remote* keys only — local roots (hop 0) are never stubbed and are
+/// unioned in by the caller ([`compute_local_frontier`]).
+#[derive(Debug, Default)]
+pub struct FrontierStubKeys {
+    /// Stubs at reverse-hop 1..3 — the content-interest slice. A peer
+    /// ships content from author `X` to us iff `X` is in `visible`
+    /// (plus our local roots).
+    pub visible: Vec<[u8; 32]>,
+    /// Stubs at reverse-hop 1..2 — the edge-interest slice we still
+    /// expand past. Strictly contained in `visible`; we never expand the
+    /// hop-3 rim, so soliciting edges that target it would be wasted.
+    pub expansion: Vec<[u8; 32]>,
+}
+
+/// Load the remote frontier stub keys live in `generation`, split into
+/// the §8.1 visible (hop ≤3) and expansion (hop ≤2) slices. Reads only
+/// rows stamped with the supplied generation — i.e. nodes the most
+/// recent rebuild marked live — so swept-but-not-yet-deleted stubs from
+/// older generations are excluded. Rows with a malformed (non-32-byte)
+/// key are skipped defensively.
+pub async fn load_frontier_stub_keys(
+    db: &SqlitePool,
+    generation: i64,
+) -> Result<FrontierStubKeys, sqlx::Error> {
+    let rows = sqlx::query!(
+        "SELECT user_key AS \"user_key!: Vec<u8>\", reverse_hop \
+         FROM frontier_users WHERE generation = ?",
+        generation,
+    )
+    .fetch_all(db)
+    .await?;
+    let mut out = FrontierStubKeys::default();
+    for row in rows {
+        let Some(key) = to_array_32(&row.user_key) else {
+            continue;
+        };
+        out.visible.push(key);
+        if row.reverse_hop <= 2 {
+            out.expansion.push(key);
+        }
+    }
+    Ok(out)
 }
 
 /// Advance the rebuild generation by one (§8.12) and return the new value.
@@ -518,7 +570,7 @@ pub async fn reverse_frontier_bfs(
                 continue;
             }
 
-            match materialize_frontier_node(db, &source, generation).await? {
+            match materialize_frontier_node(db, &source, generation, depth + 1).await? {
                 NodeMaterialization::Local => frontier.locals_skipped += 1,
                 NodeMaterialization::Stub => frontier.stubs_materialized += 1,
                 NodeMaterialization::Deferred => frontier.stubs_deferred += 1,
@@ -1008,17 +1060,22 @@ enum NodeMaterialization {
 }
 
 /// Decide and apply the §8.11 materialization for one reached key.
+///
+/// `reverse_hop` is the key's shortest BFS distance from a local root,
+/// recorded on the stub so the §8.1 filter split can be reconstructed.
 async fn materialize_frontier_node(
     db: &SqlitePool,
     key: &[u8; 32],
     generation: i64,
+    reverse_hop: u32,
 ) -> Result<NodeMaterialization, sqlx::Error> {
     if is_local_user(db, key).await? {
         return Ok(NodeMaterialization::Local);
     }
     match resolve_frontier_home(db, key).await? {
         Some((home_key, home_domain)) => {
-            upsert_frontier_user_stub(db, key, &home_key, &home_domain, generation).await?;
+            upsert_frontier_user_stub(db, key, &home_key, &home_domain, generation, reverse_hop)
+                .await?;
             Ok(NodeMaterialization::Stub)
         }
         None => Ok(NodeMaterialization::Deferred),
@@ -1129,32 +1186,42 @@ async fn resolve_frontier_home(
 }
 
 /// Upsert a `frontier_users` stub (§8.11) for `key`, refreshing its home
-/// pointer and stamping the current §8.12 GC generation. `display_name`
-/// is intentionally untouched — it is carried opportunistically by
-/// gossip, not by edges, so it stays at whatever a prior profile sync
-/// supplied (NULL until then).
+/// pointer, its §8.1 reverse-BFS hop distance, and stamping the current
+/// §8.12 GC generation. `display_name` is intentionally untouched — it is
+/// carried opportunistically by gossip, not by edges, so it stays at
+/// whatever a prior profile sync supplied (NULL until then).
+///
+/// `reverse_hop` is the node's shortest distance from any local root in
+/// this rebuild's BFS (1..3). The visited-gate in [`reverse_frontier_bfs`]
+/// guarantees a node is materialized once per pass at its shortest hop, so
+/// the value written is the slice boundary `compute_local_frontier` reads
+/// to split the visible (hop ≤3) and expansion (hop ≤2) filters.
 async fn upsert_frontier_user_stub(
     db: &SqlitePool,
     key: &[u8; 32],
     home_key: &[u8; 32],
     home_domain: &str,
     generation: i64,
+    reverse_hop: u32,
 ) -> Result<(), sqlx::Error> {
     let key_slice: &[u8] = key.as_slice();
     let home_key_slice: &[u8] = home_key.as_slice();
+    let reverse_hop = i64::from(reverse_hop);
     sqlx::query!(
         "INSERT INTO frontier_users \
-            (user_key, home_instance_key, home_instance_domain, generation) \
-         VALUES (?, ?, ?, ?) \
+            (user_key, home_instance_key, home_instance_domain, generation, reverse_hop) \
+         VALUES (?, ?, ?, ?, ?) \
          ON CONFLICT(user_key) DO UPDATE SET \
              home_instance_key = excluded.home_instance_key, \
              home_instance_domain = excluded.home_instance_domain, \
              generation = excluded.generation, \
+             reverse_hop = excluded.reverse_hop, \
              updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
         key_slice,
         home_key_slice,
         home_domain,
         generation,
+        reverse_hop,
     )
     .execute(db)
     .await?;
@@ -2008,10 +2075,10 @@ mod tests {
     #[tokio::test]
     async fn sweep_evicts_stale_stubs_on_the_same_window() {
         let pool = fresh_pool().await;
-        upsert_frontier_user_stub(&pool, &[1u8; 32], &[7u8; 32], "old.example", 0)
+        upsert_frontier_user_stub(&pool, &[1u8; 32], &[7u8; 32], "old.example", 0, 1)
             .await
             .unwrap();
-        upsert_frontier_user_stub(&pool, &[2u8; 32], &[7u8; 32], "fresh.example", 4)
+        upsert_frontier_user_stub(&pool, &[2u8; 32], &[7u8; 32], "fresh.example", 4, 1)
             .await
             .unwrap();
         assert_eq!(stub_count(&pool).await, 2);

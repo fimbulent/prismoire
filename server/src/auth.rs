@@ -234,6 +234,159 @@ pub async fn bootstrap_local_user(
     Ok(())
 }
 
+/// WebAuthn credential half of a [`LocalUserBirth`]. Absent on the
+/// `test-auth` bypass routes, which skip the passkey ceremony.
+pub struct BirthCredential<'a> {
+    /// Pre-allocated UUID for the new `credentials.id` row.
+    pub credential_id: &'a str,
+    /// Authenticator-issued credential handle (`credentials.credential_id`).
+    pub passkey_credential_id: &'a [u8],
+    /// Serialised [`webauthn_rs::prelude::Passkey`] (`credentials.public_key`).
+    pub passkey_bytes: &'a [u8],
+}
+
+/// Identity inputs for [`complete_local_user_birth`].
+pub struct LocalUserBirth<'a> {
+    /// Pre-allocated UUID for the new `users.id` row.
+    pub user_id: &'a str,
+    /// Validated display name.
+    pub display_name: &'a str,
+    /// Confusable skeleton from [`crate::display_name::display_name_skeleton`].
+    pub display_name_skeleton: &'a str,
+    /// `users.signup_method` value (`'admin'`, `'invite'`, …).
+    pub signup_method: &'a str,
+    /// `users.role` — `"admin"` for the setup path, `"user"` otherwise.
+    pub role: &'a str,
+    /// Raw 32-byte Ed25519 verifying key (must match `signing_key`).
+    pub public_key: &'a [u8],
+    /// Per-user Ed25519 private key.
+    pub signing_key: &'a ed25519_dalek::SigningKey,
+    /// WebAuthn credential to bind, or `None` for the test bypass
+    /// routes (no passkey material in tests).
+    pub credential: Option<BirthCredential<'a>>,
+}
+
+/// Birth artifacts the caller floods post-commit (real handlers) or
+/// discards (test routes drive federation by hand).
+pub struct LocalUserBirthOutput {
+    /// Self-signed genesis `profile` revision (display-name carrier).
+    /// Flood with `ForwardingClass::Authored`, routing key = user pubkey.
+    pub genesis_profile: crate::signing::SigningOutput,
+    /// §12.8 genesis `move` (home declaration) canonical hash.
+    pub genesis_move_hash: [u8; 32],
+    /// Wire-encoded genesis move. Flood with `ForwardingClass::Move`,
+    /// routing key = user pubkey.
+    pub genesis_move_wire: Vec<u8>,
+}
+
+/// Write the complete, drift-free birth write-set for a user born **on
+/// this instance** and return the objects the caller must flood
+/// post-commit.
+///
+/// Every locally-born identity — admin setup, invited signup, and their
+/// `test-auth` bypass mirrors — shares one invariant write-set:
+///
+/// 1. the `users` row,
+/// 2. the WebAuthn `credentials` row (absent on the test routes),
+/// 3. the `signing_keys` row,
+/// 4. a self-signed **genesis `profile` revision** — the only signed
+///    object carrying `display_name`, hence the one a peer needs to
+///    hydrate this identity's stub (§11.9.5), and
+/// 5. a self-counter-signed **genesis `move`** — the §12.8 home
+///    declaration `(key → this instance)` that lets peers learn where
+///    the identity lives and adjudicate root-advertisements.
+///
+/// Folding all five into one helper is deliberate: (4) and (5) are
+/// identity-declaration objects that *must* be byte-identical across
+/// every birth path, yet they previously lived inline in each handler
+/// and silently diverged — an account that skipped (4) stayed
+/// unfederatable (no stub hydration); one that skipped (5) stayed
+/// home-less (no move chain). The bypass routes re-implemented the
+/// write-set by hand and drifted hardest. One helper, four callers,
+/// nothing left to diverge.
+///
+/// This is the **birth** primitive, distinct from
+/// [`bootstrap_local_user`], which the §13 cross-instance registration
+/// path uses to re-home an *already-born* identity: that path must
+/// **not** mint genesis (4)/(5), or it would fork the profile and move
+/// chains rooted at the identity's true birth instance.
+///
+/// Path-specific follow-up (trust edges with an inviter, session
+/// minting, the setup-guard flag) stays with the caller, which must:
+/// - hold an open transaction,
+/// - flood [`LocalUserBirthOutput`] post-commit (real handlers) or
+///   discard it (test routes),
+/// - pass `instance_key` / `instance_domain` from [`AppState`].
+pub async fn complete_local_user_birth(
+    conn: &mut sqlx::SqliteConnection,
+    instance_key: &crate::federation::instance_key::InstanceKey,
+    instance_domain: &str,
+    created_at_ms: u64,
+    input: &LocalUserBirth<'_>,
+) -> Result<LocalUserBirthOutput, AppError> {
+    sqlx::query!(
+        "INSERT INTO users (id, display_name, display_name_skeleton, signup_method, role, public_key) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+        input.user_id,
+        input.display_name,
+        input.display_name_skeleton,
+        input.signup_method,
+        input.role,
+        input.public_key,
+    )
+    .execute(&mut *conn)
+    .await
+    .map_err(|err| {
+        tracing::error!(
+            display_name = %input.display_name,
+            error = %err,
+            "complete_local_user_birth: user creation constraint failure",
+        );
+        AppError::from(err)
+    })?;
+
+    if let Some(cred) = &input.credential {
+        sqlx::query!(
+            "INSERT INTO credentials (id, user_id, credential_id, public_key, sign_count) \
+             VALUES (?, ?, ?, ?, 0)",
+            cred.credential_id,
+            input.user_id,
+            cred.passkey_credential_id,
+            cred.passkey_bytes,
+        )
+        .execute(&mut *conn)
+        .await?;
+    }
+
+    signing::store_signing_key(&mut *conn, input.user_id, input.signing_key).await?;
+
+    // (4) Display-name carrier; without it peers cannot hydrate the
+    // identity's stub (§11.9.5 bootstrap recovery).
+    let genesis_profile = signing::mint_genesis_profile_revision(
+        &mut *conn,
+        input.user_id,
+        input.display_name,
+        created_at_ms,
+    )
+    .await?;
+
+    // (5) §12.8 home declaration `(key → this instance)`.
+    let (genesis_move_hash, genesis_move_wire) = mint_local_user_genesis(
+        &mut *conn,
+        instance_key,
+        instance_domain,
+        input.signing_key,
+        created_at_ms,
+    )
+    .await?;
+
+    Ok(LocalUserBirthOutput {
+        genesis_profile,
+        genesis_move_hash,
+        genesis_move_wire,
+    })
+}
+
 /// Parse a user status string from the DB, logging and falling back to
 /// `Active` on malformed data.
 ///
@@ -421,18 +574,24 @@ pub async fn signup_complete(
     // built account.
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
 
-    bootstrap_local_user(
+    let birth = complete_local_user_birth(
         &mut tx,
-        &LocalUserBootstrap {
+        &state.instance_key,
+        &state.instance_domain,
+        created_at_ms,
+        &LocalUserBirth {
             user_id: &user_id,
             display_name: &display_name,
             display_name_skeleton: &skeleton,
             signup_method: "invite",
+            role: "user",
             public_key,
             signing_key: &signing_key,
-            credential_id: &cred_id,
-            passkey_credential_id: cred_id_bytes,
-            passkey_bytes: &passkey_bytes,
+            credential: Some(BirthCredential {
+                credential_id: &cred_id,
+                passkey_credential_id: cred_id_bytes,
+                passkey_bytes: &passkey_bytes,
+            }),
         },
     )
     .await?;
@@ -517,32 +676,33 @@ pub async fn signup_complete(
     )
     .await?;
 
-    // §5.1/§12.8 genesis declaration. This instance is the account's
-    // birth instance (it was created here at this signup), so we mint
-    // and self-counter-sign a genesis move establishing `(key → us)`
-    // with no predecessor. Done in-tx so a rollback nukes the genesis
-    // alongside the identity; flooded post-commit (below) so a slow
-    // fanout can't hold the write transaction.
-    let (genesis_hash, genesis_wire) = mint_local_user_genesis(
-        &mut tx,
-        &state.instance_key,
-        &state.instance_domain,
-        &signing_key,
-        created_at_ms,
-    )
-    .await?;
-
     tx.commit().await?;
+
+    // §7.5 originator-side fanout for the genesis profile revision.
+    // ForwardingClass::Authored, routing key = user pubkey (self-signed).
+    let profile_wire = crate::federation::envelope::encode_signed_object(
+        &birth.genesis_profile.payload,
+        &birth.genesis_profile.signature,
+    );
+    forward_signed_object(
+        state.clone(),
+        birth.genesis_profile.canonical_hash,
+        ForwardingClass::Authored,
+        birth.genesis_profile.public_key.to_vec(),
+        profile_wire,
+        None,
+    )
+    .await;
 
     // §12.2 unconditional flood, post-commit. `arrived_from = None`
     // because we are the originator. Routing key for moves is the
     // moving identity K (§7.4 + §12) — here the new user's pubkey.
     forward_signed_object(
         state.clone(),
-        genesis_hash,
+        birth.genesis_move_hash,
         ForwardingClass::Move,
         verifying_bytes.to_vec(),
-        genesis_wire,
+        birth.genesis_move_wire,
         None,
     )
     .await;

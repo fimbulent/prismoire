@@ -52,7 +52,13 @@
 //!    - `EndpointMissing` → `applied`. The Phase 9.6 sweep
 //!      (`remote_users::sweep_pending_projections`) catches the
 //!      projection up when the missing endpoint's profile-rev
-//!      hydrates a stub for it.
+//!      hydrates a stub for it. As of §11.9.5, an `EndpointMissing`
+//!      edge toward a *local* user whose *source* we've never seen is
+//!      no longer purely passive: the handler spawns a §10.5
+//!      by-author backfill (`prior_home_recovery::proactive_author_backfill`)
+//!      after commit to pull the source's profile-rev, breaking the
+//!      trust-code bootstrap deadlock where the source's content is
+//!      itself gated on this edge.
 //!
 //! After the loop over all edges has finished, the batch-level
 //! handler issues a single `trust_graph_notify` — the rebuild loop
@@ -375,32 +381,37 @@ pub(crate) async fn apply_one_edge(
     wire_bytes: &[u8],
     arrived_from: [u8; 32],
 ) -> Result<EdgeResult, sqlx::Error> {
-    let (result, backfill_target) = apply_one_edge_inner(state, wire_bytes, arrived_from).await?;
-    if let Some((source_key, target_key, prior)) = backfill_target {
-        // Phase 9.8: gate spawns behind a process-wide concurrency
-        // semaphore. A burst of fresh orphans (e.g. peer re-pushing a
-        // long chain from the tail) would otherwise launch one
-        // outbound `GET /edges/backfill` per orphan. When the cap is
-        // saturated we skip the spawn — the buffered orphan stays in
-        // `pending_trust_edges`, and either the next live push (which
-        // re-triggers via the `first_for_gap` flag) or the §9.6 sweep
-        // tick will eventually drive recovery.
-        match crate::federation::edge_backfill::try_acquire_outbound_permit() {
+    let (result, recovery) = apply_one_edge_inner(state, wire_bytes, arrived_from).await?;
+    match recovery {
+        // Phase 9.8 §9.3: a fresh orphan whose chain predecessor we
+        // lack — pull the gap from the source's home. Gated behind a
+        // process-wide concurrency semaphore: a burst of fresh orphans
+        // (e.g. peer re-pushing a long chain from the tail) would
+        // otherwise launch one outbound `GET /edges/backfill` per
+        // orphan. When the cap is saturated we skip the spawn — the
+        // buffered orphan stays in `pending_trust_edges`, and either the
+        // next live push (which re-triggers via the `first_for_gap`
+        // flag) or the §9.6 sweep tick will eventually drive recovery.
+        Some(EdgeRecovery::Predecessor {
+            source,
+            target,
+            prior,
+        }) => match crate::federation::edge_backfill::try_acquire_outbound_permit() {
             Some(permit) => {
                 let state_for_backfill = state.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
                     if let Err(e) = crate::federation::edge_backfill::request_edge_predecessor(
                         state_for_backfill,
-                        source_key,
-                        target_key,
+                        source,
+                        target,
                         prior,
                     )
                     .await
                     {
                         tracing::warn!(
-                            source = %crate::users::hex_lower(&source_key),
-                            target = %crate::users::hex_lower(&target_key),
+                            source = %crate::users::hex_lower(&source),
+                            target = %crate::users::hex_lower(&target),
                             error = %e,
                             "autonomous edge backfill failed; will rely on next push to retrigger",
                         );
@@ -409,27 +420,81 @@ pub(crate) async fn apply_one_edge(
             }
             None => {
                 tracing::debug!(
-                    source = %crate::users::hex_lower(&source_key),
-                    target = %crate::users::hex_lower(&target_key),
+                    source = %crate::users::hex_lower(&source),
+                    target = %crate::users::hex_lower(&target),
                     "outbound backfill concurrency cap reached; skipping spawn (orphan retains buffered, will retrigger on next push or §9.6 sweep)",
                 );
             }
+        },
+        // §11.9.5 reverse bootstrap: an inbound trust-edge toward a local
+        // user whose *source* we have never seen projects as
+        // `EndpointMissing` and sits durable-but-unprojected. `Deferred`
+        // actively recovers its gap; `EndpointMissing` historically did
+        // not, so a trust-coded `S → local` edge would never surface in
+        // the local user's "trusted by" (the source's profile-rev is
+        // itself gated on this very edge — a bootstrap deadlock). Pull
+        // the source's content via §10.5 by-author so its stub hydrates
+        // and `sweep_pending_projections` projects the stored edge. Same
+        // outbound-backfill budget as the §9.3 path above.
+        Some(EdgeRecovery::UnknownSource { source }) => {
+            match crate::federation::edge_backfill::try_acquire_outbound_permit() {
+                Some(permit) => {
+                    let state_for_backfill = state.clone();
+                    tokio::spawn(async move {
+                        let _permit = permit;
+                        crate::federation::prior_home_recovery::proactive_author_backfill(
+                            &state_for_backfill,
+                            source,
+                        )
+                        .await;
+                    });
+                }
+                None => {
+                    tracing::debug!(
+                        source = %crate::users::hex_lower(&source),
+                        "outbound backfill concurrency cap reached; skipping unknown-source hydration (will retrigger on next push or §9.6 sweep)",
+                    );
+                }
+            }
         }
+        None => {}
     }
     Ok(result)
 }
 
-/// Core per-edge state machine. Returns `(EdgeResult, Option<(source,
-/// target, prior_edge_hash)>)` — the second element is `Some` iff the
-/// receive produced a fresh `Deferred` orphan that the outer wrapper
-/// should fire an autonomous §9.3 backfill for. `None` on every other
-/// outcome (and on Deferred-but-duplicate, where the gap already has
-/// a buffered orphan).
+/// Post-commit recovery the outer [`apply_one_edge`] wrapper should
+/// spawn for a freshly-received edge. Carried out of
+/// [`apply_one_edge_inner`] rather than spawned there because the spawned
+/// future re-enters the receive path — putting the spawn inside the inner
+/// helper would make its own future's Send-ness depend on itself.
+pub(crate) enum EdgeRecovery {
+    /// §9.3 chain-continuity: a fresh `Deferred` orphan. Fetch the
+    /// missing predecessor of the `(source, target)` chain from the
+    /// source's home.
+    Predecessor {
+        source: [u8; 32],
+        target: [u8; 32],
+        prior: [u8; 32],
+    },
+    /// §11.9.5 reverse bootstrap: an `EndpointMissing` edge toward a
+    /// local user whose `source` (the signer) we have never seen. Pull
+    /// the source's content via §10.5 by-author so its stub hydrates.
+    UnknownSource { source: [u8; 32] },
+}
+
+/// Core per-edge state machine. Returns `(EdgeResult,
+/// Option<EdgeRecovery>)` — the second element is `Some` iff the receive
+/// produced an outcome the outer wrapper should fire post-commit recovery
+/// for: a fresh `Deferred` orphan (→ [`EdgeRecovery::Predecessor`], §9.3
+/// chain backfill) or an `EndpointMissing` edge toward a local user whose
+/// source we have never seen (→ [`EdgeRecovery::UnknownSource`], §11.9.5
+/// reverse bootstrap). `None` on every other outcome (and on
+/// Deferred-but-duplicate, where the gap already has a buffered orphan).
 pub(crate) async fn apply_one_edge_inner(
     state: &Arc<AppState>,
     wire_bytes: &[u8],
     arrived_from: [u8; 32],
-) -> Result<(EdgeResult, Option<([u8; 32], [u8; 32], [u8; 32])>), sqlx::Error> {
+) -> Result<(EdgeResult, Option<EdgeRecovery>), sqlx::Error> {
     // Step 1: WireFormat decode. A failure here means we don't have a
     // canonical payload to hash for the result row's `canonical_hash`
     // field, so we fall back to hashing the raw input bytes — the
@@ -553,14 +618,21 @@ pub(crate) async fn apply_one_edge_inner(
     // persistence policy below is shaped by the result: durable for
     // every status except `Deferred` (per §9.1, the orphan re-arrives
     // via re-push or §9.3 backfill).
-    let projection =
-        try_project_trust_edge(&mut tx, &trust_edge, &canonical_hash, &signature_bytes).await?;
+    let projection = try_project_trust_edge(
+        &mut tx,
+        &trust_edge,
+        &canonical_hash,
+        &signature_bytes,
+        &payload_bytes,
+    )
+    .await?;
 
-    // Phase 9.8 dispatch flag: set on `Deferred` *and* on the row
-    // being newly enqueued (not a duplicate). Carries the `prior`
-    // hash needed for the autonomous §9.3 backfill so the outer
-    // wrapper can spawn the request after the tx commits.
-    let mut backfill_prior: Option<[u8; 32]> = None;
+    // Post-commit recovery signal for the outer wrapper. Set by the
+    // `Deferred` branch (§9.3 predecessor backfill) and the
+    // `EndpointMissing` branch (§11.9.5 unknown-source hydration); both
+    // carry the keys the wrapper needs to spawn the outbound request
+    // after the tx commits.
+    let mut recovery: Option<EdgeRecovery> = None;
 
     let status = match projection {
         TrustEdgeProjection::Projected => {
@@ -596,6 +668,46 @@ pub(crate) async fn apply_one_edge_inner(
                 &canonical_hash,
             )
             .await?;
+
+            // §11.9.5 reverse bootstrap. An `EndpointMissing` whose
+            // *target* is one of our live local users but whose *source*
+            // we've never seen is the trust-code deadlock: the source's
+            // profile-rev (which would hydrate its stub and let
+            // `sweep_pending_projections` project this edge) is itself
+            // gated on a trust path that runs through this very edge.
+            // Nothing else pushes the source's content our way, so the
+            // local user's "trusted by" would stay empty forever. Signal
+            // the outer wrapper to pull the source's content via §10.5
+            // by-author. Scoped narrowly (target local + source unknown)
+            // so stranger→stranger edges stay passive and we don't
+            // amplify backfill for edges that can't touch a local view.
+            let to_slice: &[u8] = &trust_edge.to_key;
+            let from_slice: &[u8] = &trust_edge.from_key;
+            let target_is_local = sqlx::query_scalar!(
+                "SELECT 1 AS \"x!: i64\" FROM users \
+                 WHERE public_key = ? AND home_instance IS NULL AND status = 'active' LIMIT 1",
+                to_slice,
+            )
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_some();
+            let source_known = sqlx::query_scalar!(
+                "SELECT 1 AS \"x!: i64\" FROM users WHERE public_key = ? LIMIT 1",
+                from_slice,
+            )
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_some();
+            if target_is_local && !source_known {
+                recovery = Some(EdgeRecovery::UnknownSource {
+                    source: trust_edge.from_key,
+                });
+            }
+            // No frontier_edges insert here: an `EndpointMissing` edge is
+            // not yet active in `trust_edges`, so it has no business in
+            // the reverse-frontier store. It projects (and lands in the
+            // store) via `try_project_trust_edge` on the §9.6 sweep once
+            // the missing stub hydrates.
             EdgeStatus::Applied
         }
         TrustEdgeProjection::ChainFork => {
@@ -660,21 +772,17 @@ pub(crate) async fn apply_one_edge_inner(
             )
             .await?;
             if first_for_gap {
-                backfill_prior = Some(prior);
+                recovery = Some(EdgeRecovery::Predecessor {
+                    source: trust_edge.from_key,
+                    target: trust_edge.to_key,
+                    prior,
+                });
             }
             EdgeStatus::Deferred
         }
     };
 
     tx.commit().await?;
-
-    // Phase 9.8: surface "backfill needed" to the outer wrapper. The
-    // wrapper is the one that spawns `request_edge_predecessor` — the
-    // spawn deliberately lives there to break the cycle between this
-    // function's Send check and the §9.3 issuer's (which calls back
-    // into this function via the re-feed path).
-    let backfill_target =
-        backfill_prior.map(|prior| (trust_edge.from_key, trust_edge.to_key, prior));
 
     // §7.5 fan the freshly-applied edge out to interested peers.
     // Originator-vs-relay is purely a matter of `arrived_from`: when
@@ -702,7 +810,7 @@ pub(crate) async fn apply_one_edge_inner(
             canonical_hash,
             status,
         },
-        backfill_target,
+        recovery,
     ))
 }
 

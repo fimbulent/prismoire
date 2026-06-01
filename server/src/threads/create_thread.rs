@@ -225,6 +225,19 @@ pub async fn create_thread(
     )
     .await?;
 
+    // Record the thread-create's canonical hash on the thread row so the
+    // §10.5.1 by-author backfill can serve it (the thread-create has no
+    // other queryable author mapping). The threads INSERT above ran
+    // before the bytes were signed, so this is a follow-up UPDATE.
+    let thread_create_hash_db: &[u8] = signed_thread.canonical_hash.as_slice();
+    sqlx::query!(
+        "UPDATE threads SET thread_create_hash = ? WHERE id = ?",
+        thread_create_hash_db,
+        thread_id,
+    )
+    .execute(&mut *tx)
+    .await?;
+
     tx.commit().await?;
 
     // §7.5 originator-side fanout for the two locally-originated

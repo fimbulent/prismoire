@@ -743,8 +743,8 @@ pub async fn handle_moves_backfill(
 //   * `POST /federation/v1/backfill/by-hash` — reactive per-hash lookup;
 //     returns 200 with available objects or 410 Gone for erased ones
 //     (carrying the signed erasure authority per §10.5.2).
-//   * `GET  /federation/v1/backfill/by-author` — bulk post-rev recovery
-//     for an author key (frontier-expansion path).
+//   * `GET  /federation/v1/backfill/by-author` — bulk post-rev +
+//     profile-rev recovery for an author key (frontier-expansion path).
 //   * `GET  /federation/v1/backfill/edges-by-key` — bulk trust-edge
 //     recovery referencing a key as source / target / both.
 //
@@ -757,9 +757,10 @@ pub async fn handle_moves_backfill(
 //
 // Carve-outs documented inline:
 //
-//   * by-author serves post-revs only. Retracts authored by the key
-//     are not surfaced here — there is no per-author projection that
-//     maps `retract.canonical_hash` back to author without parsing the
+//   * by-author serves post-revs + profile-revs (both have a clean
+//     per-author projection). Retracts are still NOT surfaced here —
+//     there is no per-author projection that maps
+//     `retract.canonical_hash` back to author without parsing the
 //     payload, and the reactive by-hash path covers any specific retract
 //     a sibling peer needs. Frontier-expansion already gossips retracts
 //     forward.
@@ -1120,11 +1121,19 @@ pub struct ByAuthorQuery {
 
 /// `GET /federation/v1/backfill/by-author` (§10.5.1).
 ///
-/// Phase 8 cut: serves only signed `post-rev` rows authored by the key.
-/// Retracts are surfaced via the reactive by-hash path (a sender that
-/// needs a specific retract will follow up with `POST /backfill/by-hash`
-/// for the missing canonical_hash). The reasoning is documented in the
-/// module-level §10.5 carve-out comments above.
+/// Serves the key's signed `post-rev` *and* `profile-rev` rows — both
+/// have a clean per-author projection (`post_revisions` → `posts.author`,
+/// `profile_revisions.user_id`). Profile-revs were added (§11.9.5) so a
+/// receiver can *pull* a never-seen author's identity to hydrate its
+/// stub; previously profiles only ever arrived via §7.6 frontier push,
+/// which is gated on interest the receiver cannot establish until the
+/// author's edge projects — a bootstrap deadlock for a trust-coded
+/// `S → local` edge whose source `S` the receiver has never seen.
+///
+/// Retracts are still surfaced only via the reactive by-hash path (a
+/// sender that needs a specific retract follows up with `POST
+/// /backfill/by-hash`). The reasoning is documented in the module-level
+/// §10.5 carve-out comments above.
 pub async fn handle_backfill_by_author(
     State(state): State<Arc<AppState>>,
     Extension(envelope): Extension<FedEnvelope>,
@@ -1198,9 +1207,17 @@ pub async fn handle_backfill_by_author(
                 so.payload AS \"payload?: Vec<u8>\", \
                 so.signature AS \"signature!: Vec<u8>\" \
          FROM signed_objects so \
-         JOIN post_revisions pr ON pr.canonical_hash = so.canonical_hash \
-         JOIN posts p ON p.id = pr.post_id \
-         WHERE p.author = ? \
+         WHERE so.canonical_hash IN ( \
+                 SELECT pr.canonical_hash FROM post_revisions pr \
+                   JOIN posts p ON p.id = pr.post_id \
+                  WHERE p.author = ? \
+                 UNION ALL \
+                 SELECT prof.canonical_hash FROM profile_revisions prof \
+                  WHERE prof.user_id = ? \
+                 UNION ALL \
+                 SELECT t.thread_create_hash FROM threads t \
+                  WHERE t.author = ? AND t.thread_create_hash IS NOT NULL \
+           ) \
            AND so.payload IS NOT NULL \
            AND ( \
                 ? IS NULL \
@@ -1209,6 +1226,8 @@ pub async fn handle_backfill_by_author(
            ) \
          ORDER BY so.received_at ASC, so.canonical_hash ASC \
          LIMIT ?",
+        author_id,
+        author_id,
         author_id,
         cursor_iso,
         cursor_iso,

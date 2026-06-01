@@ -779,6 +779,98 @@ pub async fn compute_prior_profile_hash<'e, E: SqliteExecutor<'e>>(
     )
 }
 
+/// Mint a self-signed *genesis* `profile` revision for a freshly
+/// created local account.
+///
+/// `profile` is the only signed object that carries a user's
+/// `display_name`, and it is the object the federation stub-hydration
+/// path needs to turn a remote stub into a named, projectable user
+/// (§11.9.5 bootstrap recovery). Yet `bio` is the only field a user can
+/// edit, so before this helper existed an account that never touched
+/// its bio had no `profile` revision at all — leaving peers with
+/// nothing to hydrate its stub from, so an inbound trust edge naming it
+/// stayed `EndpointMissing` and never projected. Minting an empty-bio
+/// genesis at account birth guarantees every locally-born identity is
+/// federatable from the moment it exists.
+///
+/// Writes, inside the caller's transaction:
+/// - signs an empty-bio `profile` payload (absent bio projected onto
+///   `""` so the canonical bytes match a later explicit-empty edit —
+///   see [`crate::users::update_bio`] for that unification rationale),
+/// - INSERTs the `profile_revisions` row,
+/// - dual-writes the canonical bytes into `signed_objects`.
+///
+/// Returns the [`SigningOutput`] so the caller can fan the revision out
+/// post-commit (`ForwardingClass::Authored`, routing key = user pubkey).
+///
+/// MUST be called after [`store_signing_key`] within the same
+/// transaction — [`sign_profile_revision`] loads the user's active
+/// signing key from `signing_keys`.
+pub async fn mint_genesis_profile_revision(
+    conn: &mut sqlx::SqliteConnection,
+    user_id: &str,
+    display_name: &str,
+    created_at_ms: u64,
+) -> Result<SigningOutput, crate::error::AppError> {
+    let bio_for_payload = "";
+
+    // Robust against being called when prior revisions somehow exist:
+    // chains onto the latest rather than forking a second root. At true
+    // account birth there are none, so this returns `None` (genesis).
+    let prior_hash = compute_prior_profile_hash(&mut *conn, user_id).await?;
+
+    let signed = sign_profile_revision(
+        &mut *conn,
+        user_id,
+        display_name,
+        bio_for_payload,
+        None,
+        created_at_ms,
+        prior_hash,
+    )
+    .await?;
+
+    let prior_hash_db: Option<Vec<u8>> = prior_hash.map(|h| h.to_vec());
+    let canonical_hash_db: Vec<u8> = signed.canonical_hash.to_vec();
+    let created_at_ms_db = i64::try_from(created_at_ms).map_err(|_| {
+        tracing::error!(
+            created_at_ms,
+            "genesis profile revision created_at_ms does not fit in i64"
+        );
+        crate::error::AppError::code(crate::error::ErrorCode::Internal)
+    })?;
+
+    let id = Uuid::new_v4().to_string();
+    sqlx::query!(
+        "INSERT INTO profile_revisions \
+            (id, user_id, display_name, bio, avatar_attachment_hash, created_at, \
+             signature, prior_profile_hash, canonical_hash) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        id,
+        user_id,
+        display_name,
+        bio_for_payload,
+        None::<Vec<u8>>,
+        created_at_ms_db,
+        signed.signature,
+        prior_hash_db,
+        canonical_hash_db,
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    store_signed_object(
+        &mut *conn,
+        "profile",
+        &signed.payload,
+        &signed.signature,
+        &signed.canonical_hash,
+    )
+    .await?;
+
+    Ok(signed)
+}
+
 /// Sign a `retract` canonical payload for the given user.
 ///
 /// DB-fetching wrapper around [`sign_retraction_with_key`].

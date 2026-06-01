@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT so.canonical_hash AS \"canonical_hash!: Vec<u8>\", so.received_at AS \"received_at!: String\", so.payload AS \"payload?: Vec<u8>\", so.signature AS \"signature!: Vec<u8>\" FROM signed_objects so WHERE so.canonical_hash IN ( SELECT pr.canonical_hash FROM post_revisions pr JOIN posts p ON p.id = pr.post_id WHERE p.author = ? UNION ALL SELECT prof.canonical_hash FROM profile_revisions prof WHERE prof.user_id = ? UNION ALL SELECT t.thread_create_hash FROM threads t WHERE t.author = ? AND t.thread_create_hash IS NOT NULL ) AND so.payload IS NOT NULL AND ( ? IS NULL OR so.received_at > ? OR (so.received_at = ? AND so.canonical_hash > ?) ) ORDER BY so.received_at ASC, so.canonical_hash ASC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "canonical_hash!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "received_at!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "payload?: Vec<u8>",
+        "ordinal": 2,
+        "type_info": "Blob"
+      },
+      {
+        "name": "signature!: Vec<u8>",
+        "ordinal": 3,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "a65268f834c1fd4865c2d6789d380b8c92ed8df2d01cc9617ad37cb08ec02d46"
+}

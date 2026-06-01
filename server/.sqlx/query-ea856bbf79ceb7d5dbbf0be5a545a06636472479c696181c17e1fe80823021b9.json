@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO frontier_users (user_key, home_instance_key, home_instance_domain, generation, reverse_hop) VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_key) DO UPDATE SET home_instance_key = excluded.home_instance_key, home_instance_domain = excluded.home_instance_domain, generation = excluded.generation, reverse_hop = excluded.reverse_hop, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "ea856bbf79ceb7d5dbbf0be5a545a06636472479c696181c17e1fe80823021b9"
+}

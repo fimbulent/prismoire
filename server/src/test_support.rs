@@ -115,18 +115,33 @@ async fn test_setup_admin(
     let public_key: &[u8] = verifying_bytes.as_slice();
     let public_key_hex = crate::users::hex_lower(public_key);
 
+    // Same birth write-set as `setup_complete` (minus the WebAuthn
+    // credential, which tests have no passkey material for): user row,
+    // signing key, genesis profile-rev, genesis move. Routing both
+    // through `complete_local_user_birth` is what keeps fixtures from
+    // drifting away from prod — the drift that masked the §11.9.5
+    // bootstrap bug. Birth output is discarded: tests drive federation
+    // by hand rather than relying on originator-side flood.
+    let created_at_ms = u64::try_from(chrono::Utc::now().timestamp_millis())
+        .map_err(|_| AppError::code(ErrorCode::Internal))?;
     let mut tx = state.db.begin().await?;
-    sqlx::query!(
-        "INSERT INTO users (id, display_name, display_name_skeleton, signup_method, role, public_key) \
-         VALUES (?, ?, ?, 'admin', 'admin', ?)",
-        user_id,
-        display_name,
-        skeleton,
-        public_key,
+    crate::auth::complete_local_user_birth(
+        &mut tx,
+        &state.instance_key,
+        &state.instance_domain,
+        created_at_ms,
+        &crate::auth::LocalUserBirth {
+            user_id: &user_id,
+            display_name: &display_name,
+            display_name_skeleton: &skeleton,
+            signup_method: "admin",
+            role: "admin",
+            public_key,
+            signing_key: &signing_key,
+            credential: None,
+        },
     )
-    .execute(&mut *tx)
     .await?;
-    signing::store_signing_key(&mut tx, &user_id, &signing_key).await?;
     tx.commit().await?;
 
     state.needs_setup.store(false, Ordering::Relaxed);
@@ -196,18 +211,29 @@ async fn test_signup_as(
     // Mirror prod's transactional shape — see `signup_complete`.
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
 
-    sqlx::query!(
-        "INSERT INTO users (id, display_name, display_name_skeleton, signup_method, public_key) \
-         VALUES (?, ?, ?, 'invite', ?)",
-        user_id,
-        display_name,
-        skeleton,
-        public_key,
+    // Same birth write-set as `signup_complete` (minus the WebAuthn
+    // credential): user row, signing key, genesis profile-rev, genesis
+    // move — via the shared `complete_local_user_birth` so fixtures
+    // can't drift from prod. Output discarded (tests flood by hand).
+    // Must precede the trust-edge signing below, which needs the
+    // invitee's signing key stored.
+    crate::auth::complete_local_user_birth(
+        &mut tx,
+        &state.instance_key,
+        &state.instance_domain,
+        created_at_ms,
+        &crate::auth::LocalUserBirth {
+            user_id: &user_id,
+            display_name: &display_name,
+            display_name_skeleton: &skeleton,
+            signup_method: "invite",
+            role: "user",
+            public_key,
+            signing_key: &signing_key,
+            credential: None,
+        },
     )
-    .execute(&mut *tx)
     .await?;
-
-    signing::store_signing_key(&mut tx, &user_id, &signing_key).await?;
 
     let signed_inviter_to_user = signing::sign_trust_edge(
         &mut tx,

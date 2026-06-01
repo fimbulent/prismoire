@@ -1,6 +1,6 @@
 use super::*;
 use crate::trust::{PendingDeltas, TrustGraph, TrustPath, TrustStance, ViewerDelta};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 const A: Uuid = Uuid::from_u128(0xa);
@@ -876,92 +876,4 @@ fn f32_storage_preserves_ranking() {
             }
         }
     }
-}
-
-// -- forward_visible_closure tests --
-//
-// These tests confirm that the federation frontier closure
-// (`docs/federation-protocol.md` §7.4) prunes paths whose combined
-// trust score falls below `MINIMUM_TRUST_THRESHOLD`. The closure
-// shares its scoring kernel with `forward_scores` via
-// `forward_bfs_inner`, so any future change to the trust algorithm
-// (decay, distrust handling) is exercised here too.
-
-/// Source UUIDs always appear in the closure even when they have no
-/// outgoing trust edges (and therefore no graph node). A local user
-/// is trivially "visible to themselves," and the frontier must
-/// advertise them so peers can route author-keyed envelopes home.
-#[test]
-fn forward_visible_closure_includes_isolated_source() {
-    let g = graph_from_edges(&[(A, B)]); // C is not in the graph
-    let closure = g.forward_visible_closure(&[C], 3);
-    assert!(closure.contains(&C), "isolated source must self-include");
-}
-
-/// Direct neighbors (1-hop, score 1.0) and 2-hop neighbors (score
-/// 0.7) and 3-hop neighbors with no hub on the path (score
-/// 1.0 × 0.7 × 0.7 = 0.49) all clear the 0.45 threshold and appear
-/// in the 3-hop closure.
-#[test]
-fn forward_visible_closure_includes_in_threshold_reachables() {
-    // Chain: A → B → C → D
-    let g = graph_from_edges(&[(A, B), (B, C), (C, D)]);
-    let closure = g.forward_visible_closure(&[A], 3);
-    let expected: HashSet<Uuid> = [A, B, C, D].into_iter().collect();
-    assert_eq!(closure, expected);
-}
-
-/// A 4-hop chain pushes the tail's combined score to
-/// 1.0 × 0.7³ = 0.343, which is below the 0.45 threshold. The
-/// 4-hop endpoint must be excluded even though BFS reaches it
-/// within `max_depth`. This is the load-bearing test: it proves
-/// the closure threshold-prunes rather than returning every
-/// reachable node.
-#[test]
-fn forward_visible_closure_prunes_paths_below_threshold() {
-    // Chain: A → B → C → D → E. With max_depth=4, BFS reaches E,
-    // but its score (0.343) is below MINIMUM_TRUST_THRESHOLD.
-    let g = graph_from_edges(&[(A, B), (B, C), (C, D), (D, E)]);
-    let closure = g.forward_visible_closure(&[A], 4);
-    assert!(closure.contains(&A));
-    assert!(closure.contains(&B), "1-hop score 1.0 must clear threshold");
-    assert!(closure.contains(&C), "2-hop score 0.7 must clear threshold");
-    assert!(
-        closure.contains(&D),
-        "3-hop score 0.49 must clear threshold"
-    );
-    assert!(
-        !closure.contains(&E),
-        "4-hop score 0.343 < 0.45 must be pruned (was: {closure:?})"
-    );
-}
-
-/// Depth bounding cuts the BFS short of paths the threshold would
-/// otherwise admit. With max_depth=2, the 3-hop endpoint never gets
-/// scored at all — independent of its hypothetical 0.49 score.
-#[test]
-fn forward_visible_closure_respects_max_depth() {
-    let g = graph_from_edges(&[(A, B), (B, C), (C, D)]);
-    let closure = g.forward_visible_closure(&[A], 2);
-    assert!(closure.contains(&A));
-    assert!(closure.contains(&B));
-    assert!(closure.contains(&C));
-    assert!(
-        !closure.contains(&D),
-        "3-hop endpoint outside max_depth=2 must be excluded"
-    );
-}
-
-/// The closure unions reachables across all sources. A UUID
-/// reachable from any source under the visibility rules belongs in
-/// the set, even if other sources cannot see it.
-#[test]
-fn forward_visible_closure_unions_across_sources() {
-    // Two disjoint chains: A → B and S1 → S2.
-    let g = graph_from_edges(&[(A, B), (S1, S2)]);
-    let closure = g.forward_visible_closure(&[A, S1], 3);
-    assert!(closure.contains(&A));
-    assert!(closure.contains(&B));
-    assert!(closure.contains(&S1));
-    assert!(closure.contains(&S2));
 }

@@ -227,31 +227,63 @@ pub async fn setup_complete(
     let passkey_bytes = serde_json::to_vec(&passkey)?;
     let cred_id_bytes = passkey.cred_id().as_ref() as &[u8];
 
+    // The admin is a locally-born identity like any other: it needs the
+    // full §11.9.5 / §12.8 birth write-set (genesis profile-rev + genesis
+    // move), not just a bare `users` row. See `complete_local_user_birth`.
+    let created_at_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| {
+        tracing::error!("setup_complete: system clock is pre-1970; cannot sign genesis objects");
+        AppError::code(ErrorCode::Internal)
+    })?;
+
     let mut tx = state.db.begin().await?;
-    sqlx::query!(
-        "INSERT INTO users (id, display_name, display_name_skeleton, signup_method, role, public_key) \
-         VALUES (?, ?, ?, 'admin', 'admin', ?)",
-        user_id,
-        display_name,
-        skeleton,
-        public_key,
+    let birth = crate::auth::complete_local_user_birth(
+        &mut tx,
+        &state.instance_key,
+        &state.instance_domain,
+        created_at_ms,
+        &crate::auth::LocalUserBirth {
+            user_id: &user_id,
+            display_name: &display_name,
+            display_name_skeleton: &skeleton,
+            signup_method: "admin",
+            role: "admin",
+            public_key,
+            signing_key: &signing_key,
+            credential: Some(crate::auth::BirthCredential {
+                credential_id: &cred_id,
+                passkey_credential_id: cred_id_bytes,
+                passkey_bytes: &passkey_bytes,
+            }),
+        },
     )
-    .execute(&mut *tx)
     .await?;
-
-    sqlx::query!(
-        "INSERT INTO credentials (id, user_id, credential_id, public_key, sign_count) \
-         VALUES (?, ?, ?, ?, 0)",
-        cred_id,
-        user_id,
-        cred_id_bytes,
-        passkey_bytes,
-    )
-    .execute(&mut *tx)
-    .await?;
-
-    signing::store_signing_key(&mut tx, &user_id, &signing_key).await?;
     tx.commit().await?;
+
+    // §7.5 / §12.2 originator-side fanout for the genesis profile
+    // revision (Authored) and genesis move (Move). Routing key = the
+    // admin's pubkey for both. Fire-and-forget.
+    let profile_wire = crate::federation::envelope::encode_signed_object(
+        &birth.genesis_profile.payload,
+        &birth.genesis_profile.signature,
+    );
+    crate::federation::forwarder::forward_signed_object(
+        state.clone(),
+        birth.genesis_profile.canonical_hash,
+        crate::federation::routing::ForwardingClass::Authored,
+        birth.genesis_profile.public_key.to_vec(),
+        profile_wire,
+        None,
+    )
+    .await;
+    crate::federation::forwarder::forward_signed_object(
+        state.clone(),
+        birth.genesis_move_hash,
+        crate::federation::routing::ForwardingClass::Move,
+        verifying_bytes.to_vec(),
+        birth.genesis_move_wire,
+        None,
+    )
+    .await;
 
     // Persist the source URL to `instance_config` and update the
     // in-memory mirror so `/api/setup/status` and the SvelteKit footer

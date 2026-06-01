@@ -133,6 +133,7 @@ fn test_attestation(user_key: &[u8; 32]) -> GenesisAttestation {
 
 /// Mint a signed Move from `user_key`. Mirrors the helper in
 /// `federation_phase7.rs`.
+#[allow(clippy::too_many_arguments)]
 fn mint_move(
     user_key: &SigningKey,
     from_key: &[u8; 32],
@@ -140,9 +141,14 @@ fn mint_move(
     to_key: &[u8; 32],
     to_domain: &str,
     created_at_ms: u64,
+    attestation: GenesisAttestation,
     prior: Option<&[u8; 32]>,
 ) -> (Vec<u8>, Vec<u8>) {
-    let user_pub = user_key.verifying_key().to_bytes();
+    // The move's `genesis_at` MUST equal the attestation's, and (for a
+    // user with a real birth anchor) the attestation MUST be the one
+    // stored in `user_genesis` — §12.8 immutability rejects any
+    // declaration whose `genesis_at` / birth instance disagrees.
+    let genesis_at = attestation.genesis_at;
     let signed = sign_move_with_key(
         user_key,
         Some(from_key),
@@ -150,14 +156,63 @@ fn mint_move(
         to_key,
         to_domain,
         created_at_ms,
-        GENESIS_AT_MS,
-        test_attestation(&user_pub),
+        genesis_at,
+        attestation,
         prior,
     );
     (
         encode_wire(&signed.payload, &signed.signature),
         signed.payload,
     )
+}
+
+/// Read a born local user's **real** birth attestation back out of
+/// `user_genesis`, so a synthesized outbound move chains onto the
+/// genesis that [`crate::common`]'s `setup_admin` minted at birth
+/// rather than forging a conflicting one.
+async fn read_birth_attestation(db: &SqlitePool, user_pub: &[u8; 32]) -> GenesisAttestation {
+    let key: &[u8] = user_pub;
+    let row = sqlx::query!(
+        "SELECT genesis_at AS \"genesis_at!: i64\", \
+                birth_instance_key AS \"birth_instance_key!: Vec<u8>\", \
+                attestation_sig AS \"attestation_sig!: Vec<u8>\" \
+         FROM user_genesis WHERE user_key = ?",
+        key,
+    )
+    .fetch_one(db)
+    .await
+    .expect("user_genesis anchor for a born user");
+    GenesisAttestation {
+        key: *user_pub,
+        genesis_at: u64::try_from(row.genesis_at).expect("genesis_at fits u64"),
+        birth_instance_key: row
+            .birth_instance_key
+            .as_slice()
+            .try_into()
+            .expect("32-byte birth_instance_key"),
+        sig: row
+            .attestation_sig
+            .as_slice()
+            .try_into()
+            .expect("64-byte attestation_sig"),
+    }
+}
+
+/// Read a born local user's current move-chain head (the birth genesis
+/// move's hash), to use as `prior_move_hash` when chaining a new move.
+async fn read_current_move_hash(db: &SqlitePool, user_pub: &[u8; 32]) -> [u8; 32] {
+    let key: &[u8] = user_pub;
+    let row = sqlx::query!(
+        "SELECT current_move_hash AS \"h!: Vec<u8>\" FROM user_homes WHERE user_key = ?",
+        key,
+    )
+    .fetch_one(db)
+    .await
+    .expect("user_homes row for a born user");
+    row.h
+        .as_slice()
+        .try_into()
+        .expect("32-byte current_move_hash")
 }
 
 // ---------------------------------------------------------------------------
@@ -293,6 +348,13 @@ async fn applied_outbound_from_self_disposes_local_authority() {
     let user_key = extract_user_signing_key(&a.state.db, &u.user_id).await;
     let user_pub: [u8; 32] = *user_key.verifying_key().as_bytes();
 
+    // Alice was born via `setup_admin`, so she carries a real
+    // `user_genesis` anchor + a genesis move at the head of her chain.
+    // Chain the synthetic outbound move onto *that* genesis (real
+    // attestation, prior = birth move hash) so the §12.8 immutability
+    // gate accepts it rather than rejecting a forged genesis_at.
+    let att = read_birth_attestation(&a.state.db, &user_pub).await;
+    let prior = read_current_move_hash(&a.state.db, &user_pub).await;
     let from_key = *a.state.instance_key.public_bytes();
     let to_key = *b.state.instance_key.public_bytes();
     let (wire, _) = mint_move(
@@ -302,7 +364,8 @@ async fn applied_outbound_from_self_disposes_local_authority() {
         &to_key,
         &b.state.instance_domain,
         now_ms(),
-        None,
+        att,
+        Some(&prior),
     );
 
     // B pushes the move to A. (Any active peer of A may gossip a move
@@ -387,7 +450,13 @@ async fn superseded_outbound_from_self_still_disposes() {
     let u = setup_admin(&a.router, "alice").await;
     insert_fake_credential(&a.state.db, &u.user_id).await;
     let user_key = extract_user_signing_key(&a.state.db, &u.user_id).await;
+    let user_pub: [u8; 32] = *user_key.verifying_key().as_bytes();
 
+    // Both synthesized moves chain onto alice's real birth genesis (she
+    // was born via `setup_admin`); a forged genesis_at would be rejected
+    // by the §12.8 immutability gate before latest-wins even runs.
+    let att = read_birth_attestation(&a.state.db, &user_pub).await;
+    let prior = read_current_move_hash(&a.state.db, &user_pub).await;
     let from_key = *a.state.instance_key.public_bytes();
     let to_key = *b.state.instance_key.public_bytes();
 
@@ -400,7 +469,8 @@ async fn superseded_outbound_from_self_still_disposes() {
         &to_key,
         &b.state.instance_domain,
         newer_ts,
-        None,
+        att.clone(),
+        Some(&prior),
     );
     let body = encode_moves_body(&[newer_wire]);
     let (status, body_bytes) = send_envelope_signed(
@@ -436,7 +506,8 @@ async fn superseded_outbound_from_self_still_disposes() {
         &to_key,
         &b.state.instance_domain,
         older_ts,
-        None,
+        att,
+        Some(&prior),
     );
     let body = encode_moves_body(&[older_wire]);
     let (status, body_bytes) = send_envelope_signed(
@@ -496,7 +567,11 @@ async fn inbound_to_self_does_not_dispose_other_local_users() {
     // either instance — they exist purely as a signer for the move
     // payload. (`OsRng` keeps this independent of any harness state.)
     let user_key = SigningKey::generate(&mut rand::rngs::OsRng);
+    let user_pub: [u8; 32] = *user_key.verifying_key().as_bytes();
 
+    // U has no real birth anchor on either instance, so the synthetic
+    // move forges a crypto-valid genesis attestation (off-graph birth
+    // instance) that the receive path accepts as a first sighting.
     let from_key = *a.state.instance_key.public_bytes();
     let to_key = *b.state.instance_key.public_bytes();
     let (wire, _) = mint_move(
@@ -506,6 +581,7 @@ async fn inbound_to_self_does_not_dispose_other_local_users() {
         &to_key,
         &b.state.instance_domain,
         now_ms(),
+        test_attestation(&user_pub),
         None,
     );
     let body = encode_moves_body(&[wire]);

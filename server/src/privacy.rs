@@ -327,6 +327,11 @@ pub struct ThreadExport {
     /// path lands; included here so the export covers every
     /// user-owned column in `threads`.
     pub home_instance_b64: Option<String>,
+    /// Canonical hash of this thread's paired `thread-create` signed
+    /// object, base64url (no padding). NULL for threads created before
+    /// the §10.5.1 by-author backfill column landed. Included so the
+    /// export covers every user-owned column in `threads`.
+    pub thread_create_hash_b64: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -657,7 +662,7 @@ pub async fn export_my_data(
         .collect();
 
     let thread_rows = sqlx::query!(
-        r#"SELECT t.id, t.title, r.slug, t.created_at, t.locked AS "locked!: bool", t.reply_count, t.link_url, t.home_instance
+        r#"SELECT t.id, t.title, r.slug, t.created_at, t.locked AS "locked!: bool", t.reply_count, t.link_url, t.home_instance, t.thread_create_hash
          FROM threads t
          JOIN rooms r ON r.id = t.room
          WHERE t.author = ?
@@ -678,6 +683,7 @@ pub async fn export_my_data(
             reply_count: r.reply_count,
             link_url: r.link_url,
             home_instance_b64: r.home_instance.as_deref().map(b64),
+            thread_create_hash_b64: r.thread_create_hash.as_deref().map(b64),
         })
         .collect();
 

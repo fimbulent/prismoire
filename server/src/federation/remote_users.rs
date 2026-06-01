@@ -408,6 +408,13 @@ pub(crate) enum TrustEdgeProjection {
 /// IMMEDIATE` transaction so chain-fork / chain-continuity and the
 /// INSERT observe one consistent snapshot.
 ///
+/// `payload` is the verbatim signed-object bytes the `canonical_hash`
+/// and `signature` cover. They're threaded through so that a successful
+/// projection can also populate the §9.1 reverse-frontier store
+/// (`frontier_edges`) here — the single funnel every federated
+/// projection (receive / orphan-drain / §9.6 sweep) passes through —
+/// rather than each call site repeating the insert.
+///
 /// Idempotency: a duplicate `canonical_hash` already in `trust_edges`
 /// short-circuits to `Projected` without re-inserting. This lets sweep
 /// safely re-run after a receive-path projection landed the same row.
@@ -416,6 +423,7 @@ pub(crate) async fn try_project_trust_edge(
     edge: &TrustEdge,
     canonical_hash: &[u8; 32],
     signature: &[u8],
+    payload: &[u8],
 ) -> Result<TrustEdgeProjection, sqlx::Error> {
     // Resolve both endpoints to local `users.id`. A federated stub
     // qualifies — Phase 9.5 hydration writes the same `users` table
@@ -523,6 +531,30 @@ pub(crate) async fn try_project_trust_edge(
     .execute(&mut *tx)
     .await?;
 
+    // §9.1 reverse-frontier population. The edge is now active in
+    // `trust_edges`, so it must also live in `frontier_edges`, the store
+    // the reverse BFS walks to discover the remote trusters that drive
+    // our advertised `visible_filter`. Doing it here — the single funnel
+    // all three projection paths share — keeps the invariant "every
+    // active federated edge is in the frontier store" enforced in one
+    // place. Idempotent on `canonical_hash`; stamped with the live
+    // rebuild generation so the §8.12 GC sweep treats it as fresh. A
+    // non-64-byte signature can't occur (every caller verified it before
+    // projecting) — skip the store insert rather than fail an otherwise
+    // valid projection if one ever does.
+    if let Ok(sig) = <[u8; 64]>::try_from(signature) {
+        let generation = crate::federation::frontier_store::current_generation(&mut *tx).await?;
+        crate::federation::frontier_store::insert_frontier_edge(
+            &mut *tx,
+            edge,
+            canonical_hash,
+            &sig,
+            payload,
+            generation,
+        )
+        .await?;
+    }
+
     // §9.1 on-receipt erasure: a neutral edge is the erasure authority
     // over the prior chain for this pair. The new neutral row itself
     // is excluded by canonical_hash.
@@ -555,13 +587,20 @@ pub(crate) async fn try_project_trust_edge(
 /// - Loops to fixed point so an ordered chain (E1 → E2 → E3) projects
 ///   in one sweep call regardless of `signed_objects` row order.
 ///
-/// **TODO (Phase 9.5/9.6 follow-up):** post-rev / thread-create
-/// orphan projection still needs writing. The `content.rs` per-class
-/// branches already store-only when prerequisites are missing; the
-/// matching extension to this function will mirror the trust-edge
-/// loop below. Until then, those orphans remain durable but
-/// unprojected (reads see them only after a re-push or §9.3 backfill
-/// triggers re-receive in a state where the stub already exists).
+/// Companion content-orphan sweeps live in `content.rs` and run from
+/// `project_remote_profile` right after this call:
+/// `reproject_orphan_threads_for_author` (thread-creates that
+/// StubMissing'd before the stub hydrated) chains into
+/// `reproject_orphan_post_revs_for_thread` (OP / reply post-revs that
+/// FkMissing'd before their thread landed). They live there, not here,
+/// because they project per-class content rows rather than trust-edges.
+/// One sweep candidate: the parsed edge, its canonical hash, and the
+/// verbatim signature + signed-payload bytes. The bytes are retained so
+/// a projected candidate can be inserted into `frontier_edges` (§9.1)
+/// with the exact bytes its hash and signature cover, without a second
+/// `signed_objects` read.
+type SweepCandidate = (TrustEdge, [u8; 32], Vec<u8>, Vec<u8>);
+
 pub async fn sweep_pending_projections(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     user_key: &[u8; 32],
@@ -587,10 +626,12 @@ pub async fn sweep_pending_projections(
     .await?;
 
     // Parse + filter once. Each retained candidate carries its own
-    // `canonical_hash`, parsed `TrustEdge`, and signature so the
-    // fixed-point loop below can call `try_project_trust_edge`
-    // without re-touching `signed_objects`.
-    let mut pending: Vec<(TrustEdge, [u8; 32], Vec<u8>)> = Vec::new();
+    // `canonical_hash`, parsed `TrustEdge`, signature, and the verbatim
+    // signed `payload` bytes so the fixed-point loop below can call
+    // `try_project_trust_edge` — and feed `frontier_edges` with the
+    // exact bytes the hash/signature cover — without re-touching
+    // `signed_objects`.
+    let mut pending: Vec<SweepCandidate> = Vec::new();
     for row in rows {
         let Ok(parsed) = SignedPayload::parse(&row.payload) else {
             // Schema-invalid bytes shouldn't be sitting in
@@ -622,7 +663,7 @@ pub async fn sweep_pending_projections(
         }
         let mut canonical = [0u8; 32];
         canonical.copy_from_slice(&row.canonical_hash);
-        pending.push((edge, canonical, row.signature));
+        pending.push((edge, canonical, row.signature, row.payload));
     }
 
     // Fixed-point loop: a successful projection in one pass may
@@ -635,9 +676,14 @@ pub async fn sweep_pending_projections(
     // progress (the break condition).
     loop {
         let mut progressed = false;
-        let mut still_deferred: Vec<(TrustEdge, [u8; 32], Vec<u8>)> = Vec::new();
-        for (edge, canonical, signature) in std::mem::take(&mut pending) {
-            match try_project_trust_edge(tx, &edge, &canonical, &signature).await? {
+        let mut still_deferred: Vec<SweepCandidate> = Vec::new();
+        for (edge, canonical, signature, payload) in std::mem::take(&mut pending) {
+            // A projection here also populates `frontier_edges` inside
+            // `try_project_trust_edge` — the verbatim `payload` is handed
+            // in for exactly that. This is the path that covers an edge
+            // going active *only* via the sweep (e.g. a former ChainFork
+            // whose rival left `trust_edges` via account deletion).
+            match try_project_trust_edge(tx, &edge, &canonical, &signature, &payload).await? {
                 TrustEdgeProjection::Projected => {
                     progressed = true;
                     // Phase 9.8: a sweep projection may also unblock
@@ -648,7 +694,7 @@ pub async fn sweep_pending_projections(
                     drain_pending_orphans_after(tx, &canonical).await?;
                 }
                 TrustEdgeProjection::Deferred => {
-                    still_deferred.push((edge, canonical, signature));
+                    still_deferred.push((edge, canonical, signature, payload));
                 }
                 // EndpointMissing: the *other* endpoint still has no
                 // stub. A future sweep keyed on that endpoint will
@@ -822,7 +868,9 @@ pub(crate) async fn drain_pending_orphans_after(
             let mut next_hash = [0u8; 32];
             next_hash.copy_from_slice(&row.canonical_hash);
 
-            match try_project_trust_edge(&mut *tx, &edge, &next_hash, &row.signature).await? {
+            match try_project_trust_edge(&mut *tx, &edge, &next_hash, &row.signature, &row.payload)
+                .await?
+            {
                 TrustEdgeProjection::Projected => {
                     // Persist the canonical bytes on this successful
                     // promotion. The receive path stored them only for

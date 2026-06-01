@@ -456,7 +456,7 @@ CREATE TABLE threads (
     link_url TEXT,
     link_url_normalized TEXT,
     home_instance BLOB
-);
+, thread_create_hash BLOB);
 CREATE TABLE posts (
     id TEXT PRIMARY KEY NOT NULL,
     author TEXT NOT NULL REFERENCES users(id),
@@ -1037,7 +1037,8 @@ CREATE TABLE frontier_users (
     -- this column.
     updated_at TEXT NOT NULL
             DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-);
+, reverse_hop INTEGER NOT NULL DEFAULT 3
+        CHECK (reverse_hop >= 1 AND reverse_hop <= 3));
 CREATE INDEX idx_frontier_users_generation
     ON frontier_users(generation);
 CREATE TABLE user_genesis (
