@@ -38,27 +38,46 @@
 //! These scenarios drive the serve handler and the fetch trigger (the
 //! functions under test) directly, so they do not use the
 //! [`settle`](common::federation::settle) convergence driver — there is
-//! no `frontier_fanout_loop` + poll race to replace here. (The serve-gate
-//! fixtures also seed synthetic non-UUID user ids like `user_alice`,
-//! which `settle`'s `refresh_trust_graph` rebuild would panic parsing.)
+//! no `frontier_fanout_loop` + poll race to replace here.
+//!
+//! Fixtures originate state through the real local APIs (upload +
+//! create-thread on the origin instance, signed content pushes for the
+//! receiver) rather than raw INSERTs, so the serve gate and fetch
+//! pipeline run against exactly the row shapes production projects. The
+//! few states with no real-API producer — an evicted blob (`blob NULL`
+//! with the binding intact), a corrupt origin blob, a tombstoned author,
+//! a post stamped with a remote `home_instance` — are reached by a single
+//! targeted `UPDATE` on top of a real post, the same way `store_signed_
+//! object` delivery is treated as legitimate injected test input
+//! elsewhere in the suite.
 
 mod common;
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use axum::http::{Method, StatusCode};
+use axum::Router;
+use axum::body::Body;
+use axum::http::{Method, Request, StatusCode, header};
 use ciborium::value::Value;
+use ed25519_dalek::SigningKey;
 use prismoire_server::AppState;
 use prismoire_server::federation::attachment_fetch::try_fetch_for_serve;
 use prismoire_server::federation::attachments::{
     ATTACHMENT_BYTES_PER_MIN_PER_PEER, ATTACHMENT_RPM_PER_PEER,
 };
+use prismoire_server::signed::AttachmentRef;
+use prismoire_server::signing::{
+    SigningOutput, sign_post_revision_with_key, sign_profile_revision_with_key,
+    sign_thread_create_with_key,
+};
+use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use common::federation::{MultiInstanceHarness, establish_active_peering, send_envelope_signed};
+use common::{Session, body_json, json_request, send, setup_admin};
 
 // ---------------------------------------------------------------------------
 // Shared hash / hex helpers — keep this crate self-contained without a
@@ -70,6 +89,15 @@ fn hex_lower(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Decode a 64-char lowercase hex string into raw 32-byte form.
+fn hex32(s: &str) -> [u8; 32] {
+    let bytes: Vec<u8> = (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("valid hex"))
+        .collect();
+    bytes.as_slice().try_into().expect("32 bytes")
+}
+
 /// SHA-256 of `bytes` — the content-address a real binding would carry.
 fn sha256(bytes: &[u8]) -> [u8; 32] {
     let mut h = Sha256::new();
@@ -77,14 +105,12 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// Build a fixed-content 32-byte hash from a test-local seed byte.
-/// Avoids hashing real bytes when a scenario only needs distinct,
-/// non-colliding hashes between cases.
+/// Build a fixed-content 32-byte hash from a test-local seed byte. Used
+/// only by the no-row cases (unknown hash) where the bytes are never
+/// uploaded, so a real content hash would be ceremony.
 fn seeded_hash(seed: u8) -> [u8; 32] {
     let mut h = [0u8; 32];
     h[0] = seed;
-    // Sprinkle a non-zero byte so the hex form isn't all-zeros (purely
-    // cosmetic — the handler doesn't care).
     h[31] = seed.wrapping_add(0x5a);
     h
 }
@@ -107,378 +133,245 @@ fn parse_error_code(bytes: &[u8]) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// §11.5 serve-gate fixtures
+// Real-API origin fixtures
 //
-// The origin-only check only fires for *local* authorship, so every
-// serve-gate scenario seeds a local user + thread + post + post_revision
-// + attachment binding via direct SQL on the serving instance, then has a
-// *peer* instance issue the envelope-signed GET. The peer is a known peer
-// (active peering established) so `verify_known_peer` admits the request.
+// Every §11.5 serve-gate scenario needs a *locally-authored* post on the
+// serving instance that binds a *resident* attachment. We produce that the
+// way production does: upload the bytes through `POST /api/attachments`,
+// then bind them onto a thread OP via `POST /api/threads`. The resulting
+// rows (resident blob, current-revision binding, `home_instance NULL`,
+// live author) are exactly what the gate inspects.
 // ---------------------------------------------------------------------------
 
-/// Minimum `users` row. `signup_method='admin'` matches the fixture style
-/// elsewhere in the suite. `public_key` is seeded from the id so a
-/// duplicate-user collision surfaces as a UNIQUE violation rather than
-/// silent reuse.
-async fn insert_local_user(db: &SqlitePool, id: &str, display_name: &str) {
-    let skeleton = display_name.to_lowercase();
-    let mut pubkey = [0u8; 32];
-    for (i, b) in id.as_bytes().iter().take(32).enumerate() {
-        pubkey[i] = *b;
-    }
-    let pubkey_slice: &[u8] = pubkey.as_slice();
-    sqlx::query!(
-        "INSERT INTO users (id, display_name, signup_method, public_key, display_name_skeleton) \
-         VALUES (?, ?, 'admin', ?, ?)",
-        id,
-        display_name,
-        pubkey_slice,
-        skeleton,
-    )
-    .execute(db)
-    .await
-    .expect("insert user");
-}
+/// Upload `bytes` as a single multipart "file" part and return the
+/// server-computed content hash. The bytes must classify as one of the
+/// allowed MIMEs; every fixture here uploads UTF-8 text, which is stored
+/// verbatim so `content_hash == sha256(bytes)` and the served bytes equal
+/// the input.
+async fn upload_attachment(app: &Router, cookie: &str, bytes: &[u8]) -> [u8; 32] {
+    let boundary = "X-PRISMOIRE-TEST-BOUNDARY";
+    let mut body: Vec<u8> = Vec::new();
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"file\"; filename=\"upload.txt\"\r\n",
+    );
+    body.extend_from_slice(b"Content-Type: text/plain\r\n\r\n");
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
 
-/// Mark a previously-inserted user as deleted by stamping `deleted_at`.
-/// Used by the §11.5 author-deleted gate test.
-async fn mark_user_deleted(db: &SqlitePool, id: &str) {
-    sqlx::query!(
-        "UPDATE users SET deleted_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
-        id,
-    )
-    .execute(db)
-    .await
-    .expect("mark user deleted");
-}
-
-/// Ensure the `general` room exists. Idempotent: every serve-gate test
-/// targets the same room so the helper can be called freely.
-async fn ensure_general_room(db: &SqlitePool, created_by: &str) {
-    let exists: Option<String> =
-        sqlx::query_scalar!("SELECT id FROM rooms WHERE id = 'general' LIMIT 1")
-            .fetch_optional(db)
-            .await
-            .expect("room lookup");
-    if exists.is_none() {
-        sqlx::query!(
-            "INSERT INTO rooms (id, slug, created_by) VALUES ('general', 'general', ?)",
-            created_by,
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/attachments")
+        .header(header::COOKIE, cookie)
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={boundary}"),
         )
-        .execute(db)
-        .await
-        .expect("insert room");
+        .body(Body::from(body))
+        .expect("build upload request");
+    let response = send(app, req).await;
+    let status = response.status();
+    let json = body_json(response).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "attachment upload should 201; got {status} body={json}",
+    );
+    hex32(json["content_hash"].as_str().expect("content_hash"))
+}
+
+/// Create a thread whose OP binds the named attachment, returning the OP
+/// post id. The body carries no inline `![](...)` ref, so a text/plain
+/// attachment binds without tripping the inline-image-only ref check.
+async fn create_thread_with_attachment(
+    app: &Router,
+    cookie: &str,
+    hash_hex: &str,
+    filename: &str,
+) -> String {
+    let req = json_request(
+        Method::POST,
+        "/api/threads",
+        Some(cookie),
+        &serde_json::json!({
+            "room": "general",
+            "title": "attachment fixture thread",
+            "body": "see attachment",
+            "attachments": [ { "content_hash": hash_hex, "filename": filename } ],
+        }),
+    );
+    let response = send(app, req).await;
+    let status = response.status();
+    let json = body_json(response).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "thread create should 201; got {status} body={json}",
+    );
+    json["post"]["id"].as_str().expect("op post id").to_string()
+}
+
+/// A locally-authored, locally-homed post that binds a resident
+/// attachment on the serving instance — the §11.5 serve-gate happy state.
+struct LocalOrigin {
+    admin: Session,
+    hash: [u8; 32],
+    op_id: String,
+}
+
+/// Drive the real upload + create-thread path on `instance` so its §11.5
+/// serve gate passes for the returned hash. `bytes` must be UTF-8 text.
+async fn create_local_origin(
+    harness: &MultiInstanceHarness,
+    instance: &str,
+    bytes: &[u8],
+    filename: &str,
+) -> LocalOrigin {
+    let app = &harness.instance(instance).router;
+    let admin = setup_admin(app, "origin-author").await;
+    let hash = upload_attachment(app, &admin.cookie, bytes).await;
+    let op_id =
+        create_thread_with_attachment(app, &admin.cookie, &hex_lower(&hash), filename).await;
+    LocalOrigin { admin, hash, op_id }
+}
+
+// ---------------------------------------------------------------------------
+// Real-API receiver fixtures
+//
+// The receiver's fetch-pending state (a federated post homed at the
+// origin, a current-revision binding, and a `blob = NULL` metadata row) is
+// exactly what the §10.1 content-receive projection produces. We drive it
+// with three signed pushes from the active-peer origin: a profile (stub
+// hydration, home = sender), a thread-create (room + thread), and the OP
+// post-rev carrying the attachment ref (posts + `project_post_attachments`).
+// ---------------------------------------------------------------------------
+
+/// Encode a §6.3 WireFormat `{ "p", "s" }`.
+fn encode_wire(payload: &[u8], signature: &[u8]) -> Vec<u8> {
+    let m = Value::Map(vec![
+        (Value::Text("p".into()), Value::Bytes(payload.to_vec())),
+        (Value::Text("s".into()), Value::Bytes(signature.to_vec())),
+    ]);
+    let mut buf = Vec::with_capacity(payload.len() + signature.len() + 16);
+    ciborium::ser::into_writer(&m, &mut buf).expect("ser");
+    buf
+}
+
+/// Pack WireFormat blobs under `{ "objects": [bstr, ...] }` per §10.1.
+fn encode_content_body(wires: &[Vec<u8>]) -> Vec<u8> {
+    let arr: Vec<Value> = wires.iter().map(|w| Value::Bytes(w.clone())).collect();
+    let body = Value::Map(vec![(Value::Text("objects".into()), Value::Array(arr))]);
+    let mut buf = Vec::with_capacity(64 + wires.iter().map(|w| w.len()).sum::<usize>());
+    ciborium::ser::into_writer(&body, &mut buf).expect("ser");
+    buf
+}
+
+/// Read the status tag of the first object in a §10.1 `{ "results": [...] }`
+/// response.
+fn first_result_status(body: &[u8]) -> String {
+    let v: Value = ciborium::de::from_reader(body).expect("cbor parse");
+    let Value::Map(m) = v else {
+        panic!("results body is not a map");
+    };
+    let results = m
+        .into_iter()
+        .find_map(|(k, v)| match k {
+            Value::Text(t) if t == "results" => Some(v),
+            _ => None,
+        })
+        .expect("missing `results` field");
+    let Value::Array(arr) = results else {
+        panic!("`results` is not an array");
+    };
+    let Some(Value::Map(fields)) = arr.into_iter().next() else {
+        panic!("no result entry");
+    };
+    for (k, v) in fields {
+        if let (Value::Text(name), Value::Text(s)) = (&k, v)
+            && name == "status"
+        {
+            return s;
+        }
+    }
+    panic!("missing `status` field");
+}
+
+/// Push one signed object `from`→`to` over `/federation/v1/content` and
+/// assert it lands `applied`.
+async fn push_applied(
+    harness: &MultiInstanceHarness,
+    from: &str,
+    to: &str,
+    signed: &SigningOutput,
+) {
+    let wire = encode_wire(&signed.payload, &signed.signature);
+    let body = encode_content_body(&[wire]);
+    let (status, resp) = send_envelope_signed(
+        harness,
+        from,
+        to,
+        Method::POST,
+        "/federation/v1/content",
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "push not 200 (body: {resp:?})");
+    let tag = first_result_status(&resp);
+    assert_eq!(tag, "applied", "push not applied (status: {tag})");
+}
+
+/// A text/plain attachment reference for a signed post-rev — mirrors what
+/// the origin's upload stored (verbatim text, so `mime = text/plain`).
+fn text_attachment_ref(hash: [u8; 32], size: u64, filename: &str) -> AttachmentRef {
+    AttachmentRef {
+        content_hash: hash,
+        mime: "text/plain".to_string(),
+        size,
+        filename: filename.to_string(),
     }
 }
 
-/// Insert a thread row referencing the `general` room.
-async fn insert_thread(db: &SqlitePool, thread_id: &Uuid, author_id: &str) {
-    let thread_id_text = thread_id.to_string();
-    sqlx::query!(
-        "INSERT INTO threads (id, title, author, room) \
-         VALUES (?, 'attachment fixture thread', ?, 'general')",
-        thread_id_text,
-        author_id,
-    )
-    .execute(db)
-    .await
-    .expect("insert thread");
-}
-
-/// Insert a `posts` row with caller-controlled `revision_count`,
-/// `retracted_at`, and `home_instance`. The §11.5 check joins
-/// `post_attachments.revision` against `posts.revision_count - 1`, so the
-/// current revision is `revision_count - 1`. `home_instance = None` means
-/// locally-authored; passing `Some(pubkey)` simulates a post that arrived
-/// via gossip-forwarding with the remote home stamped on the row.
-async fn insert_post(
-    db: &SqlitePool,
-    post_id: &Uuid,
-    author_id: &str,
-    thread_id: &Uuid,
-    revision_count: i64,
-    retracted: bool,
-    home_instance: Option<&[u8]>,
+/// Project the receiver's fetch-pending state on instance `to` by pushing
+/// the real remote-author chain from active-peer `from`: profile →
+/// thread-create → OP post-rev binding `attachment`. The post lands homed
+/// at `from`, so the serve trigger resolves `from` as the §11 origin.
+async fn push_pending_remote_post(
+    harness: &MultiInstanceHarness,
+    from: &str,
+    to: &str,
+    author_key: &SigningKey,
+    attachment: AttachmentRef,
 ) {
-    let post_id_text = post_id.to_string();
-    let thread_id_text = thread_id.to_string();
-    let retracted_at: Option<String> = if retracted {
-        Some("2024-01-01T00:00:00Z".to_string())
-    } else {
-        None
-    };
-    sqlx::query!(
-        "INSERT INTO posts (id, author, thread, revision_count, retracted_at, home_instance) \
-         VALUES (?, ?, ?, ?, ?, ?)",
-        post_id_text,
-        author_id,
-        thread_id_text,
-        revision_count,
-        retracted_at,
-        home_instance,
-    )
-    .execute(db)
-    .await
-    .expect("insert post");
-}
+    let base_ms = 1_700_000_000_000u64;
+    let thread_id = Uuid::new_v4();
+    let post_id = Uuid::new_v4();
 
-/// Insert a `post_revisions` row. Caller decides which revision number to
-/// write; `post_attachments` FKs into `(post_id, revision)` so each
-/// binding needs its own revision row.
-async fn insert_post_revision(db: &SqlitePool, post_id: &Uuid, revision: i64) {
-    let post_id_text = post_id.to_string();
-    // Stand-in canonical_hash and signature — required NOT NULL but never
-    // inspected by the attachment-fetch handler.
-    let sig = vec![0u8; 64];
-    let hash = vec![0u8; 32];
-    sqlx::query!(
-        "INSERT INTO post_revisions \
-             (post_id, revision, body, signature, canonical_hash, created_at) \
-         VALUES (?, ?, 'fixture body', ?, ?, '2024-01-01T00:00:00Z')",
-        post_id_text,
-        revision,
-        sig,
-        hash,
-    )
-    .execute(db)
-    .await
-    .expect("insert post_revision");
-}
+    let profile =
+        sign_profile_revision_with_key(author_key, "remote-author", "", None, base_ms, None);
+    push_applied(harness, from, to, &profile).await;
 
-/// Insert an `attachment_blobs` row. `blob = None` exercises the
-/// fetch-pending / cache-evicted §11.5 NULL branch.
-async fn insert_attachment_blob(
-    db: &SqlitePool,
-    content_hash: &[u8; 32],
-    blob: Option<&[u8]>,
-    content_type: &str,
-    uploader: Option<&str>,
-) {
-    let hash_slice: &[u8] = content_hash.as_slice();
-    let size = blob.map(|b| b.len() as i64).unwrap_or(0);
-    sqlx::query!(
-        "INSERT INTO attachment_blobs (content_hash, blob, content_type, size, uploader) \
-         VALUES (?, ?, ?, ?, ?)",
-        hash_slice,
-        blob,
-        content_type,
-        size,
-        uploader,
-    )
-    .execute(db)
-    .await
-    .expect("insert attachment_blob");
-}
+    let thread_create = sign_thread_create_with_key(
+        author_key,
+        &thread_id,
+        "general",
+        "placeholder",
+        None,
+        &post_id,
+        base_ms,
+    );
+    push_applied(harness, from, to, &thread_create).await;
 
-/// Insert a `post_attachments` binding row. The AFTER INSERT trigger bumps
-/// `attachment_blobs.refcount` so the binding semantics match what the
-/// production bind path produces.
-async fn insert_post_attachment(
-    db: &SqlitePool,
-    post_id: &Uuid,
-    revision: i64,
-    position: i64,
-    content_hash: &[u8; 32],
-    filename: &str,
-) {
-    let post_id_text = post_id.to_string();
-    let hash_slice: &[u8] = content_hash.as_slice();
-    sqlx::query!(
-        "INSERT INTO post_attachments (post_id, revision, position, content_hash, filename) \
-         VALUES (?, ?, ?, ?, ?)",
-        post_id_text,
-        revision,
-        position,
-        hash_slice,
-        filename,
-    )
-    .execute(db)
-    .await
-    .expect("insert post_attachment");
-}
-
-/// Seed a 4-instance harness with active peering between "a" (the serving
-/// instance) and "d" (the requesting peer). Tests drop bytes / rows
-/// directly into `harness.instance("a").state.db`.
-async fn harness_with_peering() -> MultiInstanceHarness {
-    let harness = MultiInstanceHarness::new(4).await;
-    establish_active_peering(&harness, "a", "d").await;
-    harness
-}
-
-// ---------------------------------------------------------------------------
-// §11.3 / §11.4 receiver-side fixtures
-//
-// Two-instance harness: **A** is the §11 origin (a locally-authored post
-// binds the attachment and A holds the bytes, so A's §11.5 serve gate
-// passes); **B** is the receiver, holding the same content_hash as a
-// fetch-pending `attachment_blobs` row (`blob = NULL`) plus a remote post
-// binding. The serve trigger resolves the origin from `posts.home_instance`,
-// signs a §11.2 envelope GET to A, verifies per §11.3, and stores the bytes.
-// ---------------------------------------------------------------------------
-
-/// Seed the full FK chain a serve-able §11 origin needs on `db`: local
-/// user → general room → local thread → local post (rev 0, `home_instance
-/// NULL`) → post_revision → `attachment_blobs` row holding `blob` under
-/// key `content_hash` → current-revision binding. With `home_instance
-/// NULL`, this satisfies the §11.5 serve gate so A returns 200.
-async fn seed_origin(db: &SqlitePool, content_hash: &[u8; 32], blob: &[u8], content_type: &str) {
-    let author = Uuid::new_v4().to_string();
-    let thread = Uuid::new_v4().to_string();
-    let post = Uuid::new_v4().to_string();
-    let author_pub = [0xA1u8; 32];
-    let author_pub_slice: &[u8] = &author_pub;
-    sqlx::query!(
-        "INSERT INTO users (id, display_name, signup_method, public_key, display_name_skeleton) \
-         VALUES (?, 'origin-author', 'admin', ?, 'origin-author')",
-        author,
-        author_pub_slice,
-    )
-    .execute(db)
-    .await
-    .expect("insert origin user");
-    sqlx::query!(
-        "INSERT INTO rooms (id, slug, created_by) VALUES ('general', 'general', ?)",
-        author,
-    )
-    .execute(db)
-    .await
-    .expect("insert room");
-    sqlx::query!(
-        "INSERT INTO threads (id, title, author, room) VALUES (?, 'fixture', ?, 'general')",
-        thread,
-        author,
-    )
-    .execute(db)
-    .await
-    .expect("insert thread");
-    sqlx::query!(
-        "INSERT INTO posts (id, author, thread, revision_count, home_instance) \
-         VALUES (?, ?, ?, 1, NULL)",
-        post,
-        author,
-        thread,
-    )
-    .execute(db)
-    .await
-    .expect("insert post");
-    sqlx::query!(
-        "INSERT INTO post_revisions (post_id, revision, body, signature, canonical_hash, created_at) \
-         VALUES (?, 0, 'body', X'00', X'01', '2026-01-01T00:00:00Z')",
-        post,
-    )
-    .execute(db)
-    .await
-    .expect("insert revision");
-    let hash_vec: Vec<u8> = content_hash.to_vec();
-    let size = blob.len() as i64;
-    sqlx::query!(
-        "INSERT INTO attachment_blobs (content_hash, blob, content_type, size, uploader) \
-         VALUES (?, ?, ?, ?, NULL)",
-        hash_vec,
-        blob,
-        content_type,
-        size,
-    )
-    .execute(db)
-    .await
-    .expect("insert origin blob");
-    sqlx::query!(
-        "INSERT INTO post_attachments (post_id, revision, position, content_hash, filename) \
-         VALUES (?, 0, 0, ?, 'a.png')",
-        post,
-        hash_vec,
-    )
-    .execute(db)
-    .await
-    .expect("insert origin binding");
-}
-
-/// Seed the receiver state Phase A's projection produces on `db`: a
-/// federated user/thread/post homed at `origin_pub`, plus a fetch-pending
-/// `attachment_blobs` row (`blob = NULL`) and its current-revision
-/// binding. `resolve_origins` reads `origin_pub` back off the post to find
-/// the §11 origin to fetch from.
-async fn seed_pending_receiver(
-    db: &SqlitePool,
-    content_hash: &[u8; 32],
-    content_type: &str,
-    size: i64,
-    origin_pub: &[u8; 32],
-) {
-    let author = Uuid::new_v4().to_string();
-    let thread = Uuid::new_v4().to_string();
-    let post = Uuid::new_v4().to_string();
-    let author_pub = [0xB2u8; 32];
-    let author_pub_slice: &[u8] = &author_pub;
-    let origin_slice: &[u8] = origin_pub.as_slice();
-    sqlx::query!(
-        "INSERT INTO users (id, display_name, signup_method, public_key, \
-                            display_name_skeleton, home_instance) \
-         VALUES (?, 'remote-author', 'federated', ?, 'remote-author', ?)",
-        author,
-        author_pub_slice,
-        origin_slice,
-    )
-    .execute(db)
-    .await
-    .expect("insert remote user");
-    sqlx::query!(
-        "INSERT INTO rooms (id, slug, created_by) VALUES ('general', 'general', ?)",
-        author,
-    )
-    .execute(db)
-    .await
-    .expect("insert room");
-    sqlx::query!(
-        "INSERT INTO threads (id, title, author, room, home_instance) \
-         VALUES (?, 'fixture', ?, 'general', ?)",
-        thread,
-        author,
-        origin_slice,
-    )
-    .execute(db)
-    .await
-    .expect("insert thread");
-    sqlx::query!(
-        "INSERT INTO posts (id, author, thread, revision_count, home_instance) \
-         VALUES (?, ?, ?, 1, ?)",
-        post,
-        author,
-        thread,
-        origin_slice,
-    )
-    .execute(db)
-    .await
-    .expect("insert remote post");
-    sqlx::query!(
-        "INSERT INTO post_revisions (post_id, revision, body, signature, canonical_hash, created_at) \
-         VALUES (?, 0, 'body', X'00', X'02', '2026-01-01T00:00:00Z')",
-        post,
-    )
-    .execute(db)
-    .await
-    .expect("insert remote revision");
-    let hash_vec: Vec<u8> = content_hash.to_vec();
-    sqlx::query!(
-        "INSERT INTO attachment_blobs (content_hash, blob, content_type, size, uploader) \
-         VALUES (?, NULL, ?, ?, NULL)",
-        hash_vec,
-        content_type,
-        size,
-    )
-    .execute(db)
-    .await
-    .expect("insert pending blob");
-    sqlx::query!(
-        "INSERT INTO post_attachments (post_id, revision, position, content_hash, filename) \
-         VALUES (?, 0, 0, ?, 'a.png')",
-        post,
-        hash_vec,
-    )
-    .execute(db)
-    .await
-    .expect("insert pending binding");
+    let post_rev = sign_post_revision_with_key(
+        author_key,
+        &post_id,
+        &thread_id,
+        None,
+        0,
+        "remote body",
+        base_ms,
+        vec![attachment],
+    );
+    push_applied(harness, from, to, &post_rev).await;
 }
 
 /// Read back the stored blob bytes for `content_hash` (NULL → None).
@@ -508,6 +401,14 @@ async fn failure_row(db: &SqlitePool, content_hash: &[u8; 32]) -> Option<(String
     .map(|r| (r.kind, r.last_attempt_at))
 }
 
+/// Seed a 4-instance harness with active peering between "a" (the serving
+/// instance) and "d" (the requesting peer).
+async fn harness_with_peering() -> MultiInstanceHarness {
+    let harness = MultiInstanceHarness::new(4).await;
+    establish_active_peering(&harness, "a", "d").await;
+    harness
+}
+
 /// Establish mutual active peering so B's signed GET passes A's
 /// `verify_known_peer`, and return `(receiver_state, origin_pubkey)`.
 async fn peered_pair(harness: &MultiInstanceHarness) -> (Arc<AppState>, [u8; 32]) {
@@ -525,27 +426,12 @@ async fn peered_pair(harness: &MultiInstanceHarness) -> (Arc<AppState>, [u8; 32]
 /// revision binding whose blob bytes are resident on the serving instance
 /// → 200 OK with the raw bytes and the stored Content-Type.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn attachment_fetch_returns_200_with_bytes_for_local_origin() {
     let harness = harness_with_peering().await;
-    let a = harness.instance("a");
-    let db = &a.state.db;
+    let bytes = b"servable local-origin attachment bytes";
+    let origin = create_local_origin(&harness, "a", bytes, "fixture.txt").await;
 
-    let author_id = "user_alice";
-    insert_local_user(db, author_id, "alice").await;
-    ensure_general_room(db, author_id).await;
-    let thread_id = Uuid::new_v4();
-    insert_thread(db, &thread_id, author_id).await;
-    let post_id = Uuid::new_v4();
-    insert_post(db, &post_id, author_id, &thread_id, 1, false, None).await;
-    insert_post_revision(db, &post_id, 0).await;
-
-    let hash = seeded_hash(0x01);
-    let bytes = b"PNG-ISH BLOB BYTES \xff\x00\x01\x02";
-    insert_attachment_blob(db, &hash, Some(bytes), "image/png", Some(author_id)).await;
-    insert_post_attachment(db, &post_id, 0, 0, &hash, "fixture.png").await;
-
-    let path = format!("/federation/v1/attachments/{}", hex_lower(&hash));
+    let path = format!("/federation/v1/attachments/{}", hex_lower(&origin.hash));
     let (status, resp) = send_envelope_signed(&harness, "d", "a", Method::GET, &path, &[]).await;
     assert_eq!(
         status,
@@ -582,22 +468,20 @@ async fn attachment_fetch_returns_404_for_malformed_hex() {
     assert_eq!(parse_error_code(&resp), "attachment_not_found");
 }
 
-/// §11.5 forwarding-cache rule: the blob bytes are resident (we may have
-/// fetched them while gossip-forwarding for another author) but no
-/// `post_attachments` row binds the hash to a locally-authored post.
-/// Serving would violate the spec; the handler must 404.
+/// §11.5 forwarding-cache rule: the blob bytes are resident (uploaded to
+/// staging) but no `post_attachments` row binds the hash to a
+/// locally-authored post. A bare upload that was never bound onto a thread
+/// is exactly that state. Serving would violate the spec; the handler must
+/// 404.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn attachment_fetch_returns_404_when_resident_but_no_local_binding() {
     let harness = harness_with_peering().await;
-    let a = harness.instance("a");
-    let db = &a.state.db;
+    let app = &harness.instance("a").router;
 
-    // Blob bytes resident, but no binding row for any local post — exactly
-    // the forwarding-cache state §11.5 calls out: bytes on disk, no §11
-    // origin authority.
-    let hash = seeded_hash(0x02);
-    insert_attachment_blob(db, &hash, Some(b"opaque"), "image/jpeg", None).await;
+    // Upload only — resident bytes, no binding to any local post.
+    let uploader = setup_admin(app, "uploader").await;
+    let bytes = b"orphan uploaded bytes with no post binding";
+    let hash = upload_attachment(app, &uploader.cookie, bytes).await;
 
     let path = format!("/federation/v1/attachments/{}", hex_lower(&hash));
     let (status, resp) = send_envelope_signed(&harness, "d", "a", Method::GET, &path, &[]).await;
@@ -606,125 +490,107 @@ async fn attachment_fetch_returns_404_when_resident_but_no_local_binding() {
 }
 
 /// §11.5 fetch-pending / evicted state: a binding row exists for the hash
-/// but `attachment_blobs.blob IS NULL` (the row carries metadata only).
-/// 404 per §11.4.
+/// but `attachment_blobs.blob IS NULL`. No real local API evicts a bound
+/// blob while keeping the binding, so we reach the state with a single
+/// targeted `UPDATE` on top of a real post — the NULL row is legitimate
+/// cache-evicted input. 404 per §11.4.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn attachment_fetch_returns_404_when_blob_bytes_null() {
     let harness = harness_with_peering().await;
-    let a = harness.instance("a");
-    let db = &a.state.db;
+    let bytes = b"bytes that will be evicted to NULL";
+    let origin = create_local_origin(&harness, "a", bytes, "fixture.txt").await;
 
-    let author_id = "user_bob";
-    insert_local_user(db, author_id, "bob").await;
-    ensure_general_room(db, author_id).await;
-    let thread_id = Uuid::new_v4();
-    insert_thread(db, &thread_id, author_id).await;
-    let post_id = Uuid::new_v4();
-    insert_post(db, &post_id, author_id, &thread_id, 1, false, None).await;
-    insert_post_revision(db, &post_id, 0).await;
+    // Minimal seed: drop the resident bytes, keep the binding + metadata.
+    let hash_vec = origin.hash.to_vec();
+    sqlx::query!(
+        "UPDATE attachment_blobs SET blob = NULL WHERE content_hash = ?",
+        hash_vec,
+    )
+    .execute(&harness.instance("a").state.db)
+    .await
+    .expect("evict blob bytes");
 
-    let hash = seeded_hash(0x03);
-    // Metadata row only — `blob` column intentionally NULL.
-    insert_attachment_blob(db, &hash, None, "image/png", Some(author_id)).await;
-    insert_post_attachment(db, &post_id, 0, 0, &hash, "fixture.png").await;
-
-    let path = format!("/federation/v1/attachments/{}", hex_lower(&hash));
+    let path = format!("/federation/v1/attachments/{}", hex_lower(&origin.hash));
     let (status, resp) = send_envelope_signed(&harness, "d", "a", Method::GET, &path, &[]).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(parse_error_code(&resp), "attachment_not_found");
 }
 
-/// §11.5 retracted-post case: bytes resident, binding present, but
-/// `posts.retracted_at IS NOT NULL`. The handler collapses this to 404 —
-/// the retraction reaches federation receivers via the §10.1 erase
-/// pipeline; this serve gate is the local backstop for the receive-side
-/// delete-handler having NOT yet run.
+/// §11.5 retracted-post case: bytes resident, binding present, but the OP
+/// was retracted via the real `DELETE /api/posts/{id}` handler. The serve
+/// gate collapses this to 404 — the local backstop for a receive-side
+/// delete-handler that has not yet run.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn attachment_fetch_returns_404_when_post_retracted() {
     let harness = harness_with_peering().await;
-    let a = harness.instance("a");
-    let db = &a.state.db;
+    let app = &harness.instance("a").router;
+    let bytes = b"bytes on a post that gets retracted";
+    let origin = create_local_origin(&harness, "a", bytes, "doomed.txt").await;
 
-    let author_id = "user_carol";
-    insert_local_user(db, author_id, "carol").await;
-    ensure_general_room(db, author_id).await;
-    let thread_id = Uuid::new_v4();
-    insert_thread(db, &thread_id, author_id).await;
-    let post_id = Uuid::new_v4();
-    insert_post(db, &post_id, author_id, &thread_id, 1, true, None).await;
-    insert_post_revision(db, &post_id, 0).await;
+    // Retract the OP through the real delete handler.
+    let del = Request::builder()
+        .method(Method::DELETE)
+        .uri(format!("/api/posts/{}", origin.op_id))
+        .header(header::COOKIE, &origin.admin.cookie)
+        .body(Body::empty())
+        .expect("build retract request");
+    let response = send(app, del).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::NO_CONTENT,
+        "retract should 204",
+    );
 
-    let hash = seeded_hash(0x04);
-    insert_attachment_blob(db, &hash, Some(b"bytes"), "image/png", Some(author_id)).await;
-    insert_post_attachment(db, &post_id, 0, 0, &hash, "doomed.png").await;
-
-    let path = format!("/federation/v1/attachments/{}", hex_lower(&hash));
+    let path = format!("/federation/v1/attachments/{}", hex_lower(&origin.hash));
     let (status, _resp) = send_envelope_signed(&harness, "d", "a", Method::GET, &path, &[]).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
-/// §11.5 prior-revision case: the post has been edited (revision_count =
-/// 2, current revision = 1). The attachment row binds revision 0 — i.e.
-/// the author removed it during the edit. The §11.5 check requires the
-/// binding to be on the *current* revision. 404.
+/// §11.5 prior-revision case: the author edited the OP and dropped the
+/// attachment via `PATCH /api/posts/{id}` with an empty `attachments`
+/// array. The edit bumps `revision_count`, so the binding now sits on the
+/// prior (removed) revision. The §11.5 check requires the binding to be on
+/// the *current* revision. 404.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn attachment_fetch_returns_404_when_binding_is_prior_revision() {
     let harness = harness_with_peering().await;
-    let a = harness.instance("a");
-    let db = &a.state.db;
+    let app = &harness.instance("a").router;
+    let bytes = b"bytes removed during an edit";
+    let origin = create_local_origin(&harness, "a", bytes, "removed.txt").await;
 
-    let author_id = "user_dave";
-    insert_local_user(db, author_id, "dave").await;
-    ensure_general_room(db, author_id).await;
-    let thread_id = Uuid::new_v4();
-    insert_thread(db, &thread_id, author_id).await;
-    let post_id = Uuid::new_v4();
-    // revision_count = 2 ⇒ current revision = 1. We only seed a binding on
-    // revision 0, which is the prior (removed) one.
-    insert_post(db, &post_id, author_id, &thread_id, 2, false, None).await;
-    insert_post_revision(db, &post_id, 0).await;
-    insert_post_revision(db, &post_id, 1).await;
+    // Edit the OP, dropping the attachment → new revision, stale binding.
+    let edit = json_request(
+        Method::PATCH,
+        &format!("/api/posts/{}", origin.op_id),
+        Some(&origin.admin.cookie),
+        &serde_json::json!({
+            "body": "edited body, attachment removed",
+            "attachments": [],
+        }),
+    );
+    let response = send(app, edit).await;
+    assert_eq!(response.status(), StatusCode::OK, "OP edit should 200");
 
-    let hash = seeded_hash(0x05);
-    insert_attachment_blob(db, &hash, Some(b"bytes"), "image/png", Some(author_id)).await;
-    insert_post_attachment(db, &post_id, 0, 0, &hash, "removed.png").await;
-
-    let path = format!("/federation/v1/attachments/{}", hex_lower(&hash));
+    let path = format!("/federation/v1/attachments/{}", hex_lower(&origin.hash));
     let (status, _resp) = send_envelope_signed(&harness, "d", "a", Method::GET, &path, &[]).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 /// Defence-in-depth: even with a current-revision binding in place, if the
-/// post's author has been deleted (`users.deleted_at IS NOT NULL`) the
-/// handler must 404 immediately — once a remote `deactivate` lands as a
-/// `users.deleted_at` stamp, the attachment serve stops on the next
-/// request rather than waiting for the orphan-GC sweep to reap the
-/// binding.
+/// post's author has been tombstoned (`users.deleted_at IS NOT NULL`) the
+/// handler must 404 immediately. We tombstone via a targeted `UPDATE`
+/// rather than `DELETE /api/me` precisely so the binding survives — that
+/// pins the `users.deleted_at IS NULL` gate as the thing stopping the
+/// serve, not a downstream refcount/binding reap.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn attachment_fetch_returns_404_when_author_deleted() {
     let harness = harness_with_peering().await;
-    let a = harness.instance("a");
-    let db = &a.state.db;
-
-    let author_id = "user_erin";
-    insert_local_user(db, author_id, "erin").await;
-    ensure_general_room(db, author_id).await;
-    let thread_id = Uuid::new_v4();
-    insert_thread(db, &thread_id, author_id).await;
-    let post_id = Uuid::new_v4();
-    insert_post(db, &post_id, author_id, &thread_id, 1, false, None).await;
-    insert_post_revision(db, &post_id, 0).await;
-
-    let hash = seeded_hash(0x06);
-    insert_attachment_blob(db, &hash, Some(b"bytes"), "image/png", Some(author_id)).await;
-    insert_post_attachment(db, &post_id, 0, 0, &hash, "fixture.png").await;
+    let bytes = b"bytes whose author gets tombstoned";
+    let origin = create_local_origin(&harness, "a", bytes, "fixture.txt").await;
+    let db = harness.instance("a").state.db.clone();
 
     // Sanity: pre-deletion the serve succeeds.
-    let path = format!("/federation/v1/attachments/{}", hex_lower(&hash));
+    let path = format!("/federation/v1/attachments/{}", hex_lower(&origin.hash));
     let (status, _resp) = send_envelope_signed(&harness, "d", "a", Method::GET, &path, &[]).await;
     assert_eq!(
         status,
@@ -732,10 +598,14 @@ async fn attachment_fetch_returns_404_when_author_deleted() {
         "pre-deletion control case must serve 200",
     );
 
-    // Tombstone the author. The bindings stay in place — that's the point:
-    // we're proving the `users.deleted_at IS NULL` gate is the thing
-    // keeping the serve from succeeding, not a downstream refcount change.
-    mark_user_deleted(db, author_id).await;
+    // Minimal seed: tombstone the author, leaving the bindings in place.
+    sqlx::query!(
+        "UPDATE users SET deleted_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
+        origin.admin.user_id,
+    )
+    .execute(&db)
+    .await
+    .expect("tombstone author");
 
     let (status, _resp) = send_envelope_signed(&harness, "d", "a", Method::GET, &path, &[]).await;
     assert_eq!(
@@ -747,52 +617,34 @@ async fn attachment_fetch_returns_404_when_author_deleted() {
 
 /// §11.5 origin authority: a post stamped with a remote `home_instance`
 /// (received via gossip-forwarding from the author's home instance) must
-/// NOT serve its attachment from here even if the bytes are resident and
-/// the author is a cross-instance-registered local `users` row. The §11
-/// origin authority lives at the recorded `home_instance`, not at every
-/// peer that ever cached the blob bytes.
+/// NOT serve its attachment from here even with resident bytes and a
+/// current binding. The §11 origin authority lives at the recorded
+/// `home_instance`, not at every peer that cached the bytes. No real local
+/// API both binds a resident blob AND stamps a remote home, so we reach the
+/// state with a single targeted `UPDATE` on top of a real post.
 ///
 /// Pins the `p.home_instance IS NULL` clause of the `EXISTS` subquery
-/// against regression — without it, a cross-instance-registered local
-/// user (§13) authoring on their remote home would pass an `author IN
-/// users` check despite our not being origin.
+/// against regression.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn attachment_fetch_returns_404_when_post_has_remote_home_instance() {
     let harness = harness_with_peering().await;
-    let a = harness.instance("a");
-    let db = &a.state.db;
+    let bytes = b"bytes on a post stamped with a remote home";
+    let origin = create_local_origin(&harness, "a", bytes, "remote.txt").await;
 
-    // A §13 cross-instance-registered identity that lives here but authors
-    // elsewhere: the local row exists; the post itself was received via
-    // gossip and carries the remote home's pubkey on the row.
-    let author_id = "user_frank";
-    insert_local_user(db, author_id, "frank").await;
-    ensure_general_room(db, author_id).await;
-    let thread_id = Uuid::new_v4();
-    insert_thread(db, &thread_id, author_id).await;
-    let post_id = Uuid::new_v4();
-
-    // Arbitrary 32-byte pubkey standing in for the remote home instance's
-    // identity. Any non-NULL value flips the gate.
+    // Minimal seed: stamp a remote home pubkey on the locally-authored
+    // post. Any non-NULL value flips the gate.
     let remote_home_pubkey = [0xABu8; 32];
-    insert_post(
-        db,
-        &post_id,
-        author_id,
-        &thread_id,
-        1,
-        false,
-        Some(remote_home_pubkey.as_slice()),
+    let home_slice: &[u8] = remote_home_pubkey.as_slice();
+    sqlx::query!(
+        "UPDATE posts SET home_instance = ? WHERE id = ?",
+        home_slice,
+        origin.op_id,
     )
-    .await;
-    insert_post_revision(db, &post_id, 0).await;
+    .execute(&harness.instance("a").state.db)
+    .await
+    .expect("stamp remote home_instance");
 
-    let hash = seeded_hash(0x07);
-    insert_attachment_blob(db, &hash, Some(b"remote-origin bytes"), "image/png", None).await;
-    insert_post_attachment(db, &post_id, 0, 0, &hash, "remote.png").await;
-
-    let path = format!("/federation/v1/attachments/{}", hex_lower(&hash));
+    let path = format!("/federation/v1/attachments/{}", hex_lower(&origin.hash));
     let (status, resp) = send_envelope_signed(&harness, "d", "a", Method::GET, &path, &[]).await;
     assert_eq!(
         status,
@@ -814,17 +666,25 @@ async fn attachment_fetch_returns_404_when_post_has_remote_home_instance() {
 /// Happy path: B's trigger resolves A as origin, fetches, hash-verifies,
 /// and stores the bytes — leaving no failure row.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn serve_trigger_fetches_and_clears_failure_state() {
     let harness = MultiInstanceHarness::new(2).await;
-    let (b_state, a_pub) = peered_pair(&harness).await;
-    let a = harness.instance("a");
+    let (b_state, _a_pub) = peered_pair(&harness).await;
 
-    let blob = b"servable federated bytes \x09\x08\x07".to_vec();
+    let blob = b"servable federated bytes via real push".to_vec();
     let hash = sha256(&blob);
 
-    seed_origin(&a.state.db, &hash, &blob, "image/png").await;
-    seed_pending_receiver(&b_state.db, &hash, "image/png", blob.len() as i64, &a_pub).await;
+    // Origin A: real upload + create-thread so A's serve gate passes.
+    let origin = create_local_origin(&harness, "a", &blob, "a.txt").await;
+    assert_eq!(
+        origin.hash, hash,
+        "origin upload must content-address the bytes"
+    );
+
+    // Receiver B: real push of a remote post-rev binding the same hash,
+    // homed at A.
+    let author_key = SigningKey::generate(&mut OsRng);
+    let aref = text_attachment_ref(hash, blob.len() as u64, "a.txt");
+    push_pending_remote_post(&harness, "a", "b", &author_key, aref).await;
 
     assert!(
         try_fetch_for_serve(&b_state, hash).await,
@@ -846,30 +706,35 @@ async fn serve_trigger_fetches_and_clears_failure_state() {
 /// terminal `mismatch` failure row, and short-circuits a second trigger
 /// without a re-fetch (proven by the counter staying at 1).
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn serve_trigger_records_mismatch_and_is_terminal() {
     let harness = MultiInstanceHarness::new(2).await;
-    let (b_state, a_pub) = peered_pair(&harness).await;
-    let a = harness.instance("a");
+    let (b_state, _a_pub) = peered_pair(&harness).await;
 
-    // The hash B requests is the SHA-256 of the *declared* bytes, but A is
-    // seeded with a corrupt blob under that key — its bytes do not hash to
-    // the key. A's content-addressed serve returns the corrupt bytes; B's
-    // §11.3 check must catch the mismatch.
+    // B requests the SHA-256 of the *declared* bytes; A is seeded with a
+    // binding for that key, then its stored blob is corrupted so the
+    // content-addressed serve returns bytes that don't hash to the key.
     let declared = b"what the reference claims".to_vec();
     let hash = sha256(&declared);
+    let origin = create_local_origin(&harness, "a", &declared, "a.txt").await;
+    assert_eq!(origin.hash, hash);
+
     let corrupt = b"totally different bytes".to_vec();
     assert_ne!(sha256(&corrupt), hash, "corrupt bytes must mismatch");
-
-    seed_origin(&a.state.db, &hash, &corrupt, "image/png").await;
-    seed_pending_receiver(
-        &b_state.db,
-        &hash,
-        "image/png",
-        declared.len() as i64,
-        &a_pub,
+    let hash_vec = hash.to_vec();
+    let corrupt_slice: &[u8] = &corrupt;
+    sqlx::query!(
+        "UPDATE attachment_blobs SET blob = ? WHERE content_hash = ?",
+        corrupt_slice,
+        hash_vec,
     )
-    .await;
+    .execute(&harness.instance("a").state.db)
+    .await
+    .expect("corrupt origin blob");
+
+    // Receiver B: real push binding the declared hash, homed at A.
+    let author_key = SigningKey::generate(&mut OsRng);
+    let aref = text_attachment_ref(hash, declared.len() as u64, "a.txt");
+    push_pending_remote_post(&harness, "a", "b", &author_key, aref).await;
 
     assert!(
         !try_fetch_for_serve(&b_state, hash).await,
@@ -893,8 +758,7 @@ async fn serve_trigger_records_mismatch_and_is_terminal() {
     );
 
     // A second trigger must short-circuit on the terminal row WITHOUT a
-    // transport attempt — proven by the mismatch counter staying at 1 (a
-    // re-fetch would re-bump it).
+    // transport attempt — proven by the mismatch counter staying at 1.
     assert!(!try_fetch_for_serve(&b_state, hash).await);
     assert_eq!(
         b_state
@@ -911,17 +775,18 @@ async fn serve_trigger_records_mismatch_and_is_terminal() {
 /// immediate re-trigger does not re-attempt (proven by `last_attempt_at`
 /// staying identical).
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn serve_trigger_records_transient_and_backs_off() {
     let harness = MultiInstanceHarness::new(2).await;
-    let (b_state, a_pub) = peered_pair(&harness).await;
+    let (b_state, _a_pub) = peered_pair(&harness).await;
 
-    // The receiver binds the hash (origin resolves to A) but A was never
-    // seeded with the blob, so A's content-addressed serve 404s → every
-    // candidate is Unavailable → §11.4 transient.
+    // B binds the hash (origin resolves to A) via a real push, but A was
+    // never seeded with the blob, so A's content-addressed serve 404s →
+    // §11.4 transient.
     let blob = b"bytes the origin does not hold".to_vec();
     let hash = sha256(&blob);
-    seed_pending_receiver(&b_state.db, &hash, "image/png", blob.len() as i64, &a_pub).await;
+    let author_key = SigningKey::generate(&mut OsRng);
+    let aref = text_attachment_ref(hash, blob.len() as u64, "a.txt");
+    push_pending_remote_post(&harness, "a", "b", &author_key, aref).await;
 
     assert!(
         !try_fetch_for_serve(&b_state, hash).await,
@@ -976,17 +841,15 @@ async fn serve_trigger_no_origin_returns_false_without_row() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn serve_route_429s_when_peer_exceeds_request_budget() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "b", "a").await;
     let a = harness.instance("a");
     let b_pub = *harness.instance("b").state.instance_key.public_bytes();
 
-    let blob = b"servable bytes behind the rpm gate".to_vec();
-    let hash = sha256(&blob);
-    seed_origin(&a.state.db, &hash, &blob, "image/png").await;
-    let path = format!("/federation/v1/attachments/{}", hex_lower(&hash));
+    let blob = b"servable bytes behind the rpm gate";
+    let origin = create_local_origin(&harness, "a", blob, "a.txt").await;
+    let path = format!("/federation/v1/attachments/{}", hex_lower(&origin.hash));
 
     // Control: under budget, A is the origin and holds the bytes → 200.
     let (status, body) = send_envelope_signed(&harness, "b", "a", Method::GET, &path, b"").await;
@@ -1007,17 +870,15 @@ async fn serve_route_429s_when_peer_exceeds_request_budget() {
 }
 
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn serve_route_429s_when_peer_exceeds_byte_budget() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "b", "a").await;
     let a = harness.instance("a");
     let b_pub = *harness.instance("b").state.instance_key.public_bytes();
 
-    let blob = b"servable bytes behind the byte gate".to_vec();
-    let hash = sha256(&blob);
-    seed_origin(&a.state.db, &hash, &blob, "image/png").await;
-    let path = format!("/federation/v1/attachments/{}", hex_lower(&hash));
+    let blob = b"servable bytes behind the byte gate";
+    let origin = create_local_origin(&harness, "a", blob, "a.txt").await;
+    let path = format!("/federation/v1/attachments/{}", hex_lower(&origin.hash));
 
     // Burn B's whole per-minute byte budget on A in one charge; the
     // request-count budget is untouched, so the 429 is attributable to the

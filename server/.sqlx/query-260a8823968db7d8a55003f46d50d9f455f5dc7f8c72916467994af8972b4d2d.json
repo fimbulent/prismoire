@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE attachment_blobs SET blob = ? WHERE content_hash = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "260a8823968db7d8a55003f46d50d9f455f5dc7f8c72916467994af8972b4d2d"
+}
