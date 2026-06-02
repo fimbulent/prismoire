@@ -1,16 +1,54 @@
 #![cfg(feature = "test-auth")]
-
-//! §11.9.5 cross-instance trust bootstrap (trust codes).
+//! Trust-code cross-instance bootstrap integration tests (§11.9.5).
 //!
-//! Exercises the mint endpoint (`GET /api/me/trust-code`) and the redeem
-//! endpoint (`POST /api/users/by-trust-code`) across the three resolution
-//! branches (local row / known-remote stub / never-seen → seed) plus the
-//! self and malformed-input guards and the first-seed-wins home rule.
+//! Trust codes are the invite-style bridge that seeds a cross-instance
+//! stub user plus a reciprocal trust edge: a target mints a code over
+//! `GET /api/me/trust-code`, a source redeems it over
+//! `POST /api/users/by-trust-code`, and the resulting edge then has to
+//! surface in the trust read / activity-visibility APIs the way a
+//! locally-authored edge would. Sections:
+//!
+//! - **Mint / redeem mechanics (single instance).** A minted code
+//!   round-trips through `trust_code::parse`. Redeeming a never-seen
+//!   remote code seeds a federated stub user homed on the code's
+//!   instance, a move-less `user_homes` row (NULL move hash/created_at),
+//!   and a live trust edge from the redeemer. A `dry_run` reports what it
+//!   would seed without writing. A code naming a *local* user is
+//!   `is_local` and never reseeds a remote home. A conflicting second
+//!   code for the same pubkey is first-seed-wins. Redeeming one's own
+//!   code is `self_trust_edge`; garbage is `invalid_trust_code`. The
+//!   admin peers surface lists an un-peered redeemed home as a peering
+//!   suggestion.
+//! - **Genesis profile guard.** Both account-birth paths
+//!   (`setup_complete` / `signup_complete`) mint an empty-bio genesis
+//!   `profile` revision dual-written to `signed_objects` — the only thing
+//!   a peer can hydrate a redeemed stub's display name from.
+//! - **Read-API / activity surfacing (multi-instance).** A redeemed
+//!   cross-instance edge surfaces in the *trustor's* outgoing `trusts`
+//!   read endpoints. A *received* remote edge surfaces in the target's
+//!   `trusted_by` via §11.9.5 unknown-source recovery — including the
+//!   two-remote-sources case where each source homes on a different peer
+//!   and the recovery must ask the right home for each. The asymmetric
+//!   content rule holds: a one-directional `sam2 -> sam1` edge lets sam1
+//!   see sam2's posts but does not leak sam1's posts to sam2 even under
+//!   the admin carve-out; the reciprocal `sam1 -> sam2` edge then makes
+//!   sam1's content flow to sam2. A hub relays a third-party edge to a
+//!   later-interested spoke so the spoke recovers it in `trusted_by`.
+//!
+//! Convergence-driven scenarios use the [`settle`] harness driver rather
+//! than spawning `frontier_fanout_loop` + polling: `settle` round-robins
+//! the trust-graph rebuild, an inline `frontier_fanout_once` pass
+//! (cold-start suppression disabled), and the outbound drain across all
+//! instances until quiescent — deterministic, no spawn-loop race, and it
+//! also waits out the §11.9.5 by-author recovery backfill so a recovered
+//! edge has landed before the assertion runs.
 
 mod common;
 
 use axum::http::{Method, StatusCode};
 use ciborium::value::Value;
+use serde_json::json;
+
 use common::federation::{
     MultiInstanceHarness, establish_active_peering, send_envelope_signed, settle,
 };
@@ -18,11 +56,11 @@ use common::{
     body_json, get_request, json_request, refresh_trust_graph, send, setup_admin, signup_as,
     test_app, test_app_with_transport,
 };
-use prismoire_server::federation::frontier::frontier_fanout_loop;
 use prismoire_server::federation::trust_code;
-use serde_json::json;
-use std::sync::Arc;
-use tokio::sync::Notify;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 /// Decode 64-char lowercase hex into 32 bytes (test-side mirror of the
 /// server's strict decoder).
@@ -35,6 +73,7 @@ fn hex32(s: &str) -> [u8; 32] {
     out
 }
 
+/// Lowercase-hex a byte slice (mirror of the server's pubkey rendering).
 fn hex_lower(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -43,8 +82,8 @@ fn hex_lower(bytes: &[u8]) -> String {
     s
 }
 
-/// §6.3 WireFormat `{ "p", "s" }` for one signed object. Mirrors what a
-/// real edge sender puts on the wire (copied from `federation_phase5`).
+/// §6.3 WireFormat `{ "p", "s" }` for one signed object — what a real
+/// edge sender puts on the wire.
 fn encode_wire(payload: &[u8], signature: &[u8]) -> Vec<u8> {
     let m = Value::Map(vec![
         (Value::Text("p".into()), Value::Bytes(payload.to_vec())),
@@ -94,23 +133,24 @@ fn parse_result_statuses(body: &[u8]) -> Vec<String> {
         .collect()
 }
 
-/// Spin until `predicate` is true or `timeout_ms` elapses.
-async fn poll_until<F, Fut>(timeout_ms: u64, mut predicate: F) -> bool
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = bool>,
-{
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
-    loop {
-        if predicate().await {
-            return true;
-        }
-        if std::time::Instant::now() >= deadline {
-            return false;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+/// Count current trust edges `source -> target` (by pubkey) on `db`.
+async fn count_edge(db: &sqlx::SqlitePool, source_pk: &[u8], target_pk: &[u8]) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM current_trust_edges cte \
+         JOIN users su ON su.id = cte.source_user \
+         JOIN users tu ON tu.id = cte.target_user \
+         WHERE su.public_key = ? AND tu.public_key = ? AND cte.trust_type = 'trust'",
+    )
+    .bind(source_pk)
+    .bind(target_pk)
+    .fetch_one(db)
+    .await
+    .unwrap()
 }
+
+// ---------------------------------------------------------------------------
+// Mint / redeem mechanics (single instance)
+// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn mint_returns_parseable_code() {
@@ -429,6 +469,10 @@ async fn admin_peers_surfaces_trust_code_suggestion() {
     assert_eq!(suggestions[0]["edge_count"], 1);
 }
 
+// ---------------------------------------------------------------------------
+// Genesis profile guard
+// ---------------------------------------------------------------------------
+
 /// §11.9.5 root-cause guard: account birth must mint a genesis `profile`
 /// revision, even when the user never edits their bio.
 ///
@@ -473,6 +517,14 @@ async fn account_birth_mints_genesis_profile_revision() {
         assert_eq!(signed, 1, "genesis profile must be in signed_objects");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Read-API / activity surfacing (multi-instance)
+//
+// Convergence-driven recovery (unknown-source hydration, frontier replay,
+// content backfill) is pumped to quiescence with `settle` rather than the
+// old `frontier_fanout_loop` + `poll_until` waits.
+// ---------------------------------------------------------------------------
 
 /// Read-API end-to-end: a cross-instance trust edge created purely
 /// through the public `/api` surface (mint a trust code on the target
@@ -526,7 +578,8 @@ async fn redeemed_cross_instance_edge_surfaces_in_trust_read_api() {
 
     // The list comes from the projected edge table; viewer enrichment
     // reads the graph cache, so refresh it (rebuild_loop isn't spawned
-    // in tests).
+    // in tests). bob is seeded locally as a stub by redeem, so no
+    // cross-instance recovery is needed here.
     refresh_trust_graph(&a.state).await;
 
     // (1) GET /api/users/{alice}/trust/edges?direction=trusts lists bob.
@@ -575,156 +628,6 @@ async fn redeemed_cross_instance_edge_surfaces_in_trust_read_api() {
     );
 }
 
-/// Receiver-side read-API end-to-end: the home instance of an edge's
-/// *target* must surface the remote source in that target's
-/// `trusted_by` once the edge is delivered — driven entirely from the
-/// target's own genesis state, with no manual profile-publish.
-///
-/// This is the §11.9.5 regression felt from the other side: sam1 is born
-/// on A and mints a code; sam2 (born on B) redeems it, producing a
-/// `sam2 -> sam1` edge that B delivers to A. A has never seen sam2, so it
-/// must hydrate sam2's stub before it can project the edge — and the only
-/// thing it can hydrate from is sam2's *genesis* profile revision. The
-/// precedent test in `federation_phase5` had to hand-publish a bio first
-/// because the bypass birth route minted no genesis `profile`; now that
-/// every birth path mints one, that crutch is gone. If it were still
-/// needed, sam2 would never get a display name and this read would show
-/// an empty `trusted_by`.
-///
-/// One `/federation/v1/edges` call is unavoidable: the test harness
-/// spawns no frontier loops, so the originator-side auto-forward never
-/// fires and the edge has to be hand-delivered. Everything else stays on
-/// the public `/api` surface.
-#[tokio::test]
-async fn received_cross_instance_edge_surfaces_in_trusted_by_read_api() {
-    let harness = MultiInstanceHarness::new(2).await;
-    // Mutual active peering: B delivers the edge to A, and A pulls sam2's
-    // genesis profile back from B to recover the unknown source.
-    establish_active_peering(&harness, "a", "b").await;
-    let a = harness.instance("a");
-    let b = harness.instance("b");
-
-    // sam1: edge target, born on A (A is the receiver under test).
-    // sam2: edge source, born on B — genuinely remote to A.
-    let sam1 = setup_admin(&a.router, "sam1").await;
-    let sam2 = setup_admin(&b.router, "sam2").await;
-
-    // Deliberately NO bio publish for sam2: hydration must work off the
-    // genesis profile-rev alone.
-
-    // sam1 mints a code on A; sam2 redeems it on B, signing `sam2 -> sam1`.
-    let mint = send(
-        &a.router,
-        get_request("/api/me/trust-code", Some(&sam1.cookie)),
-    )
-    .await;
-    assert_eq!(mint.status(), StatusCode::OK);
-    let code = body_json(mint).await["code"]
-        .as_str()
-        .expect("code field")
-        .to_string();
-
-    let redeem = send(
-        &b.router,
-        json_request(
-            Method::POST,
-            "/api/users/by-trust-code",
-            Some(&sam2.cookie),
-            &json!({ "code": code }),
-        ),
-    )
-    .await;
-    assert_eq!(redeem.status(), StatusCode::OK, "sam2 redeems sam1's code");
-
-    // Pull the canonical `sam2 -> sam1` edge bytes B just signed and
-    // hand them to A, mirroring the §7.4 forward the harness can't run.
-    let (payload, signature): (Vec<u8>, Vec<u8>) = sqlx::query_as(
-        "SELECT payload, signature FROM signed_objects \
-         WHERE inner_class = 'trust-edge' AND payload IS NOT NULL LIMIT 1",
-    )
-    .fetch_one(&b.state.db)
-    .await
-    .expect("sam2 -> sam1 edge bytes on B");
-    let body = encode_edges_body(&[encode_wire(&payload, &signature)]);
-    let (status, resp_body) = send_envelope_signed(
-        &harness,
-        "b",
-        "a",
-        Method::POST,
-        "/federation/v1/edges",
-        &body,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        parse_result_statuses(&resp_body),
-        vec!["applied".to_string()],
-        "§9.1 promises `applied` even for an unknown-source edge",
-    );
-
-    // Recovery is async (A backfills sam2's genesis profile from B, then
-    // sweeps the pending edge into the projection). Poll the public read
-    // endpoint until sam1's `trusted_by` lists sam2; refresh the graph
-    // cache each tick since `rebuild_loop` isn't spawned in tests.
-    let trusted_by_url = format!(
-        "/api/users/{}/trust/edges?direction=trusted_by",
-        sam1.public_key_hex
-    );
-    let surfaced = poll_until(3_000, || async {
-        refresh_trust_graph(&a.state).await;
-        let resp = send(&a.router, get_request(&trusted_by_url, Some(&sam1.cookie))).await;
-        if resp.status() != StatusCode::OK {
-            return false;
-        }
-        body_json(resp).await["users"]
-            .as_array()
-            .map(|users| {
-                users
-                    .iter()
-                    .any(|u| u["public_key_hex"] == sam2.public_key_hex)
-            })
-            .unwrap_or(false)
-    })
-    .await;
-    assert!(
-        surfaced,
-        "A must hydrate sam2 from its genesis profile and surface it in \
-         sam1's trusted_by read endpoint",
-    );
-
-    // The edge is now visible through both read shapes, with sam2's
-    // display name recovered from the genesis profile-rev (not a bio).
-    let edges = send(&a.router, get_request(&trusted_by_url, Some(&sam1.cookie))).await;
-    let edges_body = body_json(edges).await;
-    assert_eq!(edges_body["total"], 1);
-    let sam2_edge = edges_body["users"]
-        .as_array()
-        .expect("users array")
-        .iter()
-        .find(|u| u["public_key_hex"] == sam2.public_key_hex)
-        .expect("sam2 in sam1's incoming edges");
-    assert_eq!(sam2_edge["display_name"], "sam2");
-
-    let detail = send(
-        &a.router,
-        get_request(
-            &format!("/api/users/{}/trust", sam1.public_key_hex),
-            Some(&sam1.cookie),
-        ),
-    )
-    .await;
-    let detail_body = body_json(detail).await;
-    assert_eq!(detail_body["trusts_received"], 1);
-    assert!(
-        detail_body["trusted_by"]
-            .as_array()
-            .expect("trusted_by array")
-            .iter()
-            .any(|u| u["public_key_hex"] == sam2.public_key_hex),
-        "sam2 present in sam1's trust-detail `trusted_by` list",
-    );
-}
-
 /// Repro probe for the "content flows both ways" report: with a
 /// one-directional edge `sam2 -> sam1` (sam2 trusts sam1), the
 /// content-visibility rule is asymmetric — sam1 may see sam2's posts,
@@ -742,11 +645,15 @@ async fn received_cross_instance_edge_surfaces_in_trusted_by_read_api() {
 ///     the feed and stamps `admin_override == true`. The gate is open,
 ///     so the ONLY thing keeping sam1's posts off sam2's screen is
 ///     whether sam1's content was replicated to B at all. In this
-///     in-process harness (no frontier loops, no mode promotion) it
-///     should not be — so the feed is empty despite the open gate.
+///     in-process harness (no mode promotion) it should not be — so the
+///     feed is empty despite the open gate.
 ///
 /// If sam1's thread DOES surface here, content replicated to B against
 /// the interest model and we have reproduced the leak in test code.
+///
+/// `settle` drives the §11.9.5 unknown-source recovery that hydrates
+/// sam2 on A and backfills its content — replacing the old `poll_until`
+/// wait on that async backfill.
 #[tokio::test]
 async fn activity_visibility_asymmetry_under_admin_override() {
     let harness = MultiInstanceHarness::new(2).await;
@@ -846,40 +753,35 @@ async fn activity_visibility_asymmetry_under_admin_override() {
         vec!["applied".to_string()]
     );
 
-    refresh_trust_graph(&b.state).await;
+    // Drive the §11.9.5 unknown-source recovery to quiescence: A hydrates
+    // sam2 from its genesis profile, projects `sam2 -> sam1`, and
+    // backfills sam2's pre-federation thread.
+    settle(&harness).await;
+    refresh_trust_graph(&a.state).await;
 
-    // Expected direction: sam1 sees sam2's activity (sam2 trusts sam1).
-    // The edge projects on A asynchronously (unknown-source recovery), so
-    // poll — refreshing A's graph each tick — until BOTH the reverse-trust
-    // grant is recognised (`admin_override == false`) AND sam2's
-    // backfilled post is in the feed.
+    // Expected direction: sam1 sees sam2's activity (sam2 trusts sam1),
+    // with the reverse-trust grant recognised (`admin_override == false`)
+    // and sam2's backfilled post in the feed.
     let sam2_activity_url = format!("/api/users/{}/activity", sam2.public_key_hex);
-    let legit_visibility = poll_until(3_000, || async {
-        refresh_trust_graph(&a.state).await;
-        let resp = send(
-            &a.router,
-            get_request(&sam2_activity_url, Some(&sam1.cookie)),
-        )
-        .await;
-        if resp.status() != StatusCode::OK {
-            return false;
-        }
-        let body = body_json(resp).await;
-        let kumquat = body["items"]
-            .as_array()
-            .map(|items| {
-                items
-                    .iter()
-                    .any(|i| i["body"].as_str().is_some_and(|b| b.contains("kumquat")))
-            })
-            .unwrap_or(false);
-        body["admin_override"] == false && kumquat
-    })
+    let resp = send(
+        &a.router,
+        get_request(&sam2_activity_url, Some(&sam1.cookie)),
+    )
     .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(
+        body["admin_override"], false,
+        "sam1 sees sam2 via genuine reverse trust (sam2 trusts sam1)",
+    );
     assert!(
-        legit_visibility,
-        "sam1 should see sam2's post via genuine reverse trust (sam2 trusts \
-         sam1), with admin_override == false",
+        body["items"]
+            .as_array()
+            .map(|items| items
+                .iter()
+                .any(|i| i["body"].as_str().is_some_and(|b| b.contains("kumquat"))))
+            .unwrap_or(false),
+        "sam2's backfilled post must surface in sam1's view",
     );
 
     // The asymmetric direction: sam2 views sam1's activity. The trust
@@ -922,26 +824,19 @@ async fn activity_visibility_asymmetry_under_admin_override() {
 /// posts — both the thread sam1 authored before federation (`tangerine`)
 /// and one authored after (`lychee`).
 ///
-/// Unlike the asymmetry probe, this test drives the *production*
-/// frontier triggers — `frontier_fanout_loop` on both instances — so the
-/// full chain runs for real:
+/// `settle` drives the *production* frontier triggers (the inline
+/// `frontier_fanout_once` pass with cold-start suppression disabled, plus
+/// the trust-graph rebuild and outbound drain across both instances),
+/// replacing the old spawn-`frontier_fanout_loop`-and-poll pattern that
+/// raced the loop's cold-start Trigger-3 suppression. The full chain runs
+/// deterministically:
 ///
-///   1. sam1 redeems sam2's code on A → A's running forwarder delivers
-///      the `sam1 -> sam2` edge to B unaided (it routes by target, and
-///      sam2 is B-local), because A already holds B's announced frontier.
-///   2. B projects the edge; its next reverse-frontier rebuild pulls sam1
+///   1. sam1 redeems sam2's code on A → A forwards the `sam1 -> sam2`
+///      edge to B once A holds B's announced frontier.
+///   2. B projects the edge; its reverse-frontier rebuild pulls sam1
 ///      into the content closure, firing the §7.6 proactive by-author
 ///      backfill that pulls sam1's *existing* posts from A.
 ///   3. sam1's *new* post rides the reactive push.
-///
-/// This passes: with both loops running the mechanism is sound, so it
-/// stands as a regression guard for the reciprocal flow. The live report
-/// therefore points at something this in-process harness can't reproduce
-/// — a missed frontier announce (so A never forwards the edge), an
-/// inactive peer, or a restart that landed sam1's arrival on B's
-/// first-changed rebuild (where cold-start backfill suppression skips
-/// Trigger 3). The diagnostic on live instances is: does instance2's DB
-/// hold the `sam1 -> sam2` edge at all?
 #[tokio::test]
 async fn reciprocal_edge_surfaces_sam1_content_to_sam2() {
     let harness = MultiInstanceHarness::new(2).await;
@@ -1031,63 +926,26 @@ async fn reciprocal_edge_surfaces_sam1_content_to_sam2() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    refresh_trust_graph(&a.state).await;
-    refresh_trust_graph(&b.state).await;
 
-    // Sanity: sam1 sees sam2's kumquat via §11.9.5 unknown-source recovery.
+    // Settle the working-direction recovery; sam1 must see sam2's kumquat
+    // via §11.9.5 unknown-source recovery.
+    settle(&harness).await;
+    refresh_trust_graph(&a.state).await;
     let sam2_activity_url = format!("/api/users/{}/activity", sam2.public_key_hex);
-    let sam1_sees_sam2 = poll_until(3_000, || async {
-        refresh_trust_graph(&a.state).await;
-        let resp = send(
-            &a.router,
-            get_request(&sam2_activity_url, Some(&sam1.cookie)),
-        )
-        .await;
-        if resp.status() != StatusCode::OK {
-            return false;
-        }
+    let resp = send(
+        &a.router,
+        get_request(&sam2_activity_url, Some(&sam1.cookie)),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
         body_json(resp).await["items"]
             .as_array()
-            .map(|items| {
-                items
-                    .iter()
-                    .any(|i| i["body"].as_str().is_some_and(|b| b.contains("kumquat")))
-            })
-            .unwrap_or(false)
-    })
-    .await;
-    assert!(
-        sam1_sees_sam2,
-        "working direction broke: sam1 must see sam2's content"
-    );
-
-    // --- spawn the production frontier loops on both instances ---
-    let a_dirty = Arc::new(Notify::new());
-    let b_dirty = Arc::new(Notify::new());
-    tokio::spawn(frontier_fanout_loop(a.state.clone(), a_dirty.clone()));
-    tokio::spawn(frontier_fanout_loop(b.state.clone(), b_dirty.clone()));
-
-    // Warm-up: B's first changed rebuild consumes the cold-start backfill
-    // suppression on a sam1-free closure (only sam2 is local; nobody yet
-    // trusts sam2) and re-announces to A. Gate on A storing a
-    // peer_frontiers row for B so the reciprocal edge below lands on a
-    // *second* rebuild where Trigger 3 is live.
-    b_dirty.notify_one();
-    a_dirty.notify_one();
-    let b_pub = b.state.instance_key.public_bytes().to_vec();
-    let warmed = poll_until(3_000, || async {
-        let exists: Option<i64> =
-            sqlx::query_scalar("SELECT applied_version FROM peer_frontiers WHERE peer_pubkey = ?")
-                .bind(&b_pub)
-                .fetch_optional(&a.state.db)
-                .await
-                .unwrap();
-        exists.is_some()
-    })
-    .await;
-    assert!(
-        warmed,
-        "B's frontier loop never re-announced to A (warm-up)"
+            .map(|items| items
+                .iter()
+                .any(|i| i["body"].as_str().is_some_and(|b| b.contains("kumquat"))))
+            .unwrap_or(false),
+        "working direction broke: sam1 must see sam2's content",
     );
 
     // --- reciprocal edge: sam2 mints on B, sam1 redeems on A ---
@@ -1114,32 +972,6 @@ async fn reciprocal_edge_surfaces_sam1_content_to_sam2() {
     .await;
     assert_eq!(redeem2.status(), StatusCode::OK, "sam1 redeems sam2's code");
 
-    // The reciprocal edge routes by target (sam2 is B-local), so A's
-    // running forwarder delivers it to B on its own — no hand-deliver
-    // needed. Wait until B has projected `sam1 -> sam2` into its graph.
-    let sam1_id: &[u8] = &sam1_pk;
-    let sam2_id: &[u8] = &sam2_pk;
-    let edge_on_b = poll_until(3_000, || async {
-        refresh_trust_graph(&b.state).await;
-        let n: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM trust_edges te \
-             JOIN users su ON su.id = te.source_user \
-             JOIN users tu ON tu.id = te.target_user \
-             WHERE su.public_key = ? AND tu.public_key = ? AND te.trust_type = 'trust'",
-        )
-        .bind(sam1_id)
-        .bind(sam2_id)
-        .fetch_one(&b.state.db)
-        .await
-        .unwrap();
-        n >= 1
-    })
-    .await;
-    assert!(
-        edge_on_b,
-        "A's forwarder must deliver the reciprocal sam1 -> sam2 edge to B",
-    );
-
     // sam1 posts a NEW thread on A *after* the reciprocal edge.
     let r = send(
         &a.router,
@@ -1156,199 +988,44 @@ async fn reciprocal_edge_surfaces_sam1_content_to_sam2() {
     )
     .await;
     assert_eq!(r.status(), StatusCode::CREATED, "sam1 authors again on A");
-    refresh_trust_graph(&a.state).await;
 
-    // Rebuild #2 on B: sam1 now sits in B's content closure, so Trigger 3
-    // fires a by-author backfill that should pull both of sam1's threads
-    // from A. Re-announce on A so it learns B wants sam1 too.
-    b_dirty.notify_one();
-    a_dirty.notify_one();
+    // Drive the reciprocal flow to quiescence: A forwards `sam1 -> sam2`
+    // to B (routes by target, sam2 is B-local), B's reverse-frontier
+    // rebuild pulls sam1 into its closure, and Trigger-3 backfills both of
+    // sam1's threads from A.
+    settle(&harness).await;
 
-    // sam2 should now see BOTH of sam1's threads.
-    let sam1_activity_url = format!("/api/users/{}/activity", sam1.public_key_hex);
-    let visible = poll_until(5_000, || async {
-        refresh_trust_graph(&b.state).await;
-        b_dirty.notify_one();
-        let resp = send(
-            &b.router,
-            get_request(&sam1_activity_url, Some(&sam2.cookie)),
-        )
-        .await;
-        if resp.status() != StatusCode::OK {
-            return false;
-        }
-        let items = body_json(resp).await["items"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        let tangerine = items
-            .iter()
-            .any(|i| i["body"].as_str().is_some_and(|b| b.contains("tangerine")));
-        let lychee = items
-            .iter()
-            .any(|i| i["body"].as_str().is_some_and(|b| b.contains("lychee")));
-        tangerine && lychee
-    })
-    .await;
-    assert!(
-        visible,
-        "sam2 should see sam1's content (tangerine + lychee) once sam1 \
-         trusts sam2 and the frontier loop backfills it — if this fails, \
-         the live bug reproduces",
-    );
-}
-
-/// First-contact race repro — the live "sam2 sees none of sam1's content"
-/// bug, isolated to its root cause: a trust edge signed *before* the
-/// signer's instance holds the target peer's frontier is silently dropped
-/// and never replayed.
-///
-/// Cross-instance edge fan-out is reactive and one-shot. `set_trust_edge`
-/// (via `forward_trust_edge`) forwards a freshly-signed edge only to peers
-/// already present in `peers_interested_in(target)` at creation time, and
-/// nothing replays a dropped edge afterwards. `peers_interested_in`
-/// treats a peer with no `peer_frontiers` row as "filtered, empty
-/// frontier" (routing.rs) — it matches no key — so an edge toward a
-/// B-local target routes nowhere until B's frontier has reached A.
-///
-/// `establish_active_peering(a, b)` reproduces the live asymmetry for
-/// free: the initiate→accept dance fires only A's first-contact announce
-/// to B (through A's `handle_peer_response` callback), so afterwards **B
-/// holds A's frontier but A holds none for B**. This is the exact live
-/// state — instance2 held instance1's frontier early (so `sam2 -> sam1`
-/// routed), while instance1 only applied instance2's frontier 18 minutes
-/// *after* signing `sam1 -> sam2`.
-///
-/// The test signs `sam1 -> sam2` on A in that window (dropped), then lets
-/// B's frontier finally reach A, and asserts the edge reaches B. It is
-/// **expected to FAIL** against current code: applying B's frontier in
-/// `handle_frontier_announce` stores the row but never replays the
-/// stranded local edge. The fix — replay local-origin edges to a peer
-/// whose expansion frontier just arrived — makes this pass.
-#[tokio::test]
-async fn reciprocal_edge_stranded_when_peer_frontier_absent_at_creation() {
-    let harness = MultiInstanceHarness::new(2).await;
-    let a = harness.instance("a");
-    let b = harness.instance("b");
-
-    let sam1 = setup_admin(&a.router, "sam1").await;
-    let sam2 = setup_admin(&b.router, "sam2").await;
-    let sam1_pk = hex32(&sam1.public_key_hex);
-    let sam2_pk = hex32(&sam2.public_key_hex);
+    // The reciprocal `sam1 -> sam2` edge must have projected on B.
     let sam1_id: &[u8] = &sam1_pk;
     let sam2_id: &[u8] = &sam2_pk;
-
-    // Active peering, A as initiator. The initiate→accept dance fires only
-    // A's first-contact announce to B, so B now holds A's frontier while A
-    // holds NONE for B — the live race pre-condition.
-    establish_active_peering(&harness, "a", "b").await;
-
-    // Pre-condition: A has no peer_frontiers row for B, so any edge A signs
-    // toward a B-local target right now has no interested peer to route to.
-    let b_pub = b.state.instance_key.public_bytes().to_vec();
-    let a_has_b_frontier: Option<i64> =
-        sqlx::query_scalar("SELECT applied_version FROM peer_frontiers WHERE peer_pubkey = ?")
-            .bind(&b_pub)
-            .fetch_optional(&a.state.db)
-            .await
-            .unwrap();
     assert!(
-        a_has_b_frontier.is_none(),
-        "pre-condition: A must not yet hold B's frontier, else the race \
-         this test reproduces cannot occur",
+        count_edge(&b.state.db, sam1_id, sam2_id).await >= 1,
+        "A's forwarder must deliver the reciprocal sam1 -> sam2 edge to B",
     );
 
-    // sam1 trusts sam2: sam2 mints on B, sam1 redeems on A. This signs and
-    // stores `sam1 -> sam2` on A and fires A's forwarder — which finds no
-    // peer interested in sam2 (no B frontier) and drops the edge.
-    let code = body_json(
-        send(
-            &b.router,
-            get_request("/api/me/trust-code", Some(&sam2.cookie)),
-        )
-        .await,
-    )
-    .await["code"]
-        .as_str()
-        .expect("code field")
-        .to_string();
-    let redeem = send(
-        &a.router,
-        json_request(
-            Method::POST,
-            "/api/users/by-trust-code",
-            Some(&sam1.cookie),
-            &json!({ "code": code }),
-        ),
+    // sam2 should now see BOTH of sam1's threads.
+    refresh_trust_graph(&b.state).await;
+    let sam1_activity_url = format!("/api/users/{}/activity", sam1.public_key_hex);
+    let resp = send(
+        &b.router,
+        get_request(&sam1_activity_url, Some(&sam2.cookie)),
     )
     .await;
-    assert_eq!(
-        redeem.status(),
-        StatusCode::OK,
-        "sam1 redeems sam2's code on A"
-    );
-
-    // The edge is signed and stored on A...
-    let count_edge = |db: sqlx::SqlitePool| async move {
-        let n: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM trust_edges te \
-             JOIN users su ON su.id = te.source_user \
-             JOIN users tu ON tu.id = te.target_user \
-             WHERE su.public_key = ? AND tu.public_key = ? AND te.trust_type = 'trust'",
-        )
-        .bind(sam1_id)
-        .bind(sam2_id)
-        .fetch_one(&db)
-        .await
-        .unwrap();
-        n
-    };
-    assert_eq!(
-        count_edge(a.state.db.clone()).await,
-        1,
-        "sam1 -> sam2 edge is signed and stored on A",
-    );
-
-    // ...but it was dropped at creation, not delivered: B has no such edge.
-    assert_eq!(
-        count_edge(b.state.db.clone()).await,
-        0,
-        "edge had no interested peer at creation, so it is not yet on B",
-    );
-
-    // Now B's frontier finally reaches A (the live 03:35 announce). Drive
-    // B's fanout loop so it re-announces to A; A applies it via
-    // `handle_frontier_announce`.
-    let b_dirty = Arc::new(Notify::new());
-    tokio::spawn(frontier_fanout_loop(b.state.clone(), b_dirty.clone()));
-    b_dirty.notify_one();
-
-    // A now holds B's frontier — so a *fresh* edge would route. The open
-    // question is the *already-signed* one.
-    let a_now_has_b = poll_until(3_000, || async {
-        let v: Option<i64> =
-            sqlx::query_scalar("SELECT applied_version FROM peer_frontiers WHERE peer_pubkey = ?")
-                .bind(&b_pub)
-                .fetch_optional(&a.state.db)
-                .await
-                .unwrap();
-        v.is_some()
-    })
-    .await;
-    assert!(a_now_has_b, "B's frontier announce never reached A");
-
-    // The fix: applying B's frontier must replay the stranded `sam1 -> sam2`
-    // edge to B. With the bug, nothing replays it, so B never receives the
-    // edge and sam2 sees none of sam1's content.
-    let edge_reaches_b = poll_until(3_000, || async {
-        count_edge(b.state.db.clone()).await >= 1
-    })
-    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let items = body_json(resp).await["items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let tangerine = items
+        .iter()
+        .any(|i| i["body"].as_str().is_some_and(|b| b.contains("tangerine")));
+    let lychee = items
+        .iter()
+        .any(|i| i["body"].as_str().is_some_and(|b| b.contains("lychee")));
     assert!(
-        edge_reaches_b,
-        "BUG: A signed sam1 -> sam2 before holding B's frontier, so it was \
-         dropped; applying B's frontier later did not replay it, so sam2 \
-         never receives the edge and sees none of sam1's content",
+        tangerine && lychee,
+        "sam2 should see sam1's content (tangerine + lychee) once sam1 \
+         trusts sam2 and the frontier fanout backfills it",
     );
 }
 
@@ -1370,9 +1047,10 @@ async fn reciprocal_edge_stranded_when_peer_frontier_absent_at_creation() {
 /// {sam2, sam3} is silently dropped from sam1's `trusted_by`, matching the
 /// live report.
 ///
-/// One `/federation/v1/edges` call per source is hand-delivered (the
-/// harness spawns no frontier loops); everything else is the public `/api`
-/// surface plus the autonomous recovery under test.
+/// One `/federation/v1/edges` call per source is hand-delivered; `settle`
+/// then drives the autonomous recovery (genesis-profile backfill against
+/// each source's true home, stub hydration, sweep-projection) to
+/// quiescence — replacing the old `poll_until` wait on that async work.
 #[tokio::test]
 async fn two_remote_sources_both_surface_in_trusted_by() {
     let harness = MultiInstanceHarness::new(3).await;
@@ -1424,8 +1102,8 @@ async fn two_remote_sources_both_surface_in_trusted_by() {
         );
     }
 
-    // Hand-deliver each edge to A, mirroring the §7.5 forward the harness
-    // can't run. Each source instance holds exactly its own edge.
+    // Hand-deliver each edge to A, mirroring the §7.5 forward. Each source
+    // instance holds exactly its own edge.
     for from in ["b", "c"] {
         let db = &harness.instance(from).state.db;
         let (payload, signature): (Vec<u8>, Vec<u8>) = sqlx::query_as(
@@ -1453,49 +1131,30 @@ async fn two_remote_sources_both_surface_in_trusted_by() {
         );
     }
 
-    // Recovery is async (A backfills each source's genesis profile, then
-    // sweeps the pending edge into the projection). Poll the public read
-    // endpoint until sam1's `trusted_by` lists BOTH sources; refresh the
-    // graph cache each tick since `rebuild_loop` isn't spawned in tests.
+    // Drive the per-source recovery to quiescence: A backfills each
+    // source's genesis profile from its true home, hydrates the stub, and
+    // sweeps the pending edge into the projection.
+    settle(&harness).await;
+    refresh_trust_graph(&a.state).await;
+
+    // sam1's `trusted_by` must list BOTH sources.
     let trusted_by_url = format!(
         "/api/users/{}/trust/edges?direction=trusted_by",
         sam1.public_key_hex
     );
-    let both_surfaced = poll_until(5_000, || async {
-        refresh_trust_graph(&a.state).await;
-        let resp = send(&a.router, get_request(&trusted_by_url, Some(&sam1.cookie))).await;
-        if resp.status() != StatusCode::OK {
-            return false;
-        }
-        let users = body_json(resp).await;
-        let Some(arr) = users["users"].as_array() else {
-            return false;
-        };
-        let has = |pk: &str| arr.iter().any(|u| u["public_key_hex"] == pk);
-        has(&sam2.public_key_hex) && has(&sam3.public_key_hex)
-    })
-    .await;
+    let resp = send(&a.router, get_request(&trusted_by_url, Some(&sam1.cookie))).await;
+    assert_eq!(resp.status(), StatusCode::OK, "trusted_by query on A");
+    let arr = body_json(resp).await["users"]
+        .as_array()
+        .cloned()
+        .expect("users array");
+    let has = |pk: &str| arr.iter().any(|u| u["public_key_hex"] == pk);
     assert!(
-        both_surfaced,
+        has(&sam2.public_key_hex) && has(&sam3.public_key_hex),
         "BUG: only one of sam2/sam3 surfaces in sam1's trusted_by — \
          proactive_author_backfill stopped at the first peer's empty \
          `complete:true` and never asked the other source's home",
     );
-}
-
-/// Count current trust edges `source -> target` (by pubkey) on `db`.
-async fn count_edge(db: &sqlx::SqlitePool, source_pk: &[u8], target_pk: &[u8]) -> i64 {
-    sqlx::query_scalar(
-        "SELECT COUNT(*) FROM current_trust_edges cte \
-         JOIN users su ON su.id = cte.source_user \
-         JOIN users tu ON tu.id = cte.target_user \
-         WHERE su.public_key = ? AND tu.public_key = ? AND cte.trust_type = 'trust'",
-    )
-    .bind(source_pk)
-    .bind(target_pk)
-    .fetch_one(db)
-    .await
-    .unwrap()
 }
 
 /// Regression test for the live cross-instance asymmetry report: a spoke
