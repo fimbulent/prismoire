@@ -11,7 +11,9 @@ mod common;
 
 use axum::http::{Method, StatusCode};
 use ciborium::value::Value;
-use common::federation::{MultiInstanceHarness, establish_active_peering, send_envelope_signed};
+use common::federation::{
+    MultiInstanceHarness, establish_active_peering, send_envelope_signed, settle,
+};
 use common::{
     body_json, get_request, json_request, refresh_trust_graph, send, setup_admin, signup_as,
     test_app, test_app_with_transport,
@@ -1481,38 +1483,6 @@ async fn two_remote_sources_both_surface_in_trusted_by() {
     );
 }
 
-/// Hand-deliver the *sole* `trust-edge` signed object held by instance
-/// `from` to instance `to` over the real `/federation/v1/edges` surface,
-/// mirroring the §7.5 forward the harness can't run itself. Asserts the
-/// push lands and the edge applies. Each source instance in this test
-/// holds exactly one edge, so `LIMIT 1` is unambiguous.
-async fn hand_deliver_sole_edge(harness: &MultiInstanceHarness, from: &str, to: &str) {
-    let db = &harness.instance(from).state.db;
-    let (payload, signature): (Vec<u8>, Vec<u8>) = sqlx::query_as(
-        "SELECT payload, signature FROM signed_objects \
-         WHERE inner_class = 'trust-edge' AND payload IS NOT NULL LIMIT 1",
-    )
-    .fetch_one(db)
-    .await
-    .expect("source -> sam1 edge bytes");
-    let body = encode_edges_body(&[encode_wire(&payload, &signature)]);
-    let (status, resp_body) = send_envelope_signed(
-        harness,
-        from,
-        to,
-        Method::POST,
-        "/federation/v1/edges",
-        &body,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "edge push from {from} to {to}");
-    assert_eq!(
-        parse_result_statuses(&resp_body),
-        vec!["applied".to_string()],
-        "§9.1 promises `applied` even for an unknown-source edge",
-    );
-}
-
 /// Count current trust edges `source -> target` (by pubkey) on `db`.
 async fn count_edge(db: &sqlx::SqlitePool, source_pk: &[u8], target_pk: &[u8]) -> i64 {
     sqlx::query_scalar(
@@ -1563,23 +1533,16 @@ async fn count_edge(db: &sqlx::SqlitePool, source_pk: &[u8], target_pk: &[u8]) -
 /// finally sweep `sam2 -> sam1` into projection. The user-facing symptom —
 /// sam1's `trusted_by` on C — then lists both sam2 and sam3.
 ///
-/// IGNORED pending a deterministic test harness. The feature is correct
-/// (this converges reliably when run in isolation), but the test drives
-/// convergence by spawning the real `frontier_fanout_loop` and poking it
-/// each poll tick — and recovery hinges on Trigger-3 firing for sam1.
-/// `frontier_fanout_loop` suppresses Trigger-3 on its first changed
-/// rebuild (the cold-start guard), so whether sam1 ever gets its backfill
-/// depends on a race: if the test's `refresh_trust_graph` makes sam1
-/// visible *before* the loop's first rebuild (as happens under full-suite
-/// CPU starvation), sam1 is consumed by the cold-start rebuild, never
-/// re-added as a delta, and Trigger-3 never fires — a permanent stall no
-/// timeout can fix. The fix is to drive the workers deterministically
-/// (extract a one-pass `frontier_fanout_once`, consume cold-start on an
-/// innocuous rebuild, then surface sam1 and pump to quiescence) rather
-/// than racing the background loop. Tracked as the federation test-harness
-/// "settle to quiescence" follow-up.
+/// Convergence is driven by [`settle`], which pumps the trust-graph
+/// rebuild, the inline `frontier_fanout_once` pass (cold-start
+/// suppression disabled), and the outbound drain across all instances
+/// until quiescent. This replaces the old spawn-the-loop-and-poll
+/// pattern, which raced `frontier_fanout_loop`'s cold-start Trigger-3
+/// suppression: under full-suite load sam1 could become visible before
+/// the loop's first rebuild, get consumed by the suppressed cold-start
+/// diff, and never re-fire Trigger-3 — a permanent stall no timeout
+/// could fix.
 #[tokio::test]
-#[ignore = "nondeterministic: races frontier_fanout_loop cold-start suppression; needs settle-based harness (see doc comment)"]
 async fn relayed_third_party_edge_recovered_on_later_interested_spoke() {
     let harness = MultiInstanceHarness::new(3).await;
     // Hub-and-spoke: A peers with B and C; B and C never peer with each
@@ -1628,13 +1591,17 @@ async fn relayed_third_party_edge_recovered_on_later_interested_spoke() {
         );
     }
 
-    // Both source -> sam1 edges reach the hub A (§7.5 forward, hand-run).
-    hand_deliver_sole_edge(&harness, "b", "a").await;
-    hand_deliver_sole_edge(&harness, "c", "a").await;
-    refresh_trust_graph(&a.state).await;
+    // Both `source -> sam1` edges are local-origin on their authoring
+    // spoke (sam2 is B-local, sam3 is C-local), so the §7.5 fanout +
+    // §7.6 replay-on-apply delivers them to hub A *on its own* once A
+    // announces a frontier whose expansion covers sam1 — which the
+    // `sam1 -> sam3` edge below arranges. `settle` (further down) pumps
+    // that exchange; no hand-delivery needed.
 
     // Local-origin control edge: sam1 trusts sam3. sam3 mints on C, sam1
     // redeems on A → `sam1 -> sam3` is signed on A with a *local* source.
+    // This is also what puts sam1 into A's frontier expansion, so A's
+    // re-announce makes B and C replay their `*-> sam1` edges back to A.
     let sam3_code = body_json(
         send(
             &c.router,
@@ -1668,61 +1635,48 @@ async fn relayed_third_party_edge_recovered_on_later_interested_spoke() {
         "sam1 -> sam3 is signed and stored on A (local-origin control)",
     );
 
-    // Drive C's frontier loop so it announces a winning frontier covering
-    // sam1 (sam3 -> sam1) and sam3 (C-local). Applying it on A runs §7.6
-    // replay over C's expansion. Notify each tick to march past the
-    // cold-start-suppressed first rebuild. Readiness checkpoint: the
-    // local-origin `sam1 -> sam3` landing on C means sam1 is now in C's
+    // Pump every instance's background workers to quiescence. This drives
+    // C's frontier fanout (announce a winning frontier covering sam1 via
+    // sam3 -> sam1 and sam3 itself), the §7.6 replay over C's expansion on
+    // A, the resulting `sam1 -> sam3` landing on C (so sam1 enters C's
     // reverse frontier — the precondition for the §10.5.4-step-6 inbound
-    // pull that recovers `sam2 -> sam1`. (It also confirms §7.6 replay
-    // still works for the local-origin edge, the path the bug never
-    // covered for third-party edges.)
-    let c_dirty = Arc::new(Notify::new());
-    tokio::spawn(frontier_fanout_loop(c.state.clone(), c_dirty.clone()));
-    let sam1_frontiered = poll_until(15_000, || async {
-        refresh_trust_graph(&c.state).await;
-        c_dirty.notify_one();
-        count_edge(&c.state.db, &sam1_pk, &sam3_pk).await >= 1
-    })
-    .await;
+    // pull), and the whole recovery cascade: pull sam1's inbound edges from
+    // hub A → §8.1 frontier-edge discovery reaches sam2 → backfill sam2's
+    // profile → hydrate → sweep-project `sam2 -> sam1`. `settle` runs the
+    // inline `frontier_fanout_once` with cold-start suppression disabled,
+    // so Trigger-3 always fires for sam1 — no race against the loop's
+    // cold-start guard.
+    settle(&harness).await;
+
+    // Readiness checkpoint: the local-origin `sam1 -> sam3` reached C via
+    // §7.6 replay, so sam1 is in C's reverse frontier. Without this the
+    // inbound-edge pull is never triggered and the test proves nothing.
+    // (Also confirms §7.6 replay still works for the local-origin edge,
+    // the path the bug never covered for third-party edges.)
     assert!(
-        sam1_frontiered,
+        count_edge(&c.state.db, &sam1_pk, &sam3_pk).await >= 1,
         "setup: §7.6 replay must deliver the local-origin sam1 -> sam3 to C \
-         so sam1 enters C's reverse frontier — without this the inbound-edge \
-         pull is never triggered and the test proves nothing",
+         so sam1 enters C's reverse frontier",
     );
 
     // The user-facing symptom: read sam1's trusted_by on C. Before the fix
     // it listed only sam3 (C-local); with the §10.5.4-step-6 inbound pull +
     // §8.1 frontier-edge discovery, the relayed sam2 -> sam1 is recovered,
-    // sam2 hydrates, and the edge projects. Convergence spans several
-    // rebuild + backfill round-trips (pull sam1's inbound edges → discover
-    // sam2 → backfill sam2's profile → hydrate → sweep-project), each
-    // queued behind the process-wide outbound-backfill permits, and the
-    // whole cascade only fires if Trigger-3 fired for sam1 (see the
-    // #[ignore] note on this test — that firing is racy against the loop's
-    // cold-start suppression under load). Notify the loop each tick to keep
-    // driving the fanout re-trigger.
+    // sam2 hydrates, and the edge projects.
+    refresh_trust_graph(&c.state).await;
     let trusted_by_url = format!(
         "/api/users/{}/trust/edges?direction=trusted_by",
         sam1.public_key_hex
     );
-    let c_sees_both = poll_until(45_000, || async {
-        refresh_trust_graph(&c.state).await;
-        c_dirty.notify_one();
-        let resp = send(&c.router, get_request(&trusted_by_url, Some(&sam3.cookie))).await;
-        if resp.status() != StatusCode::OK {
-            return false;
-        }
-        let Some(arr) = body_json(resp).await["users"].as_array().cloned() else {
-            return false;
-        };
-        let has = |pk: &str| arr.iter().any(|u| u["public_key_hex"] == pk);
-        has(&sam2.public_key_hex) && has(&sam3.public_key_hex)
-    })
-    .await;
+    let resp = send(&c.router, get_request(&trusted_by_url, Some(&sam3.cookie))).await;
+    assert_eq!(resp.status(), StatusCode::OK, "trusted_by query on C");
+    let arr = body_json(resp).await["users"]
+        .as_array()
+        .cloned()
+        .expect("users array");
+    let has = |pk: &str| arr.iter().any(|u| u["public_key_hex"] == pk);
     assert!(
-        c_sees_both,
+        has(&sam2.public_key_hex) && has(&sam3.public_key_hex),
         "C must recover the relayed sam2 -> sam1: once sam1 enters C's \
          frontier, the §10.5.4-step-6 inbound-edge pull fetches who-trusts-\
          sam1 from hub A, §8.1 frontier-edge discovery reaches sam2, and the \

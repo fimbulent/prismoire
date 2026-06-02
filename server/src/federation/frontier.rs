@@ -2115,7 +2115,7 @@ pub async fn frontier_fanout_loop(state: Arc<AppState>, frontier_dirty: Arc<toki
     // for that artifact turns every process restart into an O(visible
     // authors) burst of `/backfill/by-author` GETs across the peer set. We
     // suppress proactive backfill on exactly that first changed rebuild:
-    // peers still learn our interest via the Trigger-2 re-announce below, so
+    // peers still learn our interest via the Trigger-2 re-announce, so
     // future content flows by push, and any pre-existing backlog is the §7.7
     // "residual missed-push gap" the spec already declares best-effort. A
     // precise restart-aware catch-up (a real per-author since-watermark) is
@@ -2123,153 +2123,218 @@ pub async fn frontier_fanout_loop(state: Arc<AppState>, frontier_dirty: Arc<toki
     let mut cold_start_backfill_suppressed = false;
     loop {
         frontier_dirty.notified().await;
+        // The first *changed* rebuild after boot is the cold-start
+        // diff-against-empty burst; suppress its Trigger-3 exactly once.
+        // `frontier_fanout_once` returns whether this pass changed the
+        // frontier, so the latch flips on the first changed rebuild and
+        // every later changed rebuild gets its proactive backfill.
+        let suppress = !cold_start_backfill_suppressed;
+        let changed = frontier_fanout_once(&state, suppress, FanoutIo::Detached).await;
+        if changed && !cold_start_backfill_suppressed {
+            cold_start_backfill_suppressed = true;
+        }
+    }
+}
 
-        // §8.9/§8.12 reverse-frontier rebuild. This loop is woken only by
-        // `frontier_dirty`, fired once per coalesced trust-graph swap, so
-        // the reverse rebuild inherits the forward rebuild's debounce — it
-        // can run no more often than the (already minutes-scale on large
-        // instances) graph rebuild, and `Notify`'s single permit collapses
-        // any wakes that land mid-rebuild. That is the §8.12 "same cadence
-        // as re-announce" SHOULD, for free. Runs *before* the forward
-        // refresh so any age ceilings it publishes to
-        // `local_frontier_age_ceilings` are picked up by `compute_local_frontier`
-        // below and ride out on this cycle's announce. Continue-on-error: a
-        // reverse failure must not block the forward re-announce — stale
-        // ceilings are absorbed by the K-generation grace window and the
-        // §8.10 opportunistic source-side backstop.
-        {
-            let trust_graph = state
-                .trust_graph
-                .read()
-                .map(|g| Arc::clone(&g))
-                .unwrap_or_else(|poisoned| Arc::clone(&poisoned.into_inner()));
-            match build_frontier_readers(&state.db, &trust_graph).await {
-                Ok(readers) => {
-                    match frontier_store::rebuild_reverse_frontier(
-                        &state.db,
-                        &readers,
-                        frontier_store::DEFAULT_FRONTIER_CAP,
-                        frontier_store::FRONTIER_MAX_DEPTH,
-                        frontier_store::FRONTIER_GC_K,
-                    )
-                    .await
-                    {
-                        Ok(outcome) => tracing::debug!(
-                            generation = outcome.generation,
-                            edges_swept = outcome.sweep.edges_swept,
-                            stubs_swept = outcome.sweep.stubs_swept,
-                            ceilings_published = outcome.ceilings.published,
-                            ceilings_cleared = outcome.ceilings.cleared,
-                            "frontier fanout: reverse frontier rebuilt",
-                        ),
-                        Err(e) => tracing::warn!(
-                            error = %e,
-                            "frontier fanout: reverse frontier rebuild failed",
-                        ),
+/// Controls whether [`frontier_fanout_once`] runs its Trigger-2 announce
+/// and Trigger-3 by-author backfill I/O detached (via `tokio::spawn`) or
+/// inline (awaited to completion).
+///
+/// The long-lived [`frontier_fanout_loop`] uses [`FanoutIo::Detached`]
+/// so a slow or unreachable peer can never stall the next rebuild. A
+/// deterministic test harness that drives convergence by pumping one
+/// pass at a time uses [`FanoutIo::Inline`], so every I/O effect of a
+/// pass has landed before the harness checks for quiescence — no racing
+/// the background spawns the loop would otherwise leave in flight.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FanoutIo {
+    /// Spawn the announce/backfill work and return immediately.
+    Detached,
+    /// Await the announce/backfill work to completion before returning.
+    Inline,
+}
+
+/// One pass of the §8.7 frontier-change fanout: the §8.9/§8.12 reverse
+/// rebuild, the forward [`refresh_local_frontier_detailed`], the
+/// Trigger-2 re-announce, and (unless suppressed) the §7.6/§10.5
+/// Trigger-3 proactive by-author backfill. Returns whether the forward
+/// refresh changed the frontier — the signal [`frontier_fanout_loop`]
+/// uses to drive its cold-start latch and a settle harness uses to tell
+/// whether more work may remain.
+///
+/// `suppress_proactive_backfill` models the loop's cold-start guard
+/// without baking the stateful latch in here: the loop passes `true` on
+/// its first changed rebuild (the diff-against-empty burst), while a
+/// test harness passes `false` so a newly-frontier'd author always gets
+/// its Trigger-3 pull. `io` selects detached vs. inline I/O (see
+/// [`FanoutIo`]).
+pub async fn frontier_fanout_once(
+    state: &Arc<AppState>,
+    suppress_proactive_backfill: bool,
+    io: FanoutIo,
+) -> bool {
+    // §8.9/§8.12 reverse-frontier rebuild. In the loop this runs once per
+    // coalesced trust-graph swap, so the reverse rebuild inherits the
+    // forward rebuild's debounce — that is the §8.12 "same cadence as
+    // re-announce" SHOULD, for free. Runs *before* the forward refresh so
+    // any age ceilings it publishes to `local_frontier_age_ceilings` are
+    // picked up by `compute_local_frontier` below and ride out on this
+    // cycle's announce. Continue-on-error: a reverse failure must not block
+    // the forward re-announce — stale ceilings are absorbed by the
+    // K-generation grace window and the §8.10 opportunistic source-side
+    // backstop.
+    {
+        let trust_graph = state
+            .trust_graph
+            .read()
+            .map(|g| Arc::clone(&g))
+            .unwrap_or_else(|poisoned| Arc::clone(&poisoned.into_inner()));
+        match build_frontier_readers(&state.db, &trust_graph).await {
+            Ok(readers) => {
+                match frontier_store::rebuild_reverse_frontier(
+                    &state.db,
+                    &readers,
+                    frontier_store::DEFAULT_FRONTIER_CAP,
+                    frontier_store::FRONTIER_MAX_DEPTH,
+                    frontier_store::FRONTIER_GC_K,
+                )
+                .await
+                {
+                    Ok(outcome) => tracing::debug!(
+                        generation = outcome.generation,
+                        edges_swept = outcome.sweep.edges_swept,
+                        stubs_swept = outcome.sweep.stubs_swept,
+                        ceilings_published = outcome.ceilings.published,
+                        ceilings_cleared = outcome.ceilings.cleared,
+                        "frontier fanout: reverse frontier rebuilt",
+                    ),
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        "frontier fanout: reverse frontier rebuild failed",
+                    ),
+                }
+            }
+            Err(e) => tracing::warn!(
+                error = %e,
+                "frontier fanout: building reverse-frontier readers failed",
+            ),
+        }
+    }
+
+    let refresh = match refresh_local_frontier_detailed(state).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = ?e, "frontier fanout: refresh failed");
+            return false;
+        }
+    };
+    if !refresh.changed {
+        return false;
+    }
+
+    // Trigger 2 — re-announce the new frontier to every active peer.
+    match crate::federation::prior_home_recovery::list_active_peers(state).await {
+        Ok(peers) => {
+            for (peer_key, peer_domain) in peers {
+                match io {
+                    FanoutIo::Detached => {
+                        let state = Arc::clone(state);
+                        tokio::spawn(async move {
+                            announce_to_peer(&state, peer_key, &peer_domain).await;
+                        });
+                    }
+                    FanoutIo::Inline => {
+                        announce_to_peer(state, peer_key, &peer_domain).await;
                     }
                 }
-                Err(e) => tracing::warn!(
-                    error = %e,
-                    "frontier fanout: building reverse-frontier readers failed",
-                ),
             }
         }
-
-        let refresh = match refresh_local_frontier_detailed(&state).await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(error = ?e, "frontier fanout: refresh failed");
-                continue;
-            }
-        };
-        if !refresh.changed {
-            continue;
+        Err(e) => {
+            tracing::warn!(error = %e, "frontier fanout: db error listing active peers");
         }
+    }
 
-        // Trigger 2 — re-announce the new frontier to every active peer.
-        match crate::federation::prior_home_recovery::list_active_peers(&state).await {
-            Ok(peers) => {
-                for (peer_key, peer_domain) in peers {
-                    let state = Arc::clone(&state);
-                    tokio::spawn(async move {
-                        match operator_announce_frontier(
-                            &state,
-                            &state.instance_key,
-                            &state.federation_transport,
-                            peer_key,
-                        )
-                        .await
-                        {
-                            Ok(version) => tracing::debug!(
-                                peer = %peer_domain,
-                                version,
-                                "frontier fanout: re-announced",
-                            ),
-                            Err(e) => tracing::debug!(
-                                peer = %peer_domain,
-                                error = ?e,
-                                "frontier fanout: re-announce failed",
-                            ),
-                        }
-                    });
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "frontier fanout: db error listing active peers");
-            }
+    // First changed rebuild after boot: the diff is against the empty boot
+    // frontier, so `added_visible_keys` is every visible author, not a real
+    // delta. Skip Trigger 3 this once (see `frontier_fanout_loop`) — the
+    // Trigger-2 re-announce above already re-established our interest.
+    if suppress_proactive_backfill {
+        tracing::info!(
+            added = refresh.added_visible_keys.len(),
+            "frontier fanout: suppressing proactive by-author backfill on \
+             first post-boot rebuild (cold-start diff against empty frontier); \
+             relying on push + reactive backfill",
+        );
+        return true;
+    }
+
+    // Trigger 3 — proactive by-author backfill for newly-frontier'd
+    // authors so their existing content arrives, not just future pushes.
+    // Only *remote* authors are worth backfilling: a peer has nothing to
+    // serve for a local author, so spawning a pull for one would just burn
+    // a futile round-trip. `added_visible_keys` is dominated by local
+    // authors (every local user expansion), so this filter is the
+    // difference between one targeted pull and a burst of dead requests.
+    let remote_authors = match filter_remote_authors(&state.db, &refresh.added_visible_keys).await {
+        Ok(keys) => keys,
+        Err(e) => {
+            tracing::warn!(error = %e, "frontier fanout: db error filtering remote authors");
+            return true;
         }
-
-        // First changed rebuild after boot: the diff is against the empty
-        // boot frontier, so `added_visible_keys` is every visible author,
-        // not a real delta. Skip Trigger 3 this once (see the loop-top
-        // comment) — the Trigger-2 re-announce above already re-established
-        // our interest with every peer.
-        if !cold_start_backfill_suppressed {
-            cold_start_backfill_suppressed = true;
-            tracing::info!(
-                added = refresh.added_visible_keys.len(),
-                "frontier fanout: suppressing proactive by-author backfill on \
-                 first post-boot rebuild (cold-start diff against empty frontier); \
-                 relying on push + reactive backfill",
-            );
-            continue;
-        }
-
-        // Trigger 3 — proactive by-author backfill for newly-frontier'd
-        // authors so their existing content arrives, not just future
-        // pushes. Only *remote* authors are worth backfilling: a peer
-        // has nothing to serve for a local author, so spawning a pull
-        // for one would just burn a futile round-trip. `added_visible_keys`
-        // is dominated by local authors (every local user expansion), so
-        // this filter is the difference between one targeted pull and a
-        // burst of dead requests.
-        let remote_authors = match filter_remote_authors(&state.db, &refresh.added_visible_keys)
-            .await
-        {
-            Ok(keys) => keys,
-            Err(e) => {
-                tracing::warn!(error = %e, "frontier fanout: db error filtering remote authors");
-                continue;
+    };
+    // Drain the batch through a single bounded-concurrency worker instead
+    // of one detached `tokio::spawn` per author. A rebuild that admits many
+    // new remote authors otherwise fires an unbounded burst of by-author
+    // sweeps (each up to `MAX_FALLBACK_PEERS`), all racing the outbound
+    // budget the §11.9.5 edge path respects. `proactive_backfill_batch`
+    // caps in-flight backfills and the §10.5.5 per-author single-flight
+    // guard de-dupes against other call sites.
+    if !remote_authors.is_empty() {
+        match io {
+            FanoutIo::Detached => {
+                let state = Arc::clone(state);
+                tokio::spawn(async move {
+                    crate::federation::prior_home_recovery::proactive_backfill_batch(
+                        state,
+                        remote_authors,
+                    )
+                    .await;
+                });
             }
-        };
-        // Drain the batch through a single bounded-concurrency worker
-        // instead of one detached `tokio::spawn` per author. A rebuild that
-        // admits many new remote authors otherwise fires an unbounded burst
-        // of by-author sweeps (each up to `MAX_FALLBACK_PEERS`), all racing
-        // the outbound budget the §11.9.5 edge path respects.
-        // `proactive_backfill_batch` caps in-flight backfills and the
-        // §10.5.5 per-author single-flight guard de-dupes against other
-        // call sites. Spawned once so the fanout loop never blocks here.
-        if !remote_authors.is_empty() {
-            let state = Arc::clone(&state);
-            tokio::spawn(async move {
+            FanoutIo::Inline => {
                 crate::federation::prior_home_recovery::proactive_backfill_batch(
-                    state,
+                    Arc::clone(state),
                     remote_authors,
                 )
                 .await;
-            });
+            }
         }
+    }
+    true
+}
+
+/// §8.7 Trigger-2 helper: re-announce our current frontier to one peer,
+/// logging the outcome. Shared by the detached and inline arms of
+/// [`frontier_fanout_once`].
+async fn announce_to_peer(state: &Arc<AppState>, peer_key: [u8; 32], peer_domain: &str) {
+    match operator_announce_frontier(
+        state,
+        &state.instance_key,
+        &state.federation_transport,
+        peer_key,
+    )
+    .await
+    {
+        Ok(version) => tracing::debug!(
+            peer = %peer_domain,
+            version,
+            "frontier fanout: re-announced",
+        ),
+        Err(e) => tracing::debug!(
+            peer = %peer_domain,
+            error = ?e,
+            "frontier fanout: re-announce failed",
+        ),
     }
 }
 

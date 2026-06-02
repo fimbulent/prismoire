@@ -194,6 +194,22 @@ impl Drop for AuthorInFlightGuard {
     }
 }
 
+/// Test-only count of by-author backfills currently claimed in
+/// [`IN_FLIGHT_AUTHORS`]. A deterministic settle harness waits for this
+/// to reach zero before it judges convergence quiescent: the §10.5.4
+/// inbound-edge pull recurses through a fire-and-forget
+/// [`spawn_unknown_source_backfill`], so a pass that *returns* may still
+/// have a recovery backfill in flight whose edge has not landed yet.
+/// Process-wide like the set itself; harnesses bound their wait so a
+/// concurrent test's backfill can't wedge them.
+#[cfg(any(test, feature = "test-auth"))]
+pub fn author_backfills_in_flight() -> usize {
+    IN_FLIGHT_AUTHORS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .len()
+}
+
 /// `POST /federation/v1/prior-home/content-by-key` (§14.5).
 const CONTENT_BY_KEY_PATH: &str = "/federation/v1/prior-home/content-by-key";
 

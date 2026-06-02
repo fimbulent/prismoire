@@ -378,6 +378,13 @@ impl MultiInstanceHarness {
             .insert(h.peer_id, h.router.clone());
     }
 
+    /// Labels of every registered instance, in no particular order.
+    /// Used by [`settle`] to round-robin the background workers across
+    /// the whole harness.
+    pub fn labels(&self) -> Vec<String> {
+        self.instances.keys().cloned().collect()
+    }
+
     /// How many instances are currently registered.
     pub fn len(&self) -> usize {
         self.instances.len()
@@ -594,4 +601,133 @@ pub async fn send_envelope_signed_split(
         .expect("body bytes")
         .to_vec();
     (status, body_bytes)
+}
+
+// ---------------------------------------------------------------------------
+// Settle-to-quiescence convergence driver
+//
+// Production runs three background workers per instance that tests can't
+// spawn freely: the trust-graph `rebuild_loop`, the `frontier_fanout_loop`,
+// and the per-peer outbound drain workers. The old pattern — spawn the real
+// `frontier_fanout_loop` and `notify_one()` it on a `poll_until` tick — races
+// the loop's internal cold-start suppression nondeterministically, which is
+// why `relayed_third_party_edge_recovered_on_later_interested_spoke` flaked
+// under load (see its doc comment). `settle` instead *pumps* the workers
+// deterministically: one explicit pass each, round-robin across all
+// instances, until a full round makes no progress and no fire-and-forget
+// recovery backfill is still in flight. No racing, no permanent-stall failure
+// mode — only bounded, observable work.
+// ---------------------------------------------------------------------------
+
+use std::time::{Duration, Instant};
+
+use prismoire_server::federation::frontier::{FanoutIo, frontier_fanout_once};
+use prismoire_server::federation::prior_home_recovery::author_backfills_in_flight;
+
+/// Per-round budget for draining each instance's outbound queue, and for
+/// waiting out a fire-and-forget recovery backfill so its edge lands
+/// before the round's progress is measured.
+const SETTLE_DRAIN_BUDGET: Duration = Duration::from_millis(500);
+
+/// Default overall deadline for [`settle`]. Generous because it is a
+/// hard cap, not a poll target: convergence normally finishes in a
+/// handful of rounds and `settle` returns the instant it goes two rounds
+/// without progress.
+const SETTLE_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Drive every instance in `harness` to convergence by pumping the
+/// background workers one pass at a time until quiescent.
+///
+/// Each round, for every instance: rebuild the trust graph (the
+/// `rebuild_loop` one-pass form), run one inline [`frontier_fanout_once`]
+/// pass with cold-start suppression disabled (so a newly-frontier'd
+/// author always gets its Trigger-3 pull — the exact step the old spawn
+/// race could drop), then drain its outbound queue. After the round,
+/// wait out any in-flight by-author recovery backfill so a
+/// `spawn_unknown_source_backfill` recursion lands its edge, then measure
+/// progress against a content fingerprint. Two consecutive no-progress
+/// rounds ⇒ quiescent. Returns on quiescence or at [`SETTLE_DEADLINE`];
+/// callers assert on the converged state afterward.
+pub async fn settle(harness: &MultiInstanceHarness) {
+    settle_with(harness, SETTLE_DEADLINE).await;
+}
+
+/// [`settle`] with a caller-chosen overall deadline.
+pub async fn settle_with(harness: &MultiInstanceHarness, deadline: Duration) {
+    let labels = harness.labels();
+    let end = Instant::now() + deadline;
+    let mut idle_rounds = 0u32;
+
+    while idle_rounds < 2 && Instant::now() < end {
+        let before = convergence_fingerprint(harness).await;
+        let mut changed_any = false;
+
+        for label in &labels {
+            let inst = harness.instance(label);
+            super::refresh_trust_graph(&inst.state).await;
+            // Inline I/O + no cold-start suppression: the announce and the
+            // proactive by-author backfill both complete before this pass
+            // returns, so the only work that can still be in flight is the
+            // deeper fire-and-forget recovery recursion handled below.
+            if frontier_fanout_once(&inst.state, false, FanoutIo::Inline).await {
+                changed_any = true;
+            }
+            inst.state
+                .outbound_queues
+                .wait_idle(SETTLE_DRAIN_BUDGET)
+                .await;
+        }
+
+        // Give any `spawn_unknown_source_backfill` recursion launched this
+        // round a moment to claim its in-flight guard, then wait (bounded)
+        // for every by-author backfill to drain so its recovered edge has
+        // landed before we fingerprint. Bounded so a concurrent test's
+        // backfill can't wedge us; the two-consecutive-round rule below
+        // absorbs the rare case where a spawn hadn't yet claimed.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let backfill_deadline = Instant::now() + SETTLE_DRAIN_BUDGET;
+        while author_backfills_in_flight() > 0 && Instant::now() < backfill_deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // A recovery backfill may have enqueued an outbound push; drain it
+        // so its effect is visible in this round's fingerprint.
+        for label in &labels {
+            harness
+                .instance(label)
+                .state
+                .outbound_queues
+                .wait_idle(SETTLE_DRAIN_BUDGET)
+                .await;
+        }
+
+        let after = convergence_fingerprint(harness).await;
+        if changed_any || after != before {
+            idle_rounds = 0;
+        } else {
+            idle_rounds += 1;
+        }
+    }
+}
+
+/// Content fingerprint summed across every instance: enough row counts
+/// to flip whenever a federation pass lands an edge, a signed object, or
+/// a hydrated user stub. `settle` declares progress whenever this moves.
+async fn convergence_fingerprint(harness: &MultiInstanceHarness) -> i64 {
+    let mut total = 0i64;
+    for label in harness.labels() {
+        let db = &harness.instance(&label).state.db;
+        let n: i64 = sqlx::query_scalar(
+            "SELECT \
+               (SELECT COUNT(*) FROM current_trust_edges) \
+             + (SELECT COUNT(*) FROM signed_objects) \
+             + (SELECT COUNT(*) FROM users) \
+             + (SELECT COUNT(*) FROM frontier_edges) \
+             + (SELECT COUNT(*) FROM frontier_users)",
+        )
+        .fetch_one(db)
+        .await
+        .expect("convergence fingerprint");
+        total += n;
+    }
+    total
 }
