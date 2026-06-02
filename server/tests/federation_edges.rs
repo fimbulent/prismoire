@@ -1115,6 +1115,140 @@ async fn unknown_source_recovery_backfills_authors_existing_thread() {
     );
 }
 
+/// §9.1 / §11.9.5 receipt-ordering regression. An edge `S → T` that lands
+/// *before* its §8.1 target `T` is in our expansion set must not be
+/// stranded forever once `T` later enters the set: a redelivery (which the
+/// §9.1 dedup short-circuits to `duplicate`) has to re-evaluate the
+/// stored-but-unprojected bytes and finally record the reverse-frontier
+/// evidence the first, pre-expansion receipt skipped.
+///
+/// This is the unit-level pin for the bug the four-instance gossip test
+/// (`post_reaches_user_three_trust_hops_away`) only hit nondeterministically:
+/// there, instance D received `B → C` while `C` was hydrated but not yet a
+/// reverse-frontier node, so the §8.1 frontier-edge insert was skipped — and
+/// every subsequent re-announce from B no-op'd as a bare `duplicate`, wedging
+/// the chain. Here the same sequence is driven deterministically:
+///
+/// 1. `B → C` arrives with both endpoints unknown and `C` outside the
+///    expansion set → stored in `signed_objects`, no `frontier_edges` row.
+/// 2. `C` enters the expansion set (a `frontier_users` stub, standing in for
+///    "a closer edge landed and the rebuild added C at reverse-hop 1").
+/// 3. The *same* edge is redelivered → still reported `duplicate` (the
+///    dedup-before-verify contract holds), but the duplicate path now
+///    re-projects the stored bytes and inserts the §8.1 frontier-edge.
+///
+/// End-to-end recovery + projection completion is covered by
+/// `unknown_source_edge_to_local_target_recovers_and_projects` and the gossip
+/// test; this test isolates the duplicate-path re-evaluation itself.
+#[tokio::test]
+async fn redelivery_after_target_enters_expansion_records_skipped_frontier_edge() {
+    let harness = MultiInstanceHarness::new(2).await;
+    // Active peering so `a` accepts `b`'s signed `POST /edges` envelope.
+    establish_active_peering(&harness, "a", "b").await;
+    let a = harness.instance("a");
+    let b = harness.instance("b");
+
+    // S = user_b (edge source/signer), T = user_c (edge target). Both are
+    // remote keys `a` has never seen, mirroring the gossip case where D
+    // knows neither endpoint of `B → C` at first receipt.
+    let user_b = SigningKey::generate(&mut OsRng);
+    let user_c_pub = SigningKey::generate(&mut OsRng).verifying_key().to_bytes();
+    let edge = sign_trust_edge_with_key(
+        &user_b,
+        &user_c_pub,
+        TrustStance::Trust,
+        1_700_000_000_000,
+        None,
+    );
+    let body = encode_edges_body(&[encode_wire(&edge.payload, &edge.signature)]);
+
+    // --- Receipt 1: target outside the expansion set ---
+    let (status, resp_body) = send_envelope_signed(
+        &harness,
+        "b",
+        "a",
+        Method::POST,
+        "/federation/v1/edges",
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        parse_results_body(&resp_body)[0].1,
+        "applied",
+        "first receipt persists the durable bytes",
+    );
+    assert!(
+        signed_object_live(&a.state.db, &edge.canonical_hash).await,
+        "the signed object is stored",
+    );
+    assert!(
+        !trust_edge_projected(&a.state.db, &edge.canonical_hash).await,
+        "no projection: neither endpoint is a known user",
+    );
+    assert!(
+        !frontier_edge_present(&a.state.db, &edge.canonical_hash).await,
+        "no §8.1 frontier-edge: C is not yet in the expansion set",
+    );
+
+    // --- C enters the expansion set ---
+    // Stand in for "C → D landed and the rebuild materialised C as a
+    // reverse-hop-1 frontier node". `target_in_expansion_set` keys on the
+    // live generation, so stamp the stub with it.
+    let generation: i64 =
+        sqlx::query_scalar!("SELECT generation FROM frontier_generation WHERE id = 1")
+            .fetch_one(&a.state.db)
+            .await
+            .expect("read frontier generation");
+    let c_slice: &[u8] = user_c_pub.as_slice();
+    let home_key: &[u8] = b.state.instance_key.public_bytes().as_slice();
+    sqlx::query!(
+        "INSERT INTO frontier_users \
+            (user_key, home_instance_key, home_instance_domain, generation, reverse_hop) \
+         VALUES (?, ?, ?, ?, 1)",
+        c_slice,
+        home_key,
+        "peer-b.test",
+        generation,
+    )
+    .execute(&a.state.db)
+    .await
+    .expect("materialise C as a reverse-hop-1 expansion stub");
+
+    // --- Receipt 2: same edge, target now in the expansion set ---
+    let (status, resp_body) = send_envelope_signed(
+        &harness,
+        "b",
+        "a",
+        Method::POST,
+        "/federation/v1/edges",
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        parse_results_body(&resp_body)[0].1,
+        "duplicate",
+        "§9.1 dedup-before-verify still reports the redelivery as a duplicate",
+    );
+    assert!(
+        frontier_edge_present(&a.state.db, &edge.canonical_hash).await,
+        "the duplicate path re-evaluated the stored edge and inserted the \
+         §8.1 frontier-edge the pre-expansion first receipt skipped — without \
+         this, the re-announce no-ops and the edge is wedged forever",
+    );
+    assert!(
+        !trust_edge_projected(&a.state.db, &edge.canonical_hash).await,
+        "still unprojected: the source user_b is unknown, so the edge holds \
+         as reverse-frontier evidence pending source hydration",
+    );
+
+    // Drain the §11.9.5 unknown-source backfill the redelivery spawned (B is
+    // still unknown, so `reattempt_unprojected_edge` fired recovery against
+    // the delivering peer) so the test leaves no in-flight task behind.
+    settle(&harness).await;
+}
+
 // ===========================================================================
 // §9.3 — chain-continuity backfill
 // ===========================================================================
@@ -2842,6 +2976,21 @@ async fn trust_edge_projected(db: &SqlitePool, canonical_hash: &[u8; 32]) -> boo
         .fetch_one(db)
         .await
         .expect("count trust_edges");
+    n > 0
+}
+
+/// True iff a `frontier_edges` row exists for `canonical_hash` — the §8.1
+/// reverse-frontier evidence the edge-ingest path records once the target
+/// is in the expansion set.
+async fn frontier_edge_present(db: &SqlitePool, canonical_hash: &[u8; 32]) -> bool {
+    let slice: &[u8] = canonical_hash.as_slice();
+    let n: i64 = sqlx::query_scalar!(
+        "SELECT COUNT(*) AS \"c!: i64\" FROM frontier_edges WHERE canonical_hash = ?",
+        slice,
+    )
+    .fetch_one(db)
+    .await
+    .expect("count frontier_edges");
     n > 0
 }
 

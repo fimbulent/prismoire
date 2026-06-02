@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO frontier_users (user_key, home_instance_key, home_instance_domain, generation, reverse_hop) VALUES (?, ?, ?, ?, 1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "0c9660cf520f42de8abd8dc62fd06dc43cb7e5cc51bc53387f2cacb4d53cbb60"
+}

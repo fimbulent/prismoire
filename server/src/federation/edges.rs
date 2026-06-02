@@ -396,7 +396,7 @@ pub(crate) async fn apply_one_edge(
             source,
             target,
             prior,
-        }) => match crate::federation::edge_backfill::try_acquire_outbound_permit() {
+        }) => match state.outbound_backfill_permits.try_acquire() {
             Some(permit) => {
                 let state_for_backfill = state.clone();
                 tokio::spawn(async move {
@@ -439,18 +439,17 @@ pub(crate) async fn apply_one_edge(
         Some(EdgeRecovery::UnknownSource {
             source,
             arrived_from,
-        }) => match crate::federation::edge_backfill::try_acquire_outbound_permit() {
+        }) => match state.outbound_backfill_permits.try_acquire() {
             Some(permit) => {
-                let state_for_backfill = state.clone();
-                tokio::spawn(async move {
-                    let _permit = permit;
-                    crate::federation::prior_home_recovery::proactive_author_backfill(
-                        &state_for_backfill,
-                        source,
-                        Some(arrived_from),
-                    )
-                    .await;
-                });
+                // Claim-before-spawn (inside the helper) so `in_flight_count`
+                // reflects this recovery before the inbound response returns —
+                // see `spawn_unknown_source_backfill`.
+                crate::federation::prior_home_recovery::spawn_unknown_source_backfill(
+                    state.clone(),
+                    source,
+                    arrived_from,
+                    permit,
+                );
             }
             None => {
                 tracing::debug!(
@@ -488,6 +487,106 @@ pub(crate) enum EdgeRecovery {
         source: [u8; 32],
         arrived_from: [u8; 32],
     },
+}
+
+/// Re-evaluate a durable-but-unprojected (`EndpointMissing`) edge against
+/// the *current* expansion set / known-users state, using the edge's
+/// already-stored (and already signature-verified) canonical bytes. Called
+/// from the §9.1 duplicate path when a redelivery lands for an edge whose
+/// `signed_objects` row exists but never projected into `trust_edges`.
+///
+/// Re-runs `try_project_trust_edge`: if both endpoints are now known the
+/// edge finally projects; if it is still `EndpointMissing` but its §8.1
+/// target has since entered our expansion set, this fires the §11.9.5
+/// reverse-bootstrap recovery signal and inserts the §8.1 frontier-edge the
+/// first (pre-expansion) receipt skipped. Idempotent: the projection re-
+/// returns the same outcome and `insert_frontier_edge` is `INSERT OR
+/// IGNORE`. Returns a recovery signal for the outer wrapper to act on, or
+/// `None` if nothing changed.
+async fn reattempt_unprojected_edge(
+    state: &Arc<AppState>,
+    canonical_hash: &[u8; 32],
+    arrived_from: [u8; 32],
+) -> Result<Option<EdgeRecovery>, sqlx::Error> {
+    let hash_slice: &[u8] = canonical_hash.as_slice();
+    let Some(row) = sqlx::query!(
+        "SELECT payload AS \"payload?: Vec<u8>\", signature AS \"signature!: Vec<u8>\" \
+         FROM signed_objects WHERE canonical_hash = ?",
+        hash_slice,
+    )
+    .fetch_optional(&state.db)
+    .await?
+    else {
+        return Ok(None);
+    };
+    let Some(payload_bytes) = row.payload else {
+        return Ok(None);
+    };
+    let signature_bytes = row.signature;
+    let Ok(SignedPayload::TrustEdge(trust_edge)) = SignedPayload::parse(&payload_bytes) else {
+        return Ok(None);
+    };
+
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    let projection = try_project_trust_edge(
+        &mut tx,
+        &trust_edge,
+        canonical_hash,
+        &signature_bytes,
+        &payload_bytes,
+    )
+    .await?;
+
+    let mut recovery: Option<EdgeRecovery> = None;
+    match projection {
+        TrustEdgeProjection::Projected => {
+            // Both endpoints hydrated since first receipt — the edge just
+            // projected into `trust_edges`. Drain any orphan that was
+            // waiting on it, mirroring the live-receipt `Projected` arm.
+            drain_pending_orphans_after(&mut tx, canonical_hash).await?;
+        }
+        TrustEdgeProjection::EndpointMissing => {
+            let target_in_expansion = crate::federation::frontier_store::target_in_expansion_set(
+                &mut tx,
+                &trust_edge.to_key,
+            )
+            .await?;
+            let from_slice: &[u8] = &trust_edge.from_key;
+            let source_known = sqlx::query_scalar!(
+                "SELECT 1 AS \"x!: i64\" FROM users WHERE public_key = ? LIMIT 1",
+                from_slice,
+            )
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_some();
+            if target_in_expansion && !source_known {
+                recovery = Some(EdgeRecovery::UnknownSource {
+                    source: trust_edge.from_key,
+                    arrived_from,
+                });
+            }
+            if target_in_expansion && let Ok(sig) = <[u8; 64]>::try_from(signature_bytes.as_slice())
+            {
+                let generation =
+                    crate::federation::frontier_store::current_generation(&mut *tx).await?;
+                crate::federation::frontier_store::insert_frontier_edge(
+                    &mut *tx,
+                    &trust_edge,
+                    canonical_hash,
+                    &sig,
+                    &payload_bytes,
+                    generation,
+                )
+                .await?;
+            }
+        }
+        // ChainFork / Deferred: re-evaluation produces no new recovery
+        // work here — the live-receipt path already recorded their
+        // evidence / buffered their orphan.
+        TrustEdgeProjection::ChainFork | TrustEdgeProjection::Deferred => {}
+    }
+    tx.commit().await?;
+    Ok(recovery)
 }
 
 /// Core per-edge state machine. Returns `(EdgeResult,
@@ -531,7 +630,24 @@ pub(crate) async fn apply_one_edge_inner(
     //   `rejected/erased`: reaccepting would defeat the §3.1
     //   erasure authority.
     // - Row exists with payload still present → idempotent
-    //   `duplicate` per §9.1 "redelivery is no-op".
+    //   `duplicate` per §9.1 "redelivery is no-op". Dedup is by canonical
+    //   hash and runs *before* signature verification, so a corrupted-sig
+    //   replay of a known edge still reports `duplicate`.
+    //
+    // But a durable row that is NOT yet projected into `trust_edges` is an
+    // `EndpointMissing` edge (§9.6) whose §8.1 target was outside our
+    // expansion set — or whose source stub was unhydrated — at first
+    // receipt. The §8.1 expansion set grows as upstream edges land, so a
+    // redelivery that arrives *after* the target enters the set is the
+    // event that should finally fire the §11.9.5 reverse-bootstrap backfill
+    // and §8.1 frontier-edge insert the first (pre-expansion) receipt
+    // skipped. We re-evaluate that here as a side effect — against the
+    // *stored* (already-verified) bytes, not the incoming wire — and still
+    // report `duplicate`, so the §9.1 dedup-before-verify contract holds
+    // even when the redelivery's signature is corrupt. Without this, an
+    // edge stranded by receipt-ordering is wedged forever: the sender's
+    // continuous re-announce keeps re-delivering it, but every redelivery
+    // no-ops.
     let hash_slice: &[u8] = canonical_hash.as_slice();
     let existing = sqlx::query!(
         "SELECT erased_at, (payload IS NULL) AS \"payload_null!: i64\" \
@@ -550,12 +666,24 @@ pub(crate) async fn apply_one_edge_inner(
                 None,
             ));
         }
+        let already_projected = sqlx::query_scalar!(
+            "SELECT 1 AS \"x!: i64\" FROM trust_edges WHERE canonical_hash = ? LIMIT 1",
+            hash_slice,
+        )
+        .fetch_optional(&state.db)
+        .await?
+        .is_some();
+        let recovery = if already_projected {
+            None
+        } else {
+            reattempt_unprojected_edge(state, &canonical_hash, arrived_from).await?
+        };
         return Ok((
             EdgeResult {
                 canonical_hash,
                 status: EdgeStatus::Duplicate,
             },
-            None,
+            recovery,
         ));
     }
 

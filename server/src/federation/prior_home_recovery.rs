@@ -155,59 +155,87 @@ fn retry_after_secs(response: &http::Response<Bytes>) -> Option<u64> {
 /// able to sweep up to `MAX_FALLBACK_PEERS`).
 const PROACTIVE_BACKFILL_BATCH_CONCURRENCY: usize = 8;
 
-/// §10.5.5 single-peer-per-author rule, enforced process-wide: at most one
-/// outstanding by-author proactive backfill per `author_key` across *all*
-/// call sites. Both the frontier Trigger-3 batch and the §11.9.5
+/// §10.5.5 single-peer-per-author dedup set, scoped to one instance (one
+/// [`AppState`]): at most one outstanding by-author proactive backfill per
+/// `author_key`. Both the frontier Trigger-3 batch and the §11.9.5
 /// reverse-bootstrap edge path funnel through [`proactive_author_backfill`],
 /// so without a shared claim a trust edge arriving for K at the same moment
 /// K enters the content frontier would fire two concurrent by-author sweeps
 /// for the same key, doubling outbound load and racing the same stub
 /// hydration. Keyed by author pubkey; entries are held only for the
 /// lifetime of an in-flight backfill via [`AuthorInFlightGuard`].
-static IN_FLIGHT_AUTHORS: LazyLock<Mutex<HashSet<[u8; 32]>>> =
-    LazyLock::new(|| Mutex::new(HashSet::new()));
+///
+/// Lives on [`AppState`] rather than a module `static` so the dedup scope is
+/// exactly one instance. In production that is identical to a process-global
+/// (one instance per process), but it keeps the multiple in-process
+/// `AppState`s of the federation test harness from colliding on each other's
+/// claims — a collision there would let one instance's backfill suppress a
+/// *different* instance's legitimate backfill of the same author into its own
+/// store, which has no production analogue.
+#[derive(Default)]
+pub struct AuthorSingleFlight {
+    in_flight: Mutex<HashSet<[u8; 32]>>,
+}
 
-/// RAII claim on an `author_key` in [`IN_FLIGHT_AUTHORS`]. Construction via
-/// [`AuthorInFlightGuard::try_claim`] returns `None` when the key is already
-/// claimed (the §10.5.5 skip case); the claim is released on `Drop`, so an
-/// early return — or a panic — in the backfill body cannot leak a permanent
-/// claim that would wedge the author out of all future backfills.
-struct AuthorInFlightGuard([u8; 32]);
-
-impl AuthorInFlightGuard {
+impl AuthorSingleFlight {
     /// Claim `author_key`, or `None` if a backfill for it is already in
-    /// flight anywhere in the process.
-    fn try_claim(author_key: [u8; 32]) -> Option<Self> {
-        let mut set = IN_FLIGHT_AUTHORS
+    /// flight on this instance (the §10.5.5 skip case). The claim releases on
+    /// `Drop`, so an early return — or a panic — in the backfill body cannot
+    /// leak a permanent claim that would wedge the author out of all future
+    /// backfills.
+    ///
+    /// Exposed `pub(crate)` so the §11.9.5 reverse-bootstrap spawn sites can
+    /// claim *before* spawning the detached backfill task and hand the guard
+    /// in (see [`spawn_unknown_source_backfill`]). Claiming synchronously at
+    /// the moment the triggering edge is applied — rather than inside the
+    /// spawned task — means `in_flight_count` reflects the pending recovery
+    /// before the inbound HTTP response returns, so a deterministic settle
+    /// harness never samples a falsely-quiescent gap between "edge applied"
+    /// and "backfill task first polled".
+    pub(crate) fn try_claim(self: &Arc<Self>, author_key: [u8; 32]) -> Option<AuthorInFlightGuard> {
+        let mut set = self
+            .in_flight
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        set.insert(author_key).then_some(Self(author_key))
+        set.insert(author_key).then(|| AuthorInFlightGuard {
+            set: self.clone(),
+            author_key,
+        })
     }
+
+    /// Test-only count of by-author backfills currently claimed on this
+    /// instance. A deterministic settle harness waits for this to reach zero
+    /// before it judges convergence quiescent: the §10.5.4 inbound-edge pull
+    /// recurses through a fire-and-forget [`spawn_unknown_source_backfill`],
+    /// so a pass that *returns* may still have a recovery backfill in flight
+    /// whose edge has not landed yet.
+    #[cfg(any(test, feature = "test-auth"))]
+    pub fn in_flight_count(&self) -> usize {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+    }
+}
+
+/// RAII claim on an `author_key` in an [`AuthorSingleFlight`]. Construction
+/// via [`AuthorSingleFlight::try_claim`] returns `None` when the key is
+/// already claimed (the §10.5.5 skip case); the claim is released on `Drop`,
+/// so an early return — or a panic — in the backfill body cannot leak a
+/// permanent claim that would wedge the author out of all future backfills.
+pub(crate) struct AuthorInFlightGuard {
+    set: Arc<AuthorSingleFlight>,
+    author_key: [u8; 32],
 }
 
 impl Drop for AuthorInFlightGuard {
     fn drop(&mut self) {
-        IN_FLIGHT_AUTHORS
+        self.set
+            .in_flight
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&self.0);
+            .remove(&self.author_key);
     }
-}
-
-/// Test-only count of by-author backfills currently claimed in
-/// [`IN_FLIGHT_AUTHORS`]. A deterministic settle harness waits for this
-/// to reach zero before it judges convergence quiescent: the §10.5.4
-/// inbound-edge pull recurses through a fire-and-forget
-/// [`spawn_unknown_source_backfill`], so a pass that *returns* may still
-/// have a recovery backfill in flight whose edge has not landed yet.
-/// Process-wide like the set itself; harnesses bound their wait so a
-/// concurrent test's backfill can't wedge them.
-#[cfg(any(test, feature = "test-auth"))]
-pub fn author_backfills_in_flight() -> usize {
-    IN_FLIGHT_AUTHORS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .len()
 }
 
 /// `POST /federation/v1/prior-home/content-by-key` (§14.5).
@@ -557,16 +585,38 @@ async fn ingest_content_object(state: &Arc<AppState>, wire: &[u8], arrived_from:
 /// function (whose body holds no awaited future) is what lets Rust's
 /// auto-`Send` solver resolve that cycle. The spawned task is boxed as a
 /// `dyn Future + Send` for the same reason.
-fn spawn_unknown_source_backfill(
+/// Spawn a §11.9.5 reverse-bootstrap by-author backfill for `source`,
+/// the unknown source of an `EndpointMissing` edge delivered by
+/// `arrived_from`.
+///
+/// Claims the §10.5.5 single-flight guard *synchronously here*, before
+/// the spawn — not inside the spawned task — so `in_flight_count` rises
+/// the instant the triggering edge is applied, before the inbound HTTP
+/// response returns to the deliverer. A deterministic settle harness
+/// keys quiescence off `in_flight_count`; claiming inside the task left
+/// a window where the edge was applied and the response returned while
+/// the count was still zero, so the harness judged the recovery cascade
+/// done one stage early (the stall this closes). The eager claim also
+/// collapses two near-simultaneous `EndpointMissing` edges for the same
+/// source into one sweep. If the source is already being backfilled, the
+/// claim returns `None` and we skip — the in-flight run will service it.
+pub(crate) fn spawn_unknown_source_backfill(
     state: Arc<AppState>,
     source: [u8; 32],
     arrived_from: [u8; 32],
     permit: tokio::sync::OwnedSemaphorePermit,
 ) {
+    let Some(guard) = state.backfill_single_flight.try_claim(source) else {
+        tracing::debug!(
+            source = %hex_lower(&source),
+            "reverse-bootstrap backfill: already in flight, skipping (§10.5.5)",
+        );
+        return;
+    };
     let fut: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
         Box::pin(async move {
             let _permit = permit;
-            proactive_author_backfill(&state, source, Some(arrived_from)).await;
+            run_author_backfill(&state, source, Some(arrived_from), guard).await;
         });
     tokio::spawn(fut);
 }
@@ -597,8 +647,7 @@ async fn ingest_edge_object(state: &Arc<AppState>, wire: &[u8], arrived_from: [u
                 source,
                 arrived_from,
             }) = recovery
-                && let Some(permit) =
-                    crate::federation::edge_backfill::try_acquire_outbound_permit()
+                && let Some(permit) = state.outbound_backfill_permits.try_acquire()
             {
                 spawn_unknown_source_backfill(state.clone(), source, arrived_from, permit);
             }
@@ -920,13 +969,13 @@ pub(crate) async fn proactive_author_backfill(
     author_key: [u8; 32],
     prefer_peer: Option<[u8; 32]>,
 ) {
-    // §10.5.5: at most one outstanding by-author request per author across
-    // the whole process. Claim the key for the duration of this run; if a
-    // backfill for it is already in flight (from the other call site or a
-    // prior still-running batch entry), skip cheaply rather than racing a
-    // duplicate sweep. The guard releases the claim on drop (incl. early
-    // returns below and panics).
-    let _in_flight = match AuthorInFlightGuard::try_claim(author_key) {
+    // §10.5.5: at most one outstanding by-author request per author on this
+    // instance. Claim the key for the duration of this run; if a backfill for
+    // it is already in flight (from the other call site or a prior
+    // still-running batch entry), skip cheaply rather than racing a duplicate
+    // sweep. The guard releases the claim on drop (incl. early returns below
+    // and panics).
+    let guard = match state.backfill_single_flight.try_claim(author_key) {
         Some(guard) => guard,
         None => {
             tracing::debug!(
@@ -936,7 +985,24 @@ pub(crate) async fn proactive_author_backfill(
             return;
         }
     };
+    run_author_backfill(state, author_key, prefer_peer, guard).await;
+}
 
+/// Body of a by-author backfill, holding a pre-acquired §10.5.5
+/// single-flight `guard` for `author_key` for the whole run.
+///
+/// Split out from [`proactive_author_backfill`] so the §11.9.5 reverse-
+/// bootstrap spawn sites can claim the guard *synchronously* (before
+/// spawning the detached task) while the frontier Trigger-3 batch path
+/// still claims it inline. Holding the guard across the run preserves
+/// the dedup invariant; dropping it on any return path (or panic)
+/// releases the author for future backfills.
+async fn run_author_backfill(
+    state: &Arc<AppState>,
+    author_key: [u8; 32],
+    prefer_peer: Option<[u8; 32]>,
+    _guard: AuthorInFlightGuard,
+) {
     let mut candidates = match list_active_peers(state).await {
         Ok(v) => v,
         Err(e) => {

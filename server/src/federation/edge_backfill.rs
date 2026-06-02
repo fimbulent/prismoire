@@ -55,7 +55,7 @@
 //! anything still pending after `DEFERRED_ORPHAN_TTL` (1h) gets
 //! evicted and becomes the sender's problem.
 
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use axum::body::Bytes;
 use ciborium::value::Value;
@@ -76,21 +76,32 @@ use crate::users::hex_lower;
 /// push or §9.6 sweep tick is the recovery path.
 const OUTBOUND_BACKFILL_CONCURRENCY: usize = 8;
 
-/// Process-wide gate for outbound §9.3 backfill spawns. See
-/// [`try_acquire_outbound_permit`] for the acquire-or-skip contract.
-static OUTBOUND_BACKFILL_PERMITS: LazyLock<Arc<Semaphore>> =
-    LazyLock::new(|| Arc::new(Semaphore::new(OUTBOUND_BACKFILL_CONCURRENCY)));
+/// Per-instance gate for outbound §9.3 backfill spawns. Held on
+/// [`AppState`] rather than a module `static` so the cap is per-instance —
+/// identical to a process-global in production (one instance per process)
+/// while keeping the multiple in-process `AppState`s of the federation test
+/// harness from sharing one budget. See [`OutboundBackfillPermits::try_acquire`]
+/// for the acquire-or-skip contract.
+pub struct OutboundBackfillPermits(Arc<Semaphore>);
 
-/// Try to claim a permit for an outbound §9.3 backfill spawn. Returns
-/// `None` when the cap is currently saturated — caller logs and skips
-/// the spawn; the buffered orphan retries on the next push or §9.6
-/// sweep. The permit must be held for the lifetime of the spawned
-/// task so the count decreases when the request finishes.
-pub(crate) fn try_acquire_outbound_permit() -> Option<OwnedSemaphorePermit> {
-    match OUTBOUND_BACKFILL_PERMITS.clone().try_acquire_owned() {
-        Ok(permit) => Some(permit),
-        Err(TryAcquireError::NoPermits) => None,
-        Err(TryAcquireError::Closed) => None,
+impl Default for OutboundBackfillPermits {
+    fn default() -> Self {
+        Self(Arc::new(Semaphore::new(OUTBOUND_BACKFILL_CONCURRENCY)))
+    }
+}
+
+impl OutboundBackfillPermits {
+    /// Try to claim a permit for an outbound §9.3 backfill spawn. Returns
+    /// `None` when the cap is currently saturated — caller logs and skips
+    /// the spawn; the buffered orphan retries on the next push or §9.6
+    /// sweep. The permit must be held for the lifetime of the spawned
+    /// task so the count decreases when the request finishes.
+    pub(crate) fn try_acquire(&self) -> Option<OwnedSemaphorePermit> {
+        match self.0.clone().try_acquire_owned() {
+            Ok(permit) => Some(permit),
+            Err(TryAcquireError::NoPermits) => None,
+            Err(TryAcquireError::Closed) => None,
+        }
     }
 }
 

@@ -278,6 +278,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         attachment_fetch_gate: Arc::new(
             prismoire_server::federation::attachment_fetch::AttachmentFetchGate::default(),
         ),
+        backfill_single_flight: Arc::new(
+            prismoire_server::federation::prior_home_recovery::AuthorSingleFlight::default(),
+        ),
+        outbound_backfill_permits: Arc::new(
+            prismoire_server::federation::edge_backfill::OutboundBackfillPermits::default(),
+        ),
     });
 
     // Spawn the debounced trust graph rebuild background task.

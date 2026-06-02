@@ -345,6 +345,12 @@ pub async fn test_app_with_pool_transport_domain_and_outbound_config(
         attachment_fetch_gate: Arc::new(
             prismoire_server::federation::attachment_fetch::AttachmentFetchGate::default(),
         ),
+        backfill_single_flight: Arc::new(
+            prismoire_server::federation::prior_home_recovery::AuthorSingleFlight::default(),
+        ),
+        outbound_backfill_permits: Arc::new(
+            prismoire_server::federation::edge_backfill::OutboundBackfillPermits::default(),
+        ),
     });
 
     let layers = rate_limit::build_layers(&test_rate_limit_config(), false);

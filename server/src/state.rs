@@ -10,6 +10,7 @@ use crate::error::{AppError, ErrorCode};
 use crate::federation::attachment_fetch::AttachmentFetchGate;
 use crate::federation::backfill_rate_limit::BackfillRateLimiter;
 use crate::federation::content_rate_limit::ContentRateLimiter;
+use crate::federation::edge_backfill::OutboundBackfillPermits;
 use crate::federation::envelope::NonceLru;
 use crate::federation::forwarder::ForwardingLru;
 use crate::federation::frontier::LocalFrontier;
@@ -17,6 +18,7 @@ use crate::federation::instance_key::InstanceKey;
 use crate::federation::outbound_queue::OutboundQueues;
 use crate::federation::prior_home_challenge_rate_limit::PriorHomeChallengeRateLimiter;
 use crate::federation::prior_home_rate_limit::PriorHomeRateLimiter;
+use crate::federation::prior_home_recovery::AuthorSingleFlight;
 use crate::federation::push_rate_limit::PushRateLimiter;
 use crate::federation::transport::FederationTransport;
 use crate::instance_config::AttachmentBudget;
@@ -200,6 +202,18 @@ pub struct AppState {
     /// (`ATTACHMENT_CONCURRENT_PER_PEER`). In-memory only; resets on
     /// restart.
     pub attachment_fetch_gate: Arc<AttachmentFetchGate>,
+    /// §10.5.5 per-instance single-flight dedup for by-author proactive
+    /// backfills: at most one outstanding sweep per `author_key`. Per-instance
+    /// (not a module static) so the multiple in-process `AppState`s of the
+    /// federation test harness don't suppress one another's legitimate
+    /// backfills of the same author; in production (one instance per process)
+    /// this is identical to a process-global. In-memory only; resets on
+    /// restart.
+    pub backfill_single_flight: Arc<AuthorSingleFlight>,
+    /// §9.3 per-instance outbound-backfill concurrency cap. Same per-instance
+    /// rationale as [`AppState::backfill_single_flight`]. In-memory only;
+    /// resets on restart.
+    pub outbound_backfill_permits: Arc<OutboundBackfillPermits>,
 }
 
 impl AppState {

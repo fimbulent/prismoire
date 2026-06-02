@@ -622,7 +622,6 @@ pub async fn send_envelope_signed_split(
 use std::time::{Duration, Instant};
 
 use prismoire_server::federation::frontier::{FanoutIo, frontier_fanout_once};
-use prismoire_server::federation::prior_home_recovery::author_backfills_in_flight;
 
 /// Per-round budget for draining each instance's outbound queue, and for
 /// waiting out a fire-and-forget recovery backfill so its edge lands
@@ -656,9 +655,8 @@ pub async fn settle(harness: &MultiInstanceHarness) {
 pub async fn settle_with(harness: &MultiInstanceHarness, deadline: Duration) {
     let labels = harness.labels();
     let end = Instant::now() + deadline;
-    let mut idle_rounds = 0u32;
 
-    while idle_rounds < 2 && Instant::now() < end {
+    while Instant::now() < end {
         let before = convergence_fingerprint(harness).await;
         let mut changed_any = false;
 
@@ -672,39 +670,55 @@ pub async fn settle_with(harness: &MultiInstanceHarness, deadline: Duration) {
             if frontier_fanout_once(&inst.state, false, FanoutIo::Inline).await {
                 changed_any = true;
             }
-            inst.state
-                .outbound_queues
-                .wait_idle(SETTLE_DRAIN_BUDGET)
-                .await;
         }
 
-        // Give any `spawn_unknown_source_backfill` recursion launched this
-        // round a moment to claim its in-flight guard, then wait (bounded)
-        // for every by-author backfill to drain so its recovered edge has
-        // landed before we fingerprint. Bounded so a concurrent test's
-        // backfill can't wedge us; the two-consecutive-round rule below
-        // absorbs the rare case where a spawn hadn't yet claimed.
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        let backfill_deadline = Instant::now() + SETTLE_DRAIN_BUDGET;
-        while author_backfills_in_flight() > 0 && Instant::now() < backfill_deadline {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        // A recovery backfill may have enqueued an outbound push; drain it
-        // so its effect is visible in this round's fingerprint.
-        for label in &labels {
-            harness
-                .instance(label)
-                .state
-                .outbound_queues
-                .wait_idle(SETTLE_DRAIN_BUDGET)
-                .await;
+        // Drain the whole mesh to a *global* fixpoint before fingerprinting.
+        // Federation work ping-pongs across instances — draining C's queue
+        // makes C dispatch to D, whose apply enqueues fresh pushes back onto
+        // A/B/C and may spawn a §14.6 backfill that enqueues yet more. A
+        // single per-instance `wait_idle` pass samples that cascade at an
+        // arbitrary point; the round-robin sampling is what made multi-hop
+        // convergence nondeterministic. Instead, keep sweeping every
+        // instance's outbound queue and by-author backfills until a full
+        // sweep observes *nothing* pending anywhere: no queued/in-flight
+        // outbound bytes and no backfill holding its single-flight guard.
+        // Only then is the I/O this round produced fully settled, so the
+        // fingerprint below reflects a deterministic end state regardless of
+        // the concurrent workers' internal interleaving.
+        let drain_deadline = Instant::now() + SETTLE_DRAIN_BUDGET;
+        loop {
+            for label in &labels {
+                let inst = harness.instance(label);
+                inst.state
+                    .outbound_queues
+                    .wait_idle(SETTLE_DRAIN_BUDGET)
+                    .await;
+            }
+            let pending = labels.iter().any(|label| {
+                let inst = harness.instance(label);
+                inst.state.outbound_queues.total_bytes() > 0
+                    || inst.state.backfill_single_flight.in_flight_count() > 0
+            });
+            if !pending || Instant::now() >= drain_deadline {
+                break;
+            }
+            // A backfill may still be mid-flight (guard held but no outbound
+            // queued yet); yield briefly so it can enqueue its push before we
+            // re-check, rather than spinning on the lock.
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
 
+        // The mesh is fully drained to a global fixpoint above, so the
+        // fingerprint now reflects a deterministic end state. A sweep that
+        // both ran no fanout work *and* moved no rows is a true fixpoint —
+        // every announce has been applied, every replay/backfill it could
+        // trigger has landed, and no further sweep can make progress. Unlike
+        // the old "two sampled idle rounds" rule, this can't quit on a
+        // transient-empty moment mid-cascade because there is no mid-cascade
+        // state left to sample once the global drain returns.
         let after = convergence_fingerprint(harness).await;
-        if changed_any || after != before {
-            idle_rounds = 0;
-        } else {
-            idle_rounds += 1;
+        if !changed_any && after == before {
+            return;
         }
     }
 }
