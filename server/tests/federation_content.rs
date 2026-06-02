@@ -67,8 +67,8 @@ use prismoire_server::federation::routing::Mode;
 use prismoire_server::signed::TrustStance;
 use prismoire_server::signing::{
     SigningOutput, sign_admin_removal_with_instance_key, sign_deactivation_with_key,
-    sign_post_revision_with_key, sign_retraction_with_key, sign_trust_edge_with_key,
-    store_signed_object,
+    sign_post_revision_with_key, sign_profile_revision_with_key, sign_retraction_with_key,
+    sign_thread_create_with_key, sign_trust_edge_with_key, store_signed_object,
 };
 use rand::rngs::OsRng;
 use serde_json::{Value as JsonValue, json};
@@ -195,61 +195,91 @@ fn encode_report_body(wire: &[u8]) -> Vec<u8> {
     buf
 }
 
-/// Insert a `users` row with a known Ed25519 public key so a remote
-/// author key is locally projectable.
-async fn insert_user_with_pubkey(db: &SqlitePool, id: &str, display_name: &str, pubkey: &[u8; 32]) {
-    let pubkey_slice: &[u8] = pubkey.as_slice();
-    let skeleton = display_name.to_lowercase();
-    sqlx::query!(
-        "INSERT INTO users (id, display_name, signup_method, public_key, display_name_skeleton) \
-         VALUES (?, ?, 'admin', ?, ?)",
-        id,
-        display_name,
-        pubkey_slice,
-        skeleton,
-    )
-    .execute(db)
-    .await
-    .expect("insert user");
+/// Decode a 64-char lowercase hex string (e.g. `Session::public_key_hex`)
+/// into raw Ed25519 public-key bytes.
+fn hex32(s: &str) -> [u8; 32] {
+    let bytes: Vec<u8> = (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("valid hex"))
+        .collect();
+    bytes.as_slice().try_into().expect("32 bytes")
 }
 
-/// Insert a `posts` row referencing an existing user + thread so the
-/// admin-rm advisory handler's `post_not_found` check sees the target.
-async fn insert_post_with_id(db: &SqlitePool, post_id: &Uuid, author_id: &str, thread_id: &Uuid) {
-    let post_id_text = post_id.to_string();
-    let thread_id_text = thread_id.to_string();
-    let room_exists: Option<String> =
-        sqlx::query_scalar!("SELECT id FROM rooms WHERE id = 'general' LIMIT 1")
-            .fetch_optional(db)
-            .await
-            .expect("room lookup");
-    if room_exists.is_none() {
-        sqlx::query!(
-            "INSERT INTO rooms (id, slug, created_by) VALUES ('general', 'general', ?)",
-            author_id,
-        )
-        .execute(db)
-        .await
-        .expect("insert room");
-    }
-    sqlx::query!(
-        "INSERT INTO threads (id, title, author, room) \
-         VALUES (?, 'placeholder', ?, 'general')",
-        thread_id_text,
-        author_id,
+/// Push a single signed object A→B over `/federation/v1/content` and
+/// assert it lands `applied`. The harness helper for the erase /
+/// projection chains below.
+async fn push_content_applied(harness: &MultiInstanceHarness, signed: &SigningOutput) {
+    let wire = encode_wire(&signed.payload, &signed.signature);
+    let body = encode_content_body(&[wire]);
+    let (status, resp_body) = send_envelope_signed(
+        harness,
+        "a",
+        "b",
+        Method::POST,
+        "/federation/v1/content",
+        &body,
     )
-    .execute(db)
-    .await
-    .expect("insert thread");
-    sqlx::query!(
-        "INSERT INTO posts (id, author, thread) VALUES (?, ?, ?)",
-        post_id_text,
-        author_id,
-        thread_id_text,
-    )
-    .execute(db)
-    .await
-    .expect("insert post");
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "push not 200 (body: {:?})",
+        resp_body
+    );
+    let results = parse_results_body(&resp_body);
+    assert_eq!(
+        results[0].1, "applied",
+        "push not applied (reason: {:?})",
+        results[0].2,
+    );
+}
+
+/// Drive the real remote-author projection chain on instance B by pushing
+/// three signed objects from active-peer A: a `profile` (hydrates the
+/// author stub via `project_remote_profile`), a `thread-create` (projects
+/// the room + thread), and the OP `post-rev` rev 0 (projects `posts` +
+/// `post_revisions`). Returns the post-rev `SigningOutput` so callers can
+/// assert on / erase its persisted row. Replaces the former raw-INSERT
+/// `insert_user_with_pubkey` + `insert_post_with_id` + inline
+/// `post_revisions` seed: the projected state is now exactly what a real
+/// federated receive produces.
+async fn project_remote_op_post(
+    harness: &MultiInstanceHarness,
+    author_key: &SigningKey,
+    display_name: &str,
+    thread_id: &Uuid,
+    post_id: &Uuid,
+    body: &str,
+) -> SigningOutput {
+    let base_ms = 1_700_000_000_000u64;
+
+    let profile = sign_profile_revision_with_key(author_key, display_name, "", None, base_ms, None);
+    push_content_applied(harness, &profile).await;
+
+    let thread_create = sign_thread_create_with_key(
+        author_key,
+        thread_id,
+        "general",
+        "placeholder",
+        None,
+        post_id,
+        base_ms,
+    );
+    push_content_applied(harness, &thread_create).await;
+
+    let post_rev = sign_post_revision_with_key(
+        author_key,
+        post_id,
+        thread_id,
+        None,
+        0,
+        body,
+        base_ms,
+        Vec::new(),
+    );
+    push_content_applied(harness, &post_rev).await;
+
+    post_rev
 }
 
 // ===========================================================================
@@ -317,61 +347,27 @@ async fn content_push_post_rev_persists_signed_object() {
 /// payload for the same `post_id` is NULLed per §10.1 on-receipt erasure
 /// (the §3 chain-walk artifacts — signature, hash, prior link — remain).
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn content_push_retract_erases_post_rev_payload() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
     let b = harness.instance("b");
 
     let alice_key = SigningKey::generate(&mut OsRng);
-    let alice_pub = alice_key.verifying_key().to_bytes();
     let post_id = Uuid::new_v4();
     let thread_id = Uuid::new_v4();
 
-    // The erase helper subqueries `posts` joined to `post_revisions`, so
-    // both rows must exist locally for the NULL to land on the right
-    // `signed_objects.canonical_hash`.
-    insert_user_with_pubkey(&b.state.db, "user-alice", "alice", &alice_pub).await;
-    insert_post_with_id(&b.state.db, &post_id, "user-alice", &thread_id).await;
-
-    let post_rev = sign_post_revision_with_key(
-        &alice_key,
-        &post_id,
-        &thread_id,
-        None,
-        0,
-        "to be retracted",
-        1_700_000_000_000,
-        Vec::new(),
-    );
-    let post_rev_hash_db: Vec<u8> = post_rev.canonical_hash.to_vec();
-    let post_rev_sig_db: Vec<u8> = post_rev.signature.clone();
-    let post_id_text = post_id.to_string();
-    sqlx::query!(
-        "INSERT INTO post_revisions \
-         (post_id, revision, body, signature, canonical_hash, created_at) \
-         VALUES (?, 0, 'to be retracted', ?, ?, '2024-01-01T00:00:00Z')",
-        post_id_text,
-        post_rev_sig_db,
-        post_rev_hash_db,
-    )
-    .execute(&b.state.db)
-    .await
-    .expect("seed post_revisions");
-
-    // Push the post-rev so its canonical bytes are persisted.
-    let wire = encode_wire(&post_rev.payload, &post_rev.signature);
-    let body = encode_content_body(&[wire]);
-    let (status, _) = send_envelope_signed(
+    // Project the author stub + thread + OP post-rev through real receives
+    // so `posts` joined to `post_revisions` carries the canonical hash the
+    // retract erase keys off — no raw INSERT.
+    let post_rev = project_remote_op_post(
         &harness,
-        "a",
-        "b",
-        Method::POST,
-        "/federation/v1/content",
-        &body,
+        &alice_key,
+        "alice",
+        &thread_id,
+        &post_id,
+        "to be retracted",
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
 
     // Now the retract.
     let retract = sign_retraction_with_key(&alice_key, &post_id, 1_700_000_000_500);
@@ -419,57 +415,27 @@ async fn content_push_retract_erases_post_rev_payload() {
 /// payload NULLed. Asserts the cascade by pushing a `post-rev` first,
 /// then the `deactivate`.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn content_push_deactivate_erases_user_payloads() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
     let b = harness.instance("b");
 
     let alice_key = SigningKey::generate(&mut OsRng);
-    let alice_pub = alice_key.verifying_key().to_bytes();
     let post_id = Uuid::new_v4();
     let thread_id = Uuid::new_v4();
 
-    insert_user_with_pubkey(&b.state.db, "user-alice", "alice", &alice_pub).await;
-    insert_post_with_id(&b.state.db, &post_id, "user-alice", &thread_id).await;
-
-    let post_rev = sign_post_revision_with_key(
-        &alice_key,
-        &post_id,
-        &thread_id,
-        None,
-        0,
-        "to be erased",
-        1_700_000_000_000,
-        Vec::new(),
-    );
-    let post_rev_hash_db: Vec<u8> = post_rev.canonical_hash.to_vec();
-    let post_rev_sig_db: Vec<u8> = post_rev.signature.clone();
-    let post_id_text = post_id.to_string();
-    sqlx::query!(
-        "INSERT INTO post_revisions \
-         (post_id, revision, body, signature, canonical_hash, created_at) \
-         VALUES (?, 0, 'to be erased', ?, ?, '2024-01-01T00:00:00Z')",
-        post_id_text,
-        post_rev_sig_db,
-        post_rev_hash_db,
-    )
-    .execute(&b.state.db)
-    .await
-    .expect("seed post_revisions");
-
-    let wire = encode_wire(&post_rev.payload, &post_rev.signature);
-    let body = encode_content_body(&[wire]);
-    let (status, _) = send_envelope_signed(
+    // Project the author stub + thread + OP post-rev through real receives.
+    // The deactivate cascade matches the stub `users` row by `public_key`,
+    // so the hydrated stub (not a raw INSERT) is what makes it fire.
+    let post_rev = project_remote_op_post(
         &harness,
-        "a",
-        "b",
-        Method::POST,
-        "/federation/v1/content",
-        &body,
+        &alice_key,
+        "alice",
+        &thread_id,
+        &post_id,
+        "to be erased",
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
 
     // Push the deactivate.
     let deact = sign_deactivation_with_key(&alice_key, 1_700_000_001_000);
@@ -841,17 +807,16 @@ async fn content_push_admin_rm_blocks_subsequent_post_rev() {
 /// authoritative from anyone but us; the sender should have used the
 /// §10.4 advisory route. Returns `rejected/wrong_route`.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn content_push_admin_rm_against_local_user_is_wrong_route() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
     let b = harness.instance("b");
     let a = harness.instance("a");
 
-    // B hosts the target user.
-    let target_key = SigningKey::generate(&mut OsRng);
-    let target_pub = target_key.verifying_key().to_bytes();
-    insert_user_with_pubkey(&b.state.db, "user-target", "target", &target_pub).await;
+    // B hosts the target as a real local user (home_instance NULL), so an
+    // admin-rm against them can only be authoritative from B itself.
+    let target = setup_admin(&b.router, "target").await;
+    let target_pub = hex32(&target.public_key_hex);
 
     let post_id = Uuid::new_v4();
     let admin_rm = sign_admin_removal_with_instance_key(
@@ -931,20 +896,41 @@ async fn content_push_admin_rm_signing_instance_mismatch_unauthorized() {
 /// Receiver returns `queued`, the row lands in `admin_rm_reports`, and a
 /// replay deduplicates by `post_id`.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn admin_rm_report_queued_for_local_target() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
     let b = harness.instance("b");
     let a = harness.instance("a");
 
-    let target_key = SigningKey::generate(&mut OsRng);
-    let target_pub = target_key.verifying_key().to_bytes();
-    insert_user_with_pubkey(&b.state.db, "user-target", "target", &target_pub).await;
+    // B hosts the target as a real local user who authors a real thread.
+    // The advisory's home check (local users row) and post_not_found check
+    // (the OP post exists) both pass against this genuine state.
+    let target = setup_admin(&b.router, "target").await;
+    let target_pub = hex32(&target.public_key_hex);
 
-    let post_id = Uuid::new_v4();
-    let thread_id = Uuid::new_v4();
-    insert_post_with_id(&b.state.db, &post_id, "user-target", &thread_id).await;
+    let create_req = json_request(
+        Method::POST,
+        "/api/threads",
+        Some(&target.cookie),
+        &json!({
+            "room": "general",
+            "title": "target's thread",
+            "body": "target's opening post",
+        }),
+    );
+    let resp = send(&b.router, create_req).await;
+    assert_eq!(resp.status(), StatusCode::CREATED, "thread create on B");
+    let created = body_json(resp).await;
+    let thread_id_text = created["id"].as_str().expect("thread id").to_string();
+
+    let op_post_id_text: String = sqlx::query_scalar!(
+        "SELECT id AS \"id!: String\" FROM posts WHERE thread = ? LIMIT 1",
+        thread_id_text,
+    )
+    .fetch_one(&b.state.db)
+    .await
+    .expect("op post id");
+    let post_id = Uuid::parse_str(&op_post_id_text).expect("uuid");
 
     let admin_rm = sign_admin_removal_with_instance_key(
         &a.state.instance_key,
