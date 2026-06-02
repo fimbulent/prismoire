@@ -191,15 +191,32 @@ async fn bootstrap_pull_reacquires_frontier_after_lost_first_contact_push() {
 
     // Live failure: the announce from B was lost in flight, so A holds no
     // frontier for B and routes nothing toward it (§7.4 empty-filter).
-    sqlx::query("DELETE FROM peer_frontiers WHERE peer_pubkey = ?")
-        .bind(&b_pub)
-        .execute(&a.state.db)
-        .await
-        .unwrap();
+    //
+    // Determinism note: activation fires *two* spawn-and-forget writers of
+    // `peer_frontiers[B]` on A — the inbound §8.6 announce (already landed,
+    // polled above) and A's own §7.3 bootstrap pull
+    // (`spawn_bootstrap_frontier_pull`, a GET to B). The latter can still
+    // be in flight and would race our DELETE, re-landing the row. Fence B
+    // out of the transport first so no *new* pull can fetch B's frontier,
+    // then delete in a settle loop to absorb a pull that fetched just
+    // before the disconnect and is mid-write. With B unreachable and no
+    // fanout loop running, this converges to a stable empty state.
+    h.disconnect("b").await;
+    let cleared = poll_until(3_000, || async {
+        sqlx::query("DELETE FROM peer_frontiers WHERE peer_pubkey = ?")
+            .bind(&b_pub)
+            .execute(&a.state.db)
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        !row_exists(&a.state.db, &b_pub).await
+    })
+    .await;
     assert!(
-        !row_exists(&a.state.db, &b_pub).await,
+        cleared,
         "precondition: A must hold no frontier for B after the lost push",
     );
+    h.reconnect("b").await;
 
     // §7.3 step 2: A pulls B's current frontier directly over the §8.5
     // GET route and applies it. This is the redundant backstop the push

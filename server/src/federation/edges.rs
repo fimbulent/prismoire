@@ -677,28 +677,23 @@ pub(crate) async fn apply_one_edge_inner(
             )
             .await?;
 
-            // §11.9.5 reverse bootstrap. An `EndpointMissing` whose
-            // *target* is one of our live local users but whose *source*
-            // we've never seen is the trust-code deadlock: the source's
-            // profile-rev (which would hydrate its stub and let
-            // `sweep_pending_projections` project this edge) is itself
-            // gated on a trust path that runs through this very edge.
-            // Nothing else pushes the source's content our way, so the
-            // local user's "trusted by" would stay empty forever. Signal
-            // the outer wrapper to pull the source's content via §10.5
-            // by-author. Scoped narrowly (target local + source unknown)
-            // so stranger→stranger edges stay passive and we don't
-            // amplify backfill for edges that can't touch a local view.
-            let to_slice: &[u8] = &trust_edge.to_key;
-            let from_slice: &[u8] = &trust_edge.from_key;
-            let target_is_local = sqlx::query_scalar!(
-                "SELECT 1 AS \"x!: i64\" FROM users \
-                 WHERE public_key = ? AND home_instance IS NULL AND status = 'active' LIMIT 1",
-                to_slice,
+            // §8.1 + §11.9.5 reverse bootstrap. An `EndpointMissing` edge
+            // `S → T` is durable-but-unprojected (one endpoint's stub is
+            // unhydrated). Both follow-up actions below — recording the
+            // edge for reverse-BFS and actively hydrating `S` — hinge on a
+            // single question: is `T` a target we still expand past?
+            // `target_in_expansion_set` answers it (a live local user, or a
+            // `frontier_users` stub at reverse-hop ≤ 2), and §8.1 routes
+            // inbound edges by target ("B wants S→T iff T ∈
+            // expansion_filter"). One predicate gates both actions and
+            // keeps a stranger from injecting reverse-frontier evidence —
+            // or provoking a backfill — for keys we don't expand.
+            let target_in_expansion = crate::federation::frontier_store::target_in_expansion_set(
+                &mut tx,
+                &trust_edge.to_key,
             )
-            .fetch_optional(&mut *tx)
-            .await?
-            .is_some();
+            .await?;
+            let from_slice: &[u8] = &trust_edge.from_key;
             let source_known = sqlx::query_scalar!(
                 "SELECT 1 AS \"x!: i64\" FROM users WHERE public_key = ? LIMIT 1",
                 from_slice,
@@ -706,17 +701,54 @@ pub(crate) async fn apply_one_edge_inner(
             .fetch_optional(&mut *tx)
             .await?
             .is_some();
-            if target_is_local && !source_known {
+            // §10.5.4 reverse-bootstrap trigger. An inbound edge toward a
+            // target we expand past, whose *source* we've never seen, is
+            // the trust-code deadlock: the
+            // source's profile-rev (which would hydrate its stub and let
+            // `sweep_pending_projections` project this edge) is itself
+            // gated on a trust path that runs through this very edge. On
+            // the target's *home* this is §11.9.5's original local-reader
+            // case; on a relay spoke the identical deadlock arises for a
+            // `frontier_users` stub the spoke expands past — a hub-and-
+            // spoke third-party edge whose target lives on a peer the spoke
+            // isn't directly federated with, so the reverse-BFS can reach
+            // `S` via `frontier_edges` but can never *resolve its home* to
+            // materialize and content-backfill it. Either way nothing else
+            // pushes the source's content our way, so signal the wrapper to
+            // pull it via §10.5 by-author. Scoped to the expansion set so
+            // stranger→stranger edges stay passive and we don't amplify
+            // backfill for edges that can't touch a view we serve.
+            if target_in_expansion && !source_known {
                 recovery = Some(EdgeRecovery::UnknownSource {
                     source: trust_edge.from_key,
                     arrived_from,
                 });
             }
-            // No frontier_edges insert here: an `EndpointMissing` edge is
-            // not yet active in `trust_edges`, so it has no business in
-            // the reverse-frontier store. It projects (and lands in the
-            // store) via `try_project_trust_edge` on the §9.6 sweep once
-            // the missing stub hydrates.
+            // §8.1 reverse-frontier discovery. The reverse-frontier store
+            // is pubkey-keyed (no `users` FK), so an inbound edge `S → T`
+            // toward a target we expand past can be recorded even while `S`
+            // is unhydrated: the reverse-BFS walks `frontier_edges` by
+            // target, and a source it discovers there gets materialized and
+            // content-backfilled, which hydrates the stub and lets the §9.6
+            // sweep finally project this edge. Unlike the projection funnel
+            // in `try_project_trust_edge`, this stores a *not-yet-active*
+            // edge; the §8.12 mark-sweep keeps it only while it stays
+            // reachable, and the later projection's `INSERT OR IGNORE` is a
+            // no-op against this row.
+            if target_in_expansion && let Ok(sig) = <[u8; 64]>::try_from(signature_bytes.as_slice())
+            {
+                let generation =
+                    crate::federation::frontier_store::current_generation(&mut *tx).await?;
+                crate::federation::frontier_store::insert_frontier_edge(
+                    &mut *tx,
+                    &trust_edge,
+                    &canonical_hash,
+                    &sig,
+                    &payload_bytes,
+                    generation,
+                )
+                .await?;
+            }
             EdgeStatus::Applied
         }
         TrustEdgeProjection::ChainFork => {

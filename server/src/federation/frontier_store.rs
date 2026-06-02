@@ -318,6 +318,56 @@ pub async fn load_frontier_stub_keys(
     Ok(out)
 }
 
+/// True iff `key` is in our live §8.1 *expansion set* — the targets
+/// whose inbound `trust-edge`s we still want, to discover deeper
+/// trusters. Membership is either:
+///
+/// - a **local user** (`users` row with NULL home) — a reverse-BFS root
+///   at hop 0, never stubbed; or
+/// - a **`frontier_users` stub at reverse-hop ≤ 2** in the current
+///   generation — a remote node we still expand past (we never expand
+///   the hop-3 rim).
+///
+/// This is the single-key form of [`load_frontier_stub_keys`]'s
+/// expansion split, used at edge-ingest time to decide whether an
+/// inbound edge `S → T` is worth recording in the reverse-frontier store
+/// even when `S` is not yet hydrated: §8.1 routes edges by target, so we
+/// want `S → T` iff `T` is in this set. Gating on it keeps a stranger
+/// from injecting reverse-frontier evidence for keys we don't expand.
+pub async fn target_in_expansion_set(
+    db: &mut sqlx::SqliteConnection,
+    key: &[u8; 32],
+) -> Result<bool, sqlx::Error> {
+    let key_slice: &[u8] = key.as_slice();
+    // Hop 0: local users are always reverse-BFS roots, hence always in
+    // the expansion set.
+    let is_local = sqlx::query_scalar!(
+        "SELECT 1 AS \"x!: i64\" FROM users \
+         WHERE public_key = ? AND home_instance IS NULL LIMIT 1",
+        key_slice,
+    )
+    .fetch_optional(&mut *db)
+    .await?
+    .is_some();
+    if is_local {
+        return Ok(true);
+    }
+    // Hop 1..2: a remote stub the most recent rebuild marked live. Older
+    // generations are swept-but-maybe-not-deleted, so gate on the live
+    // generation exactly as `load_frontier_stub_keys` does.
+    let generation = current_generation(&mut *db).await?;
+    let stub = sqlx::query_scalar!(
+        "SELECT 1 AS \"x!: i64\" FROM frontier_users \
+         WHERE user_key = ? AND generation = ? AND reverse_hop <= 2 LIMIT 1",
+        key_slice,
+        generation,
+    )
+    .fetch_optional(&mut *db)
+    .await?
+    .is_some();
+    Ok(stub)
+}
+
 /// Advance the rebuild generation by one (§8.12) and return the new value.
 /// Called once at the start of each reverse-frontier rebuild, immediately
 /// before the mark phase, so every edge/stub the rebuild touches is stamped

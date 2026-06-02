@@ -513,6 +513,9 @@ pub(crate) async fn apply_one_object(
     // erasure cascades observe the just-inserted authority.
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
 
+    // Set when a profile projection unblocked pending trust-edge orphans
+    // into `trust_edges`; drives the post-commit `rebuild_loop` wake below.
+    let mut projected_pending_edges = false;
     let status = match class_action {
         ClassAction::AdminRm(post_id, target_author, signing_instance, created_at_ms) => {
             apply_admin_rm(
@@ -578,7 +581,7 @@ pub(crate) async fn apply_one_object(
                     status: ContentStatus::Rejected(ContentRejectReason::SchemaInvalid),
                 });
             };
-            project_remote_profile(
+            let (_, swept_edges) = project_remote_profile(
                 state,
                 &mut tx,
                 prev,
@@ -587,6 +590,7 @@ pub(crate) async fn apply_one_object(
                 arrived_from,
             )
             .await?;
+            projected_pending_edges = swept_edges;
             ContentStatus::Applied
         }
         ClassAction::PostRev(_) => {
@@ -668,6 +672,17 @@ pub(crate) async fn apply_one_object(
     };
 
     tx.commit().await?;
+
+    // Wake the trust-graph rebuild loop if this profile push promoted any
+    // pending `S → T` trust-edge orphan into `trust_edges`. The §9.1 live
+    // *edge* push notifies (edges.rs), but a *content* push that hydrates a
+    // stub and unblocks edges via `sweep_pending_projections` has no notify
+    // of its own, and `rebuild_loop` has no free-running timer — so without
+    // this the newly-active edges stay invisible to readers until unrelated
+    // mutation traffic wakes the loop.
+    if projected_pending_edges {
+        state.trust_graph_notify.notify_one();
+    }
 
     // §7.5 fan out applied objects to other interested peers. Skip
     // duplicates and rejected results — matching edges.rs.
@@ -1145,9 +1160,9 @@ async fn project_remote_profile(
     signature: &[u8],
     canonical_hash: &[u8; 32],
     arrived_from: [u8; 32],
-) -> Result<ProjectionOutcome, sqlx::Error> {
+) -> Result<(ProjectionOutcome, bool), sqlx::Error> {
     if is_local_authoritative(tx, state, &prev.user, &arrived_from).await? {
-        return Ok(ProjectionOutcome::LocalAuthoritative);
+        return Ok((ProjectionOutcome::LocalAuthoritative, false));
     }
     let home_key =
         crate::federation::remote_users::resolve_current_home(tx, &prev.user, &arrived_from)
@@ -1191,8 +1206,12 @@ async fn project_remote_profile(
     .await?;
 
     // Newly-hydrated stub may unblock pre-arrived trust-edge orphans
-    // for this author (§9.6 trust-edge sweep)...
-    crate::federation::remote_users::sweep_pending_projections(tx, &prev.user).await?;
+    // for this author (§9.6 trust-edge sweep). The returned flag tells
+    // the caller whether any orphan actually promoted into `trust_edges`
+    // so it can wake `rebuild_loop` post-commit — this profile push is
+    // otherwise a trust-graph-affecting event with no notify of its own.
+    let projected_edges =
+        crate::federation::remote_users::sweep_pending_projections(tx, &prev.user).await?;
     // ...and pre-arrived `thread-create` / `post-rev` content orphans
     // (§9.5). by-author returns a freshly-trusted author's profile-rev,
     // thread-create and post-rev with identical second-precision
@@ -1200,7 +1219,7 @@ async fn project_remote_profile(
     // before this profile-rev hydrates the stub. Re-project those now.
     reproject_orphan_threads_for_author(state, tx, prev.user, arrived_from).await?;
 
-    Ok(ProjectionOutcome::Projected)
+    Ok((ProjectionOutcome::Projected, projected_edges))
 }
 
 /// §9.5 convergence sweep: re-attempt projection of orphaned

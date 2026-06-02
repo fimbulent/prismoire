@@ -604,7 +604,7 @@ type SweepCandidate = (TrustEdge, [u8; 32], Vec<u8>, Vec<u8>);
 pub async fn sweep_pending_projections(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     user_key: &[u8; 32],
-) -> Result<(), sqlx::Error> {
+) -> Result<bool, sqlx::Error> {
     // Snapshot the candidate set: live (payload-bearing) trust-edges
     // whose canonical_hash is not yet in `trust_edges`. Parse + filter
     // by `user_key` in app code — adding a payload-extracted index for
@@ -674,6 +674,7 @@ pub async fn sweep_pending_projections(
     // pass. Loop terminates because each pass either projects at
     // least one edge (decreasing the candidate set) or makes no
     // progress (the break condition).
+    let mut any_projected = false;
     loop {
         let mut progressed = false;
         let mut still_deferred: Vec<SweepCandidate> = Vec::new();
@@ -686,6 +687,7 @@ pub async fn sweep_pending_projections(
             match try_project_trust_edge(tx, &edge, &canonical, &signature, &payload).await? {
                 TrustEdgeProjection::Projected => {
                     progressed = true;
+                    any_projected = true;
                     // Phase 9.8: a sweep projection may also unblock
                     // pending_trust_edges orphans (e.g. the sweep
                     // landed the predecessor that an autonomous
@@ -710,7 +712,7 @@ pub async fn sweep_pending_projections(
         }
     }
 
-    Ok(())
+    Ok(any_projected)
 }
 
 // ---------------------------------------------------------------------------

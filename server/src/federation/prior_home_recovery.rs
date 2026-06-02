@@ -533,16 +533,60 @@ async fn ingest_content_object(state: &Arc<AppState>, wire: &[u8], arrived_from:
     }
 }
 
-/// Feed one §14.6 / §10.5.1 edge row through `apply_one_edge_inner`.
-/// The second tuple element (`Option<(source, target, prior)>`) is
-/// the autonomous-backfill trigger for orphans in *live-push*
-/// receive — recovery deliberately ignores it. We are already
-/// running a recovery sweep; chaining a fresh §9.3 backfill from
-/// inside that sweep would just multiply the budget the §9.6 cap
-/// allocated for normal traffic.
+/// Spawn the §11.9.5 `UnknownSource` recovery for an edge surfaced
+/// during a recovery sweep. Deliberately a *synchronous* `fn`, not an
+/// `async fn`: it sits on the recursion cycle `proactive_author_backfill`
+/// → inbound-edge pull → `ingest_edge_object` → here →
+/// `proactive_author_backfill`, and routing the spawn through a plain
+/// function (whose body holds no awaited future) is what lets Rust's
+/// auto-`Send` solver resolve that cycle. The spawned task is boxed as a
+/// `dyn Future + Send` for the same reason.
+fn spawn_unknown_source_backfill(
+    state: Arc<AppState>,
+    source: [u8; 32],
+    arrived_from: [u8; 32],
+    permit: tokio::sync::OwnedSemaphorePermit,
+) {
+    let fut: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+        Box::pin(async move {
+            let _permit = permit;
+            proactive_author_backfill(&state, source, Some(arrived_from)).await;
+        });
+    tokio::spawn(fut);
+}
+
+/// Feed one §14.6 / §10.5.1 edge row through `apply_one_edge_inner`,
+/// then act on its recovery signal:
+///
+/// - §9.3 `Predecessor` is deliberately dropped. We are already inside
+///   a recovery sweep; chaining a fresh chain-backfill from here would
+///   just multiply the budget the §9.6 cap allocated for normal
+///   traffic, and the next live push or sweep tick re-triggers it.
+/// - §11.9.5 `UnknownSource` is honored. On a relay spoke the inbound-
+///   edge pull (§10.5.4 step 6) is the *only* path that ever surfaces a
+///   third-party `S → T` edge whose target is a frontier author, and
+///   the reverse-BFS that would otherwise hydrate `S` dead-ends because
+///   the spoke can't resolve `S`'s home (its author lives on a peer the
+///   spoke isn't federated with). Pulling `S`'s profile directly from
+///   the edge-deliverer — `arrived_from`, which holds it — is what
+///   breaks that deadlock so `sweep_pending_projections` can finally
+///   project the edge. Bounded by the same outbound-permit budget as
+///   the live-push path; the single-flight guard inside
+///   [`proactive_author_backfill`] keeps the fan-out across the
+///   expansion frontier from looping.
 async fn ingest_edge_object(state: &Arc<AppState>, wire: &[u8], arrived_from: [u8; 32]) {
     match apply_one_edge_inner(state, wire, arrived_from).await {
-        Ok(_) => {}
+        Ok((_, recovery)) => {
+            if let Some(crate::federation::edges::EdgeRecovery::UnknownSource {
+                source,
+                arrived_from,
+            }) = recovery
+                && let Some(permit) =
+                    crate::federation::edge_backfill::try_acquire_outbound_permit()
+            {
+                spawn_unknown_source_backfill(state.clone(), source, arrived_from, permit);
+            }
+        }
         Err(e) => {
             tracing::warn!(
                 arrived_from = %hex_lower(&arrived_from),
@@ -830,10 +874,20 @@ async fn peer_domain(state: &Arc<AppState>, pubkey: &[u8; 32]) -> Option<String>
 /// `tokio::spawn`ed off the trust-graph rebuild critical path: every
 /// failure is logged at debug and swallowed.
 ///
-/// Edges are deliberately *not* fetched here (unlike
-/// [`recover_via_peer_network`]): this is steady-state frontier
-/// expansion, not account-move recovery. The author's edges arrive via
-/// the normal §7.5 push / §9.3 ancestor-miss paths.
+/// §10.5.4 step 6: concurrent with the by-author content, the author's
+/// *inbound* edges (`edges-by-key?...&direction=target` — who trusts K)
+/// are pulled from the same peer that served the content. This is the
+/// direction that advances our reverse frontier (§8.1): expanding past K
+/// means discovering who trusts K. Without it, a third-party truster
+/// `S → K` that arrived at the author's home *before* we frontiered K is
+/// never relayed to us (§7.6 replay carries only the relaying instance's
+/// *local-origin* edges), so K's `trusted_by` would silently omit `S` —
+/// the cross-instance asymmetry this pull closes. K's *outbound* edges
+/// (`direction=source`) are forward-trust, not needed for our visibility
+/// computation, so they are not fetched. A pulled inbound edge whose
+/// truster we haven't hydrated lands in `frontier_edges` (not yet
+/// `trust_edges`) via [`apply_one_edge_inner`]'s §8.1 discovery path, so
+/// the next reverse-BFS can reach and materialize that truster.
 ///
 /// `prefer_peer`, when set, is the peer that delivered the edge whose
 /// `EndpointMissing` projection triggered this run (§11.9.5). For a
@@ -906,6 +960,12 @@ pub(crate) async fn proactive_author_backfill(
 
     let key_hex = hex_lower(&author_key);
     let content_path = format!("/federation/v1/backfill/by-author?key={key_hex}");
+    // §10.5.4 step 6 — the author's inbound trusters (edges that point AT
+    // K). `direction=target` is the reverse-frontier-advancing axis (§8.1);
+    // we never pull `direction=source` here (forward-trust, irrelevant to
+    // our visibility computation).
+    let inbound_edges_path =
+        format!("/federation/v1/backfill/edges-by-key?key={key_hex}&direction=target");
 
     for (peer_key, peer_domain) in candidates {
         let peer_id = PeerId::from_bytes(peer_key);
@@ -937,6 +997,41 @@ pub(crate) async fn proactive_author_backfill(
                     objects = stats.objects_seen,
                     "proactive by-author backfill complete",
                 );
+                // §10.5.4 step 6: this peer demonstrably hosts the author
+                // (it just served K's content), so it holds the
+                // authoritative inbound-edge set too. Pull who-trusts-K
+                // from the *same* peer before returning. Best-effort: a
+                // failure here doesn't undo the content already applied,
+                // and the §7.7 pull backstop re-attempts on the next read.
+                if let Err(e) =
+                    paginate_peer_backfill(state, &peer_id, &inbound_edges_path, |wire| {
+                        let state = state.clone();
+                        async move {
+                            ingest_edge_object(&state, &wire, peer_key).await;
+                        }
+                    })
+                    .await
+                {
+                    tracing::debug!(
+                        author = %key_hex,
+                        peer = %peer_domain,
+                        error = %e,
+                        "proactive inbound-edges backfill: peer surface failed",
+                    );
+                }
+                // Wake the trust-graph rebuild loop. This run just landed
+                // recovery work through `apply_one_edge_inner` /
+                // `sweep_pending_projections` — the inbound-edge pull above
+                // (`ingest_edge_object`) and the profile hydration in the
+                // content phase, which projects any pending `S → K` orphan
+                // into `trust_edges`. Unlike the §9.1 live push, neither path
+                // notifies internally, and `rebuild_loop` has no free-running
+                // timer (it only wakes on this `Notify`), so without this the
+                // recovered edges sit in the DB and never surface to readers
+                // until unrelated mutation traffic happens to wake the loop.
+                // `notify_one` coalesces and the loop debounces, so a spurious
+                // wake when nothing new landed is cheap.
+                state.trust_graph_notify.notify_one();
                 return;
             }
             Ok(_) => {

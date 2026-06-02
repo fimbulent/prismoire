@@ -255,6 +255,17 @@ pub async fn request_edge_predecessor(
         }
     }
 
+    // Wake the trust-graph rebuild loop if this drain fed any edges. This
+    // worker runs spawned-and-detached, long after `handle_edges_push`
+    // fired its one-per-batch notify, so the predecessor edges promoted
+    // here (via `drain_pending_orphans_after` inside `apply_one_edge_inner`)
+    // land with no outstanding wake. `rebuild_loop` has no free-running
+    // timer, so without this the backfilled chain stays invisible to
+    // readers until unrelated mutation traffic wakes the loop.
+    if !objects.is_empty() {
+        state.trust_graph_notify.notify_one();
+    }
+
     // §10.5.2 `complete: false` means the receiver paginated the
     // response. Phase 9.8 stops at the first page deliberately —
     // chasing the next page from here would put us in an unbounded
