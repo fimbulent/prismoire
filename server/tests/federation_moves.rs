@@ -833,7 +833,11 @@ async fn move_push_with_skew_is_rejected() {
         &body,
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "request-level OK; per-object reject");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "request-level OK; per-object reject"
+    );
 
     let results = parse_results_body(&body_bytes);
     assert_eq!(results.len(), 1);
@@ -880,7 +884,11 @@ async fn move_push_with_bad_attestation_is_rejected_and_not_persisted() {
         &body,
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "request-level OK; per-object reject");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "request-level OK; per-object reject"
+    );
     let results = parse_results_body(&body_bytes);
     assert_eq!(results[0].0, canonical_hash);
     assert_eq!(results[0].1, "rejected");
@@ -1157,7 +1165,10 @@ async fn move_backfill_returns_chain_for_known_key() {
         })
         .expect("payload field");
     let got_hash: [u8; 32] = Sha256::digest(&payload).into();
-    assert_eq!(got_hash, move_hash, "returned payload re-hashes to move hash");
+    assert_eq!(
+        got_hash, move_hash,
+        "returned payload re-hashes to move hash"
+    );
 }
 
 /// Backfill for a key this instance has never seen returns
