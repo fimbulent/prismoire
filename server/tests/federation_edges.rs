@@ -71,10 +71,12 @@ use rand::rngs::{OsRng, StdRng};
 use sqlx::SqlitePool;
 
 use common::federation::{
-    MultiInstanceHarness, establish_active_peering, send_envelope_signed,
+    InstanceHandle, MultiInstanceHarness, establish_active_peering, send_envelope_signed,
     send_envelope_signed_split, settle,
 };
-use common::{body_json, get_request, json_request, send, setup_admin, test_app};
+use common::{
+    Session, body_json, get_request, json_request, send, setup_admin, signup_as, test_app,
+};
 use serde_json::json;
 
 // ===========================================================================
@@ -85,28 +87,22 @@ use serde_json::json;
 /// bytes land in `signed_objects`, the projection lands in `trust_edges`,
 /// and the response carries `applied`.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn push_applies_signed_edge_into_local_projection() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
     let b = harness.instance("b");
 
-    // Fixture: B knows two local users whose public keys match the
-    // signed edge's `from_key` / `to_key`. The signer of the trust
-    // edge is the source user — its private key never lives in B's
-    // signing_keys table (it's a hypothetical remote user we're
-    // standing in for).
-    let alice_key = SigningKey::generate(&mut OsRng);
-    let bob_key = SigningKey::generate(&mut OsRng);
-    let alice_pub = alice_key.verifying_key().to_bytes();
-    let bob_pub = bob_key.verifying_key().to_bytes();
-    insert_user_with_pubkey(&b.state.db, "user-alice", "alice", &alice_pub).await;
-    insert_user_with_pubkey(&b.state.db, "user-bob", "bob", &bob_pub).await;
+    // Fixture: B knows two real local users (an unconnected pair, so the
+    // §9.4 chain-fork check sees no sibling for an honest root push). The
+    // edge is signed with `src`'s *real* extracted key, so the wire bytes
+    // verify under a `from_key` that genuinely resolves to a `users` row.
+    let (src, src_key, dst) = clean_local_pair(b).await;
+    let dst_pub = hex32(&dst.public_key_hex);
 
-    // Sign a trust edge alice -> bob and push it from A to B.
+    // Sign a trust edge src -> dst and push it from A to B.
     let signed = sign_trust_edge_with_key(
-        &alice_key,
-        &bob_pub,
+        &src_key,
+        &dst_pub,
         TrustStance::Trust,
         1_700_000_000_000,
         None,
@@ -147,10 +143,12 @@ async fn push_applies_signed_edge_into_local_projection() {
         "payload bytes stored verbatim",
     );
 
-    // trust_edges projection landed.
+    // trust_edges projection landed for the real (src, dst) pair.
     let projection = sqlx::query!(
         "SELECT trust_type FROM trust_edges \
-         WHERE source_user = 'user-alice' AND target_user = 'user-bob'",
+         WHERE source_user = ? AND target_user = ?",
+        src.user_id,
+        dst.user_id,
     )
     .fetch_one(&b.state.db)
     .await
@@ -162,32 +160,17 @@ async fn push_applies_signed_edge_into_local_projection() {
 /// "redelivery is no-op". The receiver does not distinguish
 /// duplicate-from-resend vs duplicate-from-gossip-relay.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn push_replay_returns_duplicate() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
     let b = harness.instance("b");
 
-    let alice_key = SigningKey::generate(&mut OsRng);
-    let bob_key = SigningKey::generate(&mut OsRng);
-    insert_user_with_pubkey(
-        &b.state.db,
-        "user-alice",
-        "alice",
-        &alice_key.verifying_key().to_bytes(),
-    )
-    .await;
-    insert_user_with_pubkey(
-        &b.state.db,
-        "user-bob",
-        "bob",
-        &bob_key.verifying_key().to_bytes(),
-    )
-    .await;
+    let (src, src_key, dst) = clean_local_pair(b).await;
+    let dst_pub = hex32(&dst.public_key_hex);
 
     let signed = sign_trust_edge_with_key(
-        &alice_key,
-        &bob_key.verifying_key().to_bytes(),
+        &src_key,
+        &dst_pub,
         TrustStance::Trust,
         1_700_000_000_000,
         None,
@@ -221,10 +204,15 @@ async fn push_replay_returns_duplicate() {
     assert_eq!(results2[0].1, "duplicate");
     assert!(results2[0].2.is_none());
 
-    // Only one row in signed_objects + trust_edges — INSERT OR
-    // IGNORE on the canonical-hash PK is what makes redelivery safe.
+    // Exactly one trust-edge signed_object for the (src, dst) pair —
+    // INSERT OR IGNORE on the canonical-hash PK is what makes redelivery
+    // safe. Scope the signed_objects count to this edge's canonical hash
+    // (the clean-pair signup mints profile/trust objects of its own, so a
+    // global `inner_class = 'trust-edge'` count is no longer just ours).
+    let hash_slice: &[u8] = signed.canonical_hash.as_slice();
     let count_signed: i64 = sqlx::query_scalar!(
-        "SELECT COUNT(*) AS \"c!: i64\" FROM signed_objects WHERE inner_class = 'trust-edge'",
+        "SELECT COUNT(*) AS \"c!: i64\" FROM signed_objects WHERE canonical_hash = ?",
+        hash_slice,
     )
     .fetch_one(&b.state.db)
     .await
@@ -232,7 +220,9 @@ async fn push_replay_returns_duplicate() {
     assert_eq!(count_signed, 1);
     let count_edges: i64 = sqlx::query_scalar!(
         "SELECT COUNT(*) AS \"c!: i64\" FROM trust_edges \
-         WHERE source_user = 'user-alice' AND target_user = 'user-bob'",
+         WHERE source_user = ? AND target_user = ?",
+        src.user_id,
+        dst.user_id,
     )
     .fetch_one(&b.state.db)
     .await
@@ -246,32 +236,22 @@ async fn push_replay_returns_duplicate() {
 /// peer-relayed forgery: §9.1 requires per-object signature
 /// verification.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn push_with_bad_signature_is_rejected_and_not_persisted() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
     let b = harness.instance("b");
 
+    // No local-user fixture: §9.1 rejects on the signature check (step 5)
+    // *before* endpoint resolution / projection, so whether the endpoints
+    // are known to B is irrelevant. Synthetic signers stand in for the
+    // remote author whose forged edge we are rejecting — producing wire
+    // bytes is legitimate sender-side work, not faked DB state.
     let alice_key = SigningKey::generate(&mut OsRng);
-    let bob_key = SigningKey::generate(&mut OsRng);
-    insert_user_with_pubkey(
-        &b.state.db,
-        "user-alice",
-        "alice",
-        &alice_key.verifying_key().to_bytes(),
-    )
-    .await;
-    insert_user_with_pubkey(
-        &b.state.db,
-        "user-bob",
-        "bob",
-        &bob_key.verifying_key().to_bytes(),
-    )
-    .await;
+    let bob_pub = SigningKey::generate(&mut OsRng).verifying_key().to_bytes();
 
     let signed = sign_trust_edge_with_key(
         &alice_key,
-        &bob_key.verifying_key().to_bytes(),
+        &bob_pub,
         TrustStance::Trust,
         1_700_000_000_000,
         None,
@@ -441,32 +421,22 @@ async fn push_exceeding_batch_returns_400_batch_too_large() {
 /// bad-signature edge produce a 200 with `applied` and `rejected` in
 /// input order. Senders correlate by position, not by hash.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn push_mixed_batch_returns_per_edge_results_in_input_order() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
-    let b = harness.instance("b");
 
+    // No local-user fixture: this test pins per-edge *result ordering*
+    // (`applied` / `rejected` / `duplicate`), none of which depends on
+    // endpoint resolution — `applied` only promises durable bytes (see
+    // `push_between_unknown_users`), and the rejected/duplicate paths
+    // short-circuit before projection. Synthetic signers produce the wire
+    // bytes the way a remote sender would.
     let alice_key = SigningKey::generate(&mut OsRng);
-    let bob_key = SigningKey::generate(&mut OsRng);
-    insert_user_with_pubkey(
-        &b.state.db,
-        "user-alice",
-        "alice",
-        &alice_key.verifying_key().to_bytes(),
-    )
-    .await;
-    insert_user_with_pubkey(
-        &b.state.db,
-        "user-bob",
-        "bob",
-        &bob_key.verifying_key().to_bytes(),
-    )
-    .await;
+    let bob_pub = SigningKey::generate(&mut OsRng).verifying_key().to_bytes();
 
     let good = sign_trust_edge_with_key(
         &alice_key,
-        &bob_key.verifying_key().to_bytes(),
+        &bob_pub,
         TrustStance::Trust,
         1_700_000_000_000,
         None,
@@ -591,7 +561,6 @@ async fn push_with_wrong_content_type_is_415() {
 /// forwarder is just another active peer to C — so we assert convergence
 /// (via [`settle`]) on C's `trust_edges` projection.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn forwarder_relays_applied_edge_to_interested_peer() {
     let harness = MultiInstanceHarness::new(3).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -599,10 +568,15 @@ async fn forwarder_relays_applied_edge_to_interested_peer() {
     let b = harness.instance("b");
     let c = harness.instance("c");
 
-    // Both B and C need local user rows for (alice, bob) so the
-    // §9.1 projection lands on both ends. The signed edge is
-    // alice → bob; whichever instance receives it must already know
-    // who alice and bob are to write into `trust_edges`.
+    // Carve-out: both B and C must hold local user rows for the *same*
+    // (alice, bob) pubkeys, so the §9.1 projection lands on both ends and
+    // we can assert the relayed copy went through the full pipeline on C.
+    // A shared pubkey existing as a distinct local user on two instances
+    // has no real-API producer — `setup_admin` / `signup_as` mint a fresh
+    // random keypair per instance. The forward path itself is fully real
+    // (real `/edges` push, real frontier announce, real outbound-queue
+    // drain); only these FK-anchor user rows are seeded. The signed edge
+    // is legitimate sender-side wire production, not faked DB state.
     let alice_key = SigningKey::generate(&mut OsRng);
     let bob_key = SigningKey::generate(&mut OsRng);
     let alice_pub = alice_key.verifying_key().to_bytes();
@@ -716,7 +690,6 @@ async fn forwarder_relays_applied_edge_to_interested_peer() {
 /// interested (its `expansion_filter` carries the target bob), so the
 /// only thing keeping the edge from C is the §8.10 cleave.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn forwarder_sheds_relay_when_source_younger_than_peer_ceiling() {
     let harness = MultiInstanceHarness::new(3).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -724,6 +697,10 @@ async fn forwarder_sheds_relay_when_source_younger_than_peer_ceiling() {
     let b = harness.instance("b");
     let c = harness.instance("c");
 
+    // Carve-out: same shared-pubkey FK anchors on B and C as
+    // `forwarder_relays_applied_edge_to_interested_peer` (un-API-producible
+    // across instances). The §8.10 shed decision, the announce, the
+    // attested `user_genesis`, and the outbound drain are all real.
     let alice_key = SigningKey::generate(&mut OsRng);
     let bob_key = SigningKey::generate(&mut OsRng);
     let alice_pub = alice_key.verifying_key().to_bytes();
@@ -813,7 +790,6 @@ async fn forwarder_sheds_relay_when_source_younger_than_peer_ceiling() {
 /// [`forwarder_relays_applied_edge_to_interested_peer`], which puts the
 /// target bob in C's filter and asserts arrival.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn forwarder_does_not_relay_to_peer_interested_only_in_edge_source() {
     let harness = MultiInstanceHarness::new(3).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -821,6 +797,10 @@ async fn forwarder_does_not_relay_to_peer_interested_only_in_edge_source() {
     let b = harness.instance("b");
     let c = harness.instance("c");
 
+    // Carve-out: same shared-pubkey FK anchors on B and C as
+    // `forwarder_relays_applied_edge_to_interested_peer` (un-API-producible
+    // across instances). The §7.4 target-routing decision and the
+    // outbound drain are real.
     let alice_key = SigningKey::generate(&mut OsRng);
     let bob_key = SigningKey::generate(&mut OsRng);
     let alice_pub = alice_key.verifying_key().to_bytes();
@@ -1144,7 +1124,6 @@ async fn unknown_source_recovery_backfills_authors_existing_thread() {
 /// in oldest-first order with `complete: true` and no `next_cursor`.
 /// Pins the unpaginated happy path.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn backfill_returns_chain_oldest_first_complete() {
     let harness = MultiInstanceHarness::new(4).await;
     // A receives the chain from B (the originator stand-in); D pulls
@@ -1152,19 +1131,20 @@ async fn backfill_returns_chain_oldest_first_complete() {
     establish_active_peering(&harness, "a", "b").await;
     let a = harness.instance("a");
 
-    let alice_key = SigningKey::generate(&mut OsRng);
-    let bob_key = SigningKey::generate(&mut OsRng);
-    let alice_pub = alice_key.verifying_key().to_bytes();
-    let bob_pub = bob_key.verifying_key().to_bytes();
-    insert_user_with_pubkey(&a.state.db, "user-alice", "alice", &alice_pub).await;
-    insert_user_with_pubkey(&a.state.db, "user-bob", "bob", &bob_pub).await;
+    // Real, unconnected pair on A: the chain's first edge is a prior=None
+    // root, so the pair must carry no signup-minted sibling for the §9.4
+    // fork check, or the root would land as `ChainFork` and the backfill
+    // walk would miss it.
+    let (src, src_key, dst) = clean_local_pair(a).await;
+    let alice_pub = hex32(&src.public_key_hex);
+    let bob_pub = hex32(&dst.public_key_hex);
 
     // Seed A with a chained history. Distinct ms-precision timestamps
     // keep the (created_at, canonical_hash) keyset pagination
     // unambiguous; the timestamps round to whole-second ISO strings on
     // store, so they only need to differ at the second level.
     let chain = sign_chain(
-        &alice_key,
+        &src_key,
         &bob_pub,
         &[
             (TrustStance::Trust, 1_700_000_000_000),
@@ -1205,7 +1185,6 @@ async fn backfill_returns_chain_oldest_first_complete() {
 /// returns 2 objects + `next_cursor` + `complete: false`; the resume GET
 /// with that cursor returns the final 2 with `complete: true`.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn backfill_paginates_with_limit_and_next_cursor() {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -1214,15 +1193,13 @@ async fn backfill_paginates_with_limit_and_next_cursor() {
     establish_active_peering(&harness, "a", "b").await;
     let a = harness.instance("a");
 
-    let alice_key = SigningKey::generate(&mut OsRng);
-    let bob_key = SigningKey::generate(&mut OsRng);
-    let alice_pub = alice_key.verifying_key().to_bytes();
-    let bob_pub = bob_key.verifying_key().to_bytes();
-    insert_user_with_pubkey(&a.state.db, "user-alice", "alice", &alice_pub).await;
-    insert_user_with_pubkey(&a.state.db, "user-bob", "bob", &bob_pub).await;
+    // Clean real pair on A (see `backfill_returns_chain_oldest_first_complete`).
+    let (src, src_key, dst) = clean_local_pair(a).await;
+    let alice_pub = hex32(&src.public_key_hex);
+    let bob_pub = hex32(&dst.public_key_hex);
 
     let chain = sign_chain(
-        &alice_key,
+        &src_key,
         &bob_pub,
         &[
             (TrustStance::Trust, 1_700_000_000_000),
@@ -1309,7 +1286,6 @@ async fn backfill_unknown_chain_returns_400() {
 /// `400 invalid_cursor`. The spec mandates this collapse so a client
 /// retries without `since` rather than looping on a stale cursor.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn backfill_invalid_cursor_returns_400() {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -1318,15 +1294,14 @@ async fn backfill_invalid_cursor_returns_400() {
     establish_active_peering(&harness, "a", "d").await;
     let a = harness.instance("a");
 
-    // Need both endpoints to be known users so we get past the
-    // `unknown_chain` check and reach the cursor parser. The chain
-    // itself can be empty — invalid_cursor fires before the SQL walk.
-    let alice_key = SigningKey::generate(&mut OsRng);
-    let bob_key = SigningKey::generate(&mut OsRng);
-    let alice_pub = alice_key.verifying_key().to_bytes();
-    let bob_pub = bob_key.verifying_key().to_bytes();
-    insert_user_with_pubkey(&a.state.db, "user-alice", "alice", &alice_pub).await;
-    insert_user_with_pubkey(&a.state.db, "user-bob", "bob", &bob_pub).await;
+    // Both endpoints must be known users so we get past the
+    // `unknown_chain` check and reach the cursor parser. No chain needed —
+    // invalid_cursor fires before the SQL walk — so a real pair (not even
+    // necessarily edge-free) suffices; `clean_local_pair` is just the
+    // handy real-user factory here.
+    let (src, _src_key, dst) = clean_local_pair(a).await;
+    let alice_pub = hex32(&src.public_key_hex);
+    let bob_pub = hex32(&dst.public_key_hex);
 
     // 10 bytes — not the 52-byte cursor layout the handler expects.
     let garbage = URL_SAFE_NO_PAD.encode([0u8; 10]);
@@ -1347,18 +1322,16 @@ async fn backfill_invalid_cursor_returns_400() {
 /// `limit=0` and `limit=MAX_EDGE_BACKFILL_PAGE + 1` both collapse to
 /// `400 limit_out_of_range`. Pins the §9.6 cap.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn backfill_limit_out_of_range_returns_400() {
     let harness = MultiInstanceHarness::new(4).await;
     establish_active_peering(&harness, "a", "d").await;
     let a = harness.instance("a");
 
-    let alice_key = SigningKey::generate(&mut OsRng);
-    let bob_key = SigningKey::generate(&mut OsRng);
-    let alice_pub = alice_key.verifying_key().to_bytes();
-    let bob_pub = bob_key.verifying_key().to_bytes();
-    insert_user_with_pubkey(&a.state.db, "user-alice", "alice", &alice_pub).await;
-    insert_user_with_pubkey(&a.state.db, "user-bob", "bob", &bob_pub).await;
+    // Two known real users so the limit guard runs ahead of the chain
+    // walk (see `backfill_invalid_cursor_returns_400`).
+    let (src, _src_key, dst) = clean_local_pair(a).await;
+    let alice_pub = hex32(&src.public_key_hex);
+    let bob_pub = hex32(&dst.public_key_hex);
 
     for bad_limit in [0u32, MAX_EDGE_BACKFILL_PAGE + 1] {
         let (status, body) = get_backfill(
@@ -1382,12 +1355,17 @@ async fn backfill_limit_out_of_range_returns_400() {
 /// `current_trust_edges` view matches A's latest stance — the exact
 /// convergence guarantee §9.3 sells.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn partition_heal_via_backfill_and_replay() {
     let harness = MultiInstanceHarness::new(4).await;
     establish_active_peering(&harness, "a", "b").await;
     let a = harness.instance("a");
 
+    // Carve-out: convergence is asserted across A and D, which must hold
+    // the *same* (alice, bob) pubkeys as local users for the projection to
+    // land on both — a shared pubkey across two instances has no real-API
+    // producer (fresh per-instance keypairs). The chain bytes are minted
+    // via real `/edges` pushes and the heal runs through the real backfill
+    // + replay handlers; only the FK-anchor user rows are seeded.
     let alice_key = SigningKey::generate(&mut OsRng);
     let bob_key = SigningKey::generate(&mut OsRng);
     let alice_pub = alice_key.verifying_key().to_bytes();
@@ -1884,14 +1862,17 @@ async fn sweep_defers_orphan_edge_with_missing_predecessor() {
 /// `received_at` is more than `ttl_ms` behind `now_ms`. Fresh rows
 /// survive. Drives §9.6 `DEFERRED_ORPHAN_TTL` directly.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn evict_drops_expired_pending_rows_and_preserves_fresh() {
     let (_app, state) = test_app().await;
 
+    // Carve-out: this unit-exercises the §9.6 `evict_expired_pending_trust_edges`
+    // primitive, whose only input is a `pending_trust_edges` row keyed by an
+    // arbitrary `received_at`. No real API lets a caller mint a row with a
+    // chosen age (the enqueue path stamps `now`), so the two synthetic rows
+    // ARE the legitimate test input; the function under test is the real one.
+    //
     // Two synthetic pending rows: one ancient (received 2h ago), one
-    // fresh (received "now"). Insert via raw SQL — the public surface
-    // doesn't expose the enqueue path directly, and we only need the
-    // row shape, not the receive-path machinery, for this test.
+    // fresh (received "now").
     let now_ms: i64 = chrono::Utc::now().timestamp_millis();
     let two_hours_ago = now_ms - 2 * 3600 * 1000;
     let source_old = [0x11u8; 32];
@@ -1955,10 +1936,16 @@ async fn evict_drops_expired_pending_rows_and_preserves_fresh() {
 /// `pending_trust_edges` into `trust_edges` + `signed_objects`, and the
 /// pending row is deleted.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn sweep_projection_drains_buffered_orphan_chain() {
     let (_app, state) = test_app().await;
 
+    // Carve-out: this drives the real §9.6 `sweep_pending_projections` +
+    // §9.8 drain over a precisely-staged Layer-0 precondition (E1 stored
+    // unprojected via the kept `store_signed_object` delivery path; E2
+    // buffered in `pending_trust_edges`). `enqueue_pending_trust_edge` is
+    // `pub(crate)`, so the buffered row is seeded directly — the row shape
+    // is the test input; the sweep/drain functions under test are real.
+    // Endpoint stubs come from the kept `hydrate_stub_user` delivery helper.
     let from_signer = seeded_signer(0xa1);
     let to_signer = seeded_signer(0xa2);
     let from_key = pubkey_of(&from_signer);
@@ -2088,22 +2075,24 @@ async fn sweep_projection_drains_buffered_orphan_chain() {
 /// asserted `deferred` + no projection; this one additionally pins the
 /// pending-row buffer and the no-double-land invariant.)
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn deferred_push_buffers_orphan_in_pending_table() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
     let b = harness.instance("b");
 
-    let alice = SigningKey::generate(&mut OsRng);
-    let bob = SigningKey::generate(&mut OsRng);
-    let alice_pub = alice.verifying_key().to_bytes();
-    let bob_pub = bob.verifying_key().to_bytes();
-    insert_user_with_pubkey(&b.state.db, "user-alice", "alice", &alice_pub).await;
-    insert_user_with_pubkey(&b.state.db, "user-bob", "bob", &bob_pub).await;
+    // Real local pair: `deferred` only fires once both endpoints resolve
+    // and the chain-continuity check finds the prior missing. With
+    // unknown endpoints the edge would short to `EndpointMissing`
+    // (`applied`), never reaching the orphan buffer. The orphan's
+    // `prior` is a phantom hash no signup edge shares, so the clean
+    // pair's own root edges don't perturb the (source, phantom) buffer.
+    let (src, src_key, dst) = clean_local_pair(b).await;
+    let alice_pub = hex32(&src.public_key_hex);
+    let bob_pub = hex32(&dst.public_key_hex);
 
     let phantom_prior = [0x42u8; 32];
     let signed = sign_trust_edge_with_key(
-        &alice,
+        &src_key,
         &bob_pub,
         TrustStance::Trust,
         1_700_000_000_000,
@@ -2149,22 +2138,20 @@ async fn deferred_push_buffers_orphan_in_pending_table() {
 /// on the pending PK collapses retries into the existing row. Both
 /// responses are `deferred`.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn duplicate_orphan_for_same_gap_does_not_double_enqueue() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
     let b = harness.instance("b");
 
-    let alice = SigningKey::generate(&mut OsRng);
-    let bob = SigningKey::generate(&mut OsRng);
-    let alice_pub = alice.verifying_key().to_bytes();
-    let bob_pub = bob.verifying_key().to_bytes();
-    insert_user_with_pubkey(&b.state.db, "user-alice", "alice", &alice_pub).await;
-    insert_user_with_pubkey(&b.state.db, "user-bob", "bob", &bob_pub).await;
+    // Real local pair (see `deferred_push_buffers_orphan` for why both
+    // endpoints must resolve before an edge can defer into the buffer).
+    let (src, src_key, dst) = clean_local_pair(b).await;
+    let alice_pub = hex32(&src.public_key_hex);
+    let bob_pub = hex32(&dst.public_key_hex);
 
     let phantom_prior = [0x42u8; 32];
     let signed = sign_trust_edge_with_key(
-        &alice,
+        &src_key,
         &bob_pub,
         TrustStance::Trust,
         1_700_000_000_000,
@@ -2212,7 +2199,7 @@ async fn duplicate_orphan_for_same_gap_does_not_double_enqueue() {
     // shares the gap, still does not double-enqueue. (The dedup is
     // keyed on (source, prior), not on canonical_hash.)
     let sibling = sign_trust_edge_with_key(
-        &alice,
+        &src_key,
         &bob_pub,
         TrustStance::Distrust,
         1_700_000_000_001,
@@ -2242,28 +2229,27 @@ async fn duplicate_orphan_for_same_gap_does_not_double_enqueue() {
 /// projection, deletes the pending row, and persists E2's canonical
 /// bytes in `signed_objects` for future relay / audit.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn root_push_drains_buffered_orphan_chain() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
     let b = harness.instance("b");
 
-    let alice = SigningKey::generate(&mut OsRng);
-    let bob = SigningKey::generate(&mut OsRng);
-    let alice_pub = alice.verifying_key().to_bytes();
-    let bob_pub = bob.verifying_key().to_bytes();
-    insert_user_with_pubkey(&b.state.db, "user-alice", "alice", &alice_pub).await;
-    insert_user_with_pubkey(&b.state.db, "user-bob", "bob", &bob_pub).await;
+    // Clean real pair: E1 is a prior=None root, so a signup-minted root
+    // edge on the pair would trip the §9.4 chain-fork check and stop E1
+    // from projecting — which would in turn never drain the buffered E2.
+    let (src, src_key, dst) = clean_local_pair(b).await;
+    let alice_pub = hex32(&src.public_key_hex);
+    let bob_pub = hex32(&dst.public_key_hex);
 
     let e1 = sign_trust_edge_with_key(
-        &alice,
+        &src_key,
         &bob_pub,
         TrustStance::Trust,
         1_700_000_000_000,
         None,
     );
     let e2 = sign_trust_edge_with_key(
-        &alice,
+        &src_key,
         &bob_pub,
         TrustStance::Distrust,
         1_700_000_000_001,
@@ -2332,7 +2318,6 @@ async fn root_push_drains_buffered_orphan_chain() {
 /// Keeps a bounded `poll_until`: the recovery rides a raw `tokio::spawn`
 /// of `request_edge_predecessor` that `settle` does not drive.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn autonomous_backfill_recovers_chain_from_source_home() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -2340,9 +2325,14 @@ async fn autonomous_backfill_recovers_chain_from_source_home() {
     let b = harness.instance("b");
     let a_peer = *a.peer_id.as_bytes();
 
-    // Both alice and bob exist as local users on A so A's
-    // /edges/backfill handler can join trust_edges + signed_objects
-    // and serve the chain.
+    // Carve-out: this drives the autonomous §9.3 round-trip, which needs
+    // the *same* alice pubkey to be (a) a local source on A whose home is
+    // A, and (b) a federated stub on B pointing home at A. One pubkey
+    // living as distinct rows on two instances has no real-API producer.
+    // The backfill request, the `/edges/backfill` serve, the re-feed, and
+    // the orphan drain all run through the real handlers; only the
+    // FK-anchor users (and the §9.5 stub via `hydrate_stub_user`) are
+    // seeded.
     let alice = SigningKey::generate(&mut OsRng);
     let bob = SigningKey::generate(&mut OsRng);
     let alice_pub = alice.verifying_key().to_bytes();
@@ -2573,6 +2563,45 @@ async fn insert_user_with_pubkey(db: &SqlitePool, id: &str, display_name: &str, 
     .execute(db)
     .await
     .expect("insert user");
+}
+
+/// Pull a real local user's active Ed25519 private key out of
+/// `signing_keys`, so a test can sign trust-edges *as* that user instead
+/// of standing in a synthetic key behind a faked `users` row.
+async fn extract_user_signing_key(db: &SqlitePool, user_id: &str) -> SigningKey {
+    let row = sqlx::query!(
+        "SELECT private_key AS \"private_key!: Vec<u8>\" \
+         FROM signing_keys WHERE user_id = ? AND active = 1",
+        user_id,
+    )
+    .fetch_one(db)
+    .await
+    .expect("signing_keys row");
+    let bytes: [u8; 32] = row
+        .private_key
+        .as_slice()
+        .try_into()
+        .expect("32-byte private key");
+    SigningKey::from_bytes(&bytes)
+}
+
+/// Create two real local users on `inst` with **no direct trust edge**
+/// between them, plus the source's extracted signing key.
+///
+/// Why three signups for two endpoints: `try_project_trust_edge`'s §9.4
+/// chain-fork check is keyed on `(source, target)`, so any signup-minted
+/// root edge on the pair would masquerade as a prior=NULL sibling and
+/// flip an honest root push from `Projected` to `ChainFork`. `signup_as`
+/// always mints the mutual inviter↔invitee edges, so the only way to get
+/// an unconnected real pair is to route through an intermediate inviter:
+/// `source → bridge → target`, leaving `(source, target)` edge-free.
+/// Returns `(source, source_signing_key, target)`; the bridge is dropped.
+async fn clean_local_pair(inst: &InstanceHandle) -> (Session, SigningKey, Session) {
+    let source = setup_admin(&inst.router, "edge-src").await;
+    let bridge = signup_as(&inst.router, &source, "edge-bridge").await;
+    let target = signup_as(&inst.router, &bridge, "edge-dst").await;
+    let source_key = extract_user_signing_key(&inst.state.db, &source.user_id).await;
+    (source, source_key, target)
 }
 
 /// Deterministic Ed25519 signer from a seed byte. Real signers (not raw

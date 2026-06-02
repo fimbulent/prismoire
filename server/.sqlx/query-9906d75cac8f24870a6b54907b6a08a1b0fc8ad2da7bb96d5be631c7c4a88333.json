@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT COUNT(*) AS \"c!: i64\" FROM signed_objects WHERE inner_class = 'trust-edge'",
+  "query": "SELECT COUNT(*) AS \"c!: i64\" FROM trust_edges WHERE source_user = ? AND target_user = ?",
   "describe": {
     "columns": [
       {
@@ -10,11 +10,11 @@
       }
     ],
     "parameters": {
-      "Right": 0
+      "Right": 2
     },
     "nullable": [
       false
     ]
   },
-  "hash": "c7dff1ce2d1d4781115cc93f6118c2e6fa4cf9fbc2df514f8cf64691f102ad5a"
+  "hash": "9906d75cac8f24870a6b54907b6a08a1b0fc8ad2da7bb96d5be631c7c4a88333"
 }
