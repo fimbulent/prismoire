@@ -34,10 +34,12 @@
 //! storage-layer transformation — and the Layer-1 tests probe the live
 //! `/resolve` route.
 //!
-//! Every scenario drives the function under test directly or probes a
-//! handler over the in-process router, so none use the
-//! [`settle`](common::federation::settle) convergence driver — there is no
-//! `frontier_fanout_loop` + poll race to replace.
+//! Most scenarios drive the function under test directly or probe a handler
+//! over the in-process router. The one exception is
+//! `upgrade_in_place_preserves_authored_trust_edge`, which first produces a
+//! genuine stub-authored edge by signing it on one instance and fanning it
+//! out to a second (using the [`settle`](common::federation::settle)
+//! convergence driver) before driving the storage-layer upgrade directly.
 
 mod common;
 
