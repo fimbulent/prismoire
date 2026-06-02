@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT so.payload AS \"payload!: Vec<u8>\", so.signature AS \"signature!: Vec<u8>\" FROM profile_revisions pr JOIN signed_objects so ON so.canonical_hash = pr.canonical_hash WHERE pr.user_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "payload!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "signature!: Vec<u8>",
+        "ordinal": 1,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "d4bcc16ba9b6a25ab482eb2ad0dd1b303b65bbe83286f91cfd0f9642edac51fd"
+}
