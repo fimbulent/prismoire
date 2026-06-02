@@ -1206,7 +1206,13 @@ async fn move_backfill_returns_unknown_chain_for_never_seen_key() {
 /// row itself (and its pubkey) survives — authored content per §10.5.3
 /// still resolves to a known identity.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
+// Carve-out: the only raw INSERT here is `insert_fake_credential`. WebAuthn
+// `credentials` rows are minted exclusively by the passkey ceremony, which
+// has no test bypass (the `/test/setup-admin` route skips it). The synthetic
+// row is therefore legitimate test input — without it, §12.6's
+// credential-deletion assertion would be vacuously true. Everything else is
+// real: real users, real extracted signing keys, real move push, real
+// disposal observation.
 async fn applied_outbound_from_self_disposes_local_authority() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -1326,7 +1332,10 @@ async fn applied_outbound_from_self_disposes_local_authority() {
 /// against an already-`signup_method = 'federated'` row is a no-op rather
 /// than an error.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
+// Carve-out: same as `applied_outbound_from_self_disposes_local_authority` —
+// the only seed is the un-API-producible synthetic `credentials` row (no test
+// bypass exists for the WebAuthn passkey ceremony). All other state is driven
+// through real users, keys, and move pushes.
 async fn superseded_outbound_from_self_still_disposes() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -1436,7 +1445,10 @@ async fn superseded_outbound_from_self_still_disposes() {
 /// authority on B is untouched — the inbound move's only DB effect on B is
 /// the §12 projection layer.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
+// Carve-out: V's synthetic `credentials` row is the only seed, and it is
+// un-API-producible (no test bypass for the WebAuthn passkey ceremony). It
+// exists so the "V's authority untouched" assertion meaningfully covers the
+// credentials surface; everything else is real-API driven.
 async fn inbound_to_self_does_not_dispose_other_local_users() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
