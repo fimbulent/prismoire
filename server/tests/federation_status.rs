@@ -66,14 +66,14 @@ use prismoire_server::federation::thread_status::dispatch_local_thread_status;
 use prismoire_server::federation::user_status::dispatch_local_user_status;
 use prismoire_server::signed::{ReportReason, ThreadStatusKind, UserStatusKind};
 use prismoire_server::signing::{
-    SigningOutput, sign_report_with_key, sign_thread_status_with_key, sign_user_status_with_key,
-    store_signing_key,
+    SigningOutput, sign_profile_revision_with_key, sign_report_with_key,
+    sign_thread_create_with_key, sign_thread_status_with_key, sign_user_status_with_key,
 };
 
 use common::federation::{
     MultiInstanceHarness, establish_active_peering, send_envelope_signed, settle,
 };
-use common::{body_json, json_request, send, setup_admin, test_app};
+use common::{body_json, json_request, send, setup_admin, signup_as};
 
 // ---------------------------------------------------------------------------
 // Body / response helpers
@@ -289,6 +289,91 @@ async fn user_status_for(db: &SqlitePool, subject: &[u8; 32]) -> Option<String> 
         .map(|r| r.status)
 }
 
+/// Decode a 64-char lowercase hex string into raw 32-byte form — recovers
+/// the Ed25519 public key from a [`Session`](common::Session)`.public_key_hex`
+/// so a `setup_admin` / `signup_as` user's pubkey can drive the status
+/// surface (which keys on raw pubkeys, not user ids).
+fn hex32(s: &str) -> [u8; 32] {
+    let bytes: Vec<u8> = (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("valid hex"))
+        .collect();
+    bytes.as_slice().try_into().expect("32 bytes")
+}
+
+/// Push one signed content object `from`→`to` over `/federation/v1/content`
+/// and assert it lands `applied`. Profiles and thread-creates share the
+/// `{ "objects": [WireFormat] }` push body with the status routes, so
+/// [`encode_push_body`] round-trips here too; [`parse_results`] reads the
+/// §10.1 per-object status tag back.
+async fn push_content_applied(
+    harness: &MultiInstanceHarness,
+    from: &str,
+    to: &str,
+    signed: &SigningOutput,
+) {
+    let (status, resp) = send_envelope_signed(
+        harness,
+        from,
+        to,
+        Method::POST,
+        "/federation/v1/content",
+        &encode_push_body(&[signed]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "content push not 200: {resp:?}");
+    let results = parse_results(&resp);
+    assert_eq!(
+        results[0].1, "applied",
+        "content push not applied: {:?}",
+        results[0].2
+    );
+}
+
+/// Project a federated user onto instance `to` by pushing their signed
+/// profile from active-peer `from`. The §10 profile projection stamps
+/// `home_instance = from` (the envelope sender), so the resulting `users`
+/// row is exactly the "federated user homed at `from`" precondition the
+/// status-receive home-resolution gates inspect — minted through the real
+/// receive path rather than a raw INSERT.
+async fn project_federated_user(
+    harness: &MultiInstanceHarness,
+    from: &str,
+    to: &str,
+    key: &SigningKey,
+    display_name: &str,
+) {
+    let profile =
+        sign_profile_revision_with_key(key, display_name, "", None, 1_700_000_000_000, None);
+    push_content_applied(harness, from, to, &profile).await;
+}
+
+/// Project a federated thread (author stub + thread-create) onto instance
+/// `to` from active-peer `from`. The thread-create projection homes the
+/// thread at `from` and auto-creates the `general` room if absent, so the
+/// result is a real federated-mirror thread whose §17 home authority is
+/// `from`.
+async fn project_federated_thread(
+    harness: &MultiInstanceHarness,
+    from: &str,
+    to: &str,
+    author_key: &SigningKey,
+    thread_id: &Uuid,
+    op_post_id: &Uuid,
+) {
+    project_federated_user(harness, from, to, author_key, "remote-author").await;
+    let thread_create = sign_thread_create_with_key(
+        author_key,
+        thread_id,
+        "general",
+        "remote thread",
+        None,
+        op_post_id,
+        1_700_000_000_000,
+    );
+    push_content_applied(harness, from, to, &thread_create).await;
+}
+
 // ---------------------------------------------------------------------------
 // §16.1 user-status push (receive)
 //
@@ -301,18 +386,17 @@ async fn user_status_for(db: &SqlitePool, subject: &[u8; 32]) -> Option<String> 
 /// `home_instance`). A pushes a `banned` user-status; B applies it and the
 /// `user_statuses` projection reflects the ban.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn user_status_push_from_home_applies() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
     let a = harness.instance("a");
     let b = harness.instance("b");
-    let a_pub = *a.state.instance_key.public_bytes();
 
-    // Subject K — a federated user on B whose home is A.
+    // Subject K — a federated user on B whose home is A, projected through
+    // A's real profile push (home_instance = the pushing peer, A).
     let k_key = SigningKey::generate(&mut OsRng);
     let k_pub: [u8; 32] = *k_key.verifying_key().as_bytes();
-    insert_user(&b.state.db, "kara", &k_pub, Some(&a_pub)).await;
+    project_federated_user(&harness, "a", "b", &k_key, "kara").await;
 
     let signed = sign_user_status_with_key(
         &a.state.instance_key,
@@ -357,17 +441,14 @@ async fn user_status_push_from_home_applies() {
 /// `peers.instance_domain` is `rejected/unauthorized_signer` even when
 /// every other gate (signature, home) would pass.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn user_status_push_signing_instance_mismatch_rejected() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
     let a = harness.instance("a");
-    let b = harness.instance("b");
-    let a_pub = *a.state.instance_key.public_bytes();
 
     let k_key = SigningKey::generate(&mut OsRng);
     let k_pub: [u8; 32] = *k_key.verifying_key().as_bytes();
-    insert_user(&b.state.db, "kara", &k_pub, Some(&a_pub)).await;
+    project_federated_user(&harness, "a", "b", &k_key, "kara").await;
 
     let signed = sign_user_status_with_key(
         &a.state.instance_key,
@@ -435,17 +516,14 @@ async fn user_status_push_unknown_subject_rejected() {
 /// §16.3 by-hash: a stored user-status comes back in `objects`; an unheld
 /// hash is reported in `missing`.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn user_status_by_hash_serves_stored_and_reports_missing() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
     let a = harness.instance("a");
-    let b = harness.instance("b");
-    let a_pub = *a.state.instance_key.public_bytes();
 
     let k_key = SigningKey::generate(&mut OsRng);
     let k_pub: [u8; 32] = *k_key.verifying_key().as_bytes();
-    insert_user(&b.state.db, "kara", &k_pub, Some(&a_pub)).await;
+    project_federated_user(&harness, "a", "b", &k_key, "kara").await;
 
     let signed = sign_user_status_with_key(
         &a.state.instance_key,
@@ -492,22 +570,19 @@ async fn user_status_by_hash_serves_stored_and_reports_missing() {
 /// `locked` thread-status; B applies it, the `thread_statuses` projection
 /// records `locked`, and the §17.4 mirror sets `threads.locked = 1`.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn thread_status_push_from_home_applies_and_mirrors_lock() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
     let a = harness.instance("a");
     let b = harness.instance("b");
-    let a_pub = *a.state.instance_key.public_bytes();
 
-    // A local author + room so the threads FK holds, then a thread whose
-    // home_instance is A.
+    // A federated-mirror thread on B whose home is A: push the author stub +
+    // thread-create from A so the projection homes the thread at A (the §17
+    // authority) through the real receive path.
     let author_key = SigningKey::generate(&mut OsRng);
-    let author_pub: [u8; 32] = *author_key.verifying_key().as_bytes();
-    let author_id = insert_user(&b.state.db, "auth", &author_pub, None).await;
-    ensure_general_room(&b.state.db, &author_id).await;
     let thread_uuid = Uuid::new_v4();
-    insert_thread(&b.state.db, &thread_uuid, &author_id, Some(&a_pub)).await;
+    let op_post_id = Uuid::new_v4();
+    project_federated_thread(&harness, "a", "b", &author_key, &thread_uuid, &op_post_id).await;
 
     let signed = sign_thread_status_with_key(
         &a.state.instance_key,
@@ -585,23 +660,21 @@ async fn thread_status_push_unknown_thread_deferred() {
 /// pushes R's report against T's post; B queues it (`applied`). A re-push
 /// of the same `(post_id, reporter)` is `duplicate`.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn report_push_applies_then_dedups() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
-    let a = harness.instance("a");
     let b = harness.instance("b");
-    let a_pub = *a.state.instance_key.public_bytes();
 
-    // Reporter R — federated user homed at A.
+    // Target author T — a real local user on B (B is their home). Created
+    // first, while B has no admin, then its server-held pubkey becomes the
+    // report's target.
+    let target = setup_admin(&b.router, "target").await;
+    let t_pub = hex32(&target.public_key_hex);
+
+    // Reporter R — federated user homed at A, projected via A's profile push.
     let r_key = SigningKey::generate(&mut OsRng);
     let r_pub: [u8; 32] = *r_key.verifying_key().as_bytes();
-    insert_user(&b.state.db, "reporter", &r_pub, Some(&a_pub)).await;
-
-    // Target author T — local user on B (B is their home).
-    let t_key = SigningKey::generate(&mut OsRng);
-    let t_pub: [u8; 32] = *t_key.verifying_key().as_bytes();
-    insert_user(&b.state.db, "target", &t_pub, None).await;
+    project_federated_user(&harness, "a", "b", &r_key, "reporter").await;
 
     let post_id = Uuid::new_v4();
     let signed = sign_report_with_key(
@@ -666,22 +739,18 @@ async fn report_push_applies_then_dedups() {
 /// `rejected/wrong_recipient` (§18.1) — reports only flow to the target
 /// post's home.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn report_push_wrong_recipient_rejected() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
-    let a = harness.instance("a");
-    let b = harness.instance("b");
-    let a_pub = *a.state.instance_key.public_bytes();
 
+    // Reporter R — federated user homed at A.
     let r_key = SigningKey::generate(&mut OsRng);
-    let r_pub: [u8; 32] = *r_key.verifying_key().as_bytes();
-    insert_user(&b.state.db, "reporter", &r_pub, Some(&a_pub)).await;
+    project_federated_user(&harness, "a", "b", &r_key, "reporter").await;
 
-    // Target T is homed at A (not B), so B is not the recipient.
+    // Target T is also homed at A (not B), so B is not the recipient.
     let t_key = SigningKey::generate(&mut OsRng);
     let t_pub: [u8; 32] = *t_key.verifying_key().as_bytes();
-    insert_user(&b.state.db, "target", &t_pub, Some(&a_pub)).await;
+    project_federated_user(&harness, "a", "b", &t_key, "target").await;
 
     let post_id = Uuid::new_v4();
     let signed = sign_report_with_key(
@@ -718,7 +787,6 @@ async fn report_push_wrong_recipient_rejected() {
 /// once A's outbound queue drains, B has applied the report (a
 /// `federated_reports` row keyed on `(post_id, reporter)` appears).
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn report_producer_dispatches_to_target_home() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -727,31 +795,33 @@ async fn report_producer_dispatches_to_target_home() {
     let a_pub = *a.state.instance_key.public_bytes();
     let b_pub = *b.state.instance_key.public_bytes();
 
-    // Reporter R — a local user on A with a stored signing key (reports are
-    // user-signed, so the producer must load this key).
-    let r_key = SigningKey::generate(&mut OsRng);
-    let r_pub: [u8; 32] = *r_key.verifying_key().as_bytes();
-    let reporter_id = insert_user(&a.state.db, "reporter", &r_pub, None).await;
-    let mut conn = a.state.db.acquire().await.expect("acquire conn");
-    store_signing_key(&mut conn, &reporter_id, &r_key)
-        .await
-        .expect("store reporter signing key");
-    drop(conn);
+    // Reporter R — a real local user on A. Reports are user-signed, so the
+    // producer loads R's credential key through the normal active-key path;
+    // `setup_admin` stores exactly that key, so the dispatched report is
+    // signed as production would sign it (no synthetic key injection).
+    let reporter = setup_admin(&a.router, "reporter").await;
+    let r_pub = hex32(&reporter.public_key_hex);
 
-    // Target author T — a federated user on A whose home is B.
-    let t_key = SigningKey::generate(&mut OsRng);
-    let t_pub: [u8; 32] = *t_key.verifying_key().as_bytes();
+    // Target author T — a real local user on B (B is their home).
+    let target = setup_admin(&b.router, "target").await;
+    let t_pub = hex32(&target.public_key_hex);
+
+    // Minimal carve-out seed (the only state with no real-API producer): the
+    // cross-instance mirror rows. A user that is local-with-a-server-held-key
+    // on one instance AND federated on the other cannot be minted by a single
+    // profile push — profiles always home at their arrival sender, and we
+    // don't hold these server-generated private keys to re-sign one. So on A
+    // we record T as federated-homed-at-B (so the producer federates), and on
+    // B we record R as federated-homed-at-A (so the receiver's reporter-home
+    // check passes). The function under test — `dispatch_local_report` plus
+    // the real receive path — runs against these legitimate mirror rows.
     insert_user(&a.state.db, "target", &t_pub, Some(&b_pub)).await;
-
-    // On B: T is a local user (B is their home), and R is a federated user
-    // homed at A so the receiver's reporter-home check passes.
-    insert_user(&b.state.db, "target", &t_pub, None).await;
     insert_user(&b.state.db, "reporter", &r_pub, Some(&a_pub)).await;
 
     let post_id = Uuid::new_v4();
     dispatch_local_report(
         &a.state,
-        &reporter_id,
+        &reporter.user_id,
         &post_id,
         &t_pub,
         ReportReason::Spam,
@@ -786,31 +856,24 @@ async fn report_producer_dispatches_to_target_home() {
 /// `dispatch_local_report` returns `Ok` without enqueuing, so the peer
 /// never receives anything.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn report_producer_no_dispatch_for_local_author() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
     let a = harness.instance("a");
     let b = harness.instance("b");
 
-    let r_key = SigningKey::generate(&mut OsRng);
-    let r_pub: [u8; 32] = *r_key.verifying_key().as_bytes();
-    let reporter_id = insert_user(&a.state.db, "reporter", &r_pub, None).await;
-    let mut conn = a.state.db.acquire().await.expect("acquire conn");
-    store_signing_key(&mut conn, &reporter_id, &r_key)
-        .await
-        .expect("store reporter signing key");
-    drop(conn);
+    // Reporter R — a real local admin on A (stored credential key).
+    let reporter = setup_admin(&a.router, "reporter").await;
 
-    // Target author T — a *local* user on A (home is A itself).
-    let t_key = SigningKey::generate(&mut OsRng);
-    let t_pub: [u8; 32] = *t_key.verifying_key().as_bytes();
-    insert_user(&a.state.db, "target", &t_pub, None).await;
+    // Target author T — a real *local* user on A (home is A itself), created
+    // through the real invite/signup path.
+    let target = signup_as(&a.router, &reporter, "target").await;
+    let t_pub = hex32(&target.public_key_hex);
 
     let post_id = Uuid::new_v4();
     dispatch_local_report(
         &a.state,
-        &reporter_id,
+        &reporter.user_id,
         &post_id,
         &t_pub,
         ReportReason::Spam,
@@ -915,7 +978,6 @@ async fn user_status_push_rate_limited_per_peer() {
 /// `user_statuses` projection, proving the §7.5 forwarder relays status
 /// objects to a non-adjacent interested peer.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn user_status_relays_to_non_adjacent_interested_peer() {
     let harness = MultiInstanceHarness::new(3).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -927,6 +989,13 @@ async fn user_status_relays_to_non_adjacent_interested_peer() {
 
     // Subject S — a federated user (home A) known to both B and C so the
     // §16.2 home resolution succeeds on each hop and the projection lands.
+    //
+    // Minimal carve-out seed (no real-API producer for this precondition):
+    // S must be homed at A on *both* B and C, but C is not peered with A, so
+    // a profile push can only reach C via the A→B→C content relay — which is
+    // the very forwarder under test, and would re-home S at B on C (home =
+    // arrival sender). Seeding S as the A-homed federated stub directly keeps
+    // the test isolated to the status-relay path it asserts on.
     let s_key = SigningKey::generate(&mut OsRng);
     let s_pub: [u8; 32] = *s_key.verifying_key().as_bytes();
     insert_user(&b.state.db, "subj", &s_pub, Some(&a_pub)).await;
@@ -992,7 +1061,6 @@ async fn user_status_relays_to_non_adjacent_interested_peer() {
 /// interest in the OP author (the §17.2 routing key). The lock must reach
 /// the non-adjacent C and mirror into `threads.locked` (§17.4).
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn thread_status_relays_to_non_adjacent_interested_peer() {
     let harness = MultiInstanceHarness::new(3).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -1005,6 +1073,12 @@ async fn thread_status_relays_to_non_adjacent_interested_peer() {
     // OP author — the routing key. Generated once; same pubkey on every
     // instance. On A the author + thread are locally homed (so A may
     // issue); on B/C they are a federated mirror homed at A.
+    //
+    // Minimal carve-out seed (no real-API producer for this precondition):
+    // the A-homed thread must already exist as a federated mirror on the
+    // non-adjacent C, which only the A→B→C content relay (the forwarder under
+    // test) could deliver — and that would re-home it at B on C. Seeding the
+    // mirror rows directly keeps the test isolated to the §17 status relay.
     let author_key = SigningKey::generate(&mut OsRng);
     let author_pub: [u8; 32] = *author_key.verifying_key().as_bytes();
     let thread_uuid = Uuid::new_v4();
@@ -1078,17 +1152,17 @@ async fn thread_status_relays_to_non_adjacent_interested_peer() {
 /// nothing when A originates a user-status for S — adjacency alone does not
 /// earn delivery; the bloom filter is the gate.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn user_status_not_forwarded_to_uninterested_peer() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
     let a = harness.instance("a");
     let b = harness.instance("b");
-    let a_pub = *a.state.instance_key.public_bytes();
 
+    // Subject S — a federated user homed at A, projected via A's real profile
+    // push (B is the sole downstream, so there is no relay to re-home it).
     let s_key = SigningKey::generate(&mut OsRng);
     let s_pub: [u8; 32] = *s_key.verifying_key().as_bytes();
-    insert_user(&b.state.db, "subj", &s_pub, Some(&a_pub)).await;
+    project_federated_user(&harness, "a", "b", &s_key, "subj").await;
 
     // B announces interest in some *other* key — its filter does not cover
     // S, so A's `peers_interested_in` must exclude B for S.
@@ -1136,18 +1210,29 @@ async fn user_status_not_forwarded_to_uninterested_peer() {
 /// transport sender (B), so B cannot forge authority for an A-homed subject
 /// by signing fresh bytes.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn forwarded_user_status_wrong_inner_signer_rejected() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
     let a = harness.instance("a");
     let b = harness.instance("b");
 
-    // Subject S is a *local* user on A — so A resolves S's home to itself
-    // and the authority pubkey is A's own instance key.
-    let s_key = SigningKey::generate(&mut OsRng);
-    let s_pub: [u8; 32] = *s_key.verifying_key().as_bytes();
-    insert_user(&a.state.db, "subj", &s_pub, None).await;
+    // Subject S is a real *local* user on A — so A resolves S's home to
+    // itself and the authority pubkey is A's own instance key. We only need
+    // S's pubkey here (B forges the inner signature with B's key), so a
+    // `setup_admin` user supplies it without any key injection.
+    let subj = setup_admin(&a.router, "subj").await;
+    let s_pub = hex32(&subj.public_key_hex);
+
+    // A real local user carries a §12.8 genesis `move` stamped at birth
+    // (≈ now), so `resolve_subject_home_at_t` only finds S's self-home for a
+    // `created_at` at or after that move. Sign the forged status at the
+    // current wall clock so home-resolution lands on A (self) and the test
+    // exercises the home-pubkey signature gate rather than tripping the
+    // earlier `unknown_subject_home` no-move-before-`t` branch.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock after epoch")
+        .as_millis() as u64;
 
     // B signs the user-status with B's *own* instance key but truthfully
     // labels `signing_instance` as B's domain. The label is consistent; the
@@ -1161,7 +1246,7 @@ async fn forwarded_user_status_wrong_inner_signer_rejected() {
         None,
         &b.state.instance_domain,
         Some("forged ban"),
-        1_700_000_000_000,
+        now_ms,
         None,
     );
 
@@ -1206,16 +1291,26 @@ async fn forwarded_user_status_wrong_inner_signer_rejected() {
 /// remote_moderation_target`. (The suspend route shares this user-moderation
 /// gate.)
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn admin_ban_remote_user_rejected() {
-    let (app, state) = test_app().await;
-    let admin = setup_admin(&app, "admin").await;
+    let harness = MultiInstanceHarness::new(2).await;
+    establish_active_peering(&harness, "b", "a").await;
+    let a = harness.instance("a");
+    let admin = setup_admin(&a.router, "admin").await;
 
-    // A federated user whose home is some other instance key.
-    let remote_home = [0x11u8; 32];
+    // A federated user whose home is another instance (B) — projected onto A
+    // through the real §10 profile-receive path, which stamps
+    // home_instance = the pushing peer (B).
     let user_key = SigningKey::generate(&mut OsRng);
     let user_pub: [u8; 32] = *user_key.verifying_key().as_bytes();
-    let uid = insert_user(&state.db, "remote", &user_pub, Some(&remote_home)).await;
+    project_federated_user(&harness, "b", "a", &user_key, "remote").await;
+
+    // Resolve the projected user's id for the admin route (raw SELECT).
+    let user_pub_slice: &[u8] = user_pub.as_slice();
+    let uid: String =
+        sqlx::query_scalar!("SELECT id FROM users WHERE public_key = ?", user_pub_slice)
+            .fetch_one(&a.state.db)
+            .await
+            .expect("projected user id");
 
     let req = json_request(
         Method::POST,
@@ -1223,7 +1318,7 @@ async fn admin_ban_remote_user_rejected() {
         Some(&admin.cookie),
         &json!({ "reason": "spam" }),
     );
-    let resp = send(&app, req).await;
+    let resp = send(&a.router, req).await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     let body = body_json(resp).await;
     assert_eq!(body["code"], "remote_moderation_target");
@@ -1232,19 +1327,19 @@ async fn admin_ban_remote_user_rejected() {
 /// Locking a thread homed on another instance is `403
 /// remote_moderation_target`.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn admin_lock_remote_thread_rejected() {
-    let (app, state) = test_app().await;
-    let admin = setup_admin(&app, "admin").await;
+    let harness = MultiInstanceHarness::new(2).await;
+    establish_active_peering(&harness, "b", "a").await;
+    let a = harness.instance("a");
+    let admin = setup_admin(&a.router, "admin").await;
 
-    // Author + room for the threads FK, then a thread homed elsewhere.
-    let remote_home = [0x33u8; 32];
+    // A thread homed on another instance (B) — author stub + thread-create
+    // projected onto A through the real receive path, so A records
+    // home_instance = B for the thread.
     let author_key = SigningKey::generate(&mut OsRng);
-    let author_pub: [u8; 32] = *author_key.verifying_key().as_bytes();
-    let author_id = insert_user(&state.db, "auth", &author_pub, Some(&remote_home)).await;
-    ensure_general_room(&state.db, &author_id).await;
     let thread_uuid = Uuid::new_v4();
-    insert_thread(&state.db, &thread_uuid, &author_id, Some(&remote_home)).await;
+    let op_post_id = Uuid::new_v4();
+    project_federated_thread(&harness, "b", "a", &author_key, &thread_uuid, &op_post_id).await;
 
     let req = json_request(
         Method::POST,
@@ -1252,7 +1347,7 @@ async fn admin_lock_remote_thread_rejected() {
         Some(&admin.cookie),
         &json!({ "reason": "off-topic" }),
     );
-    let resp = send(&app, req).await;
+    let resp = send(&a.router, req).await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     let body = body_json(resp).await;
     assert_eq!(body["code"], "remote_moderation_target");
