@@ -41,14 +41,19 @@
 
 mod common;
 
-use common::{body_json, get_request, send, setup_admin, test_app};
+use ciborium::value::Value;
+use common::federation::{
+    MultiInstanceHarness, establish_active_peering, send_envelope_signed, settle,
+};
+use common::{body_json, get_request, json_request, send, setup_admin, test_app};
 use ed25519_dalek::SigningKey;
-use http::StatusCode;
+use http::{Method, StatusCode};
 use prismoire_server::auth::LocalUserBootstrap;
 use prismoire_server::federation::registration::upgrade_federated_stub_in_place;
 use prismoire_server::federation::remote_users::hydrate_stub_user;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
+use serde_json::json;
 use uuid::Uuid;
 
 /// Build a deterministic 32-byte pubkey from a seed byte. Avoids pulling
@@ -116,7 +121,6 @@ async fn hydrate_stub_user_is_idempotent_on_re_receive() {
 }
 
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn local_and_federated_users_share_skeleton_without_collision() {
     let (app, state) = test_app().await;
 
@@ -393,43 +397,137 @@ async fn upgrade_in_place_flips_columns_and_attaches_credentials() {
 /// user's federated content (here a trust-edge the stub authored, but the
 /// same applies to post_revisions / profile_revisions) must remain readable
 /// under the upgraded identity rather than being abandoned.
+///
+/// The stub-authored edge is produced the real way: alice is a live user on
+/// instance A who signs an `alice -> bea` edge (by redeeming bea's trust
+/// code), and B receives it over `/federation/v1/edges`, hydrates an alice
+/// stub for the unknown source, and projects the edge. Only then do we drive
+/// the storage-layer `upgrade_federated_stub_in_place` directly — its sole
+/// production caller is the webauthn `complete` handler, which cannot be
+/// driven from a Rust test.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn upgrade_in_place_preserves_authored_trust_edge() {
-    let (_app, state) = test_app().await;
+    let harness = MultiInstanceHarness::new(2).await;
+    // Mutual active peering: A pushes the edge to B, and B pulls alice's
+    // profile back from A to recover the unknown source.
+    establish_active_peering(&harness, "a", "b").await;
+    let a = harness.instance("a");
+    let b = harness.instance("b");
 
-    let alice_signer = seeded_signer(0x22);
-    let alice_pubkey = *alice_signer.verifying_key().as_bytes();
-    let bob_signer = seeded_signer(0x33);
-    let bob_pubkey = *bob_signer.verifying_key().as_bytes();
-    let home = [0xbbu8; 32];
-
-    let alice_id = hydrate_stub(&state.db, &alice_pubkey, "alice", &home).await;
-    let bob_id = hydrate_stub(&state.db, &bob_pubkey, "bob", &home).await;
-
-    // Plant a trust_edges row authored by the stub. We don't need a real
-    // signed payload — the FK target test only depends on the row
-    // referencing `alice_id` via `source_user`.
-    let edge_id = Uuid::new_v4().to_string();
-    sqlx::query(
-        "INSERT INTO trust_edges (id, source_user, target_user, trust_type) \
-         VALUES (?, ?, ?, 'trust')",
+    // alice: real user on A (the future stub-author on B). A real signup via
+    // the test bypass mints no genesis revision, so she PATCHes a bio to
+    // publish a profile-rev B can hydrate her stub from.
+    let alice = setup_admin(&a.router, "alice").await;
+    let alice_profile = send(
+        &a.router,
+        json_request(
+            Method::PATCH,
+            &format!("/api/users/{}", alice.public_key_hex),
+            Some(&alice.cookie),
+            &json!({ "bio": "alice on instance a" }),
+        ),
     )
-    .bind(&edge_id)
-    .bind(&alice_id)
-    .bind(&bob_id)
-    .execute(&state.db)
-    .await
-    .expect("insert trust_edges");
+    .await;
+    assert_eq!(
+        alice_profile.status(),
+        StatusCode::NO_CONTENT,
+        "alice publishes a profile revision on A",
+    );
 
-    // Upgrade alice in place.
+    // bea: real local user on B (the edge target / alice's home for the code).
+    let bea = setup_admin(&b.router, "bea").await;
+
+    // bea mints a trust code on B; alice redeems it on A. Redemption signs an
+    // `alice -> bea` trust-edge with alice's key and stores the canonical
+    // bytes in A's `signed_objects`.
+    let code = body_json(
+        send(
+            &b.router,
+            get_request("/api/me/trust-code", Some(&bea.cookie)),
+        )
+        .await,
+    )
+    .await["code"]
+        .as_str()
+        .expect("code field")
+        .to_string();
+    let redeem = send(
+        &a.router,
+        json_request(
+            Method::POST,
+            "/api/users/by-trust-code",
+            Some(&alice.cookie),
+            &json!({ "code": code }),
+        ),
+    )
+    .await;
+    assert_eq!(redeem.status(), StatusCode::OK, "alice redeems bea's code");
+
+    // Deliver the `alice -> bea` edge bytes A → B. B knows bea (local
+    // target); alice is an unknown source, so B hydrates an alice stub and
+    // projects the edge.
+    let (payload, signature): (Vec<u8>, Vec<u8>) = sqlx::query_as(
+        "SELECT payload, signature FROM signed_objects \
+         WHERE inner_class = 'trust-edge' AND payload IS NOT NULL LIMIT 1",
+    )
+    .fetch_one(&a.state.db)
+    .await
+    .expect("alice -> bea edge bytes on A");
+    let body = encode_edges_body(&[encode_wire(&payload, &signature)]);
+    let (status, resp_body) = send_envelope_signed(
+        &harness,
+        "a",
+        "b",
+        Method::POST,
+        "/federation/v1/edges",
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        parse_results_body(&resp_body)[0].0,
+        "applied",
+        "B durably stores the edge even before recovering its source",
+    );
+    settle(&harness).await;
+
+    // B now holds an alice stub that authored the projected edge.
+    let alice_pubkey = hex32(&alice.public_key_hex);
+    let stub_id: String = sqlx::query_scalar("SELECT id FROM users WHERE public_key = ?")
+        .bind(&alice_pubkey[..])
+        .fetch_one(&b.state.db)
+        .await
+        .expect("alice stub on B");
+    let projected_before: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM current_trust_edges WHERE source_user = ?")
+            .bind(&stub_id)
+            .fetch_one(&b.state.db)
+            .await
+            .expect("count projected edges");
+    assert!(
+        projected_before > 0,
+        "precondition: alice's authored edge is projected on B before upgrade",
+    );
+
+    // Upgrade alice's stub in place on B, using alice's real signing key
+    // (read from A) so the bootstrap pubkey matches the stub row's
+    // `public_key` — the UPDATE's `AND public_key = ?` guard depends on it.
+    let alice_signer =
+        prismoire_server::signing::load_active_signing_key(&a.state.db, &alice.user_id)
+            .await
+            .expect("alice's signing key on A");
+    assert_eq!(
+        alice_signer.verifying_key().as_bytes(),
+        &alice_pubkey,
+        "loaded key derives alice's published pubkey",
+    );
     let cred_id = Uuid::new_v4().to_string();
     {
-        let mut tx = state.db.begin().await.expect("begin");
+        let mut tx = b.state.db.begin().await.expect("begin");
         upgrade_federated_stub_in_place(
             &mut tx,
             &LocalUserBootstrap {
-                user_id: &alice_id,
+                user_id: &stub_id,
                 display_name: "alice",
                 display_name_skeleton: "alice",
                 signup_method: "cross_instance_register",
@@ -445,23 +543,86 @@ async fn upgrade_in_place_preserves_authored_trust_edge() {
         tx.commit().await.expect("commit");
     }
 
-    // The edge must still resolve via the original id.
-    let row = sqlx::query!(
-        "SELECT te.source_user, u.signup_method, u.home_instance AS \"home_instance: Vec<u8>\" \
-         FROM trust_edges te \
-         JOIN users u ON u.id = te.source_user \
-         WHERE te.id = ?",
-        edge_id,
-    )
-    .fetch_one(&state.db)
-    .await
-    .expect("resolve trust_edge under upgraded id");
-    assert_eq!(row.source_user, alice_id, "id stability post-upgrade");
-    assert_eq!(row.signup_method, "cross_instance_register");
+    // The authored edge must still resolve via the original (stable) id, now
+    // joined to the upgraded local identity rather than the abandoned stub.
+    let (source_user, signup_method, home_instance): (String, String, Option<Vec<u8>>) =
+        sqlx::query_as(
+            "SELECT cte.source_user, u.signup_method, u.home_instance \
+             FROM current_trust_edges cte JOIN users u ON u.id = cte.source_user \
+             WHERE cte.source_user = ? LIMIT 1",
+        )
+        .bind(&stub_id)
+        .fetch_one(&b.state.db)
+        .await
+        .expect("resolve edge under upgraded id");
+    assert_eq!(source_user, stub_id, "id stability post-upgrade");
+    assert_eq!(signup_method, "cross_instance_register");
     assert!(
-        row.home_instance.is_none(),
+        home_instance.is_none(),
         "joined user row is now locally homed",
     );
+}
+
+/// Decode a 64-char lowercase-hex pubkey string into 32 bytes.
+fn hex32(s: &str) -> [u8; 32] {
+    assert_eq!(s.len(), 64, "pubkey hex must be 64 chars");
+    let mut out = [0u8; 32];
+    for (i, chunk) in s.as_bytes().chunks_exact(2).enumerate() {
+        out[i] = u8::from_str_radix(std::str::from_utf8(chunk).unwrap(), 16).unwrap();
+    }
+    out
+}
+
+/// Push body builder: wrap each `(payload, signature)` pair into a canonical
+/// WireFormat blob and pack the lot under `{ "edges": [bstr, ...] }`.
+fn encode_edges_body(wires: &[Vec<u8>]) -> Vec<u8> {
+    let arr: Vec<Value> = wires.iter().map(|w| Value::Bytes(w.clone())).collect();
+    let body = Value::Map(vec![(Value::Text("edges".into()), Value::Array(arr))]);
+    let mut buf = Vec::new();
+    ciborium::ser::into_writer(&body, &mut buf).expect("ser");
+    buf
+}
+
+/// Encode a §6.3 WireFormat `{ "p", "s" }` — tests build wire bytes the same
+/// way senders do.
+fn encode_wire(payload: &[u8], signature: &[u8]) -> Vec<u8> {
+    let m = Value::Map(vec![
+        (Value::Text("p".into()), Value::Bytes(payload.to_vec())),
+        (Value::Text("s".into()), Value::Bytes(signature.to_vec())),
+    ]);
+    let mut buf = Vec::new();
+    ciborium::ser::into_writer(&m, &mut buf).expect("ser");
+    buf
+}
+
+/// Decode `{ "results": [{ status, ... }, ...] }` into the per-edge status
+/// strings (the only field these tests assert on).
+fn parse_results_body(body: &[u8]) -> Vec<(String,)> {
+    let v: Value = ciborium::de::from_reader(body).expect("cbor parse");
+    let Value::Map(m) = v else {
+        panic!("results body is not a map");
+    };
+    let Some(Value::Array(arr)) = m.into_iter().find_map(|(k, v)| match k {
+        Value::Text(t) if t == "results" => Some(v),
+        _ => None,
+    }) else {
+        panic!("missing `results` array");
+    };
+    arr.into_iter()
+        .map(|entry| {
+            let Value::Map(fields) = entry else {
+                panic!("result entry not a map");
+            };
+            let status = fields
+                .into_iter()
+                .find_map(|(k, v)| match (k, v) {
+                    (Value::Text(name), Value::Text(s)) if name == "status" => Some(s),
+                    _ => None,
+                })
+                .expect("status field");
+            (status,)
+        })
+        .collect()
 }
 
 /// Defense in depth at the storage layer: if a caller mis-routes into

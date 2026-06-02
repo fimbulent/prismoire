@@ -53,7 +53,6 @@ use ciborium::value::Value;
 use http::{Method, StatusCode};
 use serde_json::json;
 use sqlx::SqlitePool;
-use uuid::Uuid;
 
 use prismoire_server::federation::bloom::BloomFilter;
 use prismoire_server::federation::frontier::{
@@ -612,16 +611,15 @@ async fn fresh_instance_with_no_local_users_stays_in_filtered() {
 /// sender to `'all'`. `inbound_mode` mirrors the sender's wire claim
 /// (Filtered) — pinned so a column-swap regression surfaces immediately.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn announce_with_full_coverage_promotes_outbound_to_all() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
     let a = harness.instance("a");
     let b = harness.instance("b");
 
-    // Seed A's local users so its `fetch_local_user_pubkeys` returns a
+    // Create A's local users so its `fetch_local_user_pubkeys` returns a
     // known set; build B's announce visible_filter to cover all of them.
-    let a_local_keys = seed_local_users(&a.state.db).await;
+    let a_local_keys = seed_local_users(&a.router).await;
     let covering = covering_filter(&a_local_keys);
 
     // B → A: announce at version 1 with the covering filter. We stamp
@@ -666,14 +664,13 @@ async fn announce_with_full_coverage_promotes_outbound_to_all() {
 /// announce's `visible_filter` drops the receiver's coverage below
 /// `LOW_THRESHOLD`.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn follow_up_announce_with_no_coverage_demotes_outbound_to_filtered() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
     let a = harness.instance("a");
     let b = harness.instance("b");
 
-    let a_local_keys = seed_local_users(&a.state.db).await;
+    let a_local_keys = seed_local_users(&a.router).await;
     let b_pub: &[u8] = b.state.instance_key.public_bytes();
 
     // Step 1 — promote: announce at version 1 with the covering filter.
@@ -913,7 +910,6 @@ async fn bootstrap_pull_reacquires_frontier_after_lost_first_contact_push() {
 /// replay-on-apply — is what finally delivers it to B. `settle` drains
 /// the replay-on-apply re-push.
 #[tokio::test]
-#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn lost_push_then_bootstrap_pull_delivers_stranded_reciprocal_edge() {
     let h = MultiInstanceHarness::new(2).await;
     let (sam1, sam2) = http_handshake_to_active("sam1", "sam2", &h).await;
@@ -1015,29 +1011,18 @@ fn empty_coverage_filter() -> FilterSpec {
     FilterSpec::from_bloom(&bloom)
 }
 
-/// Insert `LOCAL_USERS` rows into `users` with deterministic 32-byte
-/// pubkeys ([1; 32], [2; 32], …). Returns the pubkeys so the test can
-/// build a covering bloom against the exact same key set the receiver
-/// queries in `fetch_local_user_pubkeys`.
-async fn seed_local_users(db: &SqlitePool) -> Vec<[u8; 32]> {
+/// Create `LOCAL_USERS` real active local users on `router` (one admin
+/// via the setup route, the rest invited through the signup route) and
+/// return their server-generated signing pubkeys. Building the covering
+/// bloom from these exact keys keeps the fixture aligned with the set the
+/// receiver queries in `fetch_local_user_pubkeys`, without faking rows.
+async fn seed_local_users(router: &axum::Router) -> Vec<[u8; 32]> {
+    let admin = setup_admin(router, "local-admin").await;
     let mut keys = Vec::with_capacity(LOCAL_USERS);
-    for i in 0..LOCAL_USERS {
-        let key = [(i + 1) as u8; 32];
-        let id = Uuid::new_v4().to_string();
-        let display = format!("local-user-{i}");
-        let pk_slice: &[u8] = &key;
-        sqlx::query!(
-            "INSERT INTO users (id, display_name, display_name_skeleton, signup_method, status, public_key) \
-             VALUES (?, ?, ?, 'invite', 'active', ?)",
-            id,
-            display,
-            display,
-            pk_slice,
-        )
-        .execute(db)
-        .await
-        .expect("insert local user");
-        keys.push(key);
+    keys.push(hex32(&admin.public_key_hex));
+    for i in 1..LOCAL_USERS {
+        let user = signup_as(router, &admin, &format!("local-user-{i}")).await;
+        keys.push(hex32(&user.public_key_hex));
     }
     keys
 }
