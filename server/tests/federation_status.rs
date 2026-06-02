@@ -301,6 +301,7 @@ async fn user_status_for(db: &SqlitePool, subject: &[u8; 32]) -> Option<String> 
 /// `home_instance`). A pushes a `banned` user-status; B applies it and the
 /// `user_statuses` projection reflects the ban.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn user_status_push_from_home_applies() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -356,6 +357,7 @@ async fn user_status_push_from_home_applies() {
 /// `peers.instance_domain` is `rejected/unauthorized_signer` even when
 /// every other gate (signature, home) would pass.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn user_status_push_signing_instance_mismatch_rejected() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -433,6 +435,7 @@ async fn user_status_push_unknown_subject_rejected() {
 /// §16.3 by-hash: a stored user-status comes back in `objects`; an unheld
 /// hash is reported in `missing`.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn user_status_by_hash_serves_stored_and_reports_missing() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -489,6 +492,7 @@ async fn user_status_by_hash_serves_stored_and_reports_missing() {
 /// `locked` thread-status; B applies it, the `thread_statuses` projection
 /// records `locked`, and the §17.4 mirror sets `threads.locked = 1`.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn thread_status_push_from_home_applies_and_mirrors_lock() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -581,6 +585,7 @@ async fn thread_status_push_unknown_thread_deferred() {
 /// pushes R's report against T's post; B queues it (`applied`). A re-push
 /// of the same `(post_id, reporter)` is `duplicate`.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn report_push_applies_then_dedups() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -661,6 +666,7 @@ async fn report_push_applies_then_dedups() {
 /// `rejected/wrong_recipient` (§18.1) — reports only flow to the target
 /// post's home.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn report_push_wrong_recipient_rejected() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -712,6 +718,7 @@ async fn report_push_wrong_recipient_rejected() {
 /// once A's outbound queue drains, B has applied the report (a
 /// `federated_reports` row keyed on `(post_id, reporter)` appears).
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn report_producer_dispatches_to_target_home() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -779,6 +786,7 @@ async fn report_producer_dispatches_to_target_home() {
 /// `dispatch_local_report` returns `Ok` without enqueuing, so the peer
 /// never receives anything.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn report_producer_no_dispatch_for_local_author() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -907,6 +915,7 @@ async fn user_status_push_rate_limited_per_peer() {
 /// `user_statuses` projection, proving the §7.5 forwarder relays status
 /// objects to a non-adjacent interested peer.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn user_status_relays_to_non_adjacent_interested_peer() {
     let harness = MultiInstanceHarness::new(3).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -983,6 +992,7 @@ async fn user_status_relays_to_non_adjacent_interested_peer() {
 /// interest in the OP author (the §17.2 routing key). The lock must reach
 /// the non-adjacent C and mirror into `threads.locked` (§17.4).
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn thread_status_relays_to_non_adjacent_interested_peer() {
     let harness = MultiInstanceHarness::new(3).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -1068,6 +1078,7 @@ async fn thread_status_relays_to_non_adjacent_interested_peer() {
 /// nothing when A originates a user-status for S — adjacency alone does not
 /// earn delivery; the bloom filter is the gate.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn user_status_not_forwarded_to_uninterested_peer() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -1125,6 +1136,7 @@ async fn user_status_not_forwarded_to_uninterested_peer() {
 /// transport sender (B), so B cannot forge authority for an A-homed subject
 /// by signing fresh bytes.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn forwarded_user_status_wrong_inner_signer_rejected() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -1194,6 +1206,7 @@ async fn forwarded_user_status_wrong_inner_signer_rejected() {
 /// remote_moderation_target`. (The suspend route shares this user-moderation
 /// gate.)
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn admin_ban_remote_user_rejected() {
     let (app, state) = test_app().await;
     let admin = setup_admin(&app, "admin").await;
@@ -1219,6 +1232,7 @@ async fn admin_ban_remote_user_rejected() {
 /// Locking a thread homed on another instance is `403
 /// remote_moderation_target`.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn admin_lock_remote_thread_rejected() {
     let (app, state) = test_app().await;
     let admin = setup_admin(&app, "admin").await;

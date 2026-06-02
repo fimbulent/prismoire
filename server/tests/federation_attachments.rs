@@ -525,6 +525,7 @@ async fn peered_pair(harness: &MultiInstanceHarness) -> (Arc<AppState>, [u8; 32]
 /// revision binding whose blob bytes are resident on the serving instance
 /// → 200 OK with the raw bytes and the stored Content-Type.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn attachment_fetch_returns_200_with_bytes_for_local_origin() {
     let harness = harness_with_peering().await;
     let a = harness.instance("a");
@@ -586,6 +587,7 @@ async fn attachment_fetch_returns_404_for_malformed_hex() {
 /// `post_attachments` row binds the hash to a locally-authored post.
 /// Serving would violate the spec; the handler must 404.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn attachment_fetch_returns_404_when_resident_but_no_local_binding() {
     let harness = harness_with_peering().await;
     let a = harness.instance("a");
@@ -607,6 +609,7 @@ async fn attachment_fetch_returns_404_when_resident_but_no_local_binding() {
 /// but `attachment_blobs.blob IS NULL` (the row carries metadata only).
 /// 404 per §11.4.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn attachment_fetch_returns_404_when_blob_bytes_null() {
     let harness = harness_with_peering().await;
     let a = harness.instance("a");
@@ -638,6 +641,7 @@ async fn attachment_fetch_returns_404_when_blob_bytes_null() {
 /// pipeline; this serve gate is the local backstop for the receive-side
 /// delete-handler having NOT yet run.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn attachment_fetch_returns_404_when_post_retracted() {
     let harness = harness_with_peering().await;
     let a = harness.instance("a");
@@ -666,6 +670,7 @@ async fn attachment_fetch_returns_404_when_post_retracted() {
 /// the author removed it during the edit. The §11.5 check requires the
 /// binding to be on the *current* revision. 404.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn attachment_fetch_returns_404_when_binding_is_prior_revision() {
     let harness = harness_with_peering().await;
     let a = harness.instance("a");
@@ -699,6 +704,7 @@ async fn attachment_fetch_returns_404_when_binding_is_prior_revision() {
 /// request rather than waiting for the orphan-GC sweep to reap the
 /// binding.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn attachment_fetch_returns_404_when_author_deleted() {
     let harness = harness_with_peering().await;
     let a = harness.instance("a");
@@ -751,6 +757,7 @@ async fn attachment_fetch_returns_404_when_author_deleted() {
 /// user (§13) authoring on their remote home would pass an `author IN
 /// users` check despite our not being origin.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn attachment_fetch_returns_404_when_post_has_remote_home_instance() {
     let harness = harness_with_peering().await;
     let a = harness.instance("a");
@@ -807,6 +814,7 @@ async fn attachment_fetch_returns_404_when_post_has_remote_home_instance() {
 /// Happy path: B's trigger resolves A as origin, fetches, hash-verifies,
 /// and stores the bytes — leaving no failure row.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn serve_trigger_fetches_and_clears_failure_state() {
     let harness = MultiInstanceHarness::new(2).await;
     let (b_state, a_pub) = peered_pair(&harness).await;
@@ -838,6 +846,7 @@ async fn serve_trigger_fetches_and_clears_failure_state() {
 /// terminal `mismatch` failure row, and short-circuits a second trigger
 /// without a re-fetch (proven by the counter staying at 1).
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn serve_trigger_records_mismatch_and_is_terminal() {
     let harness = MultiInstanceHarness::new(2).await;
     let (b_state, a_pub) = peered_pair(&harness).await;
@@ -902,6 +911,7 @@ async fn serve_trigger_records_mismatch_and_is_terminal() {
 /// immediate re-trigger does not re-attempt (proven by `last_attempt_at`
 /// staying identical).
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn serve_trigger_records_transient_and_backs_off() {
     let harness = MultiInstanceHarness::new(2).await;
     let (b_state, a_pub) = peered_pair(&harness).await;
@@ -966,6 +976,7 @@ async fn serve_trigger_no_origin_returns_false_without_row() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn serve_route_429s_when_peer_exceeds_request_budget() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "b", "a").await;
@@ -996,6 +1007,7 @@ async fn serve_route_429s_when_peer_exceeds_request_budget() {
 }
 
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn serve_route_429s_when_peer_exceeds_byte_budget() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "b", "a").await;

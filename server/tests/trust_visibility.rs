@@ -11,7 +11,8 @@ mod common;
 
 use axum::http::{Method, StatusCode};
 use common::{
-    body_json, get_request, json_request, refresh_trust_graph, send, setup_admin, signup_as,
+    assert_notified_then_rebuild, body_json, get_request, json_request, send, setup_admin,
+    signup_as,
 };
 
 /// alice trusts bob; bob trusts carol. After a synchronous graph
@@ -34,7 +35,7 @@ async fn transitive_trust_then_direct_distrust_flips_visibility() {
     let alice = setup_admin(&app, "alice").await;
     let bob = signup_as(&app, &alice, "bob").await;
     let carol = signup_as(&app, &bob, "carol").await;
-    refresh_trust_graph(&state).await;
+    assert_notified_then_rebuild(&state).await;
 
     // Carol posts in a room she creates. The unique word lets us key
     // the search assertion cleanly.
@@ -81,7 +82,8 @@ async fn transitive_trust_then_direct_distrust_flips_visibility() {
     // endpoint. `load_distrust_set` reads directly from the DB, so the
     // next request sees the new edge without a graph refresh — but we
     // still refresh to keep cached state consistent with the DB for
-    // any downstream code that consults the cached graph.
+    // any downstream code that consults the cached graph, and assert
+    // `set_trust_edge` scheduled that rebuild via `trust_graph_notify`.
     let distrust_req = json_request(
         Method::PUT,
         &format!("/api/users/{}/trust-edge", carol.public_key_hex),
@@ -94,7 +96,7 @@ async fn transitive_trust_then_direct_distrust_flips_visibility() {
         StatusCode::NO_CONTENT,
         "set_trust_edge should return 204"
     );
-    refresh_trust_graph(&state).await;
+    assert_notified_then_rebuild(&state).await;
 
     let hits = search_thread_ids(&app, &alice.cookie, unique_word).await;
     assert!(

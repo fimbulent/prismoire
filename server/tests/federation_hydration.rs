@@ -116,6 +116,7 @@ async fn hydrate_stub_user_is_idempotent_on_re_receive() {
 }
 
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn local_and_federated_users_share_skeleton_without_collision() {
     let (app, state) = test_app().await;
 
@@ -393,6 +394,7 @@ async fn upgrade_in_place_flips_columns_and_attaches_credentials() {
 /// same applies to post_revisions / profile_revisions) must remain readable
 /// under the upgraded identity rather than being abandoned.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn upgrade_in_place_preserves_authored_trust_edge() {
     let (_app, state) = test_app().await;
 

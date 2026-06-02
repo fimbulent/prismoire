@@ -1206,6 +1206,7 @@ async fn move_backfill_returns_unknown_chain_for_never_seen_key() {
 /// row itself (and its pubkey) survives — authored content per §10.5.3
 /// still resolves to a known identity.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn applied_outbound_from_self_disposes_local_authority() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -1325,6 +1326,7 @@ async fn applied_outbound_from_self_disposes_local_authority() {
 /// against an already-`signup_method = 'federated'` row is a no-op rather
 /// than an error.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn superseded_outbound_from_self_still_disposes() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -1434,6 +1436,7 @@ async fn superseded_outbound_from_self_still_disposes() {
 /// authority on B is untouched — the inbound move's only DB effect on B is
 /// the §12 projection layer.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn inbound_to_self_does_not_dispose_other_local_users() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;

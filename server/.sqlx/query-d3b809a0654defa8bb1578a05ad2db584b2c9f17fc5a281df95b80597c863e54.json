@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO threads (id, title, author, room, home_instance) VALUES (?, 'status fixture thread', ?, 'general', ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "d3b809a0654defa8bb1578a05ad2db584b2c9f17fc5a281df95b80597c863e54"
+}

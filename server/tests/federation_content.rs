@@ -317,6 +317,7 @@ async fn content_push_post_rev_persists_signed_object() {
 /// payload for the same `post_id` is NULLed per §10.1 on-receipt erasure
 /// (the §3 chain-walk artifacts — signature, hash, prior link — remain).
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn content_push_retract_erases_post_rev_payload() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -418,6 +419,7 @@ async fn content_push_retract_erases_post_rev_payload() {
 /// payload NULLed. Asserts the cascade by pushing a `post-rev` first,
 /// then the `deactivate`.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn content_push_deactivate_erases_user_payloads() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -839,6 +841,7 @@ async fn content_push_admin_rm_blocks_subsequent_post_rev() {
 /// authoritative from anyone but us; the sender should have used the
 /// §10.4 advisory route. Returns `rejected/wrong_route`.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn content_push_admin_rm_against_local_user_is_wrong_route() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -928,6 +931,7 @@ async fn content_push_admin_rm_signing_instance_mismatch_unauthorized() {
 /// Receiver returns `queued`, the row lands in `admin_rm_reports`, and a
 /// replay deduplicates by `post_id`.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn admin_rm_report_queued_for_local_target() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;

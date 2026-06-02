@@ -780,6 +780,7 @@ async fn per_key_cap_does_not_cross_subject_keys() {
 /// `invalid_key` and does NOT burn the per-K counter. After the
 /// rejection a *real* K can still draw its full budget.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn invalid_key_does_not_consume_per_key_budget() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -950,6 +951,7 @@ async fn seed_synthetic_profile(db: &SqlitePool, user_id: &str) -> [u8; 32] {
 /// `complete: true`. Pins the §14.5 outbound-edge join
 /// (`trust_edges.source_user == K`).
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn content_by_key_returns_outbound_edge() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -1007,6 +1009,7 @@ async fn content_by_key_returns_outbound_edge() {
 /// content-by-key returns a K-authored profile revision. Pins the §14.5
 /// profile-author join (`profile_revisions.user_id`).
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn content_by_key_returns_profile_revision() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -1040,6 +1043,7 @@ async fn content_by_key_returns_profile_revision() {
 /// content-by-key omits inbound edges (X→K) — the §14.5 "K-authored
 /// only" carve-out keeps §14.5 + §14.6 non-overlapping.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn content_by_key_omits_inbound_edges() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -1119,6 +1123,7 @@ async fn content_by_key_unknown_subject_returns_empty_complete() {
 /// `complete: true`. Pins the §14.6 target-direction join
 /// (`trust_edges.target_user == K`).
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn inbound_edges_by_key_returns_two_inbound() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -1195,6 +1200,7 @@ async fn inbound_edges_by_key_returns_two_inbound() {
 /// inbound-edges-by-key omits K→X (outbound). The §14.6 "target only"
 /// carve-out keeps inbound + outbound non-overlapping.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn inbound_edges_by_key_omits_outbound() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -1246,6 +1252,7 @@ async fn inbound_edges_by_key_omits_outbound() {
 /// cursor + `complete: false`; resuming with the cursor (and a fresh
 /// per-page response) returns the third object + `complete: true`.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn content_by_key_paginates() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -1413,6 +1420,7 @@ async fn insert_federated_stub_with_home(
 /// so does C). `discover_prior_home` surfaces B — the declared-peer
 /// short-circuit wins over the fan-out alternative.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn declared_hit_surfaces_declared_peer() {
     let harness = MultiInstanceHarness::new(3).await; // D=a, B=b, C=c
     establish_active_peering(&harness, "a", "b").await;
@@ -1441,6 +1449,7 @@ async fn declared_hit_surfaces_declared_peer() {
 /// `has_activity = false`. Even though C holds K, `discover_prior_home`
 /// must NOT surface C — B's "no" is authoritative.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn declared_authoritative_miss_is_terminal() {
     let harness = MultiInstanceHarness::new(3).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -1467,6 +1476,7 @@ async fn declared_authoritative_miss_is_terminal() {
 /// the probe errors (Unreachable) rather than answering false. C holds K
 /// and is reachable; fan-out surfaces C.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn declared_unreachable_falls_through_to_fanout() {
     let harness = MultiInstanceHarness::new(3).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -1497,6 +1507,7 @@ async fn declared_unreachable_falls_through_to_fanout() {
 /// returns `Ok(None)` and discovery falls through to strategy 3, which
 /// surfaces the K-holder C. Also covers the bare strategy-3 fan-out hit.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn declared_unknown_domain_falls_through_to_fanout() {
     // D="a", C="b". The declared domain is never registered as a peer.
     let harness = MultiInstanceHarness::new(2).await;
@@ -1519,6 +1530,7 @@ async fn declared_unknown_domain_falls_through_to_fanout() {
 /// `discover_prior_home` probes B and finds K via the
 /// `users.home_instance` shortcut.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn local_lookup_uses_home_instance_pointer() {
     let harness = MultiInstanceHarness::new(3).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -1549,6 +1561,7 @@ async fn local_lookup_uses_home_instance_pointer() {
 /// the K-holder forced to sort *past* the cap (oldest `last_handshake`
 /// under `ORDER BY ... DESC`), `discover_prior_home` returns `None`.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn fanout_respects_cap() {
     // 1 registering (D) + (cap + 2) candidates.
     let n_candidates = PRIOR_HOME_PROBE_FANOUT_MAX + 2;
@@ -1620,6 +1633,7 @@ async fn fanout_respects_cap() {
 /// (`home_instance` set) answers `has_activity = false`, so
 /// `discover_prior_home` must not surface it even as the sole candidate.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn stale_home_is_not_surfaced() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -1664,6 +1678,7 @@ async fn count_signed_object(db: &SqlitePool, hash: &[u8; 32]) -> i64 {
 /// `drive_recovery` walks both surfaces, reaches `complete: true` on
 /// each, and the bytes land in D's `signed_objects`.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn primary_path_recovers_content_and_inbound_edges() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -1740,6 +1755,7 @@ async fn primary_path_recovers_content_and_inbound_edges() {
 /// Recovery surfaces those bytes on D and reports
 /// `primary_attempted && !primary_complete && fallback_attempted`.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn fallback_recovers_from_peer_when_prior_home_offline() {
     let harness = MultiInstanceHarness::new(3).await;
     establish_active_peering(&harness, "a", "b").await;

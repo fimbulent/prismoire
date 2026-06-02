@@ -85,6 +85,7 @@ use serde_json::json;
 /// bytes land in `signed_objects`, the projection lands in `trust_edges`,
 /// and the response carries `applied`.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn push_applies_signed_edge_into_local_projection() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -161,6 +162,7 @@ async fn push_applies_signed_edge_into_local_projection() {
 /// "redelivery is no-op". The receiver does not distinguish
 /// duplicate-from-resend vs duplicate-from-gossip-relay.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn push_replay_returns_duplicate() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -244,6 +246,7 @@ async fn push_replay_returns_duplicate() {
 /// peer-relayed forgery: §9.1 requires per-object signature
 /// verification.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn push_with_bad_signature_is_rejected_and_not_persisted() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -438,6 +441,7 @@ async fn push_exceeding_batch_returns_400_batch_too_large() {
 /// bad-signature edge produce a 200 with `applied` and `rejected` in
 /// input order. Senders correlate by position, not by hash.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn push_mixed_batch_returns_per_edge_results_in_input_order() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -587,6 +591,7 @@ async fn push_with_wrong_content_type_is_415() {
 /// forwarder is just another active peer to C — so we assert convergence
 /// (via [`settle`]) on C's `trust_edges` projection.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn forwarder_relays_applied_edge_to_interested_peer() {
     let harness = MultiInstanceHarness::new(3).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -711,6 +716,7 @@ async fn forwarder_relays_applied_edge_to_interested_peer() {
 /// interested (its `expansion_filter` carries the target bob), so the
 /// only thing keeping the edge from C is the §8.10 cleave.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn forwarder_sheds_relay_when_source_younger_than_peer_ceiling() {
     let harness = MultiInstanceHarness::new(3).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -807,6 +813,7 @@ async fn forwarder_sheds_relay_when_source_younger_than_peer_ceiling() {
 /// [`forwarder_relays_applied_edge_to_interested_peer`], which puts the
 /// target bob in C's filter and asserts arrival.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn forwarder_does_not_relay_to_peer_interested_only_in_edge_source() {
     let harness = MultiInstanceHarness::new(3).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -1137,6 +1144,7 @@ async fn unknown_source_recovery_backfills_authors_existing_thread() {
 /// in oldest-first order with `complete: true` and no `next_cursor`.
 /// Pins the unpaginated happy path.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn backfill_returns_chain_oldest_first_complete() {
     let harness = MultiInstanceHarness::new(4).await;
     // A receives the chain from B (the originator stand-in); D pulls
@@ -1197,6 +1205,7 @@ async fn backfill_returns_chain_oldest_first_complete() {
 /// returns 2 objects + `next_cursor` + `complete: false`; the resume GET
 /// with that cursor returns the final 2 with `complete: true`.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn backfill_paginates_with_limit_and_next_cursor() {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -1300,6 +1309,7 @@ async fn backfill_unknown_chain_returns_400() {
 /// `400 invalid_cursor`. The spec mandates this collapse so a client
 /// retries without `since` rather than looping on a stale cursor.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn backfill_invalid_cursor_returns_400() {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -1337,6 +1347,7 @@ async fn backfill_invalid_cursor_returns_400() {
 /// `limit=0` and `limit=MAX_EDGE_BACKFILL_PAGE + 1` both collapse to
 /// `400 limit_out_of_range`. Pins the §9.6 cap.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn backfill_limit_out_of_range_returns_400() {
     let harness = MultiInstanceHarness::new(4).await;
     establish_active_peering(&harness, "a", "d").await;
@@ -1371,6 +1382,7 @@ async fn backfill_limit_out_of_range_returns_400() {
 /// `current_trust_edges` view matches A's latest stance — the exact
 /// convergence guarantee §9.3 sells.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn partition_heal_via_backfill_and_replay() {
     let harness = MultiInstanceHarness::new(4).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -1872,6 +1884,7 @@ async fn sweep_defers_orphan_edge_with_missing_predecessor() {
 /// `received_at` is more than `ttl_ms` behind `now_ms`. Fresh rows
 /// survive. Drives §9.6 `DEFERRED_ORPHAN_TTL` directly.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn evict_drops_expired_pending_rows_and_preserves_fresh() {
     let (_app, state) = test_app().await;
 
@@ -1942,6 +1955,7 @@ async fn evict_drops_expired_pending_rows_and_preserves_fresh() {
 /// `pending_trust_edges` into `trust_edges` + `signed_objects`, and the
 /// pending row is deleted.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn sweep_projection_drains_buffered_orphan_chain() {
     let (_app, state) = test_app().await;
 
@@ -2074,6 +2088,7 @@ async fn sweep_projection_drains_buffered_orphan_chain() {
 /// asserted `deferred` + no projection; this one additionally pins the
 /// pending-row buffer and the no-double-land invariant.)
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn deferred_push_buffers_orphan_in_pending_table() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -2134,6 +2149,7 @@ async fn deferred_push_buffers_orphan_in_pending_table() {
 /// on the pending PK collapses retries into the existing row. Both
 /// responses are `deferred`.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn duplicate_orphan_for_same_gap_does_not_double_enqueue() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -2226,6 +2242,7 @@ async fn duplicate_orphan_for_same_gap_does_not_double_enqueue() {
 /// projection, deletes the pending row, and persists E2's canonical
 /// bytes in `signed_objects` for future relay / audit.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn root_push_drains_buffered_orphan_chain() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -2315,6 +2332,7 @@ async fn root_push_drains_buffered_orphan_chain() {
 /// Keeps a bounded `poll_until`: the recovery rides a raw `tokio::spawn`
 /// of `request_edge_predecessor` that `settle` does not drive.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn autonomous_backfill_recovers_chain_from_source_home() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;

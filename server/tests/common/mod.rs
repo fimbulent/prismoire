@@ -371,6 +371,56 @@ pub async fn test_app_with_pool_transport_domain_and_outbound_config(
 /// and need a refresh to observe the change. Always refreshing after a
 /// trust mutation keeps test reasoning simple.
 pub async fn refresh_trust_graph(state: &AppState) {
+    // Consume the pending rebuild notification (if any) so the permit
+    // ledger stays clean for `assert_notified_then_rebuild` — production's
+    // `rebuild_loop` likewise consumes the notify before each rebuild.
+    let _ = drain_trust_graph_notify(state);
+    rebuild_trust_graph_now(state).await;
+}
+
+/// Like [`refresh_trust_graph`], but first assert the action under test
+/// actually scheduled a rebuild by firing `trust_graph_notify`.
+///
+/// Production never rebuilds the trust graph inline: a mutation calls
+/// `state.trust_graph_notify.notify_one()` and the background
+/// `rebuild_loop` consumes that permit and swaps the graph. Tests don't
+/// spawn the loop, so a plain [`refresh_trust_graph`] rebuilds
+/// *unconditionally* — which silently masks a handler that forgets to
+/// fire the notify (the graph rebuilds anyway and the visibility
+/// assertion still passes, hiding the regression).
+///
+/// This helper closes that gap: it drains the pending notification and
+/// panics if none was stored, so a missing `notify_one()` fails the test
+/// loudly, then rebuilds exactly as [`refresh_trust_graph`] does. Because
+/// `notify_one()` coalesces to a single stored permit, attribution is
+/// only sound when prior notifications were already drained — the
+/// standard "refresh after each fixture step" convention does this, since
+/// [`refresh_trust_graph`] now drains too. Call this immediately after the
+/// handler/API call whose contract includes scheduling a rebuild (signup,
+/// the trust-edge handler, admin grant/revoke, account deletion).
+///
+/// Do NOT use it after fixtures that seed edges via direct DB writes —
+/// those never fire the notify; such tests should drive the real API.
+pub async fn assert_notified_then_rebuild(state: &AppState) {
+    assert!(
+        drain_trust_graph_notify(state),
+        "expected a pending trust_graph_notify permit: the action under \
+         test fired no trust_graph_notify.notify_one(), so production would \
+         never schedule a trust-graph rebuild here",
+    );
+    rebuild_trust_graph_now(state).await;
+}
+
+/// Consume a pending `trust_graph_notify` permit if one is stored,
+/// returning whether one was present. `notify_one()` stores at most one
+/// permit, so this fully clears the pending state.
+fn drain_trust_graph_notify(state: &AppState) -> bool {
+    let notified = state.trust_graph_notify.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable()
+}
+
+async fn rebuild_trust_graph_now(state: &AppState) {
     trust::rebuild_trust_graph(
         &state.db,
         &state.trust_graph,

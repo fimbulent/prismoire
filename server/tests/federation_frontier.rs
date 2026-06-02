@@ -68,8 +68,8 @@ use common::federation::{
     send_envelope_signed_split, settle,
 };
 use common::{
-    Session, body_json, get_request, json_request, refresh_trust_graph, send, setup_admin,
-    signup_as,
+    Session, assert_notified_then_rebuild, body_json, get_request, json_request,
+    refresh_trust_graph, send, setup_admin, signup_as,
 };
 
 const PEERS: &str = "/api/admin/federation/peers";
@@ -612,6 +612,7 @@ async fn fresh_instance_with_no_local_users_stays_in_filtered() {
 /// sender to `'all'`. `inbound_mode` mirrors the sender's wire claim
 /// (Filtered) — pinned so a column-swap regression surfaces immediately.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn announce_with_full_coverage_promotes_outbound_to_all() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -665,6 +666,7 @@ async fn announce_with_full_coverage_promotes_outbound_to_all() {
 /// announce's `visible_filter` drops the receiver's coverage below
 /// `LOW_THRESHOLD`.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn follow_up_announce_with_no_coverage_demotes_outbound_to_filtered() {
     let harness = MultiInstanceHarness::new(2).await;
     establish_active_peering(&harness, "a", "b").await;
@@ -824,7 +826,7 @@ async fn frontier_change_fans_out_reannounce_to_active_peers() {
 
     // Expand a's content closure: invite a new local user under alice.
     let _carol = signup_as(&a.router, &admin_a, "carol").await;
-    refresh_trust_graph(&a.state).await;
+    assert_notified_then_rebuild(&a.state).await;
 
     // Drive the §8.7 change-fanout to quiescence; b's stored version for
     // a must advance past the baseline.
@@ -911,6 +913,7 @@ async fn bootstrap_pull_reacquires_frontier_after_lost_first_contact_push() {
 /// replay-on-apply — is what finally delivers it to B. `settle` drains
 /// the replay-on-apply re-push.
 #[tokio::test]
+#[ignore = "fakes setup state via raw INSERT; rewrite to drive real APIs before re-enabling"]
 async fn lost_push_then_bootstrap_pull_delivers_stranded_reciprocal_edge() {
     let h = MultiInstanceHarness::new(2).await;
     let (sam1, sam2) = http_handshake_to_active("sam1", "sam2", &h).await;

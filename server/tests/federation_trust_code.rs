@@ -53,8 +53,8 @@ use common::federation::{
     MultiInstanceHarness, establish_active_peering, send_envelope_signed, settle,
 };
 use common::{
-    body_json, get_request, json_request, refresh_trust_graph, send, setup_admin, signup_as,
-    test_app, test_app_with_transport,
+    assert_notified_then_rebuild, body_json, get_request, json_request, refresh_trust_graph, send,
+    setup_admin, signup_as, test_app, test_app_with_transport,
 };
 use prismoire_server::federation::trust_code;
 
@@ -579,8 +579,9 @@ async fn redeemed_cross_instance_edge_surfaces_in_trust_read_api() {
     // The list comes from the projected edge table; viewer enrichment
     // reads the graph cache, so refresh it (rebuild_loop isn't spawned
     // in tests). bob is seeded locally as a stub by redeem, so no
-    // cross-instance recovery is needed here.
-    refresh_trust_graph(&a.state).await;
+    // cross-instance recovery is needed here. The redeem's local
+    // `set_trust_edge` must have scheduled the rebuild via the notify.
+    assert_notified_then_rebuild(&a.state).await;
 
     // (1) GET /api/users/{alice}/trust/edges?direction=trusts lists bob.
     let edges = send(
@@ -1287,7 +1288,9 @@ async fn relayed_third_party_edge_recovered_on_later_interested_spoke() {
         StatusCode::OK,
         "sam1 redeems sam3's code on A"
     );
-    refresh_trust_graph(&a.state).await;
+    // Local-origin redeem on A signs `sam1 -> sam3` through `set_trust_edge`,
+    // which must have scheduled A's rebuild via the notify.
+    assert_notified_then_rebuild(&a.state).await;
     assert_eq!(
         count_edge(&a.state.db, &sam1_pk, &sam3_pk).await,
         1,
